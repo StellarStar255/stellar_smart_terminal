@@ -1,0 +1,529 @@
+"""
+国际化(i18n)模块
+提供中英文翻译支持，运行时语言热切换
+"""
+
+_current_language = "zh"
+
+TRANSLATIONS = {
+    # ===== app.py =====
+    "app.name": {"zh": "智能终端", "en": "Smart Terminal"},
+    "app.display_name": {"zh": "Smart Terminal", "en": "Smart Terminal"},
+
+    # ===== main_window.py - 窗口标题/基础 =====
+    "window.title": {"zh": "智能终端 - Smart Terminal", "en": "Smart Terminal"},
+    "window.detached_status": {"zh": "独立窗口", "en": "Detached Window"},
+    "window.navigator_title": {"zh": "窗口导航", "en": "Window Navigator"},
+    "window.navigator_list_title": {"zh": "终端窗口列表", "en": "Terminal Window List"},
+    "window.search_placeholder": {"zh": "搜索...", "en": "Search..."},
+    "window.compact_display": {"zh": "简洁显示", "en": "Compact"},
+    "window.compact_tooltip": {"zh": "只显示文件夹名", "en": "Show folder name only"},
+    "window.drag_hint": {"zh": "↕ 拖拽项目调整顺序", "en": "↕ Drag items to reorder"},
+    "window.sort_time": {"zh": "时间↑", "en": "Time↑"},
+    "window.sort_name": {"zh": "名称↓", "en": "Name↓"},
+    "window.sort_manual": {"zh": "手动⇅", "en": "Manual⇅"},
+    "window.sort_tooltip_time": {"zh": "按创建时间排序，点击切换为名称排序", "en": "Sort by time, click to sort by name"},
+    "window.sort_tooltip_name": {"zh": "按名称排序，点击切换为手动排序", "en": "Sort by name, click to sort manually"},
+    "window.sort_tooltip_manual": {"zh": "手动排序，点击切换为时间排序", "en": "Manual sort, click to sort by time"},
+    "window.sort_toggle_tooltip": {"zh": "点击切换排序方式", "en": "Click to change sort mode"},
+    "window.refresh": {"zh": "刷新", "en": "Refresh"},
+
+    # ===== 预设管理对话框 =====
+    "preset.manage_title": {"zh": "管理预设命令", "en": "Manage Presets"},
+    "preset.list_label": {"zh": "预设列表:", "en": "Preset List:"},
+    "preset.new": {"zh": "新建", "en": "New"},
+    "preset.save": {"zh": "保存", "en": "Save"},
+    "preset.save_tooltip": {"zh": "保存当前编辑的预设", "en": "Save current preset"},
+    "preset.delete": {"zh": "删除", "en": "Delete"},
+    "preset.name_label": {"zh": "名称:", "en": "Name:"},
+    "preset.commands_label": {"zh": "命令 (每行一条):", "en": "Commands (one per line):"},
+    "preset.commands_placeholder": {
+        "zh": "例如:\nexport http_proxy=http://127.0.0.1:1081/\nexport https_proxy=http://127.0.0.1:1081/\nclaude --model opus",
+        "en": "Example:\nexport http_proxy=http://127.0.0.1:1081/\nexport https_proxy=http://127.0.0.1:1081/\nclaude --model opus",
+    },
+    "preset.default_name": {"zh": "预设 {n}", "en": "Preset {n}"},
+    "preset.unnamed": {"zh": "未命名", "en": "Unnamed"},
+    "preset.cannot_save": {"zh": "无法保存", "en": "Cannot Save"},
+    "preset.select_first": {"zh": "请先选择一个预设", "en": "Please select a preset first"},
+
+    # ===== LLM 配置对话框 =====
+    "llm.config_title": {"zh": "LLM API 配置", "en": "LLM API Configuration"},
+    "llm.config_list_label": {"zh": "LLM 配置列表:", "en": "LLM Config List:"},
+    "llm.edit_label": {"zh": "配置编辑:", "en": "Config Editor:"},
+    "llm.new": {"zh": "新建", "en": "New"},
+    "llm.save": {"zh": "保存", "en": "Save"},
+    "llm.save_tooltip": {"zh": "保存当前编辑的配置", "en": "Save current config"},
+    "llm.delete": {"zh": "删除", "en": "Delete"},
+    "llm.set_default": {"zh": "设为默认", "en": "Set Default"},
+    "llm.set_default_tooltip": {"zh": "将当前配置设为默认使用的配置", "en": "Set current config as default"},
+    "llm.name_label": {"zh": "名称:", "en": "Name:"},
+    "llm.name_placeholder": {"zh": "配置名称", "en": "Config name"},
+    "llm.model_label": {"zh": "模型:", "en": "Model:"},
+    "llm.timeout_label": {"zh": "超时(秒):", "en": "Timeout(s):"},
+    "llm.max_tokens_label": {"zh": "最大 Tokens:", "en": "Max Tokens:"},
+    "llm.temperature_label": {"zh": "温度:", "en": "Temperature:"},
+    "llm.temperature_placeholder": {"zh": "1.0 (范围 0-2)", "en": "1.0 (range 0-2)"},
+    "llm.top_p_placeholder": {"zh": "1.0 (范围 0-1)", "en": "1.0 (range 0-1)"},
+    "llm.proxy_label": {"zh": "代理:", "en": "Proxy:"},
+    "llm.proxy_placeholder": {"zh": "http://127.0.0.1:7890 (可选)", "en": "http://127.0.0.1:7890 (optional)"},
+    "llm.show_key": {"zh": "显示", "en": "Show"},
+    "llm.hide_key": {"zh": "隐藏", "en": "Hide"},
+    "llm.default_name": {"zh": "配置 {n}", "en": "Config {n}"},
+    "llm.new_config_name": {"zh": "新配置", "en": "New Config"},
+    "llm.unnamed": {"zh": "未命名", "en": "Unnamed"},
+    "llm.cannot_save": {"zh": "无法保存", "en": "Cannot Save"},
+    "llm.select_first": {"zh": "请先选择一个配置", "en": "Please select a config first"},
+    "llm.validation_failed": {"zh": "验证失败", "en": "Validation Failed"},
+    "llm.name_required": {"zh": "名称不能为空", "en": "Name is required"},
+    "llm.url_required": {"zh": "API URL 不能为空", "en": "API URL is required"},
+    "llm.save_success": {"zh": "保存成功", "en": "Save Successful"},
+    "llm.config_saved": {"zh": "配置已保存", "en": "Config saved"},
+
+    # ===== 快速启动路径管理 =====
+    "dirhistory.title": {"zh": "管理快速启动路径", "en": "Manage Quick Launch Paths"},
+    "dirhistory.hint": {"zh": "管理快速启动的目录列表，可以添加、删除或调整顺序：", "en": "Manage quick launch directories. Add, remove, or reorder:"},
+    "dirhistory.list_label": {"zh": "目录列表:", "en": "Directory List:"},
+    "dirhistory.add": {"zh": "添加...", "en": "Add..."},
+    "dirhistory.delete": {"zh": "删除", "en": "Delete"},
+    "dirhistory.move_up": {"zh": "上移 ↑", "en": "Up ↑"},
+    "dirhistory.move_down": {"zh": "下移 ↓", "en": "Down ↓"},
+    "dirhistory.select_dir": {"zh": "选择要添加的目录", "en": "Select directory to add"},
+    "dirhistory.already_exists_title": {"zh": "提示", "en": "Notice"},
+    "dirhistory.already_exists": {"zh": "该目录已在列表中", "en": "Directory already in list"},
+    "dirhistory.confirm_delete_title": {"zh": "确认删除", "en": "Confirm Delete"},
+    "dirhistory.confirm_delete_msg": {"zh": "确定要从列表中移除此目录吗？\n{path}", "en": "Remove this directory from the list?\n{path}"},
+
+    # ===== 工具栏按钮 =====
+    "toolbar.start": {"zh": "启动", "en": "Start"},
+    "toolbar.stop": {"zh": "停止", "en": "Stop"},
+    "toolbar.export": {"zh": "导出", "en": "Export"},
+    "toolbar.history": {"zh": "历史", "en": "History"},
+    "toolbar.clear": {"zh": "清屏", "en": "Clear"},
+    "toolbar.split": {"zh": "分屏", "en": "Split"},
+    "toolbar.split_tooltip": {"zh": "在当前标签页中分出一个新的终端 (Ctrl+Shift+S)", "en": "Split a new terminal in current tab (Ctrl+Shift+S)"},
+    "toolbar.split_v": {"zh": "垂直分屏", "en": "V-Split"},
+    "toolbar.split_v_tooltip": {"zh": "对当前选中的终端进行上下分屏 (Ctrl+Shift+V)", "en": "Split vertically on focused terminal (Ctrl+Shift+V)"},
+    "toolbar.close_split": {"zh": "关分屏", "en": "Close Split"},
+    "toolbar.close_split_tooltip": {"zh": "关闭当前聚焦的分屏终端 (Cmd+W 或 Ctrl+Shift+X)", "en": "Close focused split terminal (Cmd+W or Ctrl+Shift+X)"},
+    "toolbar.close_tab": {"zh": "关标签", "en": "Close Tab"},
+    "toolbar.close_tab_tooltip": {"zh": "关闭当前标签页 (Ctrl+W)", "en": "Close current tab (Ctrl+W)"},
+    "toolbar.explorer": {"zh": "资源管理器", "en": "Explorer"},
+    "toolbar.explorer_tooltip": {"zh": "文件资源管理器", "en": "File Explorer"},
+    "toolbar.git": {"zh": "Git", "en": "Git"},
+    "toolbar.log": {"zh": "日志", "en": "Log"},
+    "toolbar.vscode": {"zh": "VS Code", "en": "VS Code"},
+    "toolbar.vscode_tooltip": {"zh": "在 VS Code 中打开当前工作目录", "en": "Open current directory in VS Code"},
+    "toolbar.cursor": {"zh": "Cursor", "en": "Cursor"},
+    "toolbar.cursor_tooltip": {"zh": "在 Cursor 中打开当前工作目录", "en": "Open current directory in Cursor"},
+    "toolbar.llm_config": {"zh": "LLM配置", "en": "LLM Config"},
+    "toolbar.llm_config_tooltip": {"zh": "LLM API 配置", "en": "LLM API Configuration"},
+    "toolbar.settings_tooltip": {"zh": "工具栏设置", "en": "Toolbar Settings"},
+    "toolbar.switch_preset": {"zh": "切换", "en": "Switch"},
+    "toolbar.switch_preset_tooltip": {"zh": "切换预设", "en": "Switch Preset"},
+    "toolbar.manage_preset": {"zh": "管理", "en": "Manage"},
+    "toolbar.image_prefix": {"zh": "图片加@前缀", "en": "Image @prefix"},
+    "toolbar.image_prefix_tooltip": {"zh": "粘贴图片时在路径前加 @ 符号（Gemini CLI 需要）", "en": "Add @ prefix to image paths (for Gemini CLI)"},
+    "toolbar.image_local": {"zh": "图片存工作目录", "en": "Image to CWD"},
+    "toolbar.image_local_tooltip": {"zh": "将粘贴的图片保存到当前工作目录的 .images/ 文件夹\n（勾选后 Gemini CLI 等工具可以访问图片）", "en": "Save pasted images to .images/ in current working directory\n(Required for Gemini CLI and similar tools)"},
+    "toolbar.window_nav": {"zh": "窗口快速导航", "en": "Window Navigator"},
+    "toolbar.window_nav_tooltip": {"zh": "显示一个永远在最前的小窗口，可以快速切换到其他终端窗口", "en": "Show a floating panel to quickly switch between terminal windows"},
+    "toolbar.icon_tint": {"zh": "染色", "en": "Tint"},
+    "toolbar.icon_tint_tooltip": {"zh": "给Dock图标添加主题色蒙版", "en": "Apply theme color tint to Dock icon"},
+    "toolbar.quick_launch_tooltip": {"zh": "快速启动: 选择工作目录新建标签页", "en": "Quick Launch: select directory for new tab"},
+    "toolbar.new_tab_tooltip": {"zh": "新建标签页 (Ctrl+T)", "en": "New Tab (Ctrl+T)"},
+    "toolbar.color_tooltip": {"zh": "点击选择窗口颜色标识", "en": "Click to choose window color"},
+
+    # ===== 主题名称翻译（display only） =====
+    "theme.label": {"zh": "主题:", "en": "Theme:"},
+    "theme.深蓝": {"zh": "深蓝", "en": "Deep Blue"},
+    "theme.暗夜紫": {"zh": "暗夜紫", "en": "Night Purple"},
+    "theme.森林绿": {"zh": "森林绿", "en": "Forest Green"},
+    "theme.暖橙": {"zh": "暖橙", "en": "Warm Orange"},
+    "theme.午夜黑": {"zh": "午夜黑", "en": "Midnight Black"},
+    "theme.浅色": {"zh": "浅色", "en": "Light"},
+    "theme.粉红": {"zh": "粉红", "en": "Pink"},
+    "theme.switched": {"zh": "已切换到 {name} 主题", "en": "Switched to {name} theme"},
+
+    # ===== 工具栏管理器对话框 =====
+    "toolbar_mgr.title": {"zh": "工具栏管理", "en": "Toolbar Manager"},
+    "toolbar_mgr.layout_group": {"zh": "工具栏布局", "en": "Toolbar Layout"},
+    "toolbar_mgr.single_row": {"zh": "单排布局", "en": "Single Row"},
+    "toolbar_mgr.single_row_tooltip": {"zh": "所有按钮在一行显示", "en": "All buttons in one row"},
+    "toolbar_mgr.double_row": {"zh": "双排布局", "en": "Double Row"},
+    "toolbar_mgr.double_row_tooltip": {"zh": "按钮分两行显示，更紧凑", "en": "Buttons in two rows, more compact"},
+    "toolbar_mgr.layout_note": {"zh": "* 布局变更需要重启应用后生效", "en": "* Layout changes require restart to take effect"},
+    "toolbar_mgr.buttons_group": {"zh": "显示的按钮", "en": "Visible Buttons"},
+    "toolbar_mgr.drag_hint": {"zh": "拖拽手柄可在组内或跨组移动按钮，箭头调整分组顺序（变更需重启生效）", "en": "Drag handles to move buttons within/across groups, arrows to reorder groups (restart required)"},
+    "toolbar_mgr.show_all": {"zh": "全部显示", "en": "Show All"},
+    "toolbar_mgr.hide_all": {"zh": "全部隐藏", "en": "Hide All"},
+    "toolbar_mgr.reset": {"zh": "恢复默认", "en": "Reset"},
+    "toolbar_mgr.cancel": {"zh": "取消", "en": "Cancel"},
+    "toolbar_mgr.apply": {"zh": "应用", "en": "Apply"},
+    "toolbar_mgr.move_up_tooltip": {"zh": "上移「{name}」分组", "en": "Move \"{name}\" group up"},
+    "toolbar_mgr.move_down_tooltip": {"zh": "下移「{name}」分组", "en": "Move \"{name}\" group down"},
+
+    # ===== 工具栏管理器 - 按钮显示名称 =====
+    "toolbar_mgr.btn.preset_combo": {"zh": "预设选择器", "en": "Preset Selector"},
+    "toolbar_mgr.btn.preset_switch_btn": {"zh": "切换按钮", "en": "Switch Button"},
+    "toolbar_mgr.btn.manage_preset_btn": {"zh": "管理按钮", "en": "Manage Button"},
+    "toolbar_mgr.btn.start_btn": {"zh": "启动按钮", "en": "Start Button"},
+    "toolbar_mgr.btn.stop_btn": {"zh": "停止按钮", "en": "Stop Button"},
+    "toolbar_mgr.btn.image_prefix_checkbox": {"zh": "图片加@前缀", "en": "Image @prefix"},
+    "toolbar_mgr.btn.image_local_checkbox": {"zh": "图片存工作目录", "en": "Image to CWD"},
+    "toolbar_mgr.btn.window_nav_checkbox": {"zh": "窗口快速导航", "en": "Window Navigator"},
+    "toolbar_mgr.btn.export_btn": {"zh": "导出", "en": "Export"},
+    "toolbar_mgr.btn.history_btn": {"zh": "历史", "en": "History"},
+    "toolbar_mgr.btn.clear_btn": {"zh": "清屏", "en": "Clear"},
+    "toolbar_mgr.btn.split_btn": {"zh": "分屏", "en": "Split"},
+    "toolbar_mgr.btn.split_v_btn": {"zh": "垂直分屏", "en": "V-Split"},
+    "toolbar_mgr.btn.close_split_btn": {"zh": "关分屏", "en": "Close Split"},
+    "toolbar_mgr.btn.close_tab_btn": {"zh": "关标签", "en": "Close Tab"},
+    "toolbar_mgr.btn.explorer_toggle_btn": {"zh": "资源管理器", "en": "Explorer"},
+    "toolbar_mgr.btn.git_toggle_btn": {"zh": "Git", "en": "Git"},
+    "toolbar_mgr.btn.vscode_open_btn": {"zh": "VS Code", "en": "VS Code"},
+    "toolbar_mgr.btn.cursor_open_btn": {"zh": "Cursor", "en": "Cursor"},
+    "toolbar_mgr.btn.log_toggle_btn": {"zh": "日志", "en": "Log"},
+    "toolbar_mgr.btn.theme_combo": {"zh": "主题选择器", "en": "Theme Selector"},
+    "toolbar_mgr.btn.icon_tint_checkbox": {"zh": "染色", "en": "Tint"},
+    "toolbar_mgr.btn.llm_config_btn": {"zh": "LLM配置", "en": "LLM Config"},
+    "toolbar_mgr.btn.lang_combo": {"zh": "语言选择", "en": "Language"},
+
+    # ===== 工具栏管理器 - 分组名称翻译(display only, internal key仍为中文) =====
+    "toolbar_mgr.group.预设与控制": {"zh": "预设与控制", "en": "Presets & Control"},
+    "toolbar_mgr.group.选项": {"zh": "选项", "en": "Options"},
+    "toolbar_mgr.group.操作": {"zh": "操作", "en": "Actions"},
+    "toolbar_mgr.group.分屏管理": {"zh": "分屏管理", "en": "Split Management"},
+    "toolbar_mgr.group.面板与编辑器": {"zh": "面板与编辑器", "en": "Panels & Editors"},
+    "toolbar_mgr.group.主题": {"zh": "主题", "en": "Theme"},
+    "toolbar_mgr.group.设置": {"zh": "设置", "en": "Settings"},
+
+    # ===== Explorer 面板 =====
+    "explorer.title": {"zh": "资源管理器", "en": "Explorer"},
+    "explorer.open": {"zh": "打开", "en": "Open"},
+    "explorer.run": {"zh": "运行", "en": "Run"},
+    "explorer.save": {"zh": "保存", "en": "Save"},
+    "explorer.save_as": {"zh": "另存为", "en": "Save As"},
+    "explorer.new_file": {"zh": "新建文件", "en": "New File"},
+    "explorer.new_folder": {"zh": "新建文件夹", "en": "New Folder"},
+    "explorer.rename": {"zh": "重命名", "en": "Rename"},
+    "explorer.delete": {"zh": "删除", "en": "Delete"},
+    "explorer.copy_path": {"zh": "复制路径", "en": "Copy Path"},
+    "explorer.copy_relative_path": {"zh": "复制相对路径", "en": "Copy Relative Path"},
+    "explorer.reveal_in_finder": {"zh": "在 Finder 中显示", "en": "Reveal in Finder"},
+    "explorer.reveal_in_explorer": {"zh": "在资源管理器中显示", "en": "Reveal in Explorer"},
+    "explorer.reveal_in_file_manager": {"zh": "在文件管理器中显示", "en": "Reveal in File Manager"},
+    "explorer.open_in_vscode": {"zh": "在 VS Code 中打开", "en": "Open in VS Code"},
+    "explorer.open_in_cursor": {"zh": "在 Cursor 中打开", "en": "Open in Cursor"},
+    "explorer.refresh": {"zh": "刷新", "en": "Refresh"},
+    "explorer.new_file_title": {"zh": "新建文件", "en": "New File"},
+    "explorer.new_file_prompt": {"zh": "输入文件名:", "en": "Enter file name:"},
+    "explorer.new_folder_title": {"zh": "新建文件夹", "en": "New Folder"},
+    "explorer.new_folder_prompt": {"zh": "输入文件夹名:", "en": "Enter folder name:"},
+    "explorer.default_folder_name": {"zh": "新文件夹", "en": "New Folder"},
+    "explorer.rename_title": {"zh": "重命名", "en": "Rename"},
+    "explorer.rename_prompt": {"zh": "输入新名称:", "en": "Enter new name:"},
+    "explorer.confirm_delete_title": {"zh": "确认删除", "en": "Confirm Delete"},
+    "explorer.confirm_delete_msg": {"zh": "确定要删除{type} '{name}' 吗？\n此操作将移至废纸篓。", "en": "Delete {type} '{name}'?\nThis will move it to Trash."},
+    "explorer.folder": {"zh": "文件夹", "en": "folder"},
+    "explorer.file": {"zh": "文件", "en": "file"},
+    "explorer.error": {"zh": "错误", "en": "Error"},
+    "explorer.run_failed": {"zh": "运行失败: {error}", "en": "Run failed: {error}"},
+    "explorer.create_file_failed": {"zh": "创建文件失败: {error}", "en": "Failed to create file: {error}"},
+    "explorer.create_folder_failed": {"zh": "创建文件夹失败: {error}", "en": "Failed to create folder: {error}"},
+    "explorer.rename_failed": {"zh": "重命名失败: {error}", "en": "Rename failed: {error}"},
+    "explorer.delete_failed": {"zh": "删除失败: {error}", "en": "Delete failed: {error}"},
+    "explorer.open_in_editor_failed": {"zh": "无法在 {editor} 中打开: {error}", "en": "Cannot open in {editor}: {error}"},
+    "explorer.left_right_split": {"zh": "左右分屏", "en": "Side by Side"},
+    "explorer.split_tooltip": {"zh": "勾选：文件编辑器在右侧（左右分屏）\n不勾选：文件编辑器在下方（上下分屏）", "en": "Checked: editor on right (horizontal split)\nUnchecked: editor below (vertical split)"},
+    "explorer.refresh_tooltip": {"zh": "刷新", "en": "Refresh"},
+
+    # ===== Git 面板 =====
+    "git.source_control": {"zh": "Source Control", "en": "Source Control"},
+    "git.refresh_tooltip": {"zh": "刷新", "en": "Refresh"},
+    "git.staged_changes": {"zh": "Staged Changes ({n})", "en": "Staged Changes ({n})"},
+    "git.changes": {"zh": "Changes ({n})", "en": "Changes ({n})"},
+    "git.unstage_tooltip": {"zh": "取消暂存", "en": "Unstage"},
+    "git.stage_tooltip": {"zh": "暂存", "en": "Stage"},
+    "git.discard_tooltip": {"zh": "放弃更改", "en": "Discard Changes"},
+    "git.unstage_all_tooltip": {"zh": "取消全部暂存", "en": "Unstage All"},
+    "git.stage_all_tooltip": {"zh": "暂存全部", "en": "Stage All"},
+    "git.commit_placeholder": {"zh": "提交信息...", "en": "Commit message..."},
+    "git.pull_tooltip": {"zh": "从远程拉取更新", "en": "Pull from remote"},
+    "git.push_tooltip": {"zh": "推送到远程仓库", "en": "Push to remote"},
+    "git.no_repo": {"zh": "当前目录不是 Git 仓库", "en": "Current directory is not a Git repository"},
+    "git.confirm_discard_title": {"zh": "确认放弃更改", "en": "Confirm Discard Changes"},
+    "git.confirm_discard_msg": {"zh": "确定要放弃对 '{path}' 的更改吗？\n此操作不可撤销。", "en": "Discard changes to '{path}'?\nThis cannot be undone."},
+    "git.push_success_title": {"zh": "推送成功", "en": "Push Successful"},
+    "git.push_success_msg": {"zh": "已成功推送到远程仓库", "en": "Successfully pushed to remote"},
+    "git.pull_success_title": {"zh": "拉取成功", "en": "Pull Successful"},
+    "git.pull_success_msg": {"zh": "已成功从远程仓库拉取更新", "en": "Successfully pulled from remote"},
+    "git.error_title": {"zh": "Git 错误", "en": "Git Error"},
+    "git.close": {"zh": "关闭", "en": "Close"},
+
+    # ===== Git Manager 错误消息 =====
+    "git_mgr.no_repo_path": {"zh": "未设置仓库路径", "en": "Repository path not set"},
+    "git_mgr.timeout": {"zh": "Git 命令超时", "en": "Git command timed out"},
+    "git_mgr.status_failed": {"zh": "获取状态失败: {error}", "en": "Failed to get status: {error}"},
+    "git_mgr.stage_failed": {"zh": "暂存失败: {error}", "en": "Stage failed: {error}"},
+    "git_mgr.unstage_failed": {"zh": "取消暂存失败: {error}", "en": "Unstage failed: {error}"},
+    "git_mgr.stage_all_failed": {"zh": "暂存全部失败: {error}", "en": "Stage all failed: {error}"},
+    "git_mgr.unstage_all_failed": {"zh": "取消暂存全部失败: {error}", "en": "Unstage all failed: {error}"},
+    "git_mgr.delete_failed": {"zh": "删除文件失败: {error}", "en": "Failed to delete file: {error}"},
+    "git_mgr.discard_failed": {"zh": "放弃更改失败: {error}", "en": "Discard changes failed: {error}"},
+    "git_mgr.commit_empty": {"zh": "提交信息不能为空", "en": "Commit message cannot be empty"},
+    "git_mgr.commit_failed": {"zh": "提交失败: {error}", "en": "Commit failed: {error}"},
+    "git_mgr.diff_failed": {"zh": "获取 diff 失败: {error}", "en": "Failed to get diff: {error}"},
+    "git_mgr.checkout_failed": {"zh": "切换分支失败: {error}", "en": "Branch checkout failed: {error}"},
+    "git_mgr.push_failed": {"zh": "推送失败: {error}", "en": "Push failed: {error}"},
+    "git_mgr.pull_failed": {"zh": "拉取失败: {error}", "en": "Pull failed: {error}"},
+
+    # ===== 文件编辑器 =====
+    "editor.no_file": {"zh": "未打开文件", "en": "No file open"},
+    "editor.close_tooltip": {"zh": "关闭编辑器", "en": "Close Editor"},
+    "editor.error": {"zh": "错误", "en": "Error"},
+    "editor.file_not_found": {"zh": "文件不存在: {path}", "en": "File not found: {path}"},
+    "editor.file_too_large_title": {"zh": "文件过大", "en": "File Too Large"},
+    "editor.file_too_large_msg": {"zh": "文件大小 ({size} MB) 超过限制 (5 MB)。\n请使用外部编辑器打开。", "en": "File size ({size} MB) exceeds limit (5 MB).\nPlease use an external editor."},
+    "editor.binary_title": {"zh": "无法打开", "en": "Cannot Open"},
+    "editor.binary_msg": {"zh": "这是一个二进制文件，无法在文本编辑器中打开。", "en": "This is a binary file and cannot be opened in a text editor."},
+    "editor.read_error": {"zh": "无法读取文件: {error}", "en": "Cannot read file: {error}"},
+    "editor.save_changes_title": {"zh": "保存更改", "en": "Save Changes"},
+    "editor.save_changes_msg": {"zh": "文件 '{name}' 已修改。\n是否保存更改？", "en": "File '{name}' has been modified.\nSave changes?"},
+    "editor.save_failed_title": {"zh": "保存失败", "en": "Save Failed"},
+    "editor.save_failed_msg": {"zh": "无法保存文件: {error}", "en": "Cannot save file: {error}"},
+    "editor.save_as_title": {"zh": "另存为", "en": "Save As"},
+    "editor.all_files": {"zh": "所有文件 (*.*)", "en": "All Files (*.*)"},
+
+    # ===== 历史对话框 =====
+    "history.title": {"zh": "历史会话", "en": "Session History"},
+    "history.main_title": {"zh": "历史会话记录", "en": "Session History"},
+    "history.col_session_id": {"zh": "会话ID", "en": "Session ID"},
+    "history.col_command": {"zh": "命令", "en": "Command"},
+    "history.col_start_time": {"zh": "开始时间", "en": "Start Time"},
+    "history.col_entry_count": {"zh": "条目数", "en": "Entries"},
+    "history.view_detail": {"zh": "查看详情", "en": "View Details"},
+    "history.export": {"zh": "导出", "en": "Export"},
+    "history.delete": {"zh": "删除", "en": "Delete"},
+    "history.preview_title": {"zh": "会话预览", "en": "Session Preview"},
+    "history.preview_placeholder": {"zh": "选择一个会话查看预览...", "en": "Select a session to preview..."},
+    "history.refresh": {"zh": "刷新", "en": "Refresh"},
+    "history.close": {"zh": "关闭", "en": "Close"},
+    "history.session_id_label": {"zh": "会话ID: {id}", "en": "Session ID: {id}"},
+    "history.command_label": {"zh": "命令: {cmd}", "en": "Command: {cmd}"},
+    "history.working_dir_label": {"zh": "工作目录: {dir}", "en": "Working Dir: {dir}"},
+    "history.start_time_label": {"zh": "开始时间: {time}", "en": "Start Time: {time}"},
+    "history.end_time_label": {"zh": "结束时间: {time}", "en": "End Time: {time}"},
+    "history.entry_count_label": {"zh": "条目数: {n}", "en": "Entries: {n}"},
+    "history.more_entries": {"zh": "... 还有 {n} 条记录", "en": "... {n} more entries"},
+    "history.export_format_title": {"zh": "导出格式", "en": "Export Format"},
+    "history.export_format_prompt": {"zh": "选择导出格式:", "en": "Select export format:"},
+    "history.format_html": {"zh": "HTML (推荐)", "en": "HTML (Recommended)"},
+    "history.format_markdown": {"zh": "Markdown", "en": "Markdown"},
+    "history.format_json": {"zh": "JSON", "en": "JSON"},
+    "history.format_all": {"zh": "全部格式", "en": "All Formats"},
+    "history.export_success_title": {"zh": "导出成功", "en": "Export Successful"},
+    "history.export_success_msg": {"zh": "已导出: {path}", "en": "Exported: {path}"},
+    "history.export_failed_title": {"zh": "导出失败", "en": "Export Failed"},
+    "history.confirm_delete_title": {"zh": "确认删除", "en": "Confirm Delete"},
+    "history.confirm_delete_msg": {"zh": "确定要删除会话 {id} 吗？\n此操作不可恢复！", "en": "Delete session {id}?\nThis cannot be undone!"},
+    "history.delete_success_title": {"zh": "成功", "en": "Success"},
+    "history.delete_success_msg": {"zh": "会话已删除", "en": "Session deleted"},
+    "history.delete_failed_title": {"zh": "失败", "en": "Failed"},
+    "history.delete_failed_msg": {"zh": "删除失败", "en": "Delete failed"},
+
+    # ===== 会话详情对话框 =====
+    "session_detail.title": {"zh": "会话详情 - {id}", "en": "Session Details - {id}"},
+    "session_detail.session_id": {"zh": "会话ID: {id}", "en": "Session ID: {id}"},
+    "session_detail.command": {"zh": "命令: {cmd}", "en": "Command: {cmd}"},
+    "session_detail.working_dir": {"zh": "工作目录: {dir}", "en": "Working Dir: {dir}"},
+    "session_detail.start_time": {"zh": "开始时间: {time}", "en": "Start Time: {time}"},
+    "session_detail.end_time": {"zh": "结束时间: {time}", "en": "End Time: {time}"},
+    "session_detail.total_entries": {"zh": "总条目数: {n}", "en": "Total Entries: {n}"},
+    "session_detail.detected_files": {"zh": "检测到的文件: {n}", "en": "Detected Files: {n}"},
+    "session_detail.files_label": {"zh": "文件: {files}", "en": "Files: {files}"},
+    "session_detail.close": {"zh": "关闭", "en": "Close"},
+
+    # ===== 状态栏/通用 =====
+    "status.dir_history_tooltip": {"zh": "历史目录", "en": "Directory History"},
+    "status.apply_dir_tooltip": {"zh": "切换到选中的工作目录", "en": "Switch to selected working directory"},
+    "common.error": {"zh": "错误", "en": "Error"},
+    "common.close": {"zh": "关闭", "en": "Close"},
+
+    # ===== Tab 右键菜单 =====
+    "tab.rename": {"zh": "重命名标签", "en": "Rename Tab"},
+    "tab.rename_title": {"zh": "重命名标签页", "en": "Rename Tab"},
+    "tab.rename_prompt": {"zh": "输入新名称:", "en": "Enter new name:"},
+    "tab.detach": {"zh": "分离为独立窗口", "en": "Detach to Window"},
+    "tab.close": {"zh": "关闭标签页", "en": "Close Tab"},
+    "tab.close_others": {"zh": "关闭其他标签页", "en": "Close Other Tabs"},
+
+    # ===== 快速启动菜单 =====
+    "quick_launch.manage": {"zh": "✏️ 管理路径...", "en": "✏️ Manage Paths..."},
+
+    # ===== 导出 =====
+    "export.format_title": {"zh": "导出格式", "en": "Export Format"},
+    "export.format_prompt": {"zh": "选择导出格式:", "en": "Select export format:"},
+    "export.failed_title": {"zh": "导出失败", "en": "Export Failed"},
+
+    # ===== 语言选择 =====
+    "lang.label": {"zh": "语言:", "en": "Lang:"},
+
+    # ===== main_window.py - 日志面板 =====
+    "log.title": {"zh": "📋 原始输出日志", "en": "📋 Raw Output Log"},
+    "log.clear": {"zh": "清空", "en": "Clear"},
+
+    # ===== main_window.py - 底部状态栏 =====
+    "status.not_started": {"zh": "未启动", "en": "Not Started"},
+    "status.entries": {"zh": "记录: {n}", "en": "Entries: {n}"},
+    "status.files": {"zh": "文件: {n}", "en": "Files: {n}"},
+    "status.ready": {"zh": "就绪 - 输入命令并点击「启动」开始", "en": "Ready - Enter command and click Start"},
+    "status.running": {"zh": "运行中", "en": "Running"},
+    "status.running_session": {"zh": "运行中 - {session_id}", "en": "Running - {session_id}"},
+    "status.stopped": {"zh": "已停止", "en": "Stopped"},
+    "status.session_stopped": {"zh": "会话已停止", "en": "Session stopped"},
+    "status.session_started": {"zh": "会话已启动: {name}", "en": "Session started: {name}"},
+    "status.session_stopped_saved": {"zh": "已停止 - 会话已保存: {session_id}", "en": "Stopped - Session saved: {session_id}"},
+    "status.process_exited": {"zh": "进程已退出 - 会话已保存: {session_id}", "en": "Process exited - Session saved: {session_id}"},
+    "status.pasted_video": {"zh": "已粘贴视频: {path}", "en": "Pasted video: {path}"},
+    "status.pasted_audio": {"zh": "已粘贴音频: {path}", "en": "Pasted audio: {path}"},
+    "status.pasted_image": {"zh": "已粘贴图片: {path}", "en": "Pasted image: {path}"},
+    "status.pasted_file": {"zh": "已粘贴文件: {path}", "en": "Pasted file: {path}"},
+    "status.split_done": {"zh": "已分屏: 当前标签页有 {count} 个终端", "en": "Split: {count} terminals in current tab"},
+    "status.vsplit_done": {"zh": "已垂直分屏: 当前标签页有 {count} 个终端", "en": "V-Split: {count} terminals in current tab"},
+    "status.close_split_done": {"zh": "已关闭分屏: 当前标签页有 {count} 个终端", "en": "Closed split: {count} terminals in current tab"},
+    "status.theme_switched": {"zh": "已切换到 {name} 主题", "en": "Switched to {name} theme"},
+    "status.switched_dir": {"zh": "已切换到: {path}", "en": "Switched to: {path}"},
+    "status.exported": {"zh": "已导出: {path}", "en": "Exported: {path}"},
+    "status.preset_saved": {"zh": "预设已保存", "en": "Preset saved"},
+    "status.local_preset_saved": {"zh": "本地预设已保存", "en": "Local preset saved"},
+    "status.toolbar_saved_restart": {"zh": "工具栏配置已保存，布局/顺序变更需重启应用后生效", "en": "Toolbar config saved, layout/order changes require restart"},
+    "status.toolbar_saved": {"zh": "工具栏配置已保存", "en": "Toolbar config saved"},
+    "status.opened_in_vscode": {"zh": "已在 VS Code 中打开: {cwd}", "en": "Opened in VS Code: {cwd}"},
+    "status.opened_in_cursor": {"zh": "已在 Cursor 中打开: {cwd}", "en": "Opened in Cursor: {cwd}"},
+    "status.url_copied": {"zh": "已复制: {url}", "en": "Copied: {url}"},
+    "status.session_clear": {"zh": "每次 Query 后清除会话: {status}", "en": "Clear session after each query: {status}"},
+    "status.enabled": {"zh": "已启用", "en": "Enabled"},
+    "status.disabled": {"zh": "已禁用", "en": "Disabled"},
+    "status.local_config_format_error": {"zh": "本地命令配置文件格式错误，已清空", "en": "Local config file format error, cleared"},
+    "status.load_local_commands_error": {"zh": "加载本地命令失败: {error}", "en": "Failed to load local commands: {error}"},
+    "status.save_local_commands_error": {"zh": "保存本地命令失败: {error}", "en": "Failed to save local commands: {error}"},
+    "status.config_dir_error": {"zh": "创建配置目录失败: {error}", "en": "Failed to create config directory: {error}"},
+    "status.cannot_create_config": {"zh": "无法在系统目录 {cwd} 创建配置", "en": "Cannot create config in system directory {cwd}"},
+
+    # ===== main_window.py - 对话框/消息 =====
+    "msg.error": {"zh": "错误", "en": "Error"},
+    "msg.hint": {"zh": "提示", "en": "Notice"},
+    "msg.dir_not_found": {"zh": "目录不存在: {path}", "en": "Directory not found: {path}"},
+    "msg.terminal_launch_error": {"zh": "无法启动终端: {error}", "en": "Cannot start terminal: {error}"},
+    "msg.select_working_dir": {"zh": "选择工作目录", "en": "Select Working Directory"},
+    "msg.no_selected_terminal": {"zh": "没有选中的终端", "en": "No selected terminal"},
+    "msg.active_terminal_not_in_tab": {"zh": "当前活动终端不在此标签页", "en": "Active terminal is not in this tab"},
+    "msg.cannot_find_container": {"zh": "无法找到终端的父容器", "en": "Cannot find terminal container"},
+    "msg.cannot_close_only_terminal": {"zh": "当前标签页只有一个终端，无法关闭分屏", "en": "Cannot close split: only one terminal in this tab"},
+    "msg.confirm_close_title": {"zh": "确认关闭", "en": "Confirm Close"},
+    "msg.confirm_close_last_tab": {"zh": "这是最后一个标签页，关闭后将退出程序。\n确定要关闭吗？", "en": "This is the last tab. Closing it will exit the app.\nAre you sure?"},
+    "msg.select_or_create_preset": {"zh": "请先选择或创建一个预设", "en": "Please select or create a preset first"},
+    "msg.no_session_to_export": {"zh": "没有可导出的会话", "en": "No session to export"},
+    "msg.export_failed": {"zh": "导出失败", "en": "Export Failed"},
+    "msg.open_failed": {"zh": "打开失败", "en": "Open Failed"},
+    "msg.vscode_not_found": {"zh": "无法找到 VS Code。\n\n请确保已安装 VS Code 并且 'code' 命令在 PATH 中。\n\n在 VS Code 中按 Cmd+Shift+P，输入 'Shell Command: Install code command in PATH'", "en": "VS Code not found.\n\nPlease ensure VS Code is installed and 'code' command is in PATH.\n\nIn VS Code press Cmd+Shift+P, type 'Shell Command: Install code command in PATH'"},
+    "msg.vscode_open_error": {"zh": "无法打开 VS Code: {error}", "en": "Cannot open VS Code: {error}"},
+    "msg.cursor_not_found": {"zh": "无法找到 Cursor。\n\n请确保已安装 Cursor 并且 'cursor' 命令在 PATH 中。\n\n在 Cursor 中按 Cmd+Shift+P，输入 'Shell Command: Install cursor command in PATH'", "en": "Cursor not found.\n\nPlease ensure Cursor is installed and 'cursor' command is in PATH.\n\nIn Cursor press Cmd+Shift+P, type 'Shell Command: Install cursor command in PATH'"},
+    "msg.cursor_open_error": {"zh": "无法打开 Cursor: {error}", "en": "Cannot open Cursor: {error}"},
+    "msg.confirm_exit_title": {"zh": "确认退出", "en": "Confirm Exit"},
+    "msg.confirm_exit_msg": {"zh": "当前有进程正在运行，是否保存并退出？", "en": "Processes are still running. Save and exit?"},
+    "msg.permission_denied": {"zh": "权限不足", "en": "Permission Denied"},
+    "msg.cannot_create_config_dir": {"zh": "无法在 {cwd} 创建配置目录，请检查目录权限。", "en": "Cannot create config directory in {cwd}, please check permissions."},
+    "msg.save_failed": {"zh": "保存失败", "en": "Save Failed"},
+    "msg.cannot_write_config": {"zh": "无法写入 {path}，请检查目录权限。", "en": "Cannot write {path}, please check permissions."},
+    "msg.manage_local_commands": {"zh": "管理本地快速命令", "en": "Manage Local Quick Commands"},
+    "msg.debug_special_chars": {"zh": "特殊字符调试", "en": "Special Characters Debug"},
+    "msg.no_terminal_in_tab": {"zh": "该标签页没有终端", "en": "No terminal in this tab"},
+    "msg.start_failed": {"zh": "启动失败", "en": "Start Failed"},
+    "msg.server_error": {"zh": "服务器错误", "en": "Server Error"},
+
+    # ===== main_window.py - 目录工具栏 =====
+    "dir.label": {"zh": " 工作目录: ", "en": " Directory: "},
+    "dir.browse": {"zh": "浏览...", "en": "Browse..."},
+    "dir.switch": {"zh": "切换", "en": "Switch"},
+    "dir.current": {"zh": "当前: {cwd}", "en": "Current: {cwd}"},
+
+    # ===== main_window.py - Tab & 终端 =====
+    "terminal.default_name": {"zh": "终端 {n}", "en": "Terminal {n}"},
+
+    # ===== main_window.py - 快速启动搜索 =====
+    "quick_launch.placeholder": {"zh": "搜索或粘贴路径后按回车...", "en": "Search or paste path and press Enter..."},
+
+    # ===== main_window.py - OpenAI Server 相关 =====
+    "openai.stop_server": {"zh": "停止 OpenAI API 服务器 (端口 {port})", "en": "Stop OpenAI API Server (port {port})"},
+    "openai.copy_url": {"zh": "复制 API URL", "en": "Copy API URL"},
+    "openai.clear_session": {"zh": "每次 Query 后清除会话", "en": "Clear session after each query"},
+    "openai.set_as_server": {"zh": "设置为 OpenAI API Server...", "en": "Set as OpenAI API Server..."},
+    "openai.start_title": {"zh": "启动 OpenAI API 服务器", "en": "Start OpenAI API Server"},
+    "openai.port_label": {"zh": "端口号 (8100-8199):", "en": "Port (8100-8199):"},
+
+    # ===== main_window.py - 导出格式 =====
+    "export.format_html": {"zh": "HTML (推荐)", "en": "HTML (Recommended)"},
+    "export.format_markdown": {"zh": "Markdown", "en": "Markdown"},
+    "export.format_json": {"zh": "JSON", "en": "JSON"},
+    "export.format_all": {"zh": "全部格式", "en": "All Formats"},
+
+    # ===== main_window.py - 未命名 =====
+    "common.unnamed": {"zh": "未命名", "en": "Unnamed"},
+
+    # ===== main_window.py - 额外 UI 字符串 =====
+    "toolbar.title_label": {"zh": "  智能终端  ", "en": "  Smart Terminal  "},
+    "toolbar.preset_label": {"zh": " 预设: ", "en": " Preset: "},
+    "color_picker.collapse": {"zh": "▲ 收起", "en": "▲ Collapse"},
+    "color_picker.expand": {"zh": "▼ 更多", "en": "▼ More"},
+    "quick_launch.current": {"zh": "📂 当前: {name}", "en": "📂 Current: {name}"},
+    "quick_launch.browse": {"zh": "📂 浏览选择目录...", "en": "📂 Browse directory..."},
+    "quick_launch.manage_paths": {"zh": "⚙️ 管理快速启动...", "en": "⚙️ Manage quick launch..."},
+    "status.tab_stopped": {"zh": "(已停止)", "en": "(Stopped)"},
+    "status.llm_config_saved": {"zh": "LLM 配置已保存", "en": "LLM config saved"},
+    "status.openai_server_started": {"zh": "OpenAI API 服务器已启动: http://127.0.0.1:{port}/v1/chat/completions", "en": "OpenAI API Server started: http://127.0.0.1:{port}/v1/chat/completions"},
+    "status.openai_server_running": {"zh": "OpenAI API 服务器运行中: http://127.0.0.1:{port}", "en": "OpenAI API Server running: http://127.0.0.1:{port}"},
+    "status.openai_server_stopped": {"zh": "OpenAI API 服务器已停止", "en": "OpenAI API Server stopped"},
+}
+
+
+def t(key: str, **kwargs) -> str:
+    """获取翻译文本
+
+    Args:
+        key: 翻译键名，如 'toolbar.start'
+        **kwargs: 用于格式化的参数
+
+    Returns:
+        翻译后的文本
+    """
+    entry = TRANSLATIONS.get(key)
+    if entry is None:
+        return key
+    text = entry.get(_current_language, entry.get("zh", key))
+    if kwargs:
+        try:
+            text = text.format(**kwargs)
+        except (KeyError, IndexError):
+            pass
+    return text
+
+
+def set_language(lang: str):
+    """设置当前语言
+
+    Args:
+        lang: 'zh' 或 'en'
+    """
+    global _current_language
+    if lang in ("zh", "en"):
+        _current_language = lang
+
+
+def get_language() -> str:
+    """获取当前语言
+
+    Returns:
+        'zh' 或 'en'
+    """
+    return _current_language

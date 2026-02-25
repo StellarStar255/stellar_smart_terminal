@@ -1,0 +1,85 @@
+# Python
+__pycache__/
+*.pyc
+*.pyo
+*.egg-info/
+
+# Environment & secrets
+*.env
+**/*_credential*
+
+# OS
+.DS_Store
+Thumbs.db
+
+# IDE
+.idea/
+.vscode/
+*.swp
+
+# Logs
+*.log
+
+# Documents & media
+*.xlsx
+*.docx
+*.pptx
+*.jpeg
+*.jpg
+*.png
+*.webp
+*.gif
+*.bmp
+*.tiff
+*.mp4
+
+# Allow assets
+!assets/
+!assets/*
+
+# Build & output
+output/
+exports/
+exports.images/
+SmartTerminal/
+tmp/
+bkp/
+archive/
+
+# Project-specific scripts
+CreateNewREADME.py
+CreateReadme.py
+CreateBasicFolder.sh
+GitAddBasicFile.sh
+AddSourceInfo.sh
+ListFile.py
+GetNewPython.py
+RevealCurrentFolder.py
+PyCharmStarter.py
+TraeStarterMac.py
+GenerateTraceFile.py
+OpenTerminalOnCurrentFolderMac*
+VSCodeStarter*.py
+CursorStarter*.py
+TAG_TO_BACKUP.py
+TAG_XX.py
+pack.py
+unpack.py
+recycle.py
+start_jupyter.bat
+MODE_*
+README_HIDE.md
+
+# Temp
+tmpclaude-*-cwd
+
+# Unused directories
+test/
+input/
+data/
+model/
+library/
+supplement_data/
+
+.claude
+sessions/
