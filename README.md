@@ -2,8 +2,6 @@
 
 A PyQt6-based terminal emulator with built-in file explorer, Git integration, LLM bridge, and VS Code extension management.
 
-![screenshot](assets/smart_terminal.png)
-
 ## Features
 
 - Multi-tab terminal with session management
