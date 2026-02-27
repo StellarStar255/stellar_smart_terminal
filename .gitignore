@@ -1,29 +1,53 @@
-# Python
-__pycache__/
-*.pyc
-*.pyo
-*.egg-info/
+/CreateNewREADME.py
+/PyCharmStarter.py
+/test/
+**/.idea/*
+/CreateBasicFolder.sh
+/library/archive/
+/output/
+/supplement_data/
+/tmp/
+/ListFile.py
+/input/
+/data/
+/library/
+/recycle.py
+/start_jupyter.bat
+/TAG_TO_BACKUP.py
+/model/
+/GitAddBasicFile.sh
+/TAG_XX.py
+**/VSCodeStarter*.py
+**/CursorStarter*.py
+**/__pycache__/
+**/archive/
+**/*.log
+MODE_*
+AddSourceInfo.sh
+RevealCurrentFolder.py
+GetNewPython.py
+pack.py
 
-# Environment & secrets
-*.env
+**/archive/
+**/MODE_*
+**.log
+**/*_credential*.py
 **/*_credential*
 
-# OS
+**/bkp
+
+
+**/*.xlsx
+**/*.docx
+**/*.json
+**/*.pptx
+
+
 .DS_Store
-Thumbs.db
 
-# IDE
-.idea/
-.vscode/
-*.swp
 
-# Logs
-*.log
+**/OpenTerminalOnCurrentFolderMac*
 
-# Documents & media
-*.xlsx
-*.docx
-*.pptx
 *.jpeg
 *.jpg
 *.png
@@ -31,55 +55,29 @@ Thumbs.db
 *.gif
 *.bmp
 *.tiff
+
+
 *.mp4
+*.env
 
-# Allow assets
-!assets/
-!assets/*
 
-# Build & output
-output/
-exports/
-exports.images/
-SmartTerminal/
-tmp/
-bkp/
-archive/
-
-# Project-specific scripts
-CreateNewREADME.py
 CreateReadme.py
-CreateBasicFolder.sh
-GitAddBasicFile.sh
-AddSourceInfo.sh
-ListFile.py
-GetNewPython.py
-RevealCurrentFolder.py
-PyCharmStarter.py
 TraeStarterMac.py
 GenerateTraceFile.py
-OpenTerminalOnCurrentFolderMac*
-VSCodeStarter*.py
-CursorStarter*.py
-TAG_TO_BACKUP.py
-TAG_XX.py
-pack.py
-unpack.py
-recycle.py
-start_jupyter.bat
-MODE_*
-README_HIDE.md
 
-# Temp
+
+!assets/*
+
+exports.images/
+
+exports
+SmartTerminal
+
+unpack.py
+
+
 tmpclaude-*-cwd
 
-# Unused directories
-test/
-input/
-data/
-model/
-library/
-supplement_data/
+README_HIDE.md
 
-.claude
-sessions/
+.DS_Store

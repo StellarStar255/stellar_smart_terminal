@@ -46,7 +46,7 @@ from PyQt6.QtGui import (
     QFont, QColor, QPainter, QPen, QFontMetrics, QFontMetricsF, QFontInfo,
     QKeyEvent, QPaintEvent, QResizeEvent, QShortcut, QKeySequence,
     QMouseEvent, QAction, QDesktopServices, QDragEnterEvent, QDropEvent,
-    QPixmap
+    QPixmap, QImage
 )
 
 
@@ -2251,11 +2251,146 @@ class TerminalWidget(QWidget):
         return result
 
     def _paste_from_clipboard(self):
-        """从剪贴板粘贴（支持文本、图片和音频文件）"""
-        clipboard = QApplication.clipboard()
-        mime_data = clipboard.mimeData()
+        """从剪贴板粘贴（支持文本、图片和音频文件）
 
+        macOS 上 clipboard.mimeData() 在剪贴板含有 TIFF 图片数据时
+        会在 Qt C++ 层面触发 segfault，Python 的 try/except 无法捕获。
+        因此在 macOS 上完全避免调用 mimeData()，
+        改用 clipboard.text()（安全）+ osascript 原生命令处理图片/文件。
+        """
         if self._backend is None:
+            return
+
+        try:
+            clipboard = QApplication.clipboard()
+
+            if sys.platform == 'darwin':
+                # macOS: 先安全获取文本，图片/文件通过原生 API 处理
+                self._paste_from_clipboard_macos(clipboard)
+            else:
+                # 其他平台：使用 Qt API（通常不会 segfault）
+                self._paste_from_clipboard_qt(clipboard)
+        except Exception:
+            pass
+
+    def _paste_from_clipboard_macos(self, clipboard):
+        """macOS 粘贴处理 - 避免调用 mimeData() 防止 segfault"""
+        # clipboard.text() 是安全的，即使剪贴板含有图片也不会崩溃
+        text = clipboard.text()
+
+        if text:
+            # 有文本内容，直接粘贴
+            data = text.encode('utf-8')
+            if self._write_to_backend(data):
+                self.input_buffer += text
+            return
+
+        # 文本为空，可能是图片或文件
+        # 使用 macOS 原生 API (通过 osascript 在子进程中运行) 安全处理
+        self._paste_clipboard_data_macos_native()
+
+    def _paste_clipboard_data_macos_native(self):
+        """macOS: 使用 osascript + JXA 原生 API 安全处理剪贴板图片/文件"""
+        import subprocess
+        from datetime import datetime
+        import tempfile
+
+        # 准备图片保存路径
+        timestamp = datetime.now().strftime("%Y%m%d_%H%M%S_%f")
+        if self.image_save_local:
+            try:
+                cwd = os.getcwd()
+            except (FileNotFoundError, OSError):
+                cwd = str(Path.home())
+            images_dir = Path(cwd) / ".images"
+            images_dir.mkdir(exist_ok=True)
+            save_path = str(images_dir / f"paste_{timestamp}.png")
+        else:
+            temp_dir = Path(tempfile.gettempdir()) / "smart_terminal_images"
+            temp_dir.mkdir(exist_ok=True)
+            save_path = str(temp_dir / f"paste_{timestamp}.png")
+
+        escaped_path = save_path.replace('\\', '\\\\').replace('"', '\\"')
+
+        # JXA (JavaScript for Automation) 脚本
+        # 通过 NSPasteboard 原生 API 安全读取剪贴板，在子进程中运行
+        # 即使出错也不会导致主进程崩溃
+        jxa_script = f'''
+ObjC.import('AppKit');
+var pb = $.NSPasteboard.generalPasteboard;
+var types = pb.types;
+var hasFileURL = types.containsObject('public.file-url');
+var hasTIFF = types.containsObject('public.tiff');
+var hasPNG = types.containsObject('public.png');
+if (hasFileURL) {{
+    var urls = pb.readObjectsForClassesOptions([$.NSURL], null);
+    if (urls && urls.count > 0) {{
+        var paths = [];
+        for (var i = 0; i < urls.count; i++) {{
+            var p = urls.objectAtIndex(i).path;
+            if (p) paths.push(p.js);
+        }}
+        if (paths.length > 0) {{
+            "FILES:" + paths.join("\\n");
+        }} else {{ "NOTHING"; }}
+    }} else {{ "NOTHING"; }}
+}} else if (hasTIFF || hasPNG) {{
+    var imgData = hasPNG ? pb.dataForType('public.png') : pb.dataForType('public.tiff');
+    if (imgData && imgData.length > 0) {{
+        var rep = $.NSBitmapImageRep.imageRepWithData(imgData);
+        if (rep) {{
+            var pngData = rep.representationUsingTypeProperties(4, $({{}}));
+            if (pngData && pngData.length > 0) {{
+                pngData.writeToFileAtomically("{escaped_path}", true);
+                "IMAGE_OK";
+            }} else {{ "NOTHING"; }}
+        }} else {{ "NOTHING"; }}
+    }} else {{ "NOTHING"; }}
+}} else {{ "NOTHING"; }}
+'''
+
+        try:
+            result = subprocess.run(
+                ['osascript', '-l', 'JavaScript', '-e', jxa_script],
+                capture_output=True, text=True, timeout=10
+            )
+            output = result.stdout.strip()
+
+            if output == "IMAGE_OK" and os.path.isfile(save_path):
+                prefix = '@' if self.image_prefix_enabled else ''
+                path_text = prefix + save_path + ' '
+                data = path_text.encode('utf-8')
+                if self._write_to_backend(data):
+                    self.input_buffer += path_text
+                    self.image_pasted.emit(save_path)
+
+            elif output.startswith("FILES:"):
+                file_paths = output[6:].split('\n')
+                for fp in file_paths:
+                    fp = fp.strip()
+                    if not fp:
+                        continue
+                    ext = Path(fp).suffix.lower()
+                    is_media = (ext in self._AUDIO_EXTENSIONS or
+                                ext in self._VIDEO_EXTENSIONS or
+                                ext in self._IMAGE_EXTENSIONS)
+                    prefix = '@' if (is_media and self.image_prefix_enabled) else ''
+                    if ' ' in fp and not prefix:
+                        path_text = f'"{fp}" '
+                    else:
+                        path_text = prefix + fp + ' '
+                    data = path_text.encode('utf-8')
+                    if self._write_to_backend(data):
+                        self.input_buffer += path_text
+                        if is_media:
+                            self.image_pasted.emit(fp)
+        except Exception:
+            pass
+
+    def _paste_from_clipboard_qt(self, clipboard):
+        """非 macOS 平台：使用 Qt API 处理剪贴板粘贴"""
+        mime_data = clipboard.mimeData()
+        if mime_data is None:
             return
 
         # 检查是否有文件URL（可能是音频、视频、图片等文件）
@@ -2264,53 +2399,48 @@ class TerminalWidget(QWidget):
             for url in urls:
                 if url.isLocalFile():
                     file_path = url.toLocalFile()
-                    # 检查是否为支持的媒体文件（使用类级别常量）
                     ext = Path(file_path).suffix.lower()
                     if ext in self._AUDIO_EXTENSIONS or ext in self._VIDEO_EXTENSIONS or ext in self._IMAGE_EXTENSIONS:
-                        # 发送文件路径
                         prefix = '@' if self.image_prefix_enabled else ''
                         path_text = prefix + file_path + ' '
                         data = path_text.encode('utf-8')
                         if self._write_to_backend(data):
                             self.input_buffer += path_text
-                            self.image_pasted.emit(file_path)  # 通知文件已粘贴
+                            self.image_pasted.emit(file_path)
                         return
 
         # 检查是否有图片
         if mime_data.hasImage():
-            image = clipboard.image()
-            if not image.isNull():
+            try:
+                image = clipboard.image()
+            except Exception:
+                image = None
+            if image is not None and not image.isNull():
                 from datetime import datetime
                 import tempfile
 
-                # 生成唯一文件名
                 timestamp = datetime.now().strftime("%Y%m%d_%H%M%S_%f")
 
                 if self.image_save_local:
-                    # 保存到当前工作目录下的 .images 文件夹
-                    # 这样 Gemini CLI 等工具可以访问
-                    cwd = os.getcwd()
+                    try:
+                        cwd = os.getcwd()
+                    except (FileNotFoundError, OSError):
+                        cwd = str(Path.home())
                     images_dir = Path(cwd) / ".images"
                     images_dir.mkdir(exist_ok=True)
                     image_path = images_dir / f"paste_{timestamp}.png"
                 else:
-                    # 保存到系统临时目录
                     temp_dir = Path(tempfile.gettempdir()) / "smart_terminal_images"
                     temp_dir.mkdir(exist_ok=True)
                     image_path = temp_dir / f"paste_{timestamp}.png"
 
-                # 保存图片
-                image.save(str(image_path), "PNG")
-
-                # 发送图片路径到终端（后面加空格分隔）
-                # 如果启用了前缀，添加 @ 符号（Gemini CLI 需要）
-                prefix = '@' if self.image_prefix_enabled else ''
-                path_text = prefix + str(image_path) + ' '
-                data = path_text.encode('utf-8')
-                if self._write_to_backend(data):
-                    self.input_buffer += path_text
-                    # 发出信号通知图片已粘贴
-                    self.image_pasted.emit(str(image_path))
+                if image.save(str(image_path), "PNG"):
+                    prefix = '@' if self.image_prefix_enabled else ''
+                    path_text = prefix + str(image_path) + ' '
+                    data = path_text.encode('utf-8')
+                    if self._write_to_backend(data):
+                        self.input_buffer += path_text
+                        self.image_pasted.emit(str(image_path))
                 return
 
         # 处理文本粘贴
@@ -2657,7 +2787,8 @@ class TerminalWidget(QWidget):
 
     def dragEnterEvent(self, event: QDragEnterEvent):
         """拖拽进入事件"""
-        if event.mimeData().hasUrls():
+        mime_data = event.mimeData()
+        if mime_data is not None and mime_data.hasUrls():
             event.acceptProposedAction()
 
     def dropEvent(self, event: QDropEvent):
@@ -2665,7 +2796,11 @@ class TerminalWidget(QWidget):
         if self._backend is None:
             return
 
-        urls = event.mimeData().urls()
+        mime_data = event.mimeData()
+        if mime_data is None:
+            return
+
+        urls = mime_data.urls()
         paths = []
         for url in urls:
             if url.isLocalFile():
