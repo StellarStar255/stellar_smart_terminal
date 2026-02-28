@@ -1138,6 +1138,17 @@ class TerminalWidget(QWidget):
                     self._zoom_out()
                 return
 
+        # Cmd+Right: 跳到行末 (发送 Ctrl+E, readline end-of-line)
+        # Cmd+Left: 跳到行首 (发送 Ctrl+A, readline beginning-of-line)
+        if (modifiers & Qt.KeyboardModifier.ControlModifier) and key == Qt.Key.Key_Right:
+            if self._backend is not None:
+                self._write_to_backend(b'\x05')
+            return
+        if (modifiers & Qt.KeyboardModifier.ControlModifier) and key == Qt.Key.Key_Left:
+            if self._backend is not None:
+                self._write_to_backend(b'\x01')
+            return
+
         # Cmd+K 清屏 (macOS 上 Cmd 是 ControlModifier)
         if (modifiers & Qt.KeyboardModifier.ControlModifier) and key == Qt.Key.Key_K:
             self._clear_screen_keep_history()
