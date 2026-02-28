@@ -1,43 +1,33 @@
-# Smart Terminal
+# Stellar Smart Terminal
 
-## 使用方法
-```shell
+基于 PyQt6 的智能终端，集成文件管理、Git GUI、LLM 代理和 VS Code 扩展浏览。
+
+A PyQt6-based smart terminal with file explorer, Git GUI, LLM proxy, and VS Code extension browser.
+
+<img src="assets/smart_terminal.png" width="300" />
+
+## Features / 功能
+
+- **Multi-tab Terminal / 多标签终端** — session management / 会话管理
+- **File Explorer & Editor / 文件管理与编辑器**
+- **Git GUI** — stage, commit, push, pull, diff, branch
+- **LLM Proxy / LLM 代理** — OpenAI-compatible / 兼容 OpenAI 接口
+- **VS Code Extensions / VS Code 扩展浏览**
+- **i18n** — English / 中文
+
+## Quick Start / 快速开始
+
+```bash
+pip install -r requirements.txt
 python app.py
 ```
 
-## Install
+## Requirements / 依赖
 
-``` shell
-pip install PyQt6 pyte
+- Python 3.10+
+- PyQt6 >= 6.5.0
+- pyte >= 0.8.0
 
+## License / 许可
 
-## 启动智能终端（默认运行claude）
-python smart_terminal.py
-
-## 运行其他命令
-python smart_terminal.py -c bash
-
-## 查看历史会话
-python smart_terminal.py --history
-
-## 列出所有会话
-python smart_terminal.py --list
-
-## 导出指定会话
-python smart_terminal.py --export 20260113_191500 --format html
-
-```
-
-
-## Mac Desktop Python Package Install
-```shell
-
-# 解决代理证书问题
-/usr/local/bin/pip3 install -r requirements.txt --trusted-host pypi.org --trusted-host pypi.python.org --trusted-host files.pythonhosted.org
-
-export http_proxy=http://127.0.0.1:1081/
-export https_proxy=http://127.0.0.1:1081/
-/usr/local/bin/pip3 install -r requirements.txt
-
-
-```
+[MIT](LICENSE)
