@@ -3924,8 +3924,17 @@ class MainWindow(QMainWindow):
             """执行启动操作"""
             text = search_input.text().strip()
 
-            # 如果输入的是路径（包含 / 或以 ~ 开头），直接启动
-            if text and ('/' in text or text.startswith('~')):
+            # 如果输入的是路径，直接启动
+            # 支持: Unix路径(/xxx, ~/xxx), Windows路径(C:\xxx, \\server)
+            is_path = False
+            if text:
+                # Unix路径：包含 / 或以 ~ 开头
+                if '/' in text or text.startswith('~'):
+                    is_path = True
+                # Windows路径：包含 \ 或以驱动器字母开头(如 C:)
+                elif '\\' in text or (len(text) >= 2 and text[1] == ':' and text[0].isalpha()):
+                    is_path = True
+            if is_path:
                 # 先隐藏弹出窗口防止关闭时闪烁
                 popup.setWindowOpacity(0)
                 popup.close()
