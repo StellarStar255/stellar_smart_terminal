@@ -36,8 +36,8 @@ def setup_qt_plugin_path():
 setup_qt_plugin_path()
 
 from PyQt6.QtWidgets import QApplication
-from PyQt6.QtGui import QFont, QPalette, QColor, QIcon
-from PyQt6.QtCore import Qt
+from PyQt6.QtGui import QFont, QPalette, QColor, QIcon, QPixmap
+from PyQt6.QtCore import Qt, QSize
 
 from main_window import MainWindow
 from i18n import t, set_language, get_language
@@ -65,6 +65,11 @@ def setup_app_style(app: QApplication):
 
 def main():
     """主函数"""
+    # Windows: 设置 AppUserModelID 以便任务栏显示自定义图标而非 Python 图标
+    if sys.platform == "win32":
+        import ctypes
+        ctypes.windll.shell32.SetCurrentProcessExplicitAppUserModelID("SmartTerminal.SmartTerminal")
+
     # 创建应用
     app = QApplication(sys.argv)
     app.setApplicationName(t("app.name"))
@@ -78,16 +83,31 @@ def main():
     # Linux: 设置桌面文件名，用于dock图标匹配
     app.setDesktopFileName("smart-terminal")
 
-    # 设置应用程序图标
+    # 设置应用程序图标 (提供多个尺寸以适配 Windows 任务栏/标题栏)
     icon_path = Path(__file__).parent / "assets" / "smart_terminal.png"
     if icon_path.exists():
-        app.setWindowIcon(QIcon(str(icon_path)))
+        icon = QIcon()
+        original = QPixmap(str(icon_path))
+        for size in [16, 24, 32, 48, 64, 128, 256]:
+            icon.addPixmap(original.scaled(
+                QSize(size, size),
+                Qt.AspectRatioMode.KeepAspectRatio,
+                Qt.TransformationMode.SmoothTransformation
+            ))
+        app.setWindowIcon(icon)
 
     # 设置样式
     setup_app_style(app)
 
-    # 全局字体 - 使用系统默认字体
-    font = QFont(".AppleSystemUIFont", 13)
+    # 全局字体 - 根据平台使用系统默认字体
+    if sys.platform == "win32":
+        font = QFont("Segoe UI", 10)
+        font.setFamilies(["Segoe UI", "Segoe UI Emoji", "Segoe UI Symbol"])
+    elif sys.platform == "darwin":
+        font = QFont(".AppleSystemUIFont", 13)
+    else:
+        font = QFont("Noto Sans", 11)
+        font.setFamilies(["Noto Sans", "Noto Color Emoji"])
     font.setStyleHint(QFont.StyleHint.SansSerif)
     app.setFont(font)
 

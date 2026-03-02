@@ -343,6 +343,22 @@ TRANSLATIONS = {
     "session_detail.files_label": {"zh": "文件: {files}", "en": "Files: {files}"},
     "session_detail.close": {"zh": "关闭", "en": "Close"},
 
+    # ===== 终端右键菜单 =====
+    "ctx.copy": {"zh": "复制 (⌘C)", "en": "Copy (⌘C)"},
+    "ctx.copy_win": {"zh": "复制 (Ctrl+C)", "en": "Copy (Ctrl+C)"},
+    "ctx.paste": {"zh": "粘贴 (⌘V)", "en": "Paste (⌘V)"},
+    "ctx.paste_win": {"zh": "粘贴 (Ctrl+V)", "en": "Paste (Ctrl+V)"},
+    "ctx.quick_commands": {"zh": "快速命令", "en": "Quick Commands"},
+    "ctx.add_command": {"zh": "添加命令...", "en": "Add Command..."},
+    "ctx.manage_presets": {"zh": "管理预设...", "en": "Manage Presets..."},
+    "ctx.local_quick_commands": {"zh": "本地快速命令", "en": "Local Quick Commands"},
+    "ctx.no_local_commands": {"zh": "(无本地命令)", "en": "(No local commands)"},
+    "ctx.manage_local_presets": {"zh": "管理本地预设...", "en": "Manage Local Presets..."},
+    "ctx.open_current_dir": {"zh": "打开当前目录", "en": "Open Current Directory"},
+    "ctx.select_all": {"zh": "全选", "en": "Select All"},
+    "ctx.clear_selection": {"zh": "清除选择", "en": "Clear Selection"},
+    "ctx.close_split": {"zh": "关闭当前分屏", "en": "Close Current Split"},
+
     # ===== 状态栏/通用 =====
     "status.dir_history_tooltip": {"zh": "历史目录", "en": "Directory History"},
     "status.apply_dir_tooltip": {"zh": "切换到选中的工作目录", "en": "Switch to selected working directory"},

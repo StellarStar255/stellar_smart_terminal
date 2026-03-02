@@ -14,6 +14,7 @@ import unicodedata
 import pyte
 
 from terminal_backend import create_backend, TerminalBackend
+from i18n import t
 
 
 class CompatibleHistoryScreen(pyte.HistoryScreen):
@@ -1705,12 +1706,14 @@ class TerminalWidget(QWidget):
         # 复制选中内容
         # 注意：不设置 setShortcut，因为 Ctrl+C 需要发送到终端进程
         # 复制功能通过 Cmd+C (macOS) 或在 keyPressEvent 中用 QKeySequence.StandardKey.Copy 处理
-        copy_action = QAction("复制 (⌘C)", self)
+        copy_label = t("ctx.copy") if sys.platform == 'darwin' else t("ctx.copy_win")
+        copy_action = QAction(copy_label, self)
         copy_action.triggered.connect(self._copy_selection_to_clipboard)
         menu.addAction(copy_action)
 
         # 粘贴
-        paste_action = QAction("粘贴 (⌘V)", self)
+        paste_label = t("ctx.paste") if sys.platform == 'darwin' else t("ctx.paste_win")
+        paste_action = QAction(paste_label, self)
         paste_action.triggered.connect(self._paste_from_clipboard)
         menu.addAction(paste_action)
 
@@ -1720,11 +1723,11 @@ class TerminalWidget(QWidget):
         if self.quick_commands_provider:
             presets = self.quick_commands_provider()
             if presets:
-                quick_cmd_menu = QMenu("快速命令", menu)
+                quick_cmd_menu = QMenu(t("ctx.quick_commands"), menu)
                 quick_cmd_menu.setStyleSheet(menu.styleSheet())
 
                 for preset in presets:
-                    preset_name = preset.get('name', '未命名')
+                    preset_name = preset.get('name', t("common.unnamed"))
                     commands = preset.get('commands', [])
                     if commands:
                         # 点击预设名称直接执行全部命令
@@ -1737,26 +1740,26 @@ class TerminalWidget(QWidget):
                 quick_cmd_menu.addSeparator()
 
                 # 添加"添加命令..."选项
-                add_cmd_action = QAction("添加命令...", self)
+                add_cmd_action = QAction(t("ctx.add_command"), self)
                 add_cmd_action.triggered.connect(self.add_command_requested.emit)
                 quick_cmd_menu.addAction(add_cmd_action)
 
                 # 添加"管理预设..."选项
-                manage_action = QAction("管理预设...", self)
+                manage_action = QAction(t("ctx.manage_presets"), self)
                 manage_action.triggered.connect(self.manage_presets_requested.emit)
                 quick_cmd_menu.addAction(manage_action)
 
                 menu.addMenu(quick_cmd_menu)
 
         # 本地快速命令子菜单
-        local_cmd_menu = QMenu("本地快速命令", menu)
+        local_cmd_menu = QMenu(t("ctx.local_quick_commands"), menu)
         local_cmd_menu.setStyleSheet(menu.styleSheet())
 
         if self.local_quick_commands_provider:
             local_presets = self.local_quick_commands_provider()
             if local_presets:
                 for preset in local_presets:
-                    preset_name = preset.get('name', '未命名')
+                    preset_name = preset.get('name', t("common.unnamed"))
                     commands = preset.get('commands', [])
                     if commands:
                         # 点击预设名称直接执行全部命令
@@ -1769,24 +1772,24 @@ class TerminalWidget(QWidget):
                 local_cmd_menu.addSeparator()
             else:
                 # 无本地命令时显示提示
-                no_cmd_action = QAction("(无本地命令)", self)
+                no_cmd_action = QAction(t("ctx.no_local_commands"), self)
                 no_cmd_action.setEnabled(False)
                 local_cmd_menu.addAction(no_cmd_action)
                 local_cmd_menu.addSeparator()
         else:
             # 无本地命令时显示提示
-            no_cmd_action = QAction("(无本地命令)", self)
+            no_cmd_action = QAction(t("ctx.no_local_commands"), self)
             no_cmd_action.setEnabled(False)
             local_cmd_menu.addAction(no_cmd_action)
             local_cmd_menu.addSeparator()
 
         # 添加"添加命令..."选项
-        add_local_cmd_action = QAction("添加命令...", self)
+        add_local_cmd_action = QAction(t("ctx.add_command"), self)
         add_local_cmd_action.triggered.connect(self.add_local_command_requested.emit)
         local_cmd_menu.addAction(add_local_cmd_action)
 
         # 添加"管理本地预设..."选项
-        manage_local_action = QAction("管理本地预设...", self)
+        manage_local_action = QAction(t("ctx.manage_local_presets"), self)
         manage_local_action.triggered.connect(self.manage_local_presets_requested.emit)
         local_cmd_menu.addAction(manage_local_action)
 
@@ -1794,27 +1797,27 @@ class TerminalWidget(QWidget):
         menu.addSeparator()
 
         # 打开当前目录
-        open_dir_action = QAction("打开当前目录", self)
+        open_dir_action = QAction(t("ctx.open_current_dir"), self)
         open_dir_action.triggered.connect(self._open_current_directory)
         menu.addAction(open_dir_action)
 
         menu.addSeparator()
 
         # 全选
-        select_all_action = QAction("全选", self)
+        select_all_action = QAction(t("ctx.select_all"), self)
         select_all_action.triggered.connect(self._select_all)
         menu.addAction(select_all_action)
 
         # 清除选择
         if self._has_selection():
-            clear_selection_action = QAction("清除选择", self)
+            clear_selection_action = QAction(t("ctx.clear_selection"), self)
             clear_selection_action.triggered.connect(self._clear_selection)
             menu.addAction(clear_selection_action)
 
         menu.addSeparator()
 
         # 关闭当前分屏
-        close_split_action = QAction("关闭当前分屏", self)
+        close_split_action = QAction(t("ctx.close_split"), self)
         close_split_action.triggered.connect(self.close_split_requested.emit)
         menu.addAction(close_split_action)
 
@@ -2856,8 +2859,10 @@ if (hasFileURL) {{
         self._write_to_backend(b'\x0c')
 
     def _open_current_directory(self):
-        """在 Finder 中打开终端当前工作目录"""
+        """在文件管理器中打开终端当前工作目录"""
         cwd = self.get_cwd()
+        if not cwd or not os.path.isdir(cwd):
+            cwd = self._working_dir
         if cwd and os.path.isdir(cwd):
             QDesktopServices.openUrl(QUrl.fromLocalFile(cwd))
 

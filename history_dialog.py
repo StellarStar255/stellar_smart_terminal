@@ -77,7 +77,7 @@ class HistoryDialog(QDialog):
                 background-color: #16213e;
                 color: #eaeaea;
                 border: none;
-                font-family: Monaco, monospace;
+                font-family: Monaco, Consolas, monospace;
                 font-size: 12px;
             }
             QLabel {
@@ -323,7 +323,7 @@ class SessionDetailDialog(QDialog):
                 background-color: #16213e;
                 color: #eaeaea;
                 border: none;
-                font-family: Monaco, monospace;
+                font-family: Monaco, Consolas, monospace;
                 font-size: 13px;
                 padding: 15px;
             }

@@ -2280,7 +2280,7 @@ class MainWindow(QMainWindow):
                 background-color: #1a1a2e;
                 color: #98c379;
                 border: none;
-                font-family: Menlo, Monaco, monospace;
+                font-family: Menlo, Monaco, Consolas, monospace;
                 font-size: 11px;
             }
         """)
@@ -2365,7 +2365,7 @@ class MainWindow(QMainWindow):
                 border: none;
                 border-radius: 4px;
                 font-size: 14px;
-                font-family: Arial, sans-serif;
+                font-family: 'Segoe UI Emoji', 'Apple Color Emoji', Arial, sans-serif;
                 font-weight: bold;
                 padding: 0;
                 margin: 0;
@@ -2387,7 +2387,7 @@ class MainWindow(QMainWindow):
                 border: none;
                 border-radius: 4px;
                 font-size: 18px;
-                font-family: Arial, sans-serif;
+                font-family: 'Segoe UI Emoji', 'Apple Color Emoji', Arial, sans-serif;
                 font-weight: bold;
                 padding: 0;
                 margin: 0;
@@ -4185,7 +4185,7 @@ class MainWindow(QMainWindow):
                 border: none;
                 border-radius: 10px;
                 font-size: 16px;
-                font-family: Arial, sans-serif;
+                font-family: 'Segoe UI Emoji', 'Apple Color Emoji', Arial, sans-serif;
                 padding: 0;
                 margin: 0;
             }
@@ -6078,7 +6078,7 @@ class MainWindow(QMainWindow):
                     border: none;
                     border-radius: 4px;
                     font-size: 14px;
-                    font-family: Arial, sans-serif;
+                    font-family: 'Segoe UI Emoji', 'Apple Color Emoji', Arial, sans-serif;
                     font-weight: bold;
                     padding: 0;
                     margin: 0;
@@ -6094,7 +6094,7 @@ class MainWindow(QMainWindow):
                     border: none;
                     border-radius: 4px;
                     font-size: 16px;
-                    font-family: Arial, sans-serif;
+                    font-family: 'Segoe UI Emoji', 'Apple Color Emoji', Arial, sans-serif;
                     font-weight: bold;
                     padding: 0;
                     margin: 0;
@@ -6111,7 +6111,7 @@ class MainWindow(QMainWindow):
                     border: none;
                     border-radius: 4px;
                     font-size: 14px;
-                    font-family: Arial, sans-serif;
+                    font-family: 'Segoe UI Emoji', 'Apple Color Emoji', Arial, sans-serif;
                     font-weight: bold;
                     padding: 0;
                     margin: 0;
@@ -6127,7 +6127,7 @@ class MainWindow(QMainWindow):
                     border: none;
                     border-radius: 4px;
                     font-size: 16px;
-                    font-family: Arial, sans-serif;
+                    font-family: 'Segoe UI Emoji', 'Apple Color Emoji', Arial, sans-serif;
                     font-weight: bold;
                     padding: 0;
                     margin: 0;
