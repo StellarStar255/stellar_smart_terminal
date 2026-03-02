@@ -3134,10 +3134,6 @@ class MainWindow(QMainWindow):
                     )
                 continue
 
-            # "设置"组始终在 toolbar1 末尾，最后处理
-            if group_name == "设置":
-                continue
-
             # 确定目标工具栏
             if is_double_row:
                 if group_name in ROW1_GROUPS:
@@ -3167,14 +3163,6 @@ class MainWindow(QMainWindow):
                     self._group_default_orders.get(group_name, [])
                 )
 
-        # "设置"组始终在 toolbar1 末尾
-        if "设置" in self._group_button_dicts:
-            self._add_buttons_in_order(
-                toolbar,
-                self._group_button_dicts["设置"],
-                "设置",
-                self._group_default_orders.get("设置", [])
-            )
         toolbar.addWidget(self.toolbar_settings_btn)
 
         # 保存所有工具栏按钮的引用，用于显示/隐藏
