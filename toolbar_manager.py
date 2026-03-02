@@ -380,11 +380,11 @@ class ToolbarManagerDialog(QDialog):
     ]
 
     # 分组定义（用于默认顺序）
-    DEFAULT_GROUPS = ["预设与控制", "选项", "操作", "分屏管理", "面板与编辑器", "主题", "设置"]
+    DEFAULT_GROUPS = ["预设与控制", "选项", "分屏管理", "面板与编辑器", "主题", "设置", "操作"]
 
     # 固定位置的分组（不可移动）
     PINNED_FIRST_GROUP = "预设与控制"
-    PINNED_LAST_GROUP = "设置"
+    PINNED_LAST_GROUP = "操作"
 
     def __init__(self, current_config: dict = None, theme: dict = None, parent=None):
         super().__init__(parent)
