@@ -2328,14 +2328,25 @@ class TerminalWidget(QWidget):
         except Exception:
             pass
 
+    def _prepare_paste_text(self, text: str) -> bytes:
+        """准备粘贴文本：将换行符转换为回车符（终端标准行为）
+
+        在终端中，按下 Enter 键发送的是 \\r (CR)，而不是 \\n (LF)。
+        粘贴多行文本时，需要将换行符转换为回车符，
+        否则 PTY/ConPTY 可能无法正确处理行序，导致行倒序等问题。
+        """
+        # 先将 \r\n (Windows换行) 转为 \r，再将剩余 \n (Unix换行) 转为 \r
+        text = text.replace('\r\n', '\r').replace('\n', '\r')
+        return text.encode('utf-8')
+
     def _paste_from_clipboard_macos(self, clipboard):
         """macOS 粘贴处理 - 避免调用 mimeData() 防止 segfault"""
         # clipboard.text() 是安全的，即使剪贴板含有图片也不会崩溃
         text = clipboard.text()
 
         if text:
-            # 有文本内容，直接粘贴
-            data = text.encode('utf-8')
+            # 有文本内容，转换换行符后粘贴
+            data = self._prepare_paste_text(text)
             if self._write_to_backend(data):
                 self.input_buffer += text
             return
@@ -2503,7 +2514,7 @@ if (hasFileURL) {{
         if not text:
             return
 
-        data = text.encode('utf-8')
+        data = self._prepare_paste_text(text)
         if self._write_to_backend(data):
             self.input_buffer += text
 
