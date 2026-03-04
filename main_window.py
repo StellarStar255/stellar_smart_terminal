@@ -1721,7 +1721,7 @@ class MainWindow(QMainWindow):
     """主窗口"""
 
     # 配置文件路径
-    CONFIG_FILE = Path.home() / ".smart_terminal_config.json"
+    CONFIG_FILE = Path(__file__).parent / ".smart_terminal_config.json"
 
     # 本地快速命令配置
     LOCAL_CONFIG_DIR = ".sterminal"
@@ -2070,6 +2070,22 @@ class MainWindow(QMainWindow):
             self._explorer_split_checkbox.blockSignals(True)
             self._explorer_split_checkbox.setChecked(True)
             self._explorer_split_checkbox.blockSignals(False)
+
+        # 恢复窗口几何（仅主窗口，不用于拖拽分离的 tab 窗口）
+        if not initial_tab_data:
+            if self._saved_window_geometry:
+                self.setGeometry(*self._saved_window_geometry)
+            if self._saved_window_maximized:
+                self.showMaximized()
+
+        # 恢复面板可见性
+        if not initial_tab_data:
+            if self._saved_explorer_panel_visible:
+                self._toggle_explorer_panel()
+            elif self._saved_git_panel_visible:
+                self._toggle_git_panel()
+            if self._saved_log_panel_visible:
+                self._toggle_log_panel()
 
         # macOS 原生窗口标志
         self._macos_window_configured = False
@@ -6447,6 +6463,11 @@ class MainWindow(QMainWindow):
 
     def _load_config(self):
         """加载配置（预设命令等）"""
+        # 迁移旧配置文件（从用户目录迁移到程序目录）
+        old_config = Path.home() / ".smart_terminal_config.json"
+        if not self.CONFIG_FILE.exists() and old_config.exists():
+            shutil.copy2(old_config, self.CONFIG_FILE)
+
         self.last_preset_index = 0  # 默认选中第一个
         self.image_prefix_enabled = False  # 图片路径是否加@前缀
         self.image_save_local = True  # 图片是否保存到工作目录（默认开启，方便Gemini访问）
@@ -6456,6 +6477,11 @@ class MainWindow(QMainWindow):
         self.toolbar_config = None  # 工具栏配置
         self.llm_configs = []  # LLM API 配置列表
         self.default_llm_config = 0  # 默认 LLM 配置索引
+        self._saved_window_geometry = None  # 窗口位置和大小 [x, y, w, h]
+        self._saved_window_maximized = False  # 窗口是否最大化
+        self._saved_explorer_panel_visible = False  # Explorer 面板可见性
+        self._saved_git_panel_visible = False  # Git 面板可见性
+        self._saved_log_panel_visible = False  # 日志面板可见性
         try:
             if self.CONFIG_FILE.exists():
                 with open(self.CONFIG_FILE, 'r', encoding='utf-8') as f:
@@ -6492,6 +6518,12 @@ class MainWindow(QMainWindow):
                     saved_lang = config.get('language', 'zh')
                     if saved_lang in ('zh', 'en'):
                         set_language(saved_lang)
+                    # 加载窗口几何与面板可见性
+                    self._saved_window_geometry = config.get('window_geometry', None)
+                    self._saved_window_maximized = config.get('window_maximized', False)
+                    self._saved_explorer_panel_visible = config.get('explorer_panel_visible', False)
+                    self._saved_git_panel_visible = config.get('git_panel_visible', False)
+                    self._saved_log_panel_visible = config.get('log_panel_visible', False)
         except Exception:
             self.presets = []
 
@@ -6580,6 +6612,11 @@ class MainWindow(QMainWindow):
                 'global_zoom_delta': self._global_zoom_delta,  # 保存全局缩放偏移
                 'explorer_split_horizontal': getattr(self, '_explorer_split_horizontal', False),  # 保存左右分屏偏好
                 'language': get_language(),  # 保存语言设置
+                'window_geometry': [self.x(), self.y(), self.width(), self.height()],
+                'window_maximized': self.isMaximized(),
+                'explorer_panel_visible': getattr(self, 'explorer_panel_visible', False),
+                'git_panel_visible': getattr(self, 'git_panel_visible', False),
+                'log_panel_visible': getattr(self, 'log_panel_visible', False),
             }
             with open(self.CONFIG_FILE, 'w', encoding='utf-8') as f:
                 json.dump(config, f, ensure_ascii=False, indent=2)
