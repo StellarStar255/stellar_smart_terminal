@@ -1944,6 +1944,7 @@ class MainWindow(QMainWindow):
 
         self._initial_tab_data = initial_tab_data  # 保存初始 tab 数据
         self._custom_window_title = window_title  # 自定义窗口标题
+        self._macos_window_configured = False  # macOS 原生窗口标志（需在 showEvent 之前初始化）
 
         self.session_manager = SessionManager()
         self.auto_save_timer = QTimer()
@@ -2087,8 +2088,7 @@ class MainWindow(QMainWindow):
             if self._saved_log_panel_visible:
                 self._toggle_log_panel()
 
-        # macOS 原生窗口标志
-        self._macos_window_configured = False
+        # macOS 原生窗口标志（已在 __init__ 开头初始化）
 
     def showEvent(self, event):
         """窗口显示事件 - 设置 macOS 原生窗口属性"""
