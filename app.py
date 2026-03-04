@@ -106,8 +106,17 @@ def main():
     elif sys.platform == "darwin":
         font = QFont(".AppleSystemUIFont", 13)
     else:
+        # Linux: 提供完整的字体回退链，避免因缺少字体而使用 CJK 变体导致数字显示异常
         font = QFont("Noto Sans", 11)
-        font.setFamilies(["Noto Sans", "Noto Color Emoji"])
+        font.setFamilies([
+            "Noto Sans",          # Google Noto 标准无衬线
+            "Ubuntu",             # Ubuntu 默认
+            "DejaVu Sans",        # 几乎所有 Linux 发行版都有
+            "Liberation Sans",    # Fedora/RHEL 常见
+            "Cantarell",          # GNOME 默认
+            "Droid Sans",         # Android/早期 Linux
+            "Noto Color Emoji",   # Emoji 支持
+        ])
     font.setStyleHint(QFont.StyleHint.SansSerif)
     app.setFont(font)
 

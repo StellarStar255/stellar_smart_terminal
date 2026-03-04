@@ -107,10 +107,13 @@ class TerminalWidget(QWidget):
     _RE_KITTY_KEYBOARD = re.compile(r'\x1b\[[\?<>=]*u')
     _RE_TERMINAL_QUERY = re.compile(r'\x1b\[>[\d;]*[cmu]')
     _RE_FOCUS_REPORT = re.compile(r'\x1b\[\?1004[hl]')
-    _RE_CURSOR_STYLE = re.compile(r'\x1b\[[\d]*[ q]')
+    _RE_CURSOR_STYLE = re.compile(r'\x1b\[\d* q')  # DECSCUSR: CSI Ps SP q
     _RE_OSC_HYPERLINK = re.compile(r'\x1b\]8;[^;]*;[^\x07]*\x07')
     _RE_OSC_HYPERLINK_END = re.compile(r'\x1b\]8;;\x07')
     _RE_OSC_TITLE = re.compile(r'\x1b\][012];[^\x07]*\x07')
+    # 捕获所有其他未处理的 OSC 序列 (OSC 7=CWD, 133=shell integration 等)
+    # 防止 Linux 上 shell 发送的 OSC 序列中的数字泄漏到显示缓冲区
+    _RE_OSC_OTHER = re.compile(r'\x1b\]\d+;[^\x07\x1b]*(?:\x07|\x1b\\)')
     _RE_DA_QUERY = re.compile(r'\x1b\[0?c')
 
     # 媒体文件扩展名集合（类级别，避免重复创建）
@@ -143,16 +146,53 @@ class TerminalWidget(QWidget):
         # Claude Code的TUI需要正常的清除功能才能正确显示
         self.stream = pyte.Stream(self.screen)
 
-        # 字体设置 - 使用真正的等宽字体
-        # 尝试 Monaco (macOS 经典等宽字体) 或 Menlo
-        self.term_font = QFont("Monaco", 12)
-        self.term_font.setStyleHint(QFont.StyleHint.Monospace)
-        self.term_font.setFixedPitch(True)
+        # 字体设置 - 使用真正的等宽字体，按平台选择最佳字体
+        if sys.platform == "darwin":
+            # macOS: Monaco → Menlo → SF Mono
+            self.term_font = QFont("Monaco", 12)
+            self.term_font.setStyleHint(QFont.StyleHint.Monospace)
+            self.term_font.setFixedPitch(True)
+            font_info = QFontInfo(self.term_font)
+            if font_info.family().lower() != "monaco":
+                self.term_font = QFont("Menlo", 12)
+                self.term_font.setStyleHint(QFont.StyleHint.Monospace)
+                self.term_font.setFixedPitch(True)
+        elif sys.platform == "win32":
+            # Windows: Cascadia Mono → Consolas
+            self.term_font = QFont("Cascadia Mono", 12)
+            self.term_font.setStyleHint(QFont.StyleHint.Monospace)
+            self.term_font.setFixedPitch(True)
+            font_info = QFontInfo(self.term_font)
+            if "cascadia" not in font_info.family().lower():
+                self.term_font = QFont("Consolas", 12)
+                self.term_font.setStyleHint(QFont.StyleHint.Monospace)
+                self.term_font.setFixedPitch(True)
+        else:
+            # Linux: 使用 setFamilies 设置字体优先级列表，确保找到真正的等宽字体
+            linux_mono_fonts = [
+                "DejaVu Sans Mono",   # 几乎所有 Linux 发行版都有
+                "Liberation Mono",     # Fedora/RHEL 常见
+                "Noto Sans Mono",      # Noto 字体族
+                "Ubuntu Mono",         # Ubuntu 默认
+                "Fira Code",           # 流行的编程字体
+                "Source Code Pro",     # Adobe 出品
+                "Hack",               # 编程字体
+                "Droid Sans Mono",    # Android/早期 Linux
+                "Consolas",           # 如果安装了 Windows 字体
+                "Courier New",        # 最后的后备
+            ]
+            self.term_font = QFont(linux_mono_fonts[0], 12)
+            self.term_font.setStyleHint(QFont.StyleHint.Monospace)
+            self.term_font.setFixedPitch(True)
+            self.term_font.setFamilies(linux_mono_fonts)
 
-        # 如果 Monaco 不可用，使用系统默认等宽字体
-        font_info = QFontInfo(self.term_font)
-        if font_info.family().lower() != "monaco":
-            self.term_font = QFont("Menlo", 12)
+        # 验证字体是否真正等宽（数字和字母宽度一致）
+        fmf = QFontMetricsF(self.term_font)
+        w_advance = fmf.horizontalAdvance('W')
+        digit_advance = fmf.horizontalAdvance('0')
+        if abs(w_advance - digit_advance) > 1.0:
+            # 字体不是真正等宽，强制使用 monospace 通用族
+            self.term_font = QFont("monospace", 12)
             self.term_font.setStyleHint(QFont.StyleHint.Monospace)
             self.term_font.setFixedPitch(True)
 
@@ -550,6 +590,7 @@ class TerminalWidget(QWidget):
             text = self._RE_OSC_HYPERLINK.sub('', text)     # OSC 8 超链接开始
             text = self._RE_OSC_HYPERLINK_END.sub('', text) # OSC 8 超链接结束
             text = self._RE_OSC_TITLE.sub('', text)         # OSC 0,1,2 标题
+            text = self._RE_OSC_OTHER.sub('', text)         # 其他 OSC 序列 (7, 133 等)
 
             # 检测鼠标模式启用/禁用
             # 鼠标模式序列: \x1b[?1000h (启用), \x1b[?1000l (禁用)
