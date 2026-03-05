@@ -1957,6 +1957,7 @@ class MainWindow(QMainWindow):
         self._global_zoom_delta = 0  # 全局缩放偏移量（相对于默认字体大小）
         self._gui_font_size = 0  # GUI 字体大小（0 表示跟随全局缩放）
         self._original_widget_styles = {}  # {id(widget): (weakref, original_stylesheet)}
+        self._pin_toolbar_row2 = False  # 是否固定显示第二排工具栏
 
         # 多标签页支持
         self.tab_counter = 0  # 标签页计数器
@@ -2070,6 +2071,12 @@ class MainWindow(QMainWindow):
             self.gui_font_spin.setValue(self._gui_font_size)
             self.gui_font_spin.blockSignals(False)
 
+        # 恢复固定第二排工具栏 checkbox
+        if hasattr(self, 'pin_row2_checkbox') and self._pin_toolbar_row2:
+            self.pin_row2_checkbox.blockSignals(True)
+            self.pin_row2_checkbox.setChecked(True)
+            self.pin_row2_checkbox.blockSignals(False)
+
         # 恢复全局缩放
         if self._global_zoom_delta != 0 or self._gui_font_size != 0:
             self._apply_global_zoom()
@@ -2098,9 +2105,19 @@ class MainWindow(QMainWindow):
 
         # macOS 原生窗口标志（已在 __init__ 开头初始化）
 
+        # 延迟强制第二排工具栏可见性（确保 Qt 布局完成后生效）
+        if self._pin_toolbar_row2:
+            def _force_row2_visible():
+                if hasattr(self, 'main_toolbar_row2') and not sip.isdeleted(self):
+                    self.main_toolbar_row2.setVisible(True)
+            QTimer.singleShot(0, _force_row2_visible)
+
     def showEvent(self, event):
         """窗口显示事件 - 设置 macOS 原生窗口属性"""
         super().showEvent(event)
+        # 再次强制第二排工具栏可见性（show 事件可能重置可见性）
+        if self._pin_toolbar_row2 and hasattr(self, 'main_toolbar_row2'):
+            self.main_toolbar_row2.setVisible(True)
         if not self._macos_window_configured:
             self._macos_window_configured = True
             # 延迟设置，确保窗口在 macOS 中完全注册
@@ -2607,17 +2624,20 @@ class MainWindow(QMainWindow):
     def _setup_toolbar(self):
         """设置工具栏"""
         # 检查布局配置
-        is_double_row = self.toolbar_config and self.toolbar_config.get("layout") == "double"
+        is_double_row = self._pin_toolbar_row2 or (self.toolbar_config and self.toolbar_config.get("layout") == "double")
 
         # 创建第一行工具栏
         self.main_toolbar = QToolBar()
         self.main_toolbar.setMovable(False)
+        self.main_toolbar.setFloatable(False)
         self.addToolBar(self.main_toolbar)
+        self.main_toolbar.toggleViewAction().setVisible(False)  # 禁止右键隐藏
         toolbar = self.main_toolbar  # 保持向后兼容
 
         # 创建第二行工具栏（用于双排模式）
         self.main_toolbar_row2 = QToolBar()
         self.main_toolbar_row2.setMovable(False)
+        self.main_toolbar_row2.setFloatable(False)
         self.main_toolbar_row2.setStyleSheet("""
             QToolBar {
                 background-color: #1a1a2e;
@@ -3070,6 +3090,22 @@ class MainWindow(QMainWindow):
         """)
         self.gui_font_spin.valueChanged.connect(self._on_gui_font_size_changed)
 
+        # 固定第二排工具栏 checkbox
+        self.pin_row2_checkbox = QCheckBox(t("toolbar.pin_row2"))
+        self.pin_row2_checkbox.setToolTip(t("toolbar.pin_row2_tooltip"))
+        self.pin_row2_checkbox.setChecked(self._pin_toolbar_row2)
+        self.pin_row2_checkbox.setStyleSheet("""
+            QCheckBox {
+                color: #eaeaea;
+                font-size: 11px;
+                spacing: 4px;
+            }
+            QCheckBox:hover {
+                color: #667eea;
+            }
+        """)
+        self.pin_row2_checkbox.stateChanged.connect(self._on_pin_row2_changed)
+
         self.toolbar_settings_btn = QPushButton("⚙")
         self.toolbar_settings_btn.setObjectName("toolbarSettingsBtn")
         self.toolbar_settings_btn.setToolTip(t("toolbar.settings_tooltip"))
@@ -3221,6 +3257,7 @@ class MainWindow(QMainWindow):
                     self._group_default_orders.get(group_name, [])
                 )
 
+        toolbar.addWidget(self.pin_row2_checkbox)
         toolbar.addWidget(self.toolbar_settings_btn)
 
         # 保存所有工具栏按钮的引用，用于显示/隐藏
@@ -3271,19 +3308,21 @@ class MainWindow(QMainWindow):
         if self.toolbar_config:
             self._apply_toolbar_config(self.toolbar_config)
 
-        # 添加第二行主工具栏（双排模式时显示）
-        if is_double_row:
-            self.addToolBarBreak(Qt.ToolBarArea.TopToolBarArea)  # 换行
-            self.addToolBar(Qt.ToolBarArea.TopToolBarArea, self.main_toolbar_row2)
+        # 添加第二行主工具栏（始终添加到窗口，通过 setVisible 控制显隐）
+        self.addToolBarBreak(Qt.ToolBarArea.TopToolBarArea)  # 换行
+        self.addToolBar(Qt.ToolBarArea.TopToolBarArea, self.main_toolbar_row2)
+        if is_double_row or self._pin_toolbar_row2:
             self.main_toolbar_row2.setVisible(True)
         else:
-            # 单排模式时不添加第二行工具栏
             self.main_toolbar_row2.setVisible(False)
+        # 禁止右键菜单隐藏工具栏
+        self.main_toolbar_row2.toggleViewAction().setVisible(False)
 
         # 工作目录工具栏
         self.addToolBarBreak(Qt.ToolBarArea.TopToolBarArea)  # 换行
         self.dir_toolbar = QToolBar()
         self.dir_toolbar.setMovable(False)
+        self.dir_toolbar.setFloatable(False)
         self.dir_toolbar.setStyleSheet("""
             QToolBar {
                 background-color: #16213e;
@@ -3293,6 +3332,7 @@ class MainWindow(QMainWindow):
             }
         """)
         self.addToolBar(Qt.ToolBarArea.TopToolBarArea, self.dir_toolbar)
+        self.dir_toolbar.toggleViewAction().setVisible(False)  # 禁止右键隐藏
 
         # 工作目录标签
         self.dir_label = QLabel(t("dir.label"))
@@ -3758,6 +3798,86 @@ class MainWindow(QMainWindow):
         """GUI 字体大小调整"""
         self._gui_font_size = value
         self._apply_global_zoom()
+
+    def _on_pin_row2_changed(self, state):
+        """固定/取消固定第二排工具栏"""
+        self._pin_toolbar_row2 = bool(state)
+        self._save_config()
+        self._relayout_toolbars()
+
+    def _relayout_toolbars(self):
+        """运行时重新分配工具栏按钮（双排/单排切换）"""
+        ROW1_GROUPS = {"预设与控制", "选项"}
+
+        # 收集需要在 row2 的 action 集合（按钮 + 前缀 widget）
+        row2_action_set = set()
+        for btn_name, action in self._toolbar_actions.items():
+            if self._is_button_in_row2(btn_name):
+                row2_action_set.add(action)
+        # 前缀 widget 的 action
+        for group_name, prefix_widget in self._group_prefix_widgets.items():
+            if group_name not in ROW1_GROUPS:
+                for tb in [self.main_toolbar, self.main_toolbar_row2]:
+                    for action in tb.actions():
+                        if tb.widgetForAction(action) is prefix_widget:
+                            row2_action_set.add(action)
+
+        # 找到 pin checkbox 的 action（锚点，始终留在 row1 末尾）
+        pin_action = None
+        for action in self.main_toolbar.actions():
+            if self.main_toolbar.widgetForAction(action) is self.pin_row2_checkbox:
+                pin_action = action
+                break
+
+        if self._pin_toolbar_row2:
+            # === 切换到双排：移动 row2 组的 action 到 row2 ===
+            for action in list(self.main_toolbar.actions()):
+                if action in row2_action_set:
+                    self.main_toolbar.removeAction(action)
+                    self.main_toolbar_row2.addAction(action)
+            self._cleanup_toolbar_separators(self.main_toolbar, pin_action)
+            self._cleanup_toolbar_separators(self.main_toolbar_row2, None)
+            self.main_toolbar_row2.setVisible(True)
+        else:
+            # === 切换回单排：移动 row2 的所有 action 回 row1 ===
+            for action in list(self.main_toolbar_row2.actions()):
+                self.main_toolbar_row2.removeAction(action)
+                if pin_action:
+                    self.main_toolbar.insertAction(pin_action, action)
+                else:
+                    self.main_toolbar.addAction(action)
+            self._cleanup_toolbar_separators(self.main_toolbar, pin_action)
+            self.main_toolbar_row2.setVisible(False)
+
+    def _cleanup_toolbar_separators(self, toolbar, before_action):
+        """清理工具栏中多余的分隔符（开头、结尾、连续）"""
+        actions = list(toolbar.actions())
+        to_remove = []
+
+        # 找到 before_action 的索引（如果有）
+        end_idx = len(actions)
+        if before_action and before_action in actions:
+            end_idx = actions.index(before_action)
+
+        # 标记需要删除的分隔符
+        prev_was_sep = True  # 开头的分隔符视为多余
+        for i in range(end_idx):
+            if actions[i].isSeparator():
+                if prev_was_sep:
+                    to_remove.append(actions[i])
+                prev_was_sep = True
+            else:
+                prev_was_sep = False
+
+        # before_action 前面的分隔符也删除
+        if before_action and before_action in actions:
+            idx = actions.index(before_action)
+            while idx > 0 and actions[idx - 1].isSeparator() and actions[idx - 1] not in to_remove:
+                to_remove.append(actions[idx - 1])
+                idx -= 1
+
+        for action in to_remove:
+            toolbar.removeAction(action)
 
     def _global_zoom_in(self):
         """全局放大字体 — 同步缩放所有区域"""
@@ -5837,6 +5957,11 @@ class MainWindow(QMainWindow):
         if hasattr(self, 'llm_config_btn'):
             self.llm_config_btn.setToolTip(t("toolbar.llm_config_tooltip"))
 
+        # 固定第二排
+        if hasattr(self, 'pin_row2_checkbox'):
+            self.pin_row2_checkbox.setText(t("toolbar.pin_row2"))
+            self.pin_row2_checkbox.setToolTip(t("toolbar.pin_row2_tooltip"))
+
         # 日志面板
         if hasattr(self, 'log_title'):
             self.log_title.setText(t("log.title"))
@@ -6635,6 +6760,8 @@ class MainWindow(QMainWindow):
                     self._global_zoom_delta = config.get('global_zoom_delta', 0)
                     # 加载 GUI 字体大小
                     self._gui_font_size = config.get('gui_font_size', 0)
+                    # 加载固定第二排工具栏设置
+                    self._pin_toolbar_row2 = config.get('pin_toolbar_row2', False)
                     # 加载左右分屏偏好
                     self._explorer_split_horizontal = config.get('explorer_split_horizontal', False)
                     # 加载语言设置
@@ -6734,6 +6861,7 @@ class MainWindow(QMainWindow):
                 'default_llm_config': self.default_llm_config,  # 保存默认 LLM 配置索引
                 'global_zoom_delta': self._global_zoom_delta,  # 保存全局缩放偏移
                 'gui_font_size': self._gui_font_size,  # 保存 GUI 字体大小
+                'pin_toolbar_row2': self._pin_toolbar_row2,  # 保存固定第二排工具栏
                 'explorer_split_horizontal': getattr(self, '_explorer_split_horizontal', False),  # 保存左右分屏偏好
                 'language': get_language(),  # 保存语言设置
                 'window_geometry': [self.x(), self.y(), self.width(), self.height()],
