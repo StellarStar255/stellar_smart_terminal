@@ -24,18 +24,54 @@ class CompatibleHistoryScreen(pyte.HistoryScreen):
         super().__init__(*args, **kwargs)
         # 累计推入历史的总行数（用于滚动位置稳定化）
         self._total_history_lines = 0
+        # 软换行追踪：存储自动换行的行对象 id
+        self._soft_wrapped_ids = set()
+        self._in_draw = False
 
     def select_graphic_rendition(self, *attrs, **kwargs):
         # 移除 private 参数（新版 pyte 会传递，但基类不支持）
         kwargs.pop('private', None)
         return super().select_graphic_rendition(*attrs, **kwargs)
 
+    def draw(self, *chars):
+        self._in_draw = True
+        try:
+            super().draw(*chars)
+        finally:
+            self._in_draw = False
+
+    def linefeed(self):
+        if not self._in_draw:
+            # 显式换行(\n)：确保当前行不被标记为软换行
+            self._soft_wrapped_ids.discard(id(self.buffer[self.cursor.y]))
+        super().linefeed()
+
     def index(self):
-        """重写以追踪推入历史的行数，用于滚动位置稳定化"""
+        """重写以追踪推入历史的行数和软换行状态"""
         top, bottom = self.margins or (0, self.lines - 1)
         if self.cursor.y == bottom:
             self._total_history_lines += 1
+        if self._in_draw:
+            # draw() 触发的 index 是自动换行（软换行）
+            self._soft_wrapped_ids.add(id(self.buffer[self.cursor.y]))
         super().index()
+
+    def erase_in_display(self, how=0, *args, **kwargs):
+        # 清屏时清理软换行标记
+        if how == 2 or how == 3:
+            self._soft_wrapped_ids.clear()
+        super().erase_in_display(how, *args, **kwargs)
+
+    def reset(self):
+        # reset() 可能在 __init__ 中被 super().__init__() 调用
+        if hasattr(self, '_soft_wrapped_ids'):
+            self._soft_wrapped_ids.clear()
+            self._in_draw = False
+        super().reset()
+
+    def is_soft_wrapped(self, buffer_line) -> bool:
+        """检查指定行是否因自动换行而换行"""
+        return id(buffer_line) in self._soft_wrapped_ids
 
 
 from PyQt6.QtWidgets import (
@@ -688,6 +724,16 @@ class TerminalWidget(QWidget):
                 self._wide_char_cache.popitem()
         self._wide_char_cache[char] = result
         return result
+
+    @staticmethod
+    def _need_boundary_space(last_char: str, first_char: str) -> bool:
+        """判断应用层软换行拼接时是否需要在边界处插入空格"""
+        last_wide = unicodedata.east_asian_width(last_char) in ('F', 'W')
+        first_wide = unicodedata.east_asian_width(first_char) in ('F', 'W')
+        if last_wide and first_wide:
+            return False  # CJK + CJK: 不需要空格
+        # Latin+CJK, CJK+Latin, Latin+Latin: 需要空格（词边界）
+        return True
 
     def paintEvent(self, event: QPaintEvent):
         """绘制终端 - 使用双缓冲提高性能"""
@@ -1992,27 +2038,57 @@ class TerminalWidget(QWidget):
                 # 宽字符占用两列，如果选择范围包含第二列也应该包含该字符
                 elif col < col_start and self._is_wide_char(char_data) and col + 1 >= col_start:
                     selected_chars.append(char_data)
-            line_text = ''.join(selected_chars).rstrip()
+            # 检测换行类型：0=硬换行, 1=终端软换行(pyte), 2=应用层软换行(启发式)
+            wrap_type = 0
+            if abs_row < end_row:
+                if self.screen.is_soft_wrapped(buffer_line):
+                    wrap_type = 1
+                else:
+                    # 启发式：检查行内容是否填满到行尾附近
+                    # （捕捉应用层文字排版换行，如 Claude Code 的 markdown 渲染器）
+                    # 阈值：内容占用超过约 85% 的行宽，或距行尾 ≤5 列
+                    is_full_line = (col_start == 0 and col_end == term_cols - 1)
+                    if is_full_line:
+                        wrap_threshold = max(term_cols - 5, int(term_cols * 0.85))
+                        for rev_col, rev_char in reversed(chars):
+                            if rev_char != ' ':
+                                effective_end = rev_col + (1 if self._is_wide_char(rev_char) else 0)
+                                if effective_end >= wrap_threshold:
+                                    wrap_type = 2
+                                break
 
-            # 检测软换行：如果整行被选中且行末尾有非空字符，可能是软换行
-            is_full_line = (col_start == 0 and col_end == term_cols - 1)
-            is_soft_wrapped = False
-            if is_full_line and abs_row < end_row and chars:
-                # 检查原始行末尾字符（不是 rstrip 后的）
-                # chars 是 (col, char_data) 元组列表，找最后一个字符
-                last_col, last_char = chars[-1]
-                # 如果最后一个字符接近行尾（考虑宽字符占2列）
-                if last_char and last_char != ' ' and last_col >= term_cols - 2:
-                    is_soft_wrapped = True
+            if wrap_type == 1:
+                # 终端软换行：保留所有字符（包括尾部空格，它们是真实内容）
+                line_text = ''.join(selected_chars)
+            else:
+                line_text = ''.join(selected_chars).rstrip()
 
-            selected_lines.append((line_text, is_soft_wrapped))
+            selected_lines.append((line_text, wrap_type))
 
-        # 组合结果，软换行的行不添加换行符
+        # 组合结果
         result = []
-        for i, (line_text, is_soft_wrapped) in enumerate(selected_lines):
+        for i, (line_text, wrap_type) in enumerate(selected_lines):
+            if i > 0:
+                prev_text, prev_wrap = selected_lines[i - 1]
+                if prev_wrap == 1:
+                    # 终端软换行：直接拼接（无需处理缩进）
+                    pass
+                elif prev_wrap == 2:
+                    # 应用层软换行：去除续行的相同缩进
+                    prev_indent = len(prev_text) - len(prev_text.lstrip())
+                    if prev_indent > 0:
+                        curr_indent = len(line_text) - len(line_text.lstrip())
+                        if curr_indent >= prev_indent:
+                            line_text = line_text[prev_indent:]
+                    # 恢复词边界的空格（rstrip 可能移除了换行点的空格）
+                    if result and line_text:
+                        last_ch = result[-1][-1] if result[-1] else ''
+                        first_ch = line_text[0]
+                        if last_ch and first_ch and self._need_boundary_space(last_ch, first_ch):
+                            result.append(' ')
+                else:
+                    result.append('\n')
             result.append(line_text)
-            if i < len(selected_lines) - 1 and not is_soft_wrapped:
-                result.append('\n')
 
         return ''.join(result)
 
@@ -2050,13 +2126,16 @@ class TerminalWidget(QWidget):
 
     def _get_all_content(self) -> str:
         """获取所有内容（历史记录 + 当前屏幕）- 优化版本"""
-        lines = []
         columns = self.screen.columns
+        is_wide = self._is_wide_char
+        screen = self.screen
 
-        # 内联辅助函数，减少函数调用开销
         def extract_line(buffer_line):
-            # 跳过宽字符的第二列（空占位符）
-            chars = []
+            """提取行内容，返回 (text, wrap_type)
+            wrap_type: 0=硬换行, 1=终端软换行, 2=应用层软换行
+            """
+            chars_with_col = []  # (col, char_data)
+            char_list = []
             col = 0
             while col < columns:
                 try:
@@ -2066,34 +2145,79 @@ class TerminalWidget(QWidget):
                         char_data = char if isinstance(char, str) else ' '
 
                     if char_data:
-                        chars.append(char_data)
-                        # 如果是宽字符，跳过下一列（占位符）
-                        if self._is_wide_char(char_data):
+                        chars_with_col.append((col, char_data))
+                        char_list.append(char_data)
+                        if is_wide(char_data):
                             col += 2
                         else:
                             col += 1
                     else:
-                        # 空字符可能是宽字符的第二列，跳过
                         col += 1
                 except (KeyError, IndexError, TypeError):
                     col += 1
-            return ''.join(chars).rstrip()
 
-        # 获取历史记录
+            # 确定换行类型
+            wrap_type = 0
+            if screen.is_soft_wrapped(buffer_line):
+                wrap_type = 1
+            else:
+                # 启发式：检查行是否填满到行尾附近（应用层换行）
+                wrap_threshold = max(columns - 5, int(columns * 0.85))
+                for rev_col, rev_char in reversed(chars_with_col):
+                    if rev_char != ' ':
+                        effective_end = rev_col + (1 if is_wide(rev_char) else 0)
+                        if effective_end >= wrap_threshold:
+                            wrap_type = 2
+                        break
+
+            if wrap_type == 1:
+                text = ''.join(char_list)  # 终端软换行：保留尾部空格
+            else:
+                text = ''.join(char_list).rstrip()
+
+            return text, wrap_type
+
+        # 收集所有行
+        line_data = []
+
         history_top = self._get_history_top()
         if history_top:
-            lines.extend(extract_line(history_line) for history_line in history_top)
+            line_data.extend(extract_line(hl) for hl in history_top)
 
-        # 获取当前屏幕内容
-        buffer = self.screen.buffer
+        buffer = screen.buffer
         for row in range(self.term_rows):
-            lines.append(extract_line(buffer[row]))
+            line_data.append(extract_line(buffer[row]))
 
-        # 移除末尾空行（从后往前找第一个非空行）
-        while lines and not lines[-1]:
-            lines.pop()
+        # 移除末尾空行
+        while line_data and not line_data[-1][0]:
+            line_data.pop()
 
-        return '\n'.join(lines)
+        # 组合结果
+        need_space = self._need_boundary_space
+        result = []
+        for i, (text, wrap_type) in enumerate(line_data):
+            if i > 0:
+                prev_text, prev_wrap = line_data[i - 1]
+                if prev_wrap == 1:
+                    pass  # 终端软换行：直接拼接
+                elif prev_wrap == 2:
+                    # 应用层软换行：去除续行的相同缩进
+                    prev_indent = len(prev_text) - len(prev_text.lstrip())
+                    if prev_indent > 0:
+                        curr_indent = len(text) - len(text.lstrip())
+                        if curr_indent >= prev_indent:
+                            text = text[prev_indent:]
+                    # 恢复词边界空格
+                    if result and text:
+                        last_ch = result[-1][-1] if result[-1] else ''
+                        first_ch = text[0]
+                        if last_ch and first_ch and need_space(last_ch, first_ch):
+                            result.append(' ')
+                else:
+                    result.append('\n')
+            result.append(text)
+
+        return ''.join(result)
 
     def _clear_selection(self):
         """清除选择"""
