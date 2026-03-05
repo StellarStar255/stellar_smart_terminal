@@ -377,6 +377,7 @@ class ToolbarManagerDialog(QDialog):
 
         # 第七组：设置
         ("llm_config_btn", "LLM配置", True, "设置"),
+        ("gui_font_spin", "GUI字号", True, "设置"),
     ]
 
     # 分组定义（用于默认顺序）

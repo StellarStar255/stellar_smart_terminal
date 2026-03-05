@@ -118,6 +118,9 @@ TRANSLATIONS = {
     "toolbar.llm_config": {"zh": "LLM配置", "en": "LLM Config"},
     "toolbar.llm_config_tooltip": {"zh": "LLM API 配置", "en": "LLM API Configuration"},
     "toolbar.settings_tooltip": {"zh": "工具栏设置", "en": "Toolbar Settings"},
+    "toolbar.gui_font_label": {"zh": "GUI字号:", "en": "GUI Font:"},
+    "toolbar.gui_font_auto": {"zh": "自动", "en": "Auto"},
+    "toolbar.gui_font_tooltip": {"zh": "GUI 面板字体大小（0=跟随全局缩放）", "en": "GUI panel font size (0=follow global zoom)"},
     "toolbar.switch_preset": {"zh": "切换", "en": "Switch"},
     "toolbar.switch_preset_tooltip": {"zh": "切换预设", "en": "Switch Preset"},
     "toolbar.manage_preset": {"zh": "管理", "en": "Manage"},
@@ -186,6 +189,7 @@ TRANSLATIONS = {
     "toolbar_mgr.btn.theme_combo": {"zh": "主题选择器", "en": "Theme Selector"},
     "toolbar_mgr.btn.icon_tint_checkbox": {"zh": "染色", "en": "Tint"},
     "toolbar_mgr.btn.llm_config_btn": {"zh": "LLM配置", "en": "LLM Config"},
+    "toolbar_mgr.btn.gui_font_spin": {"zh": "GUI字号", "en": "GUI Font Size"},
     "toolbar_mgr.btn.lang_combo": {"zh": "语言选择", "en": "Language"},
 
     # ===== 工具栏管理器 - 分组名称翻译(display only, internal key仍为中文) =====

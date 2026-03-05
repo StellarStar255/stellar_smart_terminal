@@ -34,7 +34,7 @@ from PyQt6.QtWidgets import (
     QListWidgetItem, QPlainTextEdit, QDialogButtonBox,
     QFormLayout, QGroupBox, QCheckBox, QTabWidget, QTabBar,
     QApplication, QInputDialog, QMenu, QStyledItemDelegate, QStyle,
-    QStyleOptionViewItem
+    QStyleOptionViewItem, QSpinBox
 )
 from PyQt6 import sip  # 用于检查 C++ 对象是否已被删除
 from PyQt6.QtCore import Qt, QTimer, QEvent, QPoint, QMimeData, pyqtSignal, QObject
@@ -1955,6 +1955,8 @@ class MainWindow(QMainWindow):
         self.current_theme = "深蓝"  # 当前主题名称
         self._use_icon_tint = False  # 是否给图标添加主题色蒙版
         self._global_zoom_delta = 0  # 全局缩放偏移量（相对于默认字体大小）
+        self._gui_font_size = 0  # GUI 字体大小（0 表示跟随全局缩放）
+        self._original_widget_styles = {}  # {id(widget): (weakref, original_stylesheet)}
 
         # 多标签页支持
         self.tab_counter = 0  # 标签页计数器
@@ -2062,8 +2064,14 @@ class MainWindow(QMainWindow):
             self.icon_tint_checkbox.setChecked(self._use_icon_tint)
             self.icon_tint_checkbox.blockSignals(False)
 
+        # 恢复 GUI 字体大小 SpinBox
+        if hasattr(self, 'gui_font_spin') and self._gui_font_size != 0:
+            self.gui_font_spin.blockSignals(True)
+            self.gui_font_spin.setValue(self._gui_font_size)
+            self.gui_font_spin.blockSignals(False)
+
         # 恢复全局缩放
-        if self._global_zoom_delta != 0:
+        if self._global_zoom_delta != 0 or self._gui_font_size != 0:
             self._apply_global_zoom()
 
         # 恢复左右分屏偏好
@@ -3029,6 +3037,39 @@ class MainWindow(QMainWindow):
         """)
         self.llm_config_btn.clicked.connect(self._show_llm_config)
 
+        # --- GUI 字体大小 ---
+        self.gui_font_label = QLabel(t("toolbar.gui_font_label"))
+        self.gui_font_label.setStyleSheet("color: #888; margin-left: 5px;")
+
+        self.gui_font_spin = QSpinBox()
+        self.gui_font_spin.setRange(0, 32)
+        self.gui_font_spin.setValue(self._gui_font_size)
+        self.gui_font_spin.setSpecialValueText(t("toolbar.gui_font_auto"))
+        self.gui_font_spin.setToolTip(t("toolbar.gui_font_tooltip"))
+        self.gui_font_spin.setSuffix(" pt")
+        self.gui_font_spin.setFixedWidth(80)
+        self.gui_font_spin.setStyleSheet("""
+            QSpinBox {
+                background-color: #16213e;
+                border: 1px solid #3d3d5c;
+                border-radius: 4px;
+                padding: 4px 6px;
+                color: #eaeaea;
+            }
+            QSpinBox:hover {
+                border-color: #667eea;
+            }
+            QSpinBox::up-button, QSpinBox::down-button {
+                background-color: #3d3d5c;
+                border: none;
+                width: 16px;
+            }
+            QSpinBox::up-button:hover, QSpinBox::down-button:hover {
+                background-color: #667eea;
+            }
+        """)
+        self.gui_font_spin.valueChanged.connect(self._on_gui_font_size_changed)
+
         self.toolbar_settings_btn = QPushButton("⚙")
         self.toolbar_settings_btn.setObjectName("toolbarSettingsBtn")
         self.toolbar_settings_btn.setToolTip(t("toolbar.settings_tooltip"))
@@ -3079,6 +3120,7 @@ class MainWindow(QMainWindow):
             "设置": {
                 "llm_config_btn": self.llm_config_btn,
                 "lang_combo": self.lang_combo,
+                "gui_font_spin": self.gui_font_spin,
             },
         }
 
@@ -3088,13 +3130,13 @@ class MainWindow(QMainWindow):
             "分屏管理": ["split_btn", "split_v_btn", "close_split_btn", "close_tab_btn"],
             "面板与编辑器": ["explorer_toggle_btn", "git_toggle_btn", "vscode_open_btn", "cursor_open_btn", "log_toggle_btn"],
             "主题": ["theme_combo", "icon_tint_checkbox"],
-            "设置": ["llm_config_btn", "lang_combo"],
+            "设置": ["llm_config_btn", "lang_combo", "gui_font_spin"],
         }
 
         # 主题组的装饰前缀
         self._group_prefix_widgets = {
             "主题": self.theme_label,
-            "设置": self.lang_label,
+            "设置": self.gui_font_label,
         }
 
         # ===== 应用跨组移动配置 =====
@@ -3712,6 +3754,11 @@ class MainWindow(QMainWindow):
 
     # ==================== 全局字体缩放 ====================
 
+    def _on_gui_font_size_changed(self, value: int):
+        """GUI 字体大小调整"""
+        self._gui_font_size = value
+        self._apply_global_zoom()
+
     def _global_zoom_in(self):
         """全局放大字体 — 同步缩放所有区域"""
         self._global_zoom_delta += 1
@@ -3725,8 +3772,10 @@ class MainWindow(QMainWindow):
     def _apply_global_zoom(self):
         """应用全局缩放到所有组件"""
         delta = self._global_zoom_delta
+        # GUI 字体大小：0 表示跟随全局缩放，>0 表示固定大小
+        gui_font_size = self._gui_font_size
 
-        # 1. 所有终端 (默认12pt, 范围8-32)
+        # 1. 所有终端 (默认12pt, 范围8-32) — 始终跟随全局缩放
         for terminals in self.tab_terminals.values():
             for term in terminals:
                 target_size = max(8, min(32, 12 + delta))
@@ -3736,9 +3785,18 @@ class MainWindow(QMainWindow):
                     term._update_terminal_size()
                     term.update()
 
-        # 2. 文件编辑器 (默认13pt, 范围6-48)
+        # GUI 组件字体大小：使用固定值或跟随全局缩放
+        def gui_target(default, lo, hi):
+            if gui_font_size > 0:
+                return max(lo, min(hi, gui_font_size))
+            return max(lo, min(hi, default + delta))
+
+        # 2. 全局 GUI 字体（工具栏、标签栏、状态栏等）— 通过缩放样式表中的 font-size
+        self._scale_gui_font_sizes(gui_font_size, delta)
+
+        # 3. 文件编辑器 (默认13pt, 范围6-48)
         if hasattr(self, 'file_editor') and self.file_editor is not None:
-            target_size = max(6, min(48, 13 + delta))
+            target_size = gui_target(13, 6, 48)
             font = self.file_editor.editor.font()
             if font.pointSize() != target_size:
                 font.setPointSize(target_size)
@@ -3747,9 +3805,9 @@ class MainWindow(QMainWindow):
                     4 * self.file_editor.editor.fontMetrics().horizontalAdvance(' ')
                 )
 
-        # 3. 资源管理器文件树 (默认13pt, 范围8-28)
+        # 4. 资源管理器文件树 (默认13pt, 范围8-28)
         if hasattr(self, 'explorer_panel') and self.explorer_panel is not None:
-            target_size = max(8, min(28, 13 + delta))
+            target_size = gui_target(13, 8, 28)
             if hasattr(self.explorer_panel, 'tree_view'):
                 tree = self.explorer_panel.tree_view
                 font = tree.font()
@@ -3757,9 +3815,9 @@ class MainWindow(QMainWindow):
                     font.setPointSize(target_size)
                     tree.setFont(font)
 
-        # 4. Git diff 查看器 (默认12pt, 范围6-32)
+        # 5. Git diff 查看器 (默认12pt, 范围6-32)
         if hasattr(self, 'git_panel') and self.git_panel is not None:
-            target_size = max(6, min(32, 12 + delta))
+            target_size = gui_target(12, 6, 32)
             if hasattr(self.git_panel, 'diff_text'):
                 font = self.git_panel.diff_text.font()
                 if font.pointSize() != target_size:
@@ -3768,6 +3826,64 @@ class MainWindow(QMainWindow):
 
         # 保存缩放偏移到配置
         self._save_config()
+
+    def _scale_gui_font_sizes(self, gui_font_size: int, delta: int):
+        """缩放所有 GUI 组件样式表中的 font-size 值"""
+        # 计算缩放比例：以 12px 为基准
+        base_px = 12
+        if gui_font_size > 0:
+            scale = gui_font_size / base_px
+        elif delta != 0:
+            scale = (base_px + delta) / base_px
+        else:
+            # 恢复原始样式
+            self._restore_original_styles()
+            return
+
+        _font_size_re = re.compile(r'font-size:\s*(\d+)px')
+
+        from PyQt6.QtWidgets import QWidget
+        for widget in self.findChildren(QWidget):
+            wid = id(widget)
+            ss = widget.styleSheet()
+            if not ss or 'font-size' not in ss:
+                continue
+
+            # 首次遇到：记录原始样式表
+            if wid not in self._original_widget_styles:
+                self._original_widget_styles[wid] = (widget, ss)
+            else:
+                # 使用存储的原始样式表作为缩放基准
+                _, ss = self._original_widget_styles[wid]
+
+            new_ss = _font_size_re.sub(
+                lambda m: f'font-size: {max(7, round(int(m.group(1)) * scale))}px',
+                ss
+            )
+            if new_ss != widget.styleSheet():
+                widget.setStyleSheet(new_ss)
+
+        # 清理已删除的 widget
+        dead_ids = []
+        for wid, (widget, _) in self._original_widget_styles.items():
+            try:
+                widget.objectName()  # 测试 widget 是否还存在
+            except RuntimeError:
+                dead_ids.append(wid)
+        for wid in dead_ids:
+            del self._original_widget_styles[wid]
+
+    def _restore_original_styles(self):
+        """恢复所有 widget 的原始样式表"""
+        dead_ids = []
+        for wid, (widget, original_ss) in self._original_widget_styles.items():
+            try:
+                if widget.styleSheet() != original_ss:
+                    widget.setStyleSheet(original_ss)
+            except RuntimeError:
+                dead_ids.append(wid)
+        for wid in dead_ids:
+            del self._original_widget_styles[wid]
 
     @property
     def terminal(self):
@@ -6313,6 +6429,11 @@ class MainWindow(QMainWindow):
         # 更新窗口和Dock图标（根据设置决定是否使用蒙版）
         self._update_app_icon_by_theme()
 
+        # 主题切换后重新应用 GUI 字体缩放（因为样式表被覆盖）
+        self._original_widget_styles.clear()
+        if self._gui_font_size != 0 or self._global_zoom_delta != 0:
+            self._scale_gui_font_sizes(self._gui_font_size, self._global_zoom_delta)
+
     def _create_themed_icon(self, theme_color: str) -> QIcon:
         """创建带主题色蒙版的图标
 
@@ -6512,6 +6633,8 @@ class MainWindow(QMainWindow):
                     self.default_llm_config = config.get('default_llm_config', 0)
                     # 加载全局缩放偏移
                     self._global_zoom_delta = config.get('global_zoom_delta', 0)
+                    # 加载 GUI 字体大小
+                    self._gui_font_size = config.get('gui_font_size', 0)
                     # 加载左右分屏偏好
                     self._explorer_split_horizontal = config.get('explorer_split_horizontal', False)
                     # 加载语言设置
@@ -6610,6 +6733,7 @@ class MainWindow(QMainWindow):
                 'llm_configs': self.llm_configs,  # 保存 LLM 配置
                 'default_llm_config': self.default_llm_config,  # 保存默认 LLM 配置索引
                 'global_zoom_delta': self._global_zoom_delta,  # 保存全局缩放偏移
+                'gui_font_size': self._gui_font_size,  # 保存 GUI 字体大小
                 'explorer_split_horizontal': getattr(self, '_explorer_split_horizontal', False),  # 保存左右分屏偏好
                 'language': get_language(),  # 保存语言设置
                 'window_geometry': [self.x(), self.y(), self.width(), self.height()],
