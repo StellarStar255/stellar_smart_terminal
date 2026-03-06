@@ -3333,10 +3333,9 @@ class MainWindow(QMainWindow):
         if self.toolbar_config:
             self._apply_toolbar_config(self.toolbar_config)
 
-        # 添加第二、三行主工具栏（始终添加到窗口，通过 setVisible 控制显隐）
+        # 添加第二行主工具栏（row2 + row3 并排在同一行，通过 setVisible 控制显隐）
         self.addToolBarBreak(Qt.ToolBarArea.TopToolBarArea)
         self.addToolBar(Qt.ToolBarArea.TopToolBarArea, self.main_toolbar_row2)
-        self.addToolBarBreak(Qt.ToolBarArea.TopToolBarArea)
         self.addToolBar(Qt.ToolBarArea.TopToolBarArea, self.main_toolbar_row3)
         pinned = is_double_row or self._pin_toolbar_row2
         self.main_toolbar_row2.setVisible(pinned)
