@@ -2725,7 +2725,6 @@ class MainWindow(QMainWindow):
                 border: none;
                 border-radius: 6px;
                 font-size: 14px;
-                font-weight: bold;
                 padding: 4px 8px;
             }
             QPushButton:hover {
@@ -3066,9 +3065,15 @@ class MainWindow(QMainWindow):
         """)
         self.llm_config_btn.clicked.connect(self._show_llm_config)
 
-        # --- GUI 字体大小 ---
+        # --- GUI 字体大小（容器：标签 + SpinBox） ---
+        self.gui_font_container = QWidget()
+        gui_font_layout = QHBoxLayout(self.gui_font_container)
+        gui_font_layout.setContentsMargins(4, 0, 0, 0)
+        gui_font_layout.setSpacing(4)
+
         self.gui_font_label = QLabel(t("toolbar.gui_font_label"))
-        self.gui_font_label.setStyleSheet("color: #888; margin-left: 5px;")
+        self.gui_font_label.setStyleSheet("color: #888;")
+        gui_font_layout.addWidget(self.gui_font_label)
 
         self.gui_font_spin = QSpinBox()
         self.gui_font_spin.setRange(0, 32)
@@ -3076,7 +3081,8 @@ class MainWindow(QMainWindow):
         self.gui_font_spin.setSpecialValueText(t("toolbar.gui_font_auto"))
         self.gui_font_spin.setToolTip(t("toolbar.gui_font_tooltip"))
         self.gui_font_spin.setSuffix(" pt")
-        self.gui_font_spin.setFixedWidth(80)
+        self.gui_font_spin.setFixedWidth(90)
+        self.gui_font_spin.setFocusPolicy(Qt.FocusPolicy.StrongFocus)
         self.gui_font_spin.setStyleSheet("""
             QSpinBox {
                 background-color: #16213e;
@@ -3091,13 +3097,30 @@ class MainWindow(QMainWindow):
             QSpinBox::up-button, QSpinBox::down-button {
                 background-color: #3d3d5c;
                 border: none;
-                width: 16px;
+                width: 18px;
             }
             QSpinBox::up-button:hover, QSpinBox::down-button:hover {
                 background-color: #667eea;
             }
+            QSpinBox::up-arrow {
+                image: none;
+                border-left: 4px solid transparent;
+                border-right: 4px solid transparent;
+                border-bottom: 5px solid #eaeaea;
+                width: 0px;
+                height: 0px;
+            }
+            QSpinBox::down-arrow {
+                image: none;
+                border-left: 4px solid transparent;
+                border-right: 4px solid transparent;
+                border-top: 5px solid #eaeaea;
+                width: 0px;
+                height: 0px;
+            }
         """)
         self.gui_font_spin.valueChanged.connect(self._on_gui_font_size_changed)
+        gui_font_layout.addWidget(self.gui_font_spin)
 
         # 固定第二排工具栏 checkbox
         self.pin_row2_checkbox = QCheckBox(t("toolbar.pin_row2"))
@@ -3165,7 +3188,7 @@ class MainWindow(QMainWindow):
             "设置": {
                 "llm_config_btn": self.llm_config_btn,
                 "lang_combo": self.lang_combo,
-                "gui_font_spin": self.gui_font_spin,
+                "gui_font_spin": self.gui_font_container,
             },
         }
 
@@ -3181,7 +3204,6 @@ class MainWindow(QMainWindow):
         # 主题组的装饰前缀
         self._group_prefix_widgets = {
             "主题": self.theme_label,
-            "设置": self.gui_font_label,
         }
 
         # ===== 应用跨组移动配置 =====
@@ -3298,7 +3320,7 @@ class MainWindow(QMainWindow):
             "icon_tint_checkbox": self.icon_tint_checkbox,
             "llm_config_btn": self.llm_config_btn,
             "lang_combo": self.lang_combo,
-            "gui_font_spin": self.gui_font_spin,
+            "gui_font_spin": self.gui_font_container,
         }
 
         # 从所有工具栏中查找 action
@@ -3801,7 +3823,14 @@ class MainWindow(QMainWindow):
     # ==================== 全局字体缩放 ====================
 
     def _on_gui_font_size_changed(self, value: int):
-        """GUI 字体大小调整"""
+        """GUI 字体大小调整（跳过 1-7 的无意义区间）"""
+        if 1 <= value <= 7:
+            # 从 0(Auto) 向上 → 跳到 8；从 8 向下 → 跳到 0(Auto)
+            self.gui_font_spin.blockSignals(True)
+            new_val = 8 if value > self._gui_font_size else 0
+            self.gui_font_spin.setValue(new_val)
+            self.gui_font_spin.blockSignals(False)
+            value = new_val
         self._gui_font_size = value
         self._apply_global_zoom()
 
@@ -5980,6 +6009,13 @@ class MainWindow(QMainWindow):
         if hasattr(self, 'llm_config_btn'):
             self.llm_config_btn.setToolTip(t("toolbar.llm_config_tooltip"))
 
+        # GUI 字体大小
+        if hasattr(self, 'gui_font_label'):
+            self.gui_font_label.setText(t("toolbar.gui_font_label"))
+        if hasattr(self, 'gui_font_spin'):
+            self.gui_font_spin.setSpecialValueText(t("toolbar.gui_font_auto"))
+            self.gui_font_spin.setToolTip(t("toolbar.gui_font_tooltip"))
+
         # 固定第二排
         if hasattr(self, 'pin_row2_checkbox'):
             self.pin_row2_checkbox.setText(t("toolbar.pin_row2"))
@@ -6302,7 +6338,6 @@ class MainWindow(QMainWindow):
                     border: none;
                     border-radius: 6px;
                     font-size: 14px;
-                    font-weight: bold;
                     padding: 4px 8px;
                 }}
                 QPushButton:hover {{
@@ -6321,7 +6356,6 @@ class MainWindow(QMainWindow):
                     border: none;
                     border-radius: 6px;
                     font-size: 14px;
-                    font-weight: bold;
                     padding: 4px 8px;
                 }}
                 QPushButton:hover {{
