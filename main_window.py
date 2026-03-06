@@ -2645,8 +2645,8 @@ class MainWindow(QMainWindow):
             QToolBar {
                 background-color: #1a1a2e;
                 border: none;
-                padding: 2px 4px;
-                spacing: 6px;
+                padding: 2px 2px;
+                spacing: 4px;
             }
         """
         self._pinned_tb_style = _pinned_tb_style
@@ -2999,18 +2999,9 @@ class MainWindow(QMainWindow):
         """)
         self.theme_combo.currentIndexChanged.connect(self._on_theme_changed)
 
-        # --- 语言选择（容器包裹，可移动） ---
-        self.lang_container = QWidget()
-        lang_layout = QHBoxLayout(self.lang_container)
-        lang_layout.setContentsMargins(0, 0, 0, 0)
-        lang_layout.setSpacing(2)
-
-        self.lang_label = QLabel(t("lang.label"))
-        self.lang_label.setStyleSheet("color: #888;")
-        lang_layout.addWidget(self.lang_label)
-
+        # --- 语言选择 ---
         self.lang_combo = QComboBox()
-        self.lang_combo.setMinimumWidth(70)
+        self.lang_combo.setFixedWidth(70)
         self.lang_combo.addItem("中文", "zh")
         self.lang_combo.addItem("English", "en")
         # 设置当前语言
@@ -3022,16 +3013,15 @@ class MainWindow(QMainWindow):
                 background-color: #16213e;
                 border: 1px solid #3d3d5c;
                 border-radius: 4px;
-                padding: 4px 8px;
+                padding: 2px 4px;
                 color: #eaeaea;
-                min-width: 60px;
             }
             QComboBox:hover {
                 border-color: #667eea;
             }
             QComboBox::drop-down {
                 border: none;
-                width: 20px;
+                width: 18px;
             }
             QComboBox QAbstractItemView {
                 background-color: #16213e;
@@ -3041,7 +3031,6 @@ class MainWindow(QMainWindow):
             }
         """)
         self.lang_combo.currentIndexChanged.connect(self._on_language_changed)
-        lang_layout.addWidget(self.lang_combo)
 
         self.icon_tint_checkbox = QCheckBox(t("toolbar.icon_tint"))
         self.icon_tint_checkbox.setToolTip(t("toolbar.icon_tint_tooltip"))
@@ -3189,7 +3178,7 @@ class MainWindow(QMainWindow):
             },
             "设置": {
                 "llm_config_btn": self.llm_config_btn,
-                "lang_combo": self.lang_container,
+                "lang_combo": self.lang_combo,
                 "gui_font_spin": self.gui_font_container,
             },
         }
@@ -3326,7 +3315,7 @@ class MainWindow(QMainWindow):
             "theme_combo": self.theme_combo,
             "icon_tint_checkbox": self.icon_tint_checkbox,
             "llm_config_btn": self.llm_config_btn,
-            "lang_combo": self.lang_container,
+            "lang_combo": self.lang_combo,
             "gui_font_spin": self.gui_font_container,
         }
 
@@ -3368,7 +3357,7 @@ class MainWindow(QMainWindow):
             if group_name in self._pinned_group_toolbars:
                 tb = self._pinned_group_toolbars[group_name]
                 self.addToolBar(Qt.ToolBarArea.TopToolBarArea, tb)
-                tb.setVisible(pinned)
+                tb.setVisible(pinned and len(tb.actions()) > 0)
                 tb.toggleViewAction().setVisible(False)
         self.addToolBar(Qt.ToolBarArea.TopToolBarArea, self._pinned_extra_toolbar)
         self._pinned_extra_toolbar.setVisible(pinned)
@@ -3950,9 +3939,13 @@ class MainWindow(QMainWindow):
             self._set_pinned_toolbars_visible(False)
 
     def _set_pinned_toolbars_visible(self, visible: bool):
-        """设置所有固定分组工具栏的可见性"""
+        """设置所有固定分组工具栏的可见性（空工具栏自动隐藏以节省空间）"""
         for tb in self._pinned_group_toolbars.values():
-            tb.setVisible(visible)
+            if visible:
+                # 只显示有内容的工具栏
+                tb.setVisible(len(tb.actions()) > 0)
+            else:
+                tb.setVisible(False)
         if self._pinned_extra_toolbar:
             self._pinned_extra_toolbar.setVisible(visible)
 
@@ -6077,9 +6070,7 @@ class MainWindow(QMainWindow):
             self.icon_tint_checkbox.setText(t("toolbar.icon_tint"))
             self.icon_tint_checkbox.setToolTip(t("toolbar.icon_tint_tooltip"))
 
-        # 语言组
-        if hasattr(self, 'lang_label'):
-            self.lang_label.setText(t("lang.label"))
+        # 语言组（lang_combo 直接作为独立 widget，无 label）
 
         # LLM 配置
         if hasattr(self, 'llm_config_btn'):
