@@ -2105,19 +2105,25 @@ class MainWindow(QMainWindow):
 
         # macOS 原生窗口标志（已在 __init__ 开头初始化）
 
-        # 延迟强制第二排工具栏可见性（确保 Qt 布局完成后生效）
+        # 延迟强制固定工具栏可见性（确保 Qt 布局完成后生效）
         if self._pin_toolbar_row2:
-            def _force_row2_visible():
-                if hasattr(self, 'main_toolbar_row2') and not sip.isdeleted(self):
-                    self.main_toolbar_row2.setVisible(True)
-            QTimer.singleShot(0, _force_row2_visible)
+            def _force_pinned_rows_visible():
+                if not sip.isdeleted(self):
+                    if hasattr(self, 'main_toolbar_row2'):
+                        self.main_toolbar_row2.setVisible(True)
+                    if hasattr(self, 'main_toolbar_row3'):
+                        self.main_toolbar_row3.setVisible(True)
+            QTimer.singleShot(0, _force_pinned_rows_visible)
 
     def showEvent(self, event):
         """窗口显示事件 - 设置 macOS 原生窗口属性"""
         super().showEvent(event)
-        # 再次强制第二排工具栏可见性（show 事件可能重置可见性）
-        if self._pin_toolbar_row2 and hasattr(self, 'main_toolbar_row2'):
-            self.main_toolbar_row2.setVisible(True)
+        # 再次强制固定工具栏可见性（show 事件可能重置可见性）
+        if self._pin_toolbar_row2:
+            if hasattr(self, 'main_toolbar_row2'):
+                self.main_toolbar_row2.setVisible(True)
+            if hasattr(self, 'main_toolbar_row3'):
+                self.main_toolbar_row3.setVisible(True)
         if not self._macos_window_configured:
             self._macos_window_configured = True
             # 延迟设置，确保窗口在 macOS 中完全注册
@@ -2634,11 +2640,24 @@ class MainWindow(QMainWindow):
         self.main_toolbar.toggleViewAction().setVisible(False)  # 禁止右键隐藏
         toolbar = self.main_toolbar  # 保持向后兼容
 
-        # 创建第二行工具栏（用于双排模式）
+        # 创建第二行工具栏（用于固定模式）
         self.main_toolbar_row2 = QToolBar()
         self.main_toolbar_row2.setMovable(False)
         self.main_toolbar_row2.setFloatable(False)
         self.main_toolbar_row2.setStyleSheet("""
+            QToolBar {
+                background-color: #1a1a2e;
+                border: none;
+                padding: 6px 8px;
+                spacing: 8px;
+            }
+        """)
+
+        # 创建第三行工具栏（用于固定模式 — 主题和设置）
+        self.main_toolbar_row3 = QToolBar()
+        self.main_toolbar_row3.setMovable(False)
+        self.main_toolbar_row3.setFloatable(False)
+        self.main_toolbar_row3.setStyleSheet("""
             QToolBar {
                 background-color: #1a1a2e;
                 border: none;
@@ -3205,14 +3224,14 @@ class MainWindow(QMainWindow):
         # ===== 按 group_order 添加按钮到工具栏 =====
         effective_group_order = self._get_effective_group_order()
 
-        # 双排模式下第一行的分组
+        # 固定模式下的分组分配（3行）
         ROW1_GROUPS = {"预设与控制", "选项"}
+        ROW2_GROUPS = {"操作", "分屏管理", "面板与编辑器"}
+        ROW3_GROUPS = {"主题", "设置"}
 
-        # 决定第二行按钮放在哪个工具栏
-        toolbar2 = self.main_toolbar_row2 if is_double_row else toolbar
-
-        first_in_row1 = True  # 用于控制是否需要在 toolbar1 添加分隔符
+        first_in_row1 = True
         first_in_row2 = True
+        first_in_row3 = True
 
         for group_name in effective_group_order:
             # "预设与控制"组的核心按钮已在上方直接添加到 toolbar
@@ -3235,11 +3254,17 @@ class MainWindow(QMainWindow):
                     if not first_in_row1:
                         toolbar.addSeparator()
                     first_in_row1 = False
-                else:
-                    target_toolbar = toolbar2
+                elif group_name in ROW2_GROUPS:
+                    target_toolbar = self.main_toolbar_row2
                     if not first_in_row2:
-                        toolbar2.addSeparator()
+                        self.main_toolbar_row2.addSeparator()
                     first_in_row2 = False
+                else:
+                    # ROW3_GROUPS 和未知分组
+                    target_toolbar = self.main_toolbar_row3
+                    if not first_in_row3:
+                        self.main_toolbar_row3.addSeparator()
+                    first_in_row3 = False
             else:
                 target_toolbar = toolbar
                 toolbar.addSeparator()
@@ -3293,8 +3318,8 @@ class MainWindow(QMainWindow):
             "lang_combo": self.lang_combo,
         }
 
-        # 从两个工具栏中查找 action
-        all_toolbars = [self.main_toolbar, self.main_toolbar_row2]
+        # 从所有工具栏中查找 action
+        all_toolbars = [self.main_toolbar, self.main_toolbar_row2, self.main_toolbar_row3]
         for btn_name, widget in button_widgets.items():
             self._toolbar_buttons[btn_name] = widget
             # 查找包含此 widget 的 action
@@ -3308,15 +3333,17 @@ class MainWindow(QMainWindow):
         if self.toolbar_config:
             self._apply_toolbar_config(self.toolbar_config)
 
-        # 添加第二行主工具栏（始终添加到窗口，通过 setVisible 控制显隐）
-        self.addToolBarBreak(Qt.ToolBarArea.TopToolBarArea)  # 换行
+        # 添加第二、三行主工具栏（始终添加到窗口，通过 setVisible 控制显隐）
+        self.addToolBarBreak(Qt.ToolBarArea.TopToolBarArea)
         self.addToolBar(Qt.ToolBarArea.TopToolBarArea, self.main_toolbar_row2)
-        if is_double_row or self._pin_toolbar_row2:
-            self.main_toolbar_row2.setVisible(True)
-        else:
-            self.main_toolbar_row2.setVisible(False)
+        self.addToolBarBreak(Qt.ToolBarArea.TopToolBarArea)
+        self.addToolBar(Qt.ToolBarArea.TopToolBarArea, self.main_toolbar_row3)
+        pinned = is_double_row or self._pin_toolbar_row2
+        self.main_toolbar_row2.setVisible(pinned)
+        self.main_toolbar_row3.setVisible(pinned)
         # 禁止右键菜单隐藏工具栏
         self.main_toolbar_row2.toggleViewAction().setVisible(False)
+        self.main_toolbar_row3.toggleViewAction().setVisible(False)
 
         # 工作目录工具栏
         self.addToolBarBreak(Qt.ToolBarArea.TopToolBarArea)  # 换行
@@ -3806,21 +3833,29 @@ class MainWindow(QMainWindow):
         self._relayout_toolbars()
 
     def _relayout_toolbars(self):
-        """运行时重新分配工具栏按钮（双排/单排切换）"""
+        """运行时重新分配工具栏按钮（固定/取消固定切换）"""
         ROW1_GROUPS = {"预设与控制", "选项"}
+        ROW2_GROUPS = {"操作", "分屏管理", "面板与编辑器"}
 
-        # 收集需要在 row2 的 action 集合（按钮 + 前缀 widget）
-        row2_action_set = set()
+        # 按行分类所有按钮的 action
+        row2_actions = set()
+        row3_actions = set()
         for btn_name, action in self._toolbar_actions.items():
-            if self._is_button_in_row2(btn_name):
-                row2_action_set.add(action)
-        # 前缀 widget 的 action
+            row = self._get_button_row(btn_name)
+            if row == 2:
+                row2_actions.add(action)
+            elif row == 3:
+                row3_actions.add(action)
+
+        # 前缀 widget 也按行分类
         for group_name, prefix_widget in self._group_prefix_widgets.items():
-            if group_name not in ROW1_GROUPS:
-                for tb in [self.main_toolbar, self.main_toolbar_row2]:
-                    for action in tb.actions():
-                        if tb.widgetForAction(action) is prefix_widget:
-                            row2_action_set.add(action)
+            for tb in [self.main_toolbar, self.main_toolbar_row2, self.main_toolbar_row3]:
+                for action in tb.actions():
+                    if tb.widgetForAction(action) is prefix_widget:
+                        if group_name in ROW2_GROUPS:
+                            row2_actions.add(action)
+                        elif group_name not in ROW1_GROUPS:
+                            row3_actions.add(action)
 
         # 找到 pin checkbox 的 action（锚点，始终留在 row1 末尾）
         pin_action = None
@@ -3830,37 +3865,48 @@ class MainWindow(QMainWindow):
                 break
 
         if self._pin_toolbar_row2:
-            # === 切换到双排：移动 row2 组的 action 到 row2 ===
+            # === 固定：从 row1 移动按钮到 row2 和 row3 ===
             for action in list(self.main_toolbar.actions()):
-                if action in row2_action_set:
+                if action in row2_actions:
                     self.main_toolbar.removeAction(action)
                     self.main_toolbar_row2.addAction(action)
+                elif action in row3_actions:
+                    self.main_toolbar.removeAction(action)
+                    self.main_toolbar_row3.addAction(action)
             self._cleanup_toolbar_separators(self.main_toolbar, pin_action)
             self._cleanup_toolbar_separators(self.main_toolbar_row2, None)
+            self._cleanup_toolbar_separators(self.main_toolbar_row3, None)
             self.main_toolbar_row2.setVisible(True)
+            self.main_toolbar_row3.setVisible(True)
         else:
-            # === 切换回单排：移动 row2 的所有 action 回 row1 ===
+            # === 取消固定：从 row2/row3 移动所有 action 回 row1 ===
             for action in list(self.main_toolbar_row2.actions()):
                 self.main_toolbar_row2.removeAction(action)
                 if pin_action:
                     self.main_toolbar.insertAction(pin_action, action)
                 else:
                     self.main_toolbar.addAction(action)
+            for action in list(self.main_toolbar_row3.actions()):
+                self.main_toolbar_row3.removeAction(action)
+                if pin_action:
+                    self.main_toolbar.insertAction(pin_action, action)
+                else:
+                    self.main_toolbar.addAction(action)
             self._cleanup_toolbar_separators(self.main_toolbar, pin_action)
             self.main_toolbar_row2.setVisible(False)
+            self.main_toolbar_row3.setVisible(False)
 
     def _cleanup_toolbar_separators(self, toolbar, before_action):
         """清理工具栏中多余的分隔符（开头、结尾、连续）"""
         actions = list(toolbar.actions())
         to_remove = []
 
-        # 找到 before_action 的索引（如果有）
         end_idx = len(actions)
         if before_action and before_action in actions:
             end_idx = actions.index(before_action)
 
-        # 标记需要删除的分隔符
-        prev_was_sep = True  # 开头的分隔符视为多余
+        # 标记需要删除的：开头、连续分隔符
+        prev_was_sep = True
         for i in range(end_idx):
             if actions[i].isSeparator():
                 if prev_was_sep:
@@ -3869,12 +3915,20 @@ class MainWindow(QMainWindow):
             else:
                 prev_was_sep = False
 
-        # before_action 前面的分隔符也删除
+        # before_action 前面的尾部分隔符
         if before_action and before_action in actions:
             idx = actions.index(before_action)
             while idx > 0 and actions[idx - 1].isSeparator() and actions[idx - 1] not in to_remove:
                 to_remove.append(actions[idx - 1])
                 idx -= 1
+
+        # 末尾分隔符（无 before_action 时）
+        if not before_action:
+            for i in range(len(actions) - 1, -1, -1):
+                if actions[i].isSeparator() and actions[i] not in to_remove:
+                    to_remove.append(actions[i])
+                else:
+                    break
 
         for action in to_remove:
             toolbar.removeAction(action)
@@ -5834,22 +5888,33 @@ class MainWindow(QMainWindow):
             return self.toolbar_config.get("layout", "single")
         return "single"
 
-    def _is_button_in_row2(self, btn_name: str) -> bool:
-        """判断按钮是否应该在第二行（双排模式时）
-        动态查询按钮所属分组（含跨组移动），非 ROW1 分组的按钮放在第二行"""
+    def _get_button_row(self, btn_name: str) -> int:
+        """判断按钮应该在第几行（1/2/3）
+        动态查询按钮所属分组（含跨组移动）"""
         from toolbar_manager import ToolbarManagerDialog
-        ROW1_GROUPS = {"预设与控制", "选项", "设置"}
+        ROW1_GROUPS = {"预设与控制", "选项"}
+        ROW2_GROUPS = {"操作", "分屏管理", "面板与编辑器"}
+        # ROW3: 主题, 设置, 以及其他未知分组
 
-        # 优先检查跨组移动配置
+        # 获取按钮所属分组
         button_groups = self.toolbar_config.get("button_groups", {}) if self.toolbar_config else {}
-        if btn_name in button_groups:
-            return button_groups[btn_name] not in ROW1_GROUPS
+        group = button_groups.get(btn_name)
+        if not group:
+            for name, _, _, g in ToolbarManagerDialog.BUTTON_DEFINITIONS:
+                if name == btn_name:
+                    group = g
+                    break
 
-        # 回退到默认分组
-        for name, _, _, group in ToolbarManagerDialog.BUTTON_DEFINITIONS:
-            if name == btn_name:
-                return group not in ROW1_GROUPS
-        return False
+        if group in ROW1_GROUPS:
+            return 1
+        elif group in ROW2_GROUPS:
+            return 2
+        else:
+            return 3
+
+    def _is_button_in_row2(self, btn_name: str) -> bool:
+        """兼容旧调用：判断按钮是否不在第一行"""
+        return self._get_button_row(btn_name) != 1
 
     def _on_theme_changed(self, index: int):
         """主题变更处理"""

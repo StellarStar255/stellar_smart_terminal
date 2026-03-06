@@ -122,7 +122,7 @@ TRANSLATIONS = {
     "toolbar.gui_font_auto": {"zh": "自动", "en": "Auto"},
     "toolbar.gui_font_tooltip": {"zh": "GUI 面板字体大小（0=跟随全局缩放）", "en": "GUI panel font size (0=follow global zoom)"},
     "toolbar.pin_row2": {"zh": "固定", "en": "Pin"},
-    "toolbar.pin_row2_tooltip": {"zh": "固定显示第二排工具栏（不自动隐藏）", "en": "Pin the second toolbar row (always visible)"},
+    "toolbar.pin_row2_tooltip": {"zh": "固定显示所有工具栏按钮（不隐藏到溢出菜单）", "en": "Pin all toolbar buttons (no overflow menu)"},
     "toolbar.switch_preset": {"zh": "切换", "en": "Switch"},
     "toolbar.switch_preset_tooltip": {"zh": "切换预设", "en": "Switch Preset"},
     "toolbar.manage_preset": {"zh": "管理", "en": "Manage"},
