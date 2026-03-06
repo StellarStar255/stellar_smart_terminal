@@ -2999,9 +2999,15 @@ class MainWindow(QMainWindow):
         """)
         self.theme_combo.currentIndexChanged.connect(self._on_theme_changed)
 
-        # --- 语言选择 ---
+        # --- 语言选择（容器包裹，可移动） ---
+        self.lang_container = QWidget()
+        lang_layout = QHBoxLayout(self.lang_container)
+        lang_layout.setContentsMargins(0, 0, 0, 0)
+        lang_layout.setSpacing(2)
+
         self.lang_label = QLabel(t("lang.label"))
-        self.lang_label.setStyleSheet("color: #888; margin-left: 5px;")
+        self.lang_label.setStyleSheet("color: #888;")
+        lang_layout.addWidget(self.lang_label)
 
         self.lang_combo = QComboBox()
         self.lang_combo.setMinimumWidth(70)
@@ -3035,6 +3041,7 @@ class MainWindow(QMainWindow):
             }
         """)
         self.lang_combo.currentIndexChanged.connect(self._on_language_changed)
+        lang_layout.addWidget(self.lang_combo)
 
         self.icon_tint_checkbox = QCheckBox(t("toolbar.icon_tint"))
         self.icon_tint_checkbox.setToolTip(t("toolbar.icon_tint_tooltip"))
@@ -3182,7 +3189,7 @@ class MainWindow(QMainWindow):
             },
             "设置": {
                 "llm_config_btn": self.llm_config_btn,
-                "lang_combo": self.lang_combo,
+                "lang_combo": self.lang_container,
                 "gui_font_spin": self.gui_font_container,
             },
         }
@@ -3193,7 +3200,7 @@ class MainWindow(QMainWindow):
             "分屏管理": ["split_btn", "split_v_btn", "close_split_btn", "close_tab_btn"],
             "面板与编辑器": ["explorer_toggle_btn", "git_toggle_btn", "vscode_open_btn", "cursor_open_btn", "log_toggle_btn"],
             "主题": ["theme_combo", "icon_tint_checkbox"],
-            "设置": ["llm_config_btn", "lang_combo", "gui_font_spin"],
+            "设置": ["llm_config_btn", "gui_font_spin", "lang_combo"],
         }
 
         # 主题组的装饰前缀
@@ -3319,7 +3326,7 @@ class MainWindow(QMainWindow):
             "theme_combo": self.theme_combo,
             "icon_tint_checkbox": self.icon_tint_checkbox,
             "llm_config_btn": self.llm_config_btn,
-            "lang_combo": self.lang_combo,
+            "lang_combo": self.lang_container,
             "gui_font_spin": self.gui_font_container,
         }
 
