@@ -3286,8 +3286,13 @@ class MainWindow(QMainWindow):
                     self._group_default_orders.get(group_name, [])
                 )
 
-        toolbar.addWidget(self.pin_row2_checkbox)
-        toolbar.addWidget(self.toolbar_settings_btn)
+        # Pin 和设置按钮：固定模式下放在 row2 末尾，否则放在 row1 末尾
+        if is_double_row:
+            self.main_toolbar_row2.addWidget(self.pin_row2_checkbox)
+            self.main_toolbar_row2.addWidget(self.toolbar_settings_btn)
+        else:
+            toolbar.addWidget(self.pin_row2_checkbox)
+            toolbar.addWidget(self.toolbar_settings_btn)
 
         # 保存所有工具栏按钮的引用，用于显示/隐藏
         # 注意：需要使用 QAction 来控制工具栏中的 widget 可见性
@@ -3860,30 +3865,49 @@ class MainWindow(QMainWindow):
                     if tb.widgetForAction(action) is prefix_widget:
                         row2_actions.add(action)
 
-        # 找到 pin checkbox 的 action（锚点，始终留在 row1 末尾）
+        # 找到 pin checkbox 和 settings btn 的 action
         pin_action = None
-        for action in self.main_toolbar.actions():
-            if self.main_toolbar.widgetForAction(action) is self.pin_row2_checkbox:
-                pin_action = action
-                break
+        settings_action = None
+        for tb in [self.main_toolbar, self.main_toolbar_row2]:
+            for action in tb.actions():
+                if tb.widgetForAction(action) is self.pin_row2_checkbox:
+                    pin_action = action
+                if tb.widgetForAction(action) is self.toolbar_settings_btn:
+                    settings_action = action
 
         if self._pin_toolbar_row2:
             # === 固定：从 row1 移动按钮到 row2 ===
+            # 先移动 row2 内容按钮
             for action in list(self.main_toolbar.actions()):
                 if action in row2_actions:
                     self.main_toolbar.removeAction(action)
                     self.main_toolbar_row2.addAction(action)
-            self._cleanup_toolbar_separators(self.main_toolbar, pin_action)
-            self._cleanup_toolbar_separators(self.main_toolbar_row2, None)
+            # 移动 pin 和 settings 到 row2 末尾
+            if pin_action:
+                self.main_toolbar.removeAction(pin_action)
+                self.main_toolbar_row2.addAction(pin_action)
+            if settings_action:
+                self.main_toolbar.removeAction(settings_action)
+                self.main_toolbar_row2.addAction(settings_action)
+            self._cleanup_toolbar_separators(self.main_toolbar, None)
+            self._cleanup_toolbar_separators(self.main_toolbar_row2, pin_action)
             self.main_toolbar_row2.setVisible(True)
         else:
             # === 取消固定：从 row2 移动所有 action 回 row1 ===
+            # 先移除 pin 和 settings（它们要放在最后）
+            if pin_action:
+                self.main_toolbar_row2.removeAction(pin_action)
+            if settings_action:
+                self.main_toolbar_row2.removeAction(settings_action)
+            # 移动其余 row2 内容到 row1（在 pin/settings 之前）
             for action in list(self.main_toolbar_row2.actions()):
                 self.main_toolbar_row2.removeAction(action)
-                if pin_action:
-                    self.main_toolbar.insertAction(pin_action, action)
-                else:
-                    self.main_toolbar.addAction(action)
+                self.main_toolbar.addAction(action)
+            # 最后添加 pin 和 settings
+            if pin_action:
+                self.main_toolbar.addAction(pin_action)
+            if settings_action:
+                self.main_toolbar.addAction(settings_action)
             self._cleanup_toolbar_separators(self.main_toolbar, pin_action)
             self.main_toolbar_row2.setVisible(False)
 
