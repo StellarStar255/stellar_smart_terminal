@@ -3323,7 +3323,7 @@ class MainWindow(QMainWindow):
         # 使用 QToolBar 原生样式间距，确保 pin 模式与 unpin 模式外观一致
         from PyQt6.QtWidgets import QStyle
         style = self.style()
-        h_sp = style.pixelMetric(QStyle.PixelMetric.PM_ToolBarItemSpacing)  # macOS: 4
+        h_sp = style.pixelMetric(QStyle.PixelMetric.PM_ToolBarItemSpacing) + 3  # 匹配 QToolBar 实际间距
         frame = style.pixelMetric(QStyle.PixelMetric.PM_ToolBarFrameWidth)  # macOS: 1
         self._flow_layout = FlowLayout(self._pinned_flow_widget, h_spacing=h_sp, v_spacing=h_sp)
         self._flow_layout.setContentsMargins(frame, frame, frame, frame)
