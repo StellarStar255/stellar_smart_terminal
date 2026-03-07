@@ -4039,14 +4039,15 @@ class MainWindow(QMainWindow):
                     widget.setParent(None)
 
     def _create_flow_separator(self):
-        """创建流式布局中的垂直分隔线"""
+        """创建流式布局中的垂直分隔线，匹配 QToolBar 原生分隔符外观"""
         sep = QFrame(self._pinned_flow_widget)
         sep.setObjectName("_flow_separator")
         sep.setFrameShape(QFrame.Shape.VLine)
-        sep.setFrameShadow(QFrame.Shadow.Sunken)
-        sep.setFixedWidth(2)
-        sep.setFixedHeight(24)
-        sep.setStyleSheet("QFrame { color: #3d3d5c; }")
+        sep.setFrameShadow(QFrame.Shadow.Plain)
+        sep.setFixedWidth(4)
+        sep.setFixedHeight(22)
+        sep.setLineWidth(1)
+        sep.setStyleSheet("QFrame { color: #6a6a8e; }")
         sep.show()
         return sep
 
