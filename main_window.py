@@ -3877,12 +3877,13 @@ class MainWindow(QMainWindow):
             for action in list(self.main_toolbar.actions()):
                 self.main_toolbar.removeAction(action)
 
-            # 2. 填充 flow layout（核心控件 + 全部分组）
-            self._populate_pinned_flow(effective_group_order)
-
-            # 3. 切换可见性
+            # 2. 先切换可见性，再填充 flow layout
+            #    （确保 parent 可见，separator 等子控件的 isVisible() 才正确）
             self.main_toolbar.setVisible(False)
             self._pinned_flow_toolbar.setVisible(True)
+
+            # 3. 填充 flow layout（核心控件 + 全部分组）
+            self._populate_pinned_flow(effective_group_order)
             QTimer.singleShot(0, self._update_flow_toolbar_height)
 
             # 重新应用可见性配置
