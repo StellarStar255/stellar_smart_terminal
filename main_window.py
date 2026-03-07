@@ -34,7 +34,7 @@ from PyQt6.QtWidgets import (
     QListWidgetItem, QPlainTextEdit, QDialogButtonBox,
     QFormLayout, QGroupBox, QCheckBox, QTabWidget, QTabBar,
     QApplication, QInputDialog, QMenu, QStyledItemDelegate, QStyle,
-    QStyleOptionViewItem, QSpinBox
+    QStyleOptionViewItem, QSpinBox, QSizePolicy
 )
 from PyQt6 import sip  # 用于检查 C++ 对象是否已被删除
 from PyQt6.QtCore import Qt, QTimer, QEvent, QPoint, QMimeData, pyqtSignal, QObject
@@ -51,6 +51,7 @@ from explorer_widget import ExplorerPanel
 from toolbar_manager import ToolbarManagerDialog
 from file_editor import FileEditorWidget
 from i18n import t, set_language, get_language
+from flow_layout import FlowLayout
 import shutil
 import subprocess
 
@@ -2111,6 +2112,7 @@ class MainWindow(QMainWindow):
             def _force_pinned_rows_visible():
                 if not sip.isdeleted(self):
                     self._set_pinned_toolbars_visible(True)
+                    self._update_flow_toolbar_height()
             QTimer.singleShot(0, _force_pinned_rows_visible)
 
     def showEvent(self, event):
@@ -2119,6 +2121,7 @@ class MainWindow(QMainWindow):
         # 再次强制固定工具栏可见性（show 事件可能重置可见性）
         if self._pin_toolbar_row2:
             self._set_pinned_toolbars_visible(True)
+            QTimer.singleShot(0, self._update_flow_toolbar_height)
         if not self._macos_window_configured:
             self._macos_window_configured = True
             # 延迟设置，确保窗口在 macOS 中完全注册
@@ -2637,19 +2640,12 @@ class MainWindow(QMainWindow):
         self.main_toolbar.toggleViewAction().setVisible(False)  # 禁止右键隐藏
         toolbar = self.main_toolbar  # 保持向后兼容
 
-        # 固定模式下的分组工具栏（每个分组一个小工具栏，Qt 自动排列换行）
-        self._pinned_group_toolbars = {}  # group_name -> QToolBar
-        self._pinned_extra_toolbar = None  # pin/settings 专用工具栏
-
-        _pinned_tb_style = """
-            QToolBar {
-                background-color: #1a1a2e;
-                border: none;
-                padding: 2px 2px;
-                spacing: 4px;
-            }
-        """
-        self._pinned_tb_style = _pinned_tb_style
+        # 固定模式下的流式布局工具栏（单个 QToolBar 内嵌 FlowLayout，自动换行）
+        self._pinned_flow_toolbar = None  # QToolBar
+        self._pinned_flow_widget = None   # QWidget (FlowLayout container)
+        self._flow_layout = None          # FlowLayout instance
+        self._flow_btn_widgets = {}       # btn_name -> widget (在 flow 中的按钮)
+        self._updating_flow_height = False  # 防止 resizeEvent 重入
 
         # 标题和颜色指示器
         self.title_label = QLabel(t("toolbar.title_label"))
@@ -3250,40 +3246,31 @@ class MainWindow(QMainWindow):
                     if not first_in_row1:
                         toolbar.addSeparator()
                     first_in_row1 = False
-                    target_toolbar = toolbar
-                else:
-                    # 每个非 row1 分组创建独立的小工具栏
-                    group_tb = QToolBar()
-                    group_tb.setMovable(False)
-                    group_tb.setFloatable(False)
-                    group_tb.setStyleSheet(self._pinned_tb_style)
-                    self._pinned_group_toolbars[group_name] = group_tb
-                    target_toolbar = group_tb
+                    # Row1 按钮直接添加到 main_toolbar
+                    if group_name in self._group_prefix_widgets:
+                        toolbar.addWidget(self._group_prefix_widgets[group_name])
+                    if group_name in self._group_button_dicts:
+                        self._add_buttons_in_order(
+                            toolbar,
+                            self._group_button_dicts[group_name],
+                            group_name,
+                            self._group_default_orders.get(group_name, [])
+                        )
+                # Row2 分组的按钮稍后添加到 flow layout
             else:
-                target_toolbar = toolbar
                 toolbar.addSeparator()
+                if group_name in self._group_prefix_widgets:
+                    toolbar.addWidget(self._group_prefix_widgets[group_name])
+                if group_name in self._group_button_dicts:
+                    self._add_buttons_in_order(
+                        toolbar,
+                        self._group_button_dicts[group_name],
+                        group_name,
+                        self._group_default_orders.get(group_name, [])
+                    )
 
-            if group_name in self._group_prefix_widgets:
-                target_toolbar.addWidget(self._group_prefix_widgets[group_name])
-            if group_name in self._group_button_dicts:
-                self._add_buttons_in_order(
-                    target_toolbar,
-                    self._group_button_dicts[group_name],
-                    group_name,
-                    self._group_default_orders.get(group_name, [])
-                )
-
-        # Pin 和设置按钮
-        if is_double_row:
-            # 创建一个专用小工具栏放 pin 和 settings
-            extra_tb = QToolBar()
-            extra_tb.setMovable(False)
-            extra_tb.setFloatable(False)
-            extra_tb.setStyleSheet(self._pinned_tb_style)
-            extra_tb.addWidget(self.pin_row2_checkbox)
-            extra_tb.addWidget(self.toolbar_settings_btn)
-            self._pinned_extra_toolbar = extra_tb
-        else:
+        # Pin 和设置按钮（非固定模式直接加到 main_toolbar）
+        if not is_double_row:
             toolbar.addWidget(self.pin_row2_checkbox)
             toolbar.addWidget(self.toolbar_settings_btn)
 
@@ -3319,49 +3306,43 @@ class MainWindow(QMainWindow):
             "gui_font_spin": self.gui_font_container,
         }
 
-        all_toolbars = [self.main_toolbar] + list(self._pinned_group_toolbars.values())
-        if self._pinned_extra_toolbar:
-            all_toolbars.append(self._pinned_extra_toolbar)
+        # 建立 action 映射（仅 main_toolbar 上的按钮）
         for btn_name, widget in button_widgets.items():
             self._toolbar_buttons[btn_name] = widget
-            for tb in all_toolbars:
-                for action in tb.actions():
-                    if tb.widgetForAction(action) == widget:
-                        self._toolbar_actions[btn_name] = action
-                        break
+            for action in self.main_toolbar.actions():
+                if self.main_toolbar.widgetForAction(action) == widget:
+                    self._toolbar_actions[btn_name] = action
+                    break
 
-        if self.toolbar_config:
-            self._apply_toolbar_config(self.toolbar_config)
+        # 创建固定模式的流式布局工具栏
+        self._pinned_flow_toolbar = QToolBar()
+        self._pinned_flow_toolbar.setMovable(False)
+        self._pinned_flow_toolbar.setFloatable(False)
+        self._pinned_flow_toolbar.toggleViewAction().setVisible(False)
 
-        # 添加固定模式的分组工具栏（每组一个小工具栏，Qt 自动排列换行充分利用空间）
+        self._pinned_flow_widget = QWidget()
+        self._flow_layout = FlowLayout(self._pinned_flow_widget, h_spacing=5, v_spacing=3)
+        self._flow_layout.setContentsMargins(5, 2, 5, 2)
+        self._pinned_flow_toolbar.addWidget(self._pinned_flow_widget)
+
         pinned = is_double_row or self._pin_toolbar_row2
-        # 确保所有分组都有工具栏（即使未固定也先创建，只是隐藏）
+        if pinned:
+            self._populate_pinned_flow(effective_group_order, ROW1_GROUPS)
+
+        # 将 flow toolbar 添加到 main_toolbar 之后（同一个 toolbar area，不加 break）
+        self.addToolBar(Qt.ToolBarArea.TopToolBarArea, self._pinned_flow_toolbar)
+        self._pinned_flow_toolbar.setVisible(pinned)
+
+        # 为 flow 中的按钮建立 _flow_btn_widgets 映射
         for group_name in effective_group_order:
             if group_name in ROW1_GROUPS or group_name == "预设与控制":
                 continue
-            if group_name not in self._pinned_group_toolbars:
-                group_tb = QToolBar()
-                group_tb.setMovable(False)
-                group_tb.setFloatable(False)
-                group_tb.setStyleSheet(self._pinned_tb_style)
-                self._pinned_group_toolbars[group_name] = group_tb
-        if not self._pinned_extra_toolbar:
-            extra_tb = QToolBar()
-            extra_tb.setMovable(False)
-            extra_tb.setFloatable(False)
-            extra_tb.setStyleSheet(self._pinned_tb_style)
-            self._pinned_extra_toolbar = extra_tb
+            if group_name in self._group_button_dicts:
+                for btn_name, widget in self._group_button_dicts[group_name].items():
+                    self._flow_btn_widgets[btn_name] = widget
 
-        self.addToolBarBreak(Qt.ToolBarArea.TopToolBarArea)  # row1 和固定区域之间换行
-        for group_name in effective_group_order:
-            if group_name in self._pinned_group_toolbars:
-                tb = self._pinned_group_toolbars[group_name]
-                self.addToolBar(Qt.ToolBarArea.TopToolBarArea, tb)
-                tb.setVisible(pinned and len(tb.actions()) > 0)
-                tb.toggleViewAction().setVisible(False)
-        self.addToolBar(Qt.ToolBarArea.TopToolBarArea, self._pinned_extra_toolbar)
-        self._pinned_extra_toolbar.setVisible(pinned)
-        self._pinned_extra_toolbar.toggleViewAction().setVisible(False)
+        if self.toolbar_config:
+            self._apply_toolbar_config(self.toolbar_config)
 
         # 工作目录工具栏
         self.addToolBarBreak(Qt.ToolBarArea.TopToolBarArea)  # 换行
@@ -3862,92 +3843,82 @@ class MainWindow(QMainWindow):
         ROW1_GROUPS = {"预设与控制", "选项"}
         effective_group_order = self._get_effective_group_order()
 
-        # 收集非 row1 按钮的 action
-        row2_btn_actions = {}  # action -> group_name
-        for btn_name, action in self._toolbar_actions.items():
-            if self._get_button_row(btn_name) != 1:
-                group = self._get_button_group(btn_name)
-                row2_btn_actions[action] = group
-
-        # 前缀 widget action -> group
-        row2_prefix_actions = {}
-        for group_name, prefix_widget in self._group_prefix_widgets.items():
-            if group_name in ROW1_GROUPS:
-                continue
-            # 搜索所有工具栏
-            for tb in [self.main_toolbar] + list(self._pinned_group_toolbars.values()):
-                for action in tb.actions():
-                    if tb.widgetForAction(action) is prefix_widget:
-                        row2_prefix_actions[action] = group_name
-
-        # 找到 pin 和 settings 的 action
+        # 找到 pin 和 settings 的 action（可能在 main_toolbar 上）
         pin_action = settings_action = None
-        all_tbs = [self.main_toolbar] + list(self._pinned_group_toolbars.values())
-        all_tbs.append(self._pinned_extra_toolbar)
-        for tb in all_tbs:
-            for action in tb.actions():
-                w = tb.widgetForAction(action)
-                if w is self.pin_row2_checkbox:
-                    pin_action = action
-                elif w is self.toolbar_settings_btn:
-                    settings_action = action
+        for action in self.main_toolbar.actions():
+            w = self.main_toolbar.widgetForAction(action)
+            if w is self.pin_row2_checkbox:
+                pin_action = action
+            elif w is self.toolbar_settings_btn:
+                settings_action = action
 
         if self._pin_toolbar_row2:
-            # === 固定：从 main_toolbar 移动按钮到各分组工具栏 ===
+            # === 固定：从 main_toolbar 移动 row2 按钮到 flow layout ===
+            # 移除 row2 相关 action 和前缀 widget
             for action in list(self.main_toolbar.actions()):
-                if action in row2_btn_actions:
-                    group = row2_btn_actions[action]
-                    if group in self._pinned_group_toolbars:
+                w = self.main_toolbar.widgetForAction(action)
+                if w is self.pin_row2_checkbox or w is self.toolbar_settings_btn:
+                    self.main_toolbar.removeAction(action)
+                    continue
+                # 检查是否为 row2 按钮
+                for btn_name, widget in self._toolbar_buttons.items():
+                    if w is widget and self._get_button_row(btn_name) != 1:
                         self.main_toolbar.removeAction(action)
-                        self._pinned_group_toolbars[group].addAction(action)
-                elif action in row2_prefix_actions:
-                    group = row2_prefix_actions[action]
-                    if group in self._pinned_group_toolbars:
+                        # 清除旧 action 映射
+                        if btn_name in self._toolbar_actions and self._toolbar_actions[btn_name] is action:
+                            del self._toolbar_actions[btn_name]
+                        break
+                # 检查是否为前缀 widget
+                for group_name, prefix_widget in self._group_prefix_widgets.items():
+                    if w is prefix_widget and group_name not in ROW1_GROUPS:
                         self.main_toolbar.removeAction(action)
-                        self._pinned_group_toolbars[group].addAction(action)
-            # 移动 pin 和 settings 到 extra toolbar
-            if pin_action and pin_action in self.main_toolbar.actions():
-                self.main_toolbar.removeAction(pin_action)
-                self._pinned_extra_toolbar.addAction(pin_action)
-            if settings_action and settings_action in self.main_toolbar.actions():
-                self.main_toolbar.removeAction(settings_action)
-                self._pinned_extra_toolbar.addAction(settings_action)
+                        break
+
             self._cleanup_toolbar_separators(self.main_toolbar, None)
+
+            # 填充 flow layout
+            self._populate_pinned_flow(effective_group_order, ROW1_GROUPS)
             self._set_pinned_toolbars_visible(True)
+            QTimer.singleShot(0, self._update_flow_toolbar_height)
         else:
-            # === 取消固定：从分组工具栏移回 main_toolbar ===
-            # 先取出 pin 和 settings
-            if pin_action and pin_action in self._pinned_extra_toolbar.actions():
-                self._pinned_extra_toolbar.removeAction(pin_action)
-            if settings_action and settings_action in self._pinned_extra_toolbar.actions():
-                self._pinned_extra_toolbar.removeAction(settings_action)
-            # 按分组顺序从各工具栏移回 main_toolbar（加分隔符）
-            for group_name in effective_group_order:
-                if group_name in self._pinned_group_toolbars:
-                    group_tb = self._pinned_group_toolbars[group_name]
-                    if group_tb.actions():
-                        self.main_toolbar.addSeparator()
-                    for action in list(group_tb.actions()):
-                        group_tb.removeAction(action)
-                        self.main_toolbar.addAction(action)
-            # pin 和 settings 放最后
-            if pin_action:
-                self.main_toolbar.addAction(pin_action)
-            if settings_action:
-                self.main_toolbar.addAction(settings_action)
-            self._cleanup_toolbar_separators(self.main_toolbar, pin_action)
+            # === 取消固定：从 flow layout 移回 main_toolbar ===
+            self._clear_flow_layout()
             self._set_pinned_toolbars_visible(False)
 
+            # 按分组顺序将 row2 按钮添加回 main_toolbar
+            for group_name in effective_group_order:
+                if group_name in ROW1_GROUPS or group_name == "预设与控制":
+                    continue
+                if group_name not in self._group_button_dicts:
+                    continue
+                buttons_dict = self._group_button_dicts[group_name]
+                if not buttons_dict:
+                    continue
+                self.main_toolbar.addSeparator()
+                if group_name in self._group_prefix_widgets:
+                    self.main_toolbar.addWidget(self._group_prefix_widgets[group_name])
+                saved_order = self._get_button_order(group_name)
+                order = saved_order if saved_order else self._group_default_orders.get(group_name, [])
+                for btn_name in order:
+                    if btn_name in buttons_dict:
+                        new_action = self.main_toolbar.addWidget(buttons_dict[btn_name])
+                        self._toolbar_actions[btn_name] = new_action
+
+            # pin 和 settings 放最后
+            pin_action = self.main_toolbar.addWidget(self.pin_row2_checkbox)
+            settings_action = self.main_toolbar.addWidget(self.toolbar_settings_btn)
+            self._cleanup_toolbar_separators(self.main_toolbar, pin_action)
+
+            # 重新应用可见性配置
+            if self.toolbar_config:
+                self._apply_toolbar_config(self.toolbar_config)
+
     def _set_pinned_toolbars_visible(self, visible: bool):
-        """设置所有固定分组工具栏的可见性（空工具栏自动隐藏以节省空间）"""
-        for tb in self._pinned_group_toolbars.values():
+        """设置固定流式工具栏的可见性"""
+        if self._pinned_flow_toolbar:
+            self._pinned_flow_toolbar.setVisible(visible)
             if visible:
-                # 只显示有内容的工具栏
-                tb.setVisible(len(tb.actions()) > 0)
-            else:
-                tb.setVisible(False)
-        if self._pinned_extra_toolbar:
-            self._pinned_extra_toolbar.setVisible(visible)
+                QTimer.singleShot(0, self._update_flow_toolbar_height)
 
     def _get_button_group(self, btn_name: str) -> str:
         """获取按钮所属分组名"""
@@ -3997,6 +3968,103 @@ class MainWindow(QMainWindow):
 
         for action in to_remove:
             toolbar.removeAction(action)
+
+    def _populate_pinned_flow(self, effective_group_order, ROW1_GROUPS):
+        """将 row2 分组按钮添加到 flow layout（含分隔符）"""
+        self._clear_flow_layout()
+        first_group = True
+        for group_name in effective_group_order:
+            if group_name in ROW1_GROUPS or group_name == "预设与控制":
+                continue
+            if group_name not in self._group_button_dicts:
+                continue
+            buttons_dict = self._group_button_dicts[group_name]
+            if not buttons_dict:
+                continue
+            if not first_group:
+                sep = self._create_flow_separator()
+                self._flow_layout.addWidget(sep)
+            first_group = False
+            if group_name in self._group_prefix_widgets:
+                pw = self._group_prefix_widgets[group_name]
+                pw.setParent(self._pinned_flow_widget)
+                self._flow_layout.addWidget(pw)
+            saved_order = self._get_button_order(group_name)
+            order = saved_order if saved_order else self._group_default_orders.get(group_name, [])
+            # 确保新增的按钮也添加进来
+            for btn_name in self._group_default_orders.get(group_name, []):
+                if btn_name not in order:
+                    order.append(btn_name)
+            for btn_name in order:
+                if btn_name in buttons_dict:
+                    w = buttons_dict[btn_name]
+                    w.setParent(self._pinned_flow_widget)
+                    self._flow_layout.addWidget(w)
+                    w.show()
+        # pin checkbox 和 settings 按钮放在最后
+        self.pin_row2_checkbox.setParent(self._pinned_flow_widget)
+        self._flow_layout.addWidget(self.pin_row2_checkbox)
+        self.pin_row2_checkbox.show()
+        self.toolbar_settings_btn.setParent(self._pinned_flow_widget)
+        self._flow_layout.addWidget(self.toolbar_settings_btn)
+        self.toolbar_settings_btn.show()
+
+    def _clear_flow_layout(self):
+        """清空 flow layout 中的所有 widget（不删除按钮 widget 本身）"""
+        if not self._flow_layout:
+            return
+        while self._flow_layout.count():
+            item = self._flow_layout.takeAt(0)
+            widget = item.widget()
+            if widget:
+                # 分隔符是临时创建的，可以销毁
+                if widget.objectName() == "_flow_separator":
+                    widget.setParent(None)
+                    widget.deleteLater()
+                else:
+                    widget.setParent(None)
+
+    def _create_flow_separator(self):
+        """创建流式布局中的垂直分隔线"""
+        sep = QFrame(self._pinned_flow_widget)
+        sep.setObjectName("_flow_separator")
+        sep.setFrameShape(QFrame.Shape.VLine)
+        sep.setFrameShadow(QFrame.Shadow.Sunken)
+        sep.setFixedWidth(2)
+        sep.setFixedHeight(24)
+        sep.setStyleSheet("QFrame { color: #3d3d5c; }")
+        sep.show()
+        return sep
+
+    def _update_flow_toolbar_height(self):
+        """根据 flow layout 计算并设置 flow toolbar 高度"""
+        if self._updating_flow_height:
+            return
+        if not self._pinned_flow_toolbar or not self._pinned_flow_toolbar.isVisible():
+            return
+        if not self._flow_layout:
+            return
+
+        self._updating_flow_height = True
+        try:
+            width = self._pinned_flow_toolbar.width()
+            if width <= 0:
+                return
+            # 计算 flow layout 需要的高度
+            h = self._flow_layout.heightForWidth(width)
+            padding = 6
+            total_h = h + padding
+            if total_h < 10:
+                total_h = 36  # 最小高度
+            self._pinned_flow_toolbar.setFixedHeight(total_h)
+            self._pinned_flow_widget.setMinimumHeight(h)
+        finally:
+            self._updating_flow_height = False
+
+    def resizeEvent(self, event):
+        """窗口大小变化时更新 flow toolbar 高度"""
+        super().resizeEvent(event)
+        self._update_flow_toolbar_height()
 
     def _global_zoom_in(self):
         """全局放大字体 — 同步缩放所有区域"""
@@ -5935,12 +6003,17 @@ class MainWindow(QMainWindow):
         if not hasattr(self, '_toolbar_actions') or not self._toolbar_actions:
             return
         visible_buttons = config.get("visible_buttons", {})
+        # Row1 按钮通过 action 控制可见性
         for btn_name, action in self._toolbar_actions.items():
             if btn_name in visible_buttons:
                 action.setVisible(visible_buttons[btn_name])
-
-        # 布局变更需要重启才能生效
-        # 因为在运行时移动工具栏按钮非常复杂
+        # Flow 中的 row2 按钮直接控制 widget 可见性
+        for btn_name, widget in self._flow_btn_widgets.items():
+            if btn_name in visible_buttons:
+                widget.setVisible(visible_buttons[btn_name])
+        # 更新 flow toolbar 高度
+        if hasattr(self, '_pinned_flow_toolbar') and self._pinned_flow_toolbar and self._pinned_flow_toolbar.isVisible():
+            QTimer.singleShot(0, self._update_flow_toolbar_height)
 
     def _get_toolbar_layout(self) -> str:
         """获取当前工具栏布局配置"""
@@ -6310,6 +6383,20 @@ class MainWindow(QMainWindow):
                 spacing: 6px;
             }}
         """)
+
+        # 固定流式工具栏样式
+        if self._pinned_flow_toolbar:
+            self._pinned_flow_widget.setStyleSheet(f"""
+                QWidget {{
+                    background-color: {t['bg_dark']};
+                }}
+            """)
+            # 更新分隔符颜色
+            if self._flow_layout:
+                for i in range(self._flow_layout.count()):
+                    item = self._flow_layout.itemAt(i)
+                    if item and item.widget() and item.widget().objectName() == "_flow_separator":
+                        item.widget().setStyleSheet(f"QFrame {{ color: {t['border']}; }}")
 
         # 工作目录标签样式
         self.dir_label.setStyleSheet(f"color: {t['text_dim']}; font-size: 12px;")
