@@ -65,9 +65,12 @@ class FlowLayout(QLayout):
     def _do_layout(self, rect, test_only):
         m = self.contentsMargins()
         effective = rect.adjusted(m.left(), m.top(), -m.right(), -m.bottom())
+
+        # 第一遍：将 items 按行分组，计算每行高度
+        rows = []  # [(row_height, [(item, item_size, x_pos), ...])]
         x = effective.x()
-        y = effective.y()
         row_height = 0
+        current_row = []
 
         for item in self._items:
             widget = item.widget()
@@ -78,15 +81,27 @@ class FlowLayout(QLayout):
             next_x = x + item_size.width() + self._h_spacing
 
             if x > effective.x() and next_x - self._h_spacing > effective.right():
+                rows.append((row_height, current_row))
+                current_row = []
                 x = effective.x()
-                y += row_height + self._v_spacing
                 next_x = x + item_size.width() + self._h_spacing
                 row_height = 0
 
-            if not test_only:
-                item.setGeometry(QRect(QPoint(x, y), item_size))
-
+            current_row.append((item, item_size, x))
             x = next_x
             row_height = max(row_height, item_size.height())
 
-        return y + row_height - rect.y() + m.bottom()
+        if current_row:
+            rows.append((row_height, current_row))
+
+        # 第二遍：垂直居中放置每行的 items
+        y = effective.y()
+        for row_h, row_items in rows:
+            if not test_only:
+                for item, item_size, x_pos in row_items:
+                    y_offset = (row_h - item_size.height()) // 2
+                    item.setGeometry(QRect(QPoint(x_pos, y + y_offset), item_size))
+            y += row_h + self._v_spacing
+
+        total_height = y - self._v_spacing - rect.y() + m.bottom() if rows else 0
+        return total_height
