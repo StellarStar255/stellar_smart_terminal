@@ -14,7 +14,6 @@ class FlowLayout(QLayout):
         self._h_spacing = h_spacing
         self._v_spacing = v_spacing
         self._items = []
-        self._item_sizes = {}  # 缓存：widget id -> 实际渲染尺寸
 
     def addItem(self, item):
         self._items.append(item)
@@ -29,11 +28,7 @@ class FlowLayout(QLayout):
 
     def takeAt(self, index):
         if 0 <= index < len(self._items):
-            item = self._items.pop(index)
-            widget = item.widget()
-            if widget:
-                self._item_sizes.pop(id(widget), None)
-            return item
+            return self._items.pop(index)
         return None
 
     def hasHeightForWidth(self):
@@ -45,32 +40,6 @@ class FlowLayout(QLayout):
     def setGeometry(self, rect):
         super().setGeometry(rect)
         self._do_layout(rect, test_only=False)
-        # 第二遍：第一遍后控件可能被 Qt 强制为更大的最小尺寸（如带 stylesheet
-        # 的 QCheckBox 的 indicator 大小与 sizeHint 不一致），
-        # 用实际尺寸重新布局以消除重叠
-        self._capture_actual_sizes()
-        self._do_layout(rect, test_only=False)
-
-    def _capture_actual_sizes(self):
-        """捕获控件在第一遍布局后的实际渲染尺寸"""
-        for item in self._items:
-            widget = item.widget()
-            if widget and widget.isVisible():
-                actual = widget.size()
-                hint = item.sizeHint()
-                # 只缓存比 sizeHint 更大的实际尺寸（排除未初始化的默认值 640x480）
-                if (actual.width() > hint.width() and actual.width() < hint.width() * 4):
-                    self._item_sizes[id(widget)] = actual
-
-    def _effective_size(self, item):
-        """获取布局项的有效尺寸：优先使用缓存的实际渲染尺寸"""
-        widget = item.widget()
-        hint = item.sizeHint()
-        if widget:
-            cached = self._item_sizes.get(id(widget))
-            if cached:
-                return hint.expandedTo(cached)
-        return hint
 
     def sizeHint(self):
         return self.minimumSize()
@@ -81,6 +50,16 @@ class FlowLayout(QLayout):
             size = size.expandedTo(item.minimumSize())
         m = self.contentsMargins()
         size += QSize(m.left() + m.right(), m.top() + m.bottom())
+        return size
+
+    def _effective_item_size(self, item):
+        """获取布局项的有效尺寸，匹配 QToolBar 的行为：
+        使用 sizeHint 与 minimumSizeHint 的较大值，
+        确保自定义样式控件（如带 stylesheet 的 QCheckBox）获得正确尺寸"""
+        size = item.sizeHint()
+        widget = item.widget()
+        if widget:
+            size = size.expandedTo(widget.minimumSizeHint())
         return size
 
     def _do_layout(self, rect, test_only):
@@ -95,7 +74,7 @@ class FlowLayout(QLayout):
             if widget and not widget.isVisible():
                 continue
 
-            item_size = self._effective_size(item)
+            item_size = self._effective_item_size(item)
             next_x = x + item_size.width() + self._h_spacing
 
             if x > effective.x() and next_x - self._h_spacing > effective.right():
