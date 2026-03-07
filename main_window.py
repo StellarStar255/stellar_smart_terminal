@@ -3320,8 +3320,13 @@ class MainWindow(QMainWindow):
         self._pinned_flow_widget = QWidget()
         self._pinned_flow_widget.setObjectName("pinnedFlowWidget")
         self._pinned_flow_widget.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Preferred)
-        self._flow_layout = FlowLayout(self._pinned_flow_widget, h_spacing=5, v_spacing=3)
-        self._flow_layout.setContentsMargins(5, 2, 5, 2)
+        # 使用 QToolBar 原生样式间距，确保 pin 模式与 unpin 模式外观一致
+        from PyQt6.QtWidgets import QStyle
+        style = self.style()
+        h_sp = style.pixelMetric(QStyle.PixelMetric.PM_ToolBarItemSpacing)  # macOS: 4
+        frame = style.pixelMetric(QStyle.PixelMetric.PM_ToolBarFrameWidth)  # macOS: 1
+        self._flow_layout = FlowLayout(self._pinned_flow_widget, h_spacing=h_sp, v_spacing=h_sp)
+        self._flow_layout.setContentsMargins(frame, frame, frame, frame)
         self._pinned_flow_toolbar.addWidget(self._pinned_flow_widget)
 
         pinned = is_double_row or self._pin_toolbar_row2
@@ -4061,7 +4066,10 @@ class MainWindow(QMainWindow):
                 return
             # 计算 flow layout 需要的高度
             h = self._flow_layout.heightForWidth(width)
-            padding = 6
+            # QToolBar 内部额外高度 = 2 * (PM_ToolBarFrameWidth + PM_ToolBarItemMargin)
+            from PyQt6.QtWidgets import QStyle
+            tb_frame = self.style().pixelMetric(QStyle.PixelMetric.PM_ToolBarFrameWidth)
+            padding = max(tb_frame * 2 + 2, 4)
             total_h = h + padding
             if total_h < 10:
                 total_h = 36  # 最小高度
