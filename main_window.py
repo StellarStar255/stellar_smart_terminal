@@ -1719,6 +1719,27 @@ class DirectoryHistoryDialog(QDialog):
         super().reject()
 
 
+class _FlowSeparator(QWidget):
+    """流式布局中的垂直虚线分隔符，匹配 QToolBar 原生分隔符"""
+
+    def __init__(self, parent=None):
+        super().__init__(parent)
+        self.setObjectName("_flow_separator")
+        self.setFixedWidth(6)
+        self.setFixedHeight(22)
+
+    def paintEvent(self, event):
+        p = QPainter(self)
+        p.setRenderHint(QPainter.RenderHint.Antialiasing, False)
+        pen = QPen(QColor("#6a6a8e"))
+        pen.setStyle(Qt.PenStyle.DashLine)
+        pen.setWidth(1)
+        p.setPen(pen)
+        x = self.width() // 2
+        p.drawLine(x, 2, x, self.height() - 2)
+        p.end()
+
+
 class MainWindow(QMainWindow):
     """主窗口"""
 
@@ -4039,15 +4060,9 @@ class MainWindow(QMainWindow):
                     widget.setParent(None)
 
     def _create_flow_separator(self):
-        """创建流式布局中的垂直分隔线，匹配 QToolBar 原生分隔符外观"""
-        sep = QFrame(self._pinned_flow_widget)
-        sep.setObjectName("_flow_separator")
-        sep.setFrameShape(QFrame.Shape.VLine)
-        sep.setFrameShadow(QFrame.Shadow.Plain)
-        sep.setFixedWidth(4)
-        sep.setFixedHeight(22)
-        sep.setLineWidth(1)
-        sep.setStyleSheet("QFrame { color: #6a6a8e; }")
+        """创建流式布局中的垂直虚线分隔符，匹配 QToolBar 原生分隔符外观"""
+        sep = _FlowSeparator(self._pinned_flow_widget)
+        sep.show()
         sep.show()
         return sep
 
