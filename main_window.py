@@ -2122,16 +2122,19 @@ class MainWindow(QMainWindow):
         if self._pin_toolbar_row2:
             self._set_pinned_toolbars_visible(True)
             QTimer.singleShot(0, self._update_flow_toolbar_height)
-            # 窗口完全显示后重新布局（此时所有控件已完成渲染，尺寸准确）
+            # 窗口完全显示后强制重新布局（所有控件已渲染，尺寸准确）
             def _post_show_relayout():
                 if not sip.isdeleted(self) and self._flow_layout:
-                    # 清除缓存的尺寸，强制重新捕获
+                    # 清除缓存并让所有控件重算尺寸
                     self._flow_layout._item_sizes.clear()
-                    # 使布局失效，触发 setGeometry 重新计算
+                    for i in range(self._flow_layout.count()):
+                        item = self._flow_layout.itemAt(i)
+                        if item and item.widget():
+                            item.widget().adjustSize()
                     self._flow_layout.invalidate()
                     self._pinned_flow_widget.updateGeometry()
-                    self._update_flow_toolbar_height()
-            QTimer.singleShot(50, _post_show_relayout)
+                    QTimer.singleShot(0, self._update_flow_toolbar_height)
+            QTimer.singleShot(100, _post_show_relayout)
         if not self._macos_window_configured:
             self._macos_window_configured = True
             # 延迟设置，确保窗口在 macOS 中完全注册
