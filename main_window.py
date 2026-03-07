@@ -3318,6 +3318,7 @@ class MainWindow(QMainWindow):
         self._pinned_flow_toolbar.toggleViewAction().setVisible(False)
 
         self._pinned_flow_widget = QWidget()
+        self._pinned_flow_widget.setObjectName("pinnedFlowWidget")
         self._flow_layout = FlowLayout(self._pinned_flow_widget, h_spacing=5, v_spacing=3)
         self._flow_layout.setContentsMargins(5, 2, 5, 2)
         self._pinned_flow_toolbar.addWidget(self._pinned_flow_widget)
@@ -6394,7 +6395,7 @@ class MainWindow(QMainWindow):
         # 固定流式工具栏样式
         if self._pinned_flow_toolbar:
             self._pinned_flow_widget.setStyleSheet(f"""
-                QWidget {{
+                QWidget#pinnedFlowWidget {{
                     background-color: {t['bg_dark']};
                 }}
             """)
