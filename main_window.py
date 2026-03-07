@@ -3319,6 +3319,7 @@ class MainWindow(QMainWindow):
 
         self._pinned_flow_widget = QWidget()
         self._pinned_flow_widget.setObjectName("pinnedFlowWidget")
+        self._pinned_flow_widget.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Preferred)
         self._flow_layout = FlowLayout(self._pinned_flow_widget, h_spacing=5, v_spacing=3)
         self._flow_layout.setContentsMargins(5, 2, 5, 2)
         self._pinned_flow_toolbar.addWidget(self._pinned_flow_widget)
