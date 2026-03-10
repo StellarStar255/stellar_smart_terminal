@@ -2670,21 +2670,24 @@ class MainWindow(QMainWindow):
         self._updating_flow_height = False  # 防止 resizeEvent 重入
         self._core_toolbar_widgets = []    # 核心工具栏控件列表（用于 pin 时移到 flow）
 
-        # 标题和颜色指示器
+        # 标题和颜色指示器（合并为一个容器，避免 QToolBar 在小控件间插入多余间距）
         self.title_label = QLabel(t("toolbar.title_label"))
         self._update_title_label_color()
-        toolbar.addWidget(self.title_label)
 
-        # 颜色选择按钮
         self.color_btn = QPushButton()
         self.color_btn.setFixedSize(24, 24)
         self.color_btn.setToolTip(t("toolbar.color_tooltip"))
         self.color_btn.setCursor(Qt.CursorShape.PointingHandCursor)
         self._update_color_btn_style()
         self.color_btn.clicked.connect(self._show_color_picker)
-        toolbar.addWidget(self.color_btn)
 
-        toolbar.addSeparator()
+        self._title_color_container = QWidget()
+        _tc_layout = QHBoxLayout(self._title_color_container)
+        _tc_layout.setContentsMargins(0, 0, 0, 0)
+        _tc_layout.setSpacing(4)
+        _tc_layout.addWidget(self.title_label)
+        _tc_layout.addWidget(self.color_btn)
+        toolbar.addWidget(self._title_color_container)
 
         # 预设选择
         self.preset_label = QLabel(t("toolbar.preset_label"))
@@ -2784,9 +2787,7 @@ class MainWindow(QMainWindow):
         # 记录核心控件顺序（pin 时移到 flow layout 用）
         # None 表示分隔符位置
         self._core_toolbar_widgets = [
-            self.title_label,
-            self.color_btn,
-            None,  # separator
+            self._title_color_container,
             self.preset_label,
             self.preset_combo,
             self.preset_switch_btn,
@@ -3338,6 +3339,9 @@ class MainWindow(QMainWindow):
         self._pinned_flow_toolbar.setMovable(False)
         self._pinned_flow_toolbar.setFloatable(False)
         self._pinned_flow_toolbar.toggleViewAction().setVisible(False)
+        # 去掉 QToolBar 自身的 padding，避免与 FlowLayout 的 contentsMargins 叠加产生多余空白
+        self._pinned_flow_toolbar.setStyleSheet("QToolBar { padding: 0px; margin: 0px; }")
+        self._pinned_flow_toolbar.setContentsMargins(0, 0, 0, 0)
 
         self._pinned_flow_widget = QWidget()
         self._pinned_flow_widget.setObjectName("pinnedFlowWidget")
@@ -6449,6 +6453,14 @@ class MainWindow(QMainWindow):
 
         # 固定流式工具栏样式
         if self._pinned_flow_toolbar:
+            self._pinned_flow_toolbar.setStyleSheet(f"""
+                QToolBar {{
+                    padding: 0px;
+                    margin: 0px;
+                    background-color: {t['bg_dark']};
+                    border: none;
+                }}
+            """)
             self._pinned_flow_widget.setStyleSheet(f"""
                 QWidget#pinnedFlowWidget {{
                     background-color: {t['bg_dark']};
