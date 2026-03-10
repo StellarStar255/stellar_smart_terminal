@@ -94,8 +94,20 @@ class FlowLayout(QLayout):
         if current_row:
             rows.append((row_height, current_row))
 
-        # 第二遍：垂直居中放置每行的 items
-        y = effective.y()
+        # 计算所有行的总高度
+        content_height = 0
+        if rows:
+            for row_h, _ in rows:
+                content_height += row_h
+            content_height += self._v_spacing * (len(rows) - 1)
+
+        # 第二遍：整体垂直居中后，逐行放置 items（行内也垂直居中）
+        available_h = effective.height()
+        if available_h > content_height and content_height > 0 and not test_only:
+            y = effective.y() + (available_h - content_height) // 2
+        else:
+            y = effective.y()
+
         for row_h, row_items in rows:
             if not test_only:
                 for item, item_size, x_pos in row_items:
