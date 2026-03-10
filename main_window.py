@@ -5915,12 +5915,27 @@ class MainWindow(QMainWindow):
 
     def _open_in_vscode(self):
         """在 VS Code 中打开当前工作目录"""
-        # 使用缓存的路径
+        import sys as _sys
+        # macOS: 优先使用 open -a 启动，确保应用获得完整文件系统权限
+        if _sys.platform == "darwin":
+            app_paths = [
+                "/Applications/Visual Studio Code.app",
+                os.path.expanduser("~/Applications/Visual Studio Code.app"),
+            ]
+            for app_path in app_paths:
+                if os.path.isdir(app_path):
+                    try:
+                        subprocess.Popen(["open", "-a", app_path, "--args", self._window_cwd])
+                        self.statusbar.showMessage(t("status.opened_in_vscode", cwd=self._window_cwd), 3000)
+                        return
+                    except Exception as e:
+                        QMessageBox.warning(self, t("msg.open_failed"), t("msg.vscode_open_error", error=str(e)))
+                        return
+
+        # Windows / Linux: 使用 CLI 命令
         if MainWindow._vscode_path_cache is None:
-            # 首次查找并缓存
             code_path = shutil.which("code")
             if not code_path:
-                # 尝试常见路径
                 possible_paths = [
                     "/usr/local/bin/code",
                     "/Applications/Visual Studio Code.app/Contents/Resources/app/bin/code",
@@ -5930,7 +5945,7 @@ class MainWindow(QMainWindow):
                     if os.path.isfile(path):
                         code_path = path
                         break
-            MainWindow._vscode_path_cache = code_path or ""  # 空字符串表示未找到
+            MainWindow._vscode_path_cache = code_path or ""
 
         code_path = MainWindow._vscode_path_cache
         if not code_path:
@@ -5942,7 +5957,6 @@ class MainWindow(QMainWindow):
             return
 
         try:
-            # 打开当前工作目录
             subprocess.Popen([code_path, self._window_cwd])
             self.statusbar.showMessage(t("status.opened_in_vscode", cwd=self._window_cwd), 3000)
         except Exception as e:
@@ -5950,12 +5964,27 @@ class MainWindow(QMainWindow):
 
     def _open_in_cursor(self):
         """在 Cursor 中打开当前工作目录"""
-        # 使用缓存的路径
+        import sys as _sys
+        # macOS: 优先使用 open -a 启动，确保应用获得完整文件系统权限
+        if _sys.platform == "darwin":
+            app_paths = [
+                "/Applications/Cursor.app",
+                os.path.expanduser("~/Applications/Cursor.app"),
+            ]
+            for app_path in app_paths:
+                if os.path.isdir(app_path):
+                    try:
+                        subprocess.Popen(["open", "-a", app_path, "--args", self._window_cwd])
+                        self.statusbar.showMessage(t("status.opened_in_cursor", cwd=self._window_cwd), 3000)
+                        return
+                    except Exception as e:
+                        QMessageBox.warning(self, t("msg.open_failed"), t("msg.cursor_open_error", error=str(e)))
+                        return
+
+        # Windows / Linux: 使用 CLI 命令
         if MainWindow._cursor_path_cache is None:
-            # 首次查找并缓存
             cursor_path = shutil.which("cursor")
             if not cursor_path:
-                # 尝试常见路径
                 possible_paths = [
                     "/usr/local/bin/cursor",
                     "/Applications/Cursor.app/Contents/Resources/app/bin/cursor",
@@ -5965,7 +5994,7 @@ class MainWindow(QMainWindow):
                     if os.path.isfile(path):
                         cursor_path = path
                         break
-            MainWindow._cursor_path_cache = cursor_path or ""  # 空字符串表示未找到
+            MainWindow._cursor_path_cache = cursor_path or ""
 
         cursor_path = MainWindow._cursor_path_cache
         if not cursor_path:
@@ -5977,7 +6006,6 @@ class MainWindow(QMainWindow):
             return
 
         try:
-            # 打开当前工作目录
             subprocess.Popen([cursor_path, self._window_cwd])
             self.statusbar.showMessage(t("status.opened_in_cursor", cwd=self._window_cwd), 3000)
         except Exception as e:
