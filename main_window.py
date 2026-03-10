@@ -599,7 +599,7 @@ class WindowNavigatorPanel(QWidget):
 
         # 更新列表
         self.window_list.clear()
-        for window in windows:
+        for idx, window in enumerate(windows, 1):
             try:
                 if sip.isdeleted(window):
                     continue
@@ -609,6 +609,7 @@ class WindowNavigatorPanel(QWidget):
                     display_title = self._extract_folder_name(title, window)
                 else:
                     display_title = title
+                display_title = f"{idx}. {display_title}"
                 color = window.get_window_color()
                 item = QListWidgetItem(display_title)
                 item.setData(Qt.ItemDataRole.UserRole, window)
