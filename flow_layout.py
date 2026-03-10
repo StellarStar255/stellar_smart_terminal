@@ -78,13 +78,16 @@ class FlowLayout(QLayout):
                 continue
 
             item_size = self._effective_item_size(item)
-            next_x = x + item_size.width() + self._h_spacing
+            # 分隔符不额外加间距，与 QToolBar 原生分隔符行为一致
+            is_sep = widget and widget.objectName() == "_flow_separator"
+            spacing = 0 if is_sep else self._h_spacing
+            next_x = x + item_size.width() + spacing
 
-            if x > effective.x() and next_x - self._h_spacing > effective.right():
+            if x > effective.x() and next_x - spacing > effective.right():
                 rows.append((row_height, current_row))
                 current_row = []
                 x = effective.x()
-                next_x = x + item_size.width() + self._h_spacing
+                next_x = x + item_size.width() + spacing
                 row_height = 0
 
             current_row.append((item, item_size, x))

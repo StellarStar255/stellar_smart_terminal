@@ -1726,7 +1726,7 @@ class _FlowSeparator(QWidget):
     def __init__(self, parent=None):
         super().__init__(parent)
         self.setObjectName("_flow_separator")
-        self.setFixedWidth(6)
+        self.setFixedWidth(10)  # 包含两侧间距，匹配 QToolBar 原生分隔符总宽度
         self.setFixedHeight(22)
 
     def paintEvent(self, event):
