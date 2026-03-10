@@ -3881,14 +3881,20 @@ class MainWindow(QMainWindow):
             for action in list(self.main_toolbar.actions()):
                 self.main_toolbar.removeAction(action)
 
-            # 2. 先切换可见性，再填充 flow layout
+            # 2. 重置 flow toolbar 高度约束，防止上一次的 setFixedHeight 影响新布局
+            self._pinned_flow_toolbar.setMinimumHeight(0)
+            self._pinned_flow_toolbar.setMaximumHeight(16777215)  # QWIDGETSIZE_MAX
+
+            # 3. 先切换可见性，再填充 flow layout
             #    （确保 parent 可见，separator 等子控件的 isVisible() 才正确）
             self.main_toolbar.setVisible(False)
             self._pinned_flow_toolbar.setVisible(True)
 
-            # 3. 填充 flow layout（核心控件 + 全部分组）
+            # 4. 填充 flow layout（核心控件 + 全部分组）
             self._populate_pinned_flow(effective_group_order)
+            # 延迟更新高度：让 Qt 完成布局后再计算
             QTimer.singleShot(0, self._update_flow_toolbar_height)
+            QTimer.singleShot(100, self._update_flow_toolbar_height)
 
             # 重新应用可见性配置
             if self.toolbar_config:
@@ -3908,6 +3914,7 @@ class MainWindow(QMainWindow):
                     self.main_toolbar.addSeparator()
                 else:
                     self.main_toolbar.addWidget(w)
+                    w.show()
 
             # 4. 按分组顺序将所有组按钮添加回 main_toolbar
             for group_name in effective_group_order:
@@ -3920,17 +3927,23 @@ class MainWindow(QMainWindow):
                     continue
                 self.main_toolbar.addSeparator()
                 if group_name in self._group_prefix_widgets:
-                    self.main_toolbar.addWidget(self._group_prefix_widgets[group_name])
+                    pw = self._group_prefix_widgets[group_name]
+                    self.main_toolbar.addWidget(pw)
+                    pw.show()
                 saved_order = self._get_button_order(group_name)
                 order = saved_order if saved_order else self._group_default_orders.get(group_name, [])
                 for btn_name in order:
                     if btn_name in buttons_dict:
-                        new_action = self.main_toolbar.addWidget(buttons_dict[btn_name])
+                        w = buttons_dict[btn_name]
+                        new_action = self.main_toolbar.addWidget(w)
+                        w.show()
                         self._toolbar_actions[btn_name] = new_action
 
             # 5. pin 和 settings 放最后
             pin_action = self.main_toolbar.addWidget(self.pin_row2_checkbox)
-            settings_action = self.main_toolbar.addWidget(self.toolbar_settings_btn)
+            self.pin_row2_checkbox.show()
+            self.main_toolbar.addWidget(self.toolbar_settings_btn)
+            self.toolbar_settings_btn.show()
             self._cleanup_toolbar_separators(self.main_toolbar, pin_action)
 
             # 6. 显示 main_toolbar
@@ -4028,6 +4041,7 @@ class MainWindow(QMainWindow):
                 pw = self._group_prefix_widgets[group_name]
                 pw.setParent(self._pinned_flow_widget)
                 self._flow_layout.addWidget(pw)
+                pw.show()
             saved_order = self._get_button_order(group_name)
             order = saved_order if saved_order else self._group_default_orders.get(group_name, [])
             for btn_name in self._group_default_orders.get(group_name, []):
@@ -4040,12 +4054,14 @@ class MainWindow(QMainWindow):
                     self._flow_layout.addWidget(w)
                     w.show()
 
-        # 3. pin checkbox 和 settings 按钮放在最后
+        # 3. pin checkbox 和 settings 按钮放在最后（设置在最末尾）
         sep = self._create_flow_separator()
         self._flow_layout.addWidget(sep)
         self.pin_row2_checkbox.setParent(self._pinned_flow_widget)
         self._flow_layout.addWidget(self.pin_row2_checkbox)
         self.pin_row2_checkbox.show()
+        sep2 = self._create_flow_separator()
+        self._flow_layout.addWidget(sep2)
         self.toolbar_settings_btn.setParent(self._pinned_flow_widget)
         self._flow_layout.addWidget(self.toolbar_settings_btn)
         self.toolbar_settings_btn.show()
@@ -4083,7 +4099,11 @@ class MainWindow(QMainWindow):
 
         self._updating_flow_height = True
         try:
-            width = self._pinned_flow_toolbar.width()
+            # 使用 flow widget 的实际宽度（已扣除 QToolBar 内部 margins）
+            # 这样 heightForWidth 才能正确判断哪些 items 需要换行
+            width = self._pinned_flow_widget.width()
+            if width <= 0:
+                width = self._pinned_flow_toolbar.width()
             if width <= 0:
                 return
             # 计算 flow layout 需要的高度
