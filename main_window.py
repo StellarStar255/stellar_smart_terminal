@@ -5925,7 +5925,7 @@ class MainWindow(QMainWindow):
             for app_path in app_paths:
                 if os.path.isdir(app_path):
                     try:
-                        subprocess.Popen(["open", "-a", app_path, "--args", self._window_cwd])
+                        subprocess.Popen(["open", "-a", app_path, self._window_cwd])
                         self.statusbar.showMessage(t("status.opened_in_vscode", cwd=self._window_cwd), 3000)
                         return
                     except Exception as e:
@@ -5974,7 +5974,7 @@ class MainWindow(QMainWindow):
             for app_path in app_paths:
                 if os.path.isdir(app_path):
                     try:
-                        subprocess.Popen(["open", "-a", app_path, "--args", self._window_cwd])
+                        subprocess.Popen(["open", "-a", app_path, self._window_cwd])
                         self.statusbar.showMessage(t("status.opened_in_cursor", cwd=self._window_cwd), 3000)
                         return
                     except Exception as e:
