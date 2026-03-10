@@ -3339,16 +3339,18 @@ class MainWindow(QMainWindow):
         self._pinned_flow_toolbar.setMovable(False)
         self._pinned_flow_toolbar.setFloatable(False)
         self._pinned_flow_toolbar.toggleViewAction().setVisible(False)
-        # 去掉 QToolBar 自身的 padding，避免与 FlowLayout 的 contentsMargins 叠加产生多余空白
-        self._pinned_flow_toolbar.setStyleSheet("QToolBar { padding: 0px; margin: 0px; }")
+        # 去掉 QToolBar 自身所有间距，由 FlowLayout 完全控制
+        self._pinned_flow_toolbar.setStyleSheet("QToolBar { padding: 0px; margin: 0px; spacing: 0px; }")
         self._pinned_flow_toolbar.setContentsMargins(0, 0, 0, 0)
 
         self._pinned_flow_widget = QWidget()
         self._pinned_flow_widget.setObjectName("pinnedFlowWidget")
         self._pinned_flow_widget.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Preferred)
-        # 间距与全局 QToolBar CSS { spacing: 5px; padding: 5px; } 保持一致
+        self._pinned_flow_widget.setContentsMargins(0, 0, 0, 0)
+        # h_spacing 匹配 unpin QToolBar 的 CSS spacing: 5px
+        # contentsMargins 需减去 QToolBar/QWidgetAction 内部约 3px 的隐式边距
         self._flow_layout = FlowLayout(self._pinned_flow_widget, h_spacing=5, v_spacing=5)
-        self._flow_layout.setContentsMargins(5, 5, 5, 5)
+        self._flow_layout.setContentsMargins(2, 2, 2, 2)
         self._pinned_flow_toolbar.addWidget(self._pinned_flow_widget)
 
         pinned = is_double_row or self._pin_toolbar_row2
@@ -4102,16 +4104,11 @@ class MainWindow(QMainWindow):
                 width = self._pinned_flow_toolbar.width()
             if width <= 0:
                 return
-            # 计算 flow layout 需要的高度
+            # 计算 flow layout 需要的高度（FlowLayout 的 contentsMargins 已包含边距）
             h = self._flow_layout.heightForWidth(width)
-            # QToolBar 内部额外高度 = 2 * (PM_ToolBarFrameWidth + PM_ToolBarItemMargin)
-            from PyQt6.QtWidgets import QStyle
-            tb_frame = self.style().pixelMetric(QStyle.PixelMetric.PM_ToolBarFrameWidth)
-            padding = max(tb_frame * 2 + 2, 4)
-            total_h = h + padding
-            if total_h < 10:
-                total_h = 36  # 最小高度
-            self._pinned_flow_toolbar.setFixedHeight(total_h)
+            if h < 10:
+                h = 36  # 最小高度
+            self._pinned_flow_toolbar.setFixedHeight(h)
             self._pinned_flow_widget.setMinimumHeight(h)
         finally:
             self._updating_flow_height = False
@@ -6473,6 +6470,7 @@ class MainWindow(QMainWindow):
                 QToolBar {{
                     padding: 0px;
                     margin: 0px;
+                    spacing: 0px;
                     background-color: {t['bg_dark']};
                     border: none;
                 }}
