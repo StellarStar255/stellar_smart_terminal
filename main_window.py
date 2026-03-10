@@ -3346,13 +3346,9 @@ class MainWindow(QMainWindow):
         self._pinned_flow_widget = QWidget()
         self._pinned_flow_widget.setObjectName("pinnedFlowWidget")
         self._pinned_flow_widget.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Preferred)
-        # 使用 QToolBar 原生样式间距，确保 pin 模式与 unpin 模式外观一致
-        from PyQt6.QtWidgets import QStyle
-        style = self.style()
-        h_sp = style.pixelMetric(QStyle.PixelMetric.PM_ToolBarItemSpacing) + 3  # 匹配 QToolBar 实际间距
-        frame = style.pixelMetric(QStyle.PixelMetric.PM_ToolBarFrameWidth)  # macOS: 1
-        self._flow_layout = FlowLayout(self._pinned_flow_widget, h_spacing=h_sp, v_spacing=h_sp)
-        self._flow_layout.setContentsMargins(frame, frame, frame, frame)
+        # 间距与全局 QToolBar CSS { spacing: 5px; padding: 5px; } 保持一致
+        self._flow_layout = FlowLayout(self._pinned_flow_widget, h_spacing=5, v_spacing=5)
+        self._flow_layout.setContentsMargins(5, 5, 5, 5)
         self._pinned_flow_toolbar.addWidget(self._pinned_flow_widget)
 
         pinned = is_double_row or self._pin_toolbar_row2
