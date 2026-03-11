@@ -1247,43 +1247,33 @@ class TerminalWidget(QWidget):
                     self._write_to_backend(b'\x03')
                 return
 
-        # Cmd+W: 关闭标签页 (使用 QKeySequence.StandardKey.Close 确保跨平台兼容)
+        # === GUI 快捷键（始终拦截，不发送到终端）===
+
+        # Cmd+W / Ctrl+W: 关闭标签页
         if event.matches(QKeySequence.StandardKey.Close):
             self.close_tab_requested.emit()
             event.accept()
             return
 
-        # Cmd+T: 新建标签页 (使用 QKeySequence.StandardKey.AddTab)
+        # Cmd+T / Ctrl+T: 新建标签页
         if event.matches(QKeySequence.StandardKey.AddTab):
             self.new_tab_requested.emit()
             event.accept()
             return
 
-        # 使用 QKeySequence 标准方式检测粘贴/复制/全选
+        # Ctrl+V / Cmd+V: 粘贴
         if event.matches(QKeySequence.StandardKey.Paste):
             self._paste_from_clipboard()
+            event.accept()
             return
 
-        # 复制功能：Cmd+C (macOS) 或 Ctrl+C (Windows/Linux，且没有选中文本时不生效)
+        # Ctrl+C / Cmd+C: 复制（仅在有选中文本时拦截，否则发送到终端）
         if event.matches(QKeySequence.StandardKey.Copy):
             self._copy_selection_to_clipboard()
+            event.accept()
             return
 
-        if event.matches(QKeySequence.StandardKey.SelectAll):
-            self._select_all_content()
-            return
-
-        # Cmd+F 搜索
-        if event.matches(QKeySequence.StandardKey.Find):
-            self._show_search_bar()
-            return
-
-        # Cmd+S 保存
-        if event.matches(QKeySequence.StandardKey.Save):
-            self._save_to_file()
-            return
-
-        # Cmd+Plus/Minus/= 字体缩放 — 委托给主窗口全局缩放
+        # Ctrl+Plus/Minus/= 字体缩放 — 委托给主窗口全局缩放
         if modifiers & Qt.KeyboardModifier.ControlModifier:
             if key in (Qt.Key.Key_Plus, Qt.Key.Key_Equal):
                 main_win = self.window()
@@ -1291,6 +1281,7 @@ class TerminalWidget(QWidget):
                     main_win._global_zoom_in()
                 else:
                     self._zoom_in()
+                event.accept()
                 return
             if key == Qt.Key.Key_Minus:
                 main_win = self.window()
@@ -1298,27 +1289,26 @@ class TerminalWidget(QWidget):
                     main_win._global_zoom_out()
                 else:
                     self._zoom_out()
+                event.accept()
                 return
 
-        # Cmd+Right: 跳到行末 (发送 Ctrl+E, readline end-of-line)
-        # Cmd+Left: 跳到行首 (发送 Ctrl+A, readline beginning-of-line)
-        if (modifiers & Qt.KeyboardModifier.ControlModifier) and key == Qt.Key.Key_Right:
-            if self._backend is not None:
-                self._write_to_backend(b'\x05')
-            return
-        if (modifiers & Qt.KeyboardModifier.ControlModifier) and key == Qt.Key.Key_Left:
-            if self._backend is not None:
-                self._write_to_backend(b'\x01')
-            return
-
-        # Cmd+K 清屏 (macOS 上 Cmd 是 ControlModifier)
-        if (modifiers & Qt.KeyboardModifier.ControlModifier) and key == Qt.Key.Key_K:
-            self._clear_screen_keep_history()
-            return
+        # macOS: Cmd+Right/Left 跳到行末/行首
+        if sys.platform == 'darwin':
+            if (modifiers & Qt.KeyboardModifier.ControlModifier) and key == Qt.Key.Key_Right:
+                if self._backend is not None:
+                    self._write_to_backend(b'\x05')
+                event.accept()
+                return
+            if (modifiers & Qt.KeyboardModifier.ControlModifier) and key == Qt.Key.Key_Left:
+                if self._backend is not None:
+                    self._write_to_backend(b'\x01')
+                event.accept()
+                return
 
         # Escape 关闭搜索栏
         if key == Qt.Key.Key_Escape and self._search_bar and self._search_bar.isVisible():
             self._hide_search_bar()
+            event.accept()
             return
 
         # Shift+PageUp/PageDown 滚动历史
@@ -1328,27 +1318,44 @@ class TerminalWidget(QWidget):
                 self.scroll_offset = min(self.scroll_offset + self.term_rows, history_lines)
                 self._content_dirty = True
                 self.update()
+                event.accept()
                 return
             elif key == Qt.Key.Key_PageDown:
                 self.scroll_offset = max(self.scroll_offset - self.term_rows, 0)
                 self._content_dirty = True
                 self.update()
+                event.accept()
                 return
             elif key == Qt.Key.Key_Home:
-                # Shift+Home 滚动到最顶部
                 self.scroll_offset = history_lines
                 self._content_dirty = True
                 self.update()
+                event.accept()
                 return
             elif key == Qt.Key.Key_End:
-                # Shift+End 滚动到底部
                 self.scroll_offset = 0
                 self._content_dirty = True
                 self.update()
+                event.accept()
                 return
 
+        # === 终端未运行时的 GUI 快捷键 ===
         if self._backend is None:
+            if event.matches(QKeySequence.StandardKey.SelectAll):
+                self._select_all_content()
+                event.accept()
+                return
+            if event.matches(QKeySequence.StandardKey.Find):
+                self._show_search_bar()
+                event.accept()
+                return
+            if event.matches(QKeySequence.StandardKey.Save):
+                self._save_to_file()
+                event.accept()
+                return
             return
+
+        # === 以下所有按键都发送到终端 ===
 
         # 输入时自动滚动到底部
         if self.scroll_offset > 0:
@@ -1365,7 +1372,7 @@ class TerminalWidget(QWidget):
         else:
             is_physical_ctrl = bool(modifiers & Qt.KeyboardModifier.ControlModifier) and not bool(modifiers & Qt.KeyboardModifier.MetaModifier)
 
-        # 物理 Control 键按下（无 Shift/Alt）
+        # 物理 Control 键按下（无 Shift/Alt）→ 全部发送到终端
         if is_physical_ctrl and not has_shift_or_alt:
             if key == Qt.Key.Key_C:
                 # Ctrl+C 已在上方优先处理，这里作为兜底
@@ -1444,6 +1451,7 @@ class TerminalWidget(QWidget):
 
         if data:
             self._write_to_backend(data)
+            event.accept()
 
     def inputMethodEvent(self, event):
         """处理输入法输入（中文等）"""
