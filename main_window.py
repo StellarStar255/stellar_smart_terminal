@@ -4267,8 +4267,38 @@ class MainWindow(QMainWindow):
         idx = self.tab_widget.currentIndex()
         self.tab_sessions[idx] = session
 
+    def _reload_dir_history_from_config(self):
+        """从配置文件重新加载目录历史（确保多窗口间同步）"""
+        try:
+            if self.CONFIG_FILE.exists():
+                with open(self.CONFIG_FILE, 'r', encoding='utf-8') as f:
+                    config = json.load(f)
+                saved_history = config.get('working_dir_history', [])
+                saved_freq = config.get('working_dir_freq', {})
+                # 合并：以文件中的数据为基础，同时保留本窗口新增但尚未保存的条目
+                merged_history = list(saved_history)
+                merged_freq = dict(saved_freq)
+                for p in self.working_dir_history:
+                    if p not in merged_freq:
+                        merged_freq[p] = self._working_dir_freq.get(p, 1)
+                    if p not in merged_history:
+                        merged_history.append(p)
+                # 为没有频率记录的路径补默认值
+                for p in merged_history:
+                    if p not in merged_freq:
+                        merged_freq[p] = 1
+                # 按频率倒序排列
+                merged_history.sort(key=lambda p: merged_freq.get(p, 0), reverse=True)
+                self.working_dir_history = merged_history
+                self._working_dir_freq = merged_freq
+        except Exception:
+            pass
+
     def _show_quick_launch_menu(self):
         """显示快速启动菜单 - 支持搜索过滤"""
+        # 从配置文件重新加载目录历史，确保多窗口间同步
+        self._reload_dir_history_from_config()
+
         # 创建弹出窗口 - 使用Tool类型以支持键盘焦点
         popup = QDialog(self, Qt.WindowType.Tool | Qt.WindowType.FramelessWindowHint | Qt.WindowType.WindowStaysOnTopHint)
         popup.setAttribute(Qt.WidgetAttribute.WA_DeleteOnClose)  # 关闭时自动删除

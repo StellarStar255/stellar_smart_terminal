@@ -18,7 +18,12 @@ from i18n import t
 
 
 class CompatibleHistoryScreen(pyte.HistoryScreen):
-    """兼容性修复：处理新版 pyte 传递的 private 参数"""
+    """兼容性修复：处理新版 pyte 传递的 private 参数
+    并实现备用屏幕缓冲区（mode 1049/47/1047），pyte 0.8 原生不支持。
+    """
+
+    # 备用屏幕相关的私有模式号
+    _ALT_SCREEN_MODES = frozenset({47, 1047, 1049})
 
     def __init__(self, *args, **kwargs):
         super().__init__(*args, **kwargs)
@@ -28,10 +33,61 @@ class CompatibleHistoryScreen(pyte.HistoryScreen):
         self._soft_wrapped_ids = set()
         self._in_draw = False
 
+        # 备用屏幕缓冲区支持
+        self._in_alt_screen = False
+        self._saved_main_buffer = None
+        self._saved_main_cursor = None
+        self._saved_main_history_lines = 0
+
     def select_graphic_rendition(self, *attrs, **kwargs):
         # 移除 private 参数（新版 pyte 会传递，但基类不支持）
         kwargs.pop('private', None)
         return super().select_graphic_rendition(*attrs, **kwargs)
+
+    # ------ 备用屏幕缓冲区 ------
+
+    def set_mode(self, *modes, **kwargs):
+        """拦截 private mode 设置，处理备用屏幕切换"""
+        if kwargs.get('private') and not self._in_alt_screen:
+            if self._ALT_SCREEN_MODES & set(modes):
+                self._enter_alt_screen(save_cursor=(1049 in modes))
+        super().set_mode(*modes, **kwargs)
+
+    def reset_mode(self, *modes, **kwargs):
+        """拦截 private mode 重置，处理备用屏幕退出"""
+        if kwargs.get('private') and self._in_alt_screen:
+            if self._ALT_SCREEN_MODES & set(modes):
+                self._leave_alt_screen(restore_cursor=(1049 in modes))
+        super().reset_mode(*modes, **kwargs)
+
+    def _enter_alt_screen(self, save_cursor=True):
+        """进入备用屏幕：保存主缓冲区，创建空的备用缓冲区"""
+        import copy
+        # 保存主屏幕的缓冲区和光标
+        self._saved_main_buffer = copy.deepcopy(self.buffer)
+        self._saved_main_history_lines = self._total_history_lines
+        if save_cursor:
+            self._saved_main_cursor = copy.copy(self.cursor)
+        self._in_alt_screen = True
+        # 清空当前缓冲区作为备用屏幕
+        for row in range(self.lines):
+            self.buffer[row].clear()
+        self.cursor.x = 0
+        self.cursor.y = 0
+
+    def _leave_alt_screen(self, restore_cursor=True):
+        """退出备用屏幕：恢复主缓冲区"""
+        if self._saved_main_buffer is not None:
+            self.buffer = self._saved_main_buffer
+            self._total_history_lines = self._saved_main_history_lines
+            if restore_cursor and self._saved_main_cursor is not None:
+                self.cursor.x = self._saved_main_cursor.x
+                self.cursor.y = self._saved_main_cursor.y
+            self._saved_main_buffer = None
+            self._saved_main_cursor = None
+        self._in_alt_screen = False
+
+    # ------ 原有功能 ------
 
     def draw(self, *chars):
         self._in_draw = True
@@ -49,12 +105,17 @@ class CompatibleHistoryScreen(pyte.HistoryScreen):
     def index(self):
         """重写以追踪推入历史的行数和软换行状态"""
         top, bottom = self.margins or (0, self.lines - 1)
-        if self.cursor.y == bottom:
+        if self.cursor.y == bottom and not self._in_alt_screen:
+            # 备用屏幕上不追踪主屏幕的历史行数
             self._total_history_lines += 1
         if self._in_draw:
             # draw() 触发的 index 是自动换行（软换行）
             self._soft_wrapped_ids.add(id(self.buffer[self.cursor.y]))
-        super().index()
+        if self._in_alt_screen:
+            # 备用屏幕上不推入主屏幕历史，直接调用 Screen.index
+            pyte.Screen.index(self)
+        else:
+            super().index()
 
     def erase_in_display(self, how=0, *args, **kwargs):
         # 清屏时清理软换行标记
@@ -67,6 +128,10 @@ class CompatibleHistoryScreen(pyte.HistoryScreen):
         if hasattr(self, '_soft_wrapped_ids'):
             self._soft_wrapped_ids.clear()
             self._in_draw = False
+        if hasattr(self, '_in_alt_screen') and self._in_alt_screen:
+            self._in_alt_screen = False
+            self._saved_main_buffer = None
+            self._saved_main_cursor = None
         super().reset()
 
     def is_soft_wrapped(self, buffer_line) -> bool:
@@ -140,7 +205,7 @@ class TerminalWidget(QWidget):
 
     # 预编译正则表达式（用于过滤不支持的转义序列）
     _RE_SYNC_OUTPUT = re.compile(r'\x1b\[\?2026[hl]')
-    _RE_KITTY_KEYBOARD = re.compile(r'\x1b\[[\?<>=]*u')
+    _RE_KITTY_KEYBOARD = re.compile(r'\x1b\[[\?<>=]+u')
     _RE_TERMINAL_QUERY = re.compile(r'\x1b\[>[\d;]*[cmu]')
     _RE_FOCUS_REPORT = re.compile(r'\x1b\[\?1004[hl]')
     _RE_CURSOR_STYLE = re.compile(r'\x1b\[\d* q')  # DECSCUSR: CSI Ps SP q
@@ -628,6 +693,7 @@ class TerminalWidget(QWidget):
             text = self._RE_OSC_TITLE.sub('', text)         # OSC 0,1,2 标题
             text = self._RE_OSC_OTHER.sub('', text)         # 其他 OSC 序列 (7, 133 等)
 
+
             # 检测鼠标模式启用/禁用
             # 鼠标模式序列: \x1b[?1000h (启用), \x1b[?1000l (禁用)
             # 也有 1002, 1003, 1006 等变体
@@ -699,12 +765,20 @@ class TerminalWidget(QWidget):
         return getattr(self.screen, 'history', None)
 
     def _get_history_top(self):
-        """获取历史记录顶部列表（避免重复 hasattr 检查）"""
+        """获取历史记录顶部列表（避免重复 hasattr 检查）
+        备用屏幕上不显示主屏幕的历史记录。
+        """
+        if self.screen._in_alt_screen:
+            return []
         history = self._screen_history
         return history.top if history else []
 
     def _get_history_count(self) -> int:
-        """获取历史记录行数（避免重复 hasattr 检查）"""
+        """获取历史记录行数（避免重复 hasattr 检查）
+        备用屏幕上不显示主屏幕的历史记录。
+        """
+        if self.screen._in_alt_screen:
+            return 0
         history = self._screen_history
         return len(history.top) if history else 0
 

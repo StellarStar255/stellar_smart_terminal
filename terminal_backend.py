@@ -1,6 +1,6 @@
 """
 跨平台终端后端抽象层
-支持 Unix (pty/fork) 和 Windows (pywinpty)
+支持 Unix (pty/fork) 和 Windows (ConPTY passthrough via ctypes)
 """
 import os
 import sys
@@ -74,39 +74,323 @@ class TerminalBackend(ABC):
 
 
 if IS_WINDOWS:
-    import winpty
+    import ctypes
+    import ctypes.wintypes as wintypes
+    import subprocess
+
+    # Windows API 常量
+    PSEUDOCONSOLE_PASSTHROUGH = 0x0000008
+    PROC_THREAD_ATTRIBUTE_PSEUDOCONSOLE = 0x00020016
+    EXTENDED_STARTUPINFO_PRESENT = 0x00080000
+    CREATE_UNICODE_ENVIRONMENT = 0x00000400
+    STILL_ACTIVE = 259
+    WAIT_TIMEOUT = 0x00000102
+    INFINITE = 0xFFFFFFFF
+    GENERIC_READ = 0x80000000
+    GENERIC_WRITE = 0x40000000
+    FILE_FLAG_OVERLAPPED = 0x40000000
+
+    # Windows API 结构体
+    class COORD(ctypes.Structure):
+        _fields_ = [("X", ctypes.c_short), ("Y", ctypes.c_short)]
+
+    class STARTUPINFOEX(ctypes.Structure):
+        _fields_ = [
+            ("cb", wintypes.DWORD),
+            ("lpReserved", wintypes.LPWSTR),
+            ("lpDesktop", wintypes.LPWSTR),
+            ("lpTitle", wintypes.LPWSTR),
+            ("dwX", wintypes.DWORD),
+            ("dwY", wintypes.DWORD),
+            ("dwXSize", wintypes.DWORD),
+            ("dwYSize", wintypes.DWORD),
+            ("dwXCountChars", wintypes.DWORD),
+            ("dwYCountChars", wintypes.DWORD),
+            ("dwFillAttribute", wintypes.DWORD),
+            ("dwFlags", wintypes.DWORD),
+            ("wShowWindow", wintypes.WORD),
+            ("cbReserved2", wintypes.WORD),
+            ("lpReserved2", ctypes.POINTER(ctypes.c_byte)),
+            ("hStdInput", wintypes.HANDLE),
+            ("hStdOutput", wintypes.HANDLE),
+            ("hStdError", wintypes.HANDLE),
+            ("lpAttributeList", ctypes.c_void_p),
+        ]
+
+    class PROCESS_INFORMATION(ctypes.Structure):
+        _fields_ = [
+            ("hProcess", wintypes.HANDLE),
+            ("hThread", wintypes.HANDLE),
+            ("dwProcessId", wintypes.DWORD),
+            ("dwThreadId", wintypes.DWORD),
+        ]
+
+    class SECURITY_ATTRIBUTES(ctypes.Structure):
+        _fields_ = [
+            ("nLength", wintypes.DWORD),
+            ("lpSecurityDescriptor", wintypes.LPVOID),
+            ("bInheritHandle", wintypes.BOOL),
+        ]
+
+    # Windows API 函数
+    kernel32 = ctypes.windll.kernel32
+
+    # CreatePipe
+    kernel32.CreatePipe.argtypes = [
+        ctypes.POINTER(wintypes.HANDLE),  # hReadPipe
+        ctypes.POINTER(wintypes.HANDLE),  # hWritePipe
+        ctypes.POINTER(SECURITY_ATTRIBUTES),  # lpPipeAttributes
+        wintypes.DWORD,  # nSize
+    ]
+    kernel32.CreatePipe.restype = wintypes.BOOL
+
+    # CreatePseudoConsole
+    kernel32.CreatePseudoConsole.argtypes = [
+        COORD,           # size
+        wintypes.HANDLE, # hInput
+        wintypes.HANDLE, # hOutput
+        wintypes.DWORD,  # dwFlags
+        ctypes.POINTER(wintypes.HANDLE),  # phPC (HPCON*)
+    ]
+    kernel32.CreatePseudoConsole.restype = ctypes.HRESULT
+
+    # ResizePseudoConsole
+    kernel32.ResizePseudoConsole.argtypes = [
+        wintypes.HANDLE,  # hPC
+        COORD,            # size
+    ]
+    kernel32.ResizePseudoConsole.restype = ctypes.HRESULT
+
+    # ClosePseudoConsole
+    kernel32.ClosePseudoConsole.argtypes = [wintypes.HANDLE]
+    kernel32.ClosePseudoConsole.restype = None
+
+    # InitializeProcThreadAttributeList
+    kernel32.InitializeProcThreadAttributeList.argtypes = [
+        ctypes.c_void_p,  # lpAttributeList
+        wintypes.DWORD,   # dwAttributeCount
+        wintypes.DWORD,   # dwFlags
+        ctypes.POINTER(ctypes.c_size_t),  # lpSize
+    ]
+    kernel32.InitializeProcThreadAttributeList.restype = wintypes.BOOL
+
+    # UpdateProcThreadAttribute
+    kernel32.UpdateProcThreadAttribute.argtypes = [
+        ctypes.c_void_p,   # lpAttributeList
+        wintypes.DWORD,    # dwFlags
+        ctypes.POINTER(wintypes.DWORD) if ctypes.sizeof(ctypes.c_void_p) == 4
+            else ctypes.c_ulonglong,  # Attribute (DWORD_PTR)
+        ctypes.c_void_p,   # lpValue
+        ctypes.c_size_t,   # cbSize
+        ctypes.c_void_p,   # lpPreviousValue
+        ctypes.c_void_p,   # lpReturnSize
+    ]
+    kernel32.UpdateProcThreadAttribute.restype = wintypes.BOOL
+
+    # CreateProcessW
+    kernel32.CreateProcessW.argtypes = [
+        wintypes.LPCWSTR,   # lpApplicationName
+        wintypes.LPWSTR,    # lpCommandLine
+        ctypes.c_void_p,    # lpProcessAttributes
+        ctypes.c_void_p,    # lpThreadAttributes
+        wintypes.BOOL,      # bInheritHandles
+        wintypes.DWORD,     # dwCreationFlags
+        ctypes.c_void_p,    # lpEnvironment
+        wintypes.LPCWSTR,   # lpCurrentDirectory
+        ctypes.c_void_p,    # lpStartupInfo (STARTUPINFOEX*)
+        ctypes.POINTER(PROCESS_INFORMATION),  # lpProcessInformation
+    ]
+    kernel32.CreateProcessW.restype = wintypes.BOOL
+
+    # ReadFile / WriteFile
+    kernel32.ReadFile.argtypes = [
+        wintypes.HANDLE, ctypes.c_void_p, wintypes.DWORD,
+        ctypes.POINTER(wintypes.DWORD), ctypes.c_void_p,
+    ]
+    kernel32.ReadFile.restype = wintypes.BOOL
+
+    kernel32.WriteFile.argtypes = [
+        wintypes.HANDLE, ctypes.c_void_p, wintypes.DWORD,
+        ctypes.POINTER(wintypes.DWORD), ctypes.c_void_p,
+    ]
+    kernel32.WriteFile.restype = wintypes.BOOL
+
+    # CloseHandle / GetExitCodeProcess / WaitForSingleObject
+    kernel32.CloseHandle.argtypes = [wintypes.HANDLE]
+    kernel32.CloseHandle.restype = wintypes.BOOL
+
+    kernel32.GetExitCodeProcess.argtypes = [
+        wintypes.HANDLE, ctypes.POINTER(wintypes.DWORD),
+    ]
+    kernel32.GetExitCodeProcess.restype = wintypes.BOOL
+
+    kernel32.WaitForSingleObject.argtypes = [wintypes.HANDLE, wintypes.DWORD]
+    kernel32.WaitForSingleObject.restype = wintypes.DWORD
+
+    # DeleteProcThreadAttributeList
+    kernel32.DeleteProcThreadAttributeList.argtypes = [ctypes.c_void_p]
+    kernel32.DeleteProcThreadAttributeList.restype = None
+
+    # GetLastError
+    kernel32.GetLastError.argtypes = []
+    kernel32.GetLastError.restype = wintypes.DWORD
 
     class WindowsBackend(TerminalBackend):
-        """Windows 终端后端 - 使用 pywinpty"""
+        """Windows 终端后端 - 使用 ConPTY Passthrough 模式（与 Windows Terminal 相同）"""
 
         def __init__(self):
             super().__init__()
-            self._pty: Optional[winpty.PTY] = None
+            self._hpc = None          # PseudoConsole handle
+            self._h_process = None    # 子进程 handle
+            self._h_thread = None     # 子进程主线程 handle
+            self._pipe_in_write = None   # 写入管道（我们写入 → 子进程stdin）
+            self._pipe_out_read = None   # 读取管道（子进程stdout → 我们读取）
+            self._pipe_in_read = None    # 管道读取端（给 ConPTY）
+            self._pipe_out_write = None  # 管道写入端（给 ConPTY）
             self._reader_thread: Optional[threading.Thread] = None
-            self._process_handle = None
+            self._attr_list_buf = None   # 保持 attribute list 内存存活
 
         def start(self, command: List[str], cwd: Optional[str] = None,
                   cols: int = 80, rows: int = 24) -> bool:
-            if self._pty is not None:
+            if self._hpc is not None:
                 return False
 
             try:
-                # 创建 PTY
-                self._pty = winpty.PTY(cols, rows)
+                # 设置终端环境变量
+                os.environ.setdefault('TERM', 'xterm-256color')
+                os.environ.setdefault('COLORTERM', 'truecolor')
 
-                # 构建命令字符串
+                # 1. 创建管道
+                pipe_in_read = wintypes.HANDLE()
+                pipe_in_write = wintypes.HANDLE()
+                pipe_out_read = wintypes.HANDLE()
+                pipe_out_write = wintypes.HANDLE()
+
+                if not kernel32.CreatePipe(
+                    ctypes.byref(pipe_in_read),
+                    ctypes.byref(pipe_in_write),
+                    None, 0
+                ):
+                    raise OSError(f"CreatePipe (input) failed: {kernel32.GetLastError()}")
+
+                if not kernel32.CreatePipe(
+                    ctypes.byref(pipe_out_read),
+                    ctypes.byref(pipe_out_write),
+                    None, 0
+                ):
+                    kernel32.CloseHandle(pipe_in_read)
+                    kernel32.CloseHandle(pipe_in_write)
+                    raise OSError(f"CreatePipe (output) failed: {kernel32.GetLastError()}")
+
+                self._pipe_in_read = pipe_in_read.value
+                self._pipe_in_write = pipe_in_write.value
+                self._pipe_out_read = pipe_out_read.value
+                self._pipe_out_write = pipe_out_write.value
+
+                # 2. 创建 PseudoConsole（使用 PASSTHROUGH 标志）
+                size = COORD(cols, rows)
+                hpc = wintypes.HANDLE()
+                passthrough_ok = False
+                hr = kernel32.CreatePseudoConsole(
+                    size,
+                    wintypes.HANDLE(self._pipe_in_read),
+                    wintypes.HANDLE(self._pipe_out_write),
+                    PSEUDOCONSOLE_PASSTHROUGH,
+                    ctypes.byref(hpc),
+                )
+                if hr == 0:
+                    passthrough_ok = True
+                    print("[WindowsBackend] *** ConPTY PASSTHROUGH mode enabled ***")
+                else:
+                    # Passthrough 不可用，回退到普通模式
+                    print(f"[WindowsBackend] *** Passthrough FAILED (hr=0x{hr:08x}), falling back to normal ConPTY ***")
+                    hr = kernel32.CreatePseudoConsole(
+                        size,
+                        wintypes.HANDLE(self._pipe_in_read),
+                        wintypes.HANDLE(self._pipe_out_write),
+                        0,  # 无特殊标志
+                        ctypes.byref(hpc),
+                    )
+                    if hr != 0:
+                        raise OSError(f"CreatePseudoConsole failed: HRESULT 0x{hr:08x}")
+                    print("[WindowsBackend] Normal ConPTY mode (no passthrough)")
+
+                self._hpc = hpc.value
+
+                # 3. 初始化进程线程属性列表
+                attr_size = ctypes.c_size_t(0)
+                kernel32.InitializeProcThreadAttributeList(None, 1, 0, ctypes.byref(attr_size))
+
+                attr_list_buf = (ctypes.c_byte * attr_size.value)()
+                self._attr_list_buf = attr_list_buf
+
+                if not kernel32.InitializeProcThreadAttributeList(
+                    attr_list_buf, 1, 0, ctypes.byref(attr_size)
+                ):
+                    raise OSError(f"InitializeProcThreadAttributeList failed: {kernel32.GetLastError()}")
+
+                # 4. 设置 PSEUDOCONSOLE 属性
+                if not kernel32.UpdateProcThreadAttribute(
+                    attr_list_buf,
+                    0,
+                    PROC_THREAD_ATTRIBUTE_PSEUDOCONSOLE,
+                    self._hpc,
+                    ctypes.sizeof(wintypes.HANDLE),
+                    None,
+                    None,
+                ):
+                    raise OSError(f"UpdateProcThreadAttribute failed: {kernel32.GetLastError()}")
+
+                # 5. 构建命令字符串
                 if len(command) == 1:
                     cmd_str = command[0]
                 else:
-                    # 处理带参数的命令
-                    cmd_str = ' '.join(command)
+                    cmd_str = subprocess.list2cmdline(command)
 
                 # 设置工作目录
                 if cwd is None:
                     cwd = os.getcwd()
 
-                # 启动进程
-                self._pty.spawn(cmd_str, cwd=cwd)
+                # 6. 构建环境变量块（Unicode）
+                env = os.environ.copy()
+                env_block = '\0'.join(f'{k}={v}' for k, v in env.items()) + '\0\0'
+
+                # 7. 创建进程
+                si = STARTUPINFOEX()
+                si.cb = ctypes.sizeof(STARTUPINFOEX)
+                si.lpAttributeList = ctypes.cast(attr_list_buf, ctypes.c_void_p).value
+
+                pi = PROCESS_INFORMATION()
+
+                cmd_buf = ctypes.create_unicode_buffer(cmd_str)
+                env_buf = ctypes.create_unicode_buffer(env_block)
+
+                if not kernel32.CreateProcessW(
+                    None,           # lpApplicationName
+                    cmd_buf,        # lpCommandLine
+                    None,           # lpProcessAttributes
+                    None,           # lpThreadAttributes
+                    False,          # bInheritHandles
+                    EXTENDED_STARTUPINFO_PRESENT | CREATE_UNICODE_ENVIRONMENT,
+                    env_buf,        # lpEnvironment
+                    cwd,            # lpCurrentDirectory
+                    ctypes.byref(si),
+                    ctypes.byref(pi),
+                ):
+                    raise OSError(f"CreateProcessW failed: {kernel32.GetLastError()}")
+
+                self._h_process = pi.hProcess
+                self._h_thread = pi.hThread
+
+                # 清理属性列表（进程已创建，不再需要）
+                kernel32.DeleteProcThreadAttributeList(attr_list_buf)
+
+                # 关闭 ConPTY 端的管道端（我们不直接使用这些）
+                kernel32.CloseHandle(wintypes.HANDLE(self._pipe_in_read))
+                self._pipe_in_read = None
+                kernel32.CloseHandle(wintypes.HANDLE(self._pipe_out_write))
+                self._pipe_out_write = None
+
                 self._running = True
 
                 # 启动读取线程
@@ -120,53 +404,82 @@ if IS_WINDOWS:
 
             except Exception as e:
                 print(f"[WindowsBackend] Error starting process: {e}")
+                import traceback
+                traceback.print_exc()
                 self._cleanup()
                 return False
 
         def _read_loop(self):
-            """后台读取循环"""
-            while self._running and self._pty is not None:
+            """后台读取循环 - 从 ConPTY 输出管道读取"""
+            buf_size = 65536
+            buf = ctypes.create_string_buffer(buf_size)
+            bytes_read = wintypes.DWORD(0)
+
+            while self._running and self._pipe_out_read is not None:
                 try:
-                    # 读取输出 (阻塞读取，有超时)
-                    data = self._pty.read(65536, blocking=False)
-                    if data:
+                    success = kernel32.ReadFile(
+                        wintypes.HANDLE(self._pipe_out_read),
+                        buf,
+                        buf_size,
+                        ctypes.byref(bytes_read),
+                        None,
+                    )
+                    if success and bytes_read.value > 0:
+                        data = buf.raw[:bytes_read.value]
                         if self.on_output:
-                            self.on_output(data.encode('utf-8') if isinstance(data, str) else data)
-                    else:
-                        # 短暂休眠避免 CPU 空转
-                        import time
-                        time.sleep(0.01)
-
-                    # 检查进程是否还在运行
-                    if not self._pty.isalive():
-                        self._running = False
-                        if self.on_exit:
-                            self.on_exit(0)
+                            self.on_output(data)
+                    elif not success:
+                        # 管道关闭（进程退出）
                         break
-
                 except Exception as e:
                     if self._running:
                         print(f"[WindowsBackend] Read error: {e}")
                     break
 
+            # 进程结束处理
+            if self._running:
+                self._running = False
+                exit_code = self._get_exit_code()
+                if self.on_exit:
+                    self.on_exit(exit_code)
+
+        def _get_exit_code(self) -> int:
+            """获取子进程退出码"""
+            if self._h_process is None:
+                return -1
+            code = wintypes.DWORD(0)
+            kernel32.GetExitCodeProcess(
+                wintypes.HANDLE(self._h_process),
+                ctypes.byref(code)
+            )
+            return code.value
+
         def write(self, data: bytes) -> bool:
-            if self._pty is None:
+            if self._pipe_in_write is None:
                 return False
             try:
-                # pywinpty 接受字符串
-                text = data.decode('utf-8', errors='replace')
-                self._pty.write(text)
-                return True
+                written = wintypes.DWORD(0)
+                success = kernel32.WriteFile(
+                    wintypes.HANDLE(self._pipe_in_write),
+                    data,
+                    len(data),
+                    ctypes.byref(written),
+                    None,
+                )
+                return bool(success)
             except Exception as e:
                 print(f"[WindowsBackend] Write error: {e}")
                 return False
 
         def resize(self, cols: int, rows: int) -> bool:
-            if self._pty is None:
+            if self._hpc is None:
                 return False
             try:
-                self._pty.set_size(cols, rows)
-                return True
+                size = COORD(cols, rows)
+                hr = kernel32.ResizePseudoConsole(
+                    wintypes.HANDLE(self._hpc), size
+                )
+                return hr == 0
             except Exception as e:
                 print(f"[WindowsBackend] Resize error: {e}")
                 return False
@@ -181,23 +494,59 @@ if IS_WINDOWS:
             self._cleanup()
 
         def _cleanup(self):
-            """清理资源"""
-            # 先等待线程退出
+            """清理所有资源"""
+            # 关闭 PseudoConsole（这会导致子进程收到关闭信号）
+            if self._hpc is not None:
+                try:
+                    kernel32.ClosePseudoConsole(wintypes.HANDLE(self._hpc))
+                except Exception:
+                    pass
+                self._hpc = None
+
+            # 等待读取线程退出
             if self._reader_thread is not None:
-                self._reader_thread.join(timeout=2.0)
+                self._reader_thread.join(timeout=3.0)
                 self._reader_thread = None
 
-            # 然后关闭 PTY
-            if self._pty is not None:
+            # 关闭管道
+            for pipe_attr in ('_pipe_in_write', '_pipe_in_read',
+                              '_pipe_out_read', '_pipe_out_write'):
+                handle = getattr(self, pipe_attr, None)
+                if handle is not None:
+                    try:
+                        kernel32.CloseHandle(wintypes.HANDLE(handle))
+                    except Exception:
+                        pass
+                    setattr(self, pipe_attr, None)
+
+            # 关闭进程和线程 handles
+            if self._h_thread is not None:
                 try:
-                    self._pty.close()
-                except:
+                    kernel32.CloseHandle(wintypes.HANDLE(self._h_thread))
+                except Exception:
                     pass
-                self._pty = None
+                self._h_thread = None
+
+            if self._h_process is not None:
+                try:
+                    kernel32.CloseHandle(wintypes.HANDLE(self._h_process))
+                except Exception:
+                    pass
+                self._h_process = None
+
+            self._attr_list_buf = None
 
         @property
         def is_running(self) -> bool:
-            return self._running and self._pty is not None and self._pty.isalive()
+            if not self._running or self._h_process is None:
+                return False
+            # 检查进程是否还在运行
+            code = wintypes.DWORD(0)
+            kernel32.GetExitCodeProcess(
+                wintypes.HANDLE(self._h_process),
+                ctypes.byref(code)
+            )
+            return code.value == STILL_ACTIVE
 
 else:
     # Unix 系统
