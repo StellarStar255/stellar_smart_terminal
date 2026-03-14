@@ -118,6 +118,8 @@ TRANSLATIONS = {
     "toolbar.llm_config": {"zh": "LLM配置", "en": "LLM Config"},
     "toolbar.llm_config_tooltip": {"zh": "LLM API 配置", "en": "LLM API Configuration"},
     "toolbar.settings_tooltip": {"zh": "工具栏设置", "en": "Toolbar Settings"},
+    "toolbar.opacity_label": {"zh": "透明度:", "en": "Opacity:"},
+    "toolbar.opacity_tooltip": {"zh": "窗口透明度（10%-100%），对所有窗口生效", "en": "Window opacity (10%-100%), applies to all windows"},
     "toolbar.gui_font_label": {"zh": "GUI字号:", "en": "GUI Font:"},
     "toolbar.gui_font_auto": {"zh": "自动", "en": "Auto"},
     "toolbar.gui_font_tooltip": {"zh": "GUI 面板字体大小（0=跟随全局缩放）", "en": "GUI panel font size (0=follow global zoom)"},

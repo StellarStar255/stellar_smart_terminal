@@ -1982,6 +1982,7 @@ class MainWindow(QMainWindow):
         self._gui_font_size = 0  # GUI 字体大小（0 表示跟随全局缩放）
         self._original_widget_styles = {}  # {id(widget): (weakref, original_stylesheet)}
         self._pin_toolbar_row2 = False  # 是否固定显示第二排工具栏
+        self._window_opacity = 100  # 窗口透明度百分比（10-100）
 
         # 多标签页支持
         self.tab_counter = 0  # 标签页计数器
@@ -2094,6 +2095,13 @@ class MainWindow(QMainWindow):
             self.gui_font_spin.blockSignals(True)
             self.gui_font_spin.setValue(self._gui_font_size)
             self.gui_font_spin.blockSignals(False)
+
+        # 恢复窗口透明度
+        if hasattr(self, 'opacity_spin') and self._window_opacity != 100:
+            self.opacity_spin.blockSignals(True)
+            self.opacity_spin.setValue(self._window_opacity)
+            self.opacity_spin.blockSignals(False)
+            self.setWindowOpacity(self._window_opacity / 100.0)
 
         # 恢复固定第二排工具栏 checkbox
         if hasattr(self, 'pin_row2_checkbox') and self._pin_toolbar_row2:
@@ -3148,6 +3156,63 @@ class MainWindow(QMainWindow):
         self.gui_font_spin.valueChanged.connect(self._on_gui_font_size_changed)
         gui_font_layout.addWidget(self.gui_font_spin)
 
+        # 窗口透明度控件
+        self.opacity_container = QWidget()
+        opacity_layout = QHBoxLayout(self.opacity_container)
+        opacity_layout.setContentsMargins(4, 0, 0, 0)
+        opacity_layout.setSpacing(4)
+
+        self.opacity_label = QLabel(t("toolbar.opacity_label"))
+        self.opacity_label.setStyleSheet("color: #888;")
+        opacity_layout.addWidget(self.opacity_label)
+
+        self.opacity_spin = QSpinBox()
+        self.opacity_spin.setRange(10, 100)
+        self.opacity_spin.setValue(self._window_opacity)
+        self.opacity_spin.setToolTip(t("toolbar.opacity_tooltip"))
+        self.opacity_spin.setSuffix("%")
+        self.opacity_spin.setSingleStep(5)
+        self.opacity_spin.setFixedWidth(80)
+        self.opacity_spin.setFocusPolicy(Qt.FocusPolicy.StrongFocus)
+        self.opacity_spin.setStyleSheet("""
+            QSpinBox {
+                background-color: #16213e;
+                border: 1px solid #3d3d5c;
+                border-radius: 4px;
+                padding: 4px 6px;
+                color: #eaeaea;
+            }
+            QSpinBox:hover {
+                border-color: #667eea;
+            }
+            QSpinBox::up-button, QSpinBox::down-button {
+                background-color: #3d3d5c;
+                border: none;
+                width: 18px;
+            }
+            QSpinBox::up-button:hover, QSpinBox::down-button:hover {
+                background-color: #667eea;
+            }
+            QSpinBox::up-arrow {
+                image: none;
+                border-left: 4px solid transparent;
+                border-right: 4px solid transparent;
+                border-bottom: 5px solid #eaeaea;
+                width: 0px;
+                height: 0px;
+            }
+            QSpinBox::down-arrow {
+                image: none;
+                border-left: 4px solid transparent;
+                border-right: 4px solid transparent;
+                border-top: 5px solid #eaeaea;
+                width: 0px;
+                height: 0px;
+            }
+        """)
+        self.opacity_spin.valueChanged.connect(self._on_opacity_changed)
+        opacity_layout.addWidget(self.opacity_spin)
+
         # 固定第二排工具栏 checkbox
         self.pin_row2_checkbox = QCheckBox(t("toolbar.pin_row2"))
         self.pin_row2_checkbox.setToolTip(t("toolbar.pin_row2_tooltip"))
@@ -3215,6 +3280,7 @@ class MainWindow(QMainWindow):
                 "llm_config_btn": self.llm_config_btn,
                 "lang_combo": self.lang_combo,
                 "gui_font_spin": self.gui_font_container,
+                "opacity_spin": self.opacity_container,
             },
         }
 
@@ -3224,7 +3290,7 @@ class MainWindow(QMainWindow):
             "分屏管理": ["split_btn", "split_v_btn", "close_split_btn", "close_tab_btn"],
             "面板与编辑器": ["explorer_toggle_btn", "git_toggle_btn", "vscode_open_btn", "cursor_open_btn", "log_toggle_btn"],
             "主题": ["theme_combo", "icon_tint_checkbox"],
-            "设置": ["llm_config_btn", "gui_font_spin", "lang_combo"],
+            "设置": ["llm_config_btn", "gui_font_spin", "opacity_spin", "lang_combo"],
         }
 
         # 主题组的装饰前缀
@@ -3324,6 +3390,7 @@ class MainWindow(QMainWindow):
             "llm_config_btn": self.llm_config_btn,
             "lang_combo": self.lang_combo,
             "gui_font_spin": self.gui_font_container,
+            "opacity_spin": self.opacity_container,
         }
 
         # 建立 action 映射（仅 main_toolbar 上的按钮）
@@ -3846,6 +3913,17 @@ class MainWindow(QMainWindow):
         zoom_out_action = QAction(self)
         zoom_out_action.setShortcut("Ctrl+-")
         zoom_out_action.triggered.connect(self._global_zoom_out)
+
+        # 窗口透明度快捷键 (Ctrl+Shift+Up 增加, Ctrl+Shift+Down 减少)
+        opacity_up_action = QAction(self)
+        opacity_up_action.setShortcut("Ctrl+Shift+Up")
+        opacity_up_action.triggered.connect(self._opacity_increase)
+        self.addAction(opacity_up_action)
+
+        opacity_down_action = QAction(self)
+        opacity_down_action.setShortcut("Ctrl+Shift+Down")
+        opacity_down_action.triggered.connect(self._opacity_decrease)
+        self.addAction(opacity_down_action)
         self.addAction(zoom_out_action)
 
     # ==================== 全局字体缩放 ====================
@@ -3861,6 +3939,27 @@ class MainWindow(QMainWindow):
             value = new_val
         self._gui_font_size = value
         self._apply_global_zoom()
+
+    def _on_opacity_changed(self, value: int):
+        """窗口透明度调整 — 同步到所有窗口"""
+        self._window_opacity = value
+        self._apply_opacity_to_all_windows()
+        self._save_config()
+
+    def _apply_opacity_to_all_windows(self):
+        """将当前透明度设置应用到所有 MainWindow 窗口"""
+        opacity = self._window_opacity / 100.0
+        app = QApplication.instance()
+        if app:
+            for widget in app.topLevelWidgets():
+                if isinstance(widget, MainWindow):
+                    widget.setWindowOpacity(opacity)
+                    # 同步其他窗口的 opacity_spin 值（避免信号循环）
+                    if widget is not self and hasattr(widget, 'opacity_spin'):
+                        widget.opacity_spin.blockSignals(True)
+                        widget.opacity_spin.setValue(self._window_opacity)
+                        widget.opacity_spin.blockSignals(False)
+                        widget._window_opacity = self._window_opacity
 
     def _on_pin_row2_changed(self, state):
         """固定/取消固定第二排工具栏"""
@@ -4127,6 +4226,24 @@ class MainWindow(QMainWindow):
         """全局缩小字体 — 同步缩放所有区域"""
         self._global_zoom_delta -= 1
         self._apply_global_zoom()
+
+    def _opacity_increase(self):
+        """增加窗口透明度（更不透明）"""
+        new_val = min(100, self._window_opacity + 5)
+        if hasattr(self, 'opacity_spin'):
+            self.opacity_spin.setValue(new_val)  # 会触发 _on_opacity_changed
+        else:
+            self._window_opacity = new_val
+            self._apply_opacity_to_all_windows()
+
+    def _opacity_decrease(self):
+        """减少窗口透明度（更透明）"""
+        new_val = max(10, self._window_opacity - 5)
+        if hasattr(self, 'opacity_spin'):
+            self.opacity_spin.setValue(new_val)  # 会触发 _on_opacity_changed
+        else:
+            self._window_opacity = new_val
+            self._apply_opacity_to_all_windows()
 
     def _apply_global_zoom(self):
         """应用全局缩放到所有组件"""
@@ -6266,6 +6383,12 @@ class MainWindow(QMainWindow):
             self.gui_font_spin.setSpecialValueText(t("toolbar.gui_font_auto"))
             self.gui_font_spin.setToolTip(t("toolbar.gui_font_tooltip"))
 
+        # 窗口透明度
+        if hasattr(self, 'opacity_label'):
+            self.opacity_label.setText(t("toolbar.opacity_label"))
+        if hasattr(self, 'opacity_spin'):
+            self.opacity_spin.setToolTip(t("toolbar.opacity_tooltip"))
+
         # 固定第二排
         if hasattr(self, 'pin_row2_checkbox'):
             self.pin_row2_checkbox.setText(t("toolbar.pin_row2"))
@@ -7096,6 +7219,8 @@ class MainWindow(QMainWindow):
                     self._gui_font_size = config.get('gui_font_size', 0)
                     # 加载固定第二排工具栏设置
                     self._pin_toolbar_row2 = config.get('pin_toolbar_row2', False)
+                    # 加载窗口透明度
+                    self._window_opacity = config.get('window_opacity', 100)
                     # 加载左右分屏偏好
                     self._explorer_split_horizontal = config.get('explorer_split_horizontal', False)
                     # 加载语言设置
@@ -7196,6 +7321,7 @@ class MainWindow(QMainWindow):
                 'global_zoom_delta': self._global_zoom_delta,  # 保存全局缩放偏移
                 'gui_font_size': self._gui_font_size,  # 保存 GUI 字体大小
                 'pin_toolbar_row2': self._pin_toolbar_row2,  # 保存固定第二排工具栏
+                'window_opacity': self._window_opacity,  # 保存窗口透明度
                 'explorer_split_horizontal': getattr(self, '_explorer_split_horizontal', False),  # 保存左右分屏偏好
                 'language': get_language(),  # 保存语言设置
                 'window_geometry': [self.x(), self.y(), self.width(), self.height()],
