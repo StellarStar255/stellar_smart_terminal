@@ -63,6 +63,33 @@ def setup_app_style(app: QApplication):
     app.setPalette(palette)
 
 
+def _ensure_linux_desktop_file(icon_path: Path):
+    """在 Linux 上自动创建/更新 .desktop 文件，使任务栏/dock 能显示应用图标"""
+    desktop_dir = Path.home() / ".local" / "share" / "applications"
+    desktop_file = desktop_dir / "smart-terminal.desktop"
+    icon_abs = str(icon_path.resolve()) if icon_path.exists() else ""
+
+    content = f"""[Desktop Entry]
+Name=Smart Terminal
+Comment=Smart Terminal with AI Integration
+Exec={sys.executable} {Path(__file__).resolve()}
+Icon={icon_abs}
+Terminal=false
+Type=Application
+Categories=Development;Utility;
+StartupWMClass=smart-terminal
+"""
+    try:
+        # 只在内容变化或文件不存在时写入
+        if desktop_file.exists():
+            if desktop_file.read_text() == content:
+                return
+        desktop_dir.mkdir(parents=True, exist_ok=True)
+        desktop_file.write_text(content)
+    except OSError:
+        pass  # 静默失败，不影响应用启动
+
+
 def main():
     """主函数"""
     # Windows: 设置 AppUserModelID 以便任务栏显示自定义图标而非 Python 图标
@@ -80,11 +107,15 @@ def main():
     # macOS: 确保支持多窗口在 Mission Control 中正确显示
     app.setAttribute(Qt.ApplicationAttribute.AA_DontShowIconsInMenus, False)
 
-    # Linux: 设置桌面文件名，用于dock图标匹配
+    # 设置应用程序图标路径
+    icon_path = Path(__file__).parent / "assets" / "smart_terminal.png"
+
+    # Linux: 自动创建 .desktop 文件，用于dock/任务栏图标匹配
+    if sys.platform == "linux":
+        _ensure_linux_desktop_file(icon_path)
     app.setDesktopFileName("smart-terminal")
 
     # 设置应用程序图标 (提供多个尺寸以适配 Windows 任务栏/标题栏)
-    icon_path = Path(__file__).parent / "assets" / "smart_terminal.png"
     if icon_path.exists():
         icon = QIcon()
         original = QPixmap(str(icon_path))
