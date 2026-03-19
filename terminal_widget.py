@@ -220,6 +220,9 @@ class TerminalWidget(QWidget):
     _RE_OSC_OTHER = re.compile(r'\x1b\]\d+;[^\x07\x1b]*(?:\x07|\x1b\\)')
     _RE_DA_QUERY = re.compile(r'\x1b\[0?c')
 
+    # 终端内容边距（像素），左右各 PADDING，上下各 PADDING
+    PADDING = 8
+
     # 媒体文件扩展名集合（类级别，避免重复创建）
     _AUDIO_EXTENSIONS = frozenset({'.wav', '.mp3', '.m4a', '.ogg', '.flac', '.webm', '.aac'})
     _VIDEO_EXTENSIONS = frozenset({'.mp4', '.mov', '.avi', '.mkv', '.wmv', '.flv', '.m4v', '.mpeg', '.mpg'})
@@ -477,9 +480,10 @@ class TerminalWidget(QWidget):
 
     def sizeHint(self):
         from PyQt6.QtCore import QSize
+        p2 = self.PADDING * 2
         return QSize(
-            int(self.term_cols * self.char_width + 20),
-            int(self.term_rows * self.char_height + 20)
+            int(self.term_cols * self.char_width + p2),
+            int(self.term_rows * self.char_height + p2)
         )
 
     def _toggle_cursor(self):
@@ -530,16 +534,21 @@ class TerminalWidget(QWidget):
 
     def _update_terminal_size(self):
         """根据窗口大小更新终端尺寸"""
-        # 计算可用宽度（减去左右边距各10px）
-        available_width = self.width() - 20
+        if self.width() <= 0 or self.height() <= 0:
+            return
+
+        p2 = self.PADDING * 2  # 左右/上下边距总和
+        # 计算可用宽度
+        available_width = self.width() - p2
         # 允许更小的列数以支持分屏（最小 20 列）
         new_cols = max(20, int(available_width / self.char_width))
-        # 使用实际窗口计算的行数（减去上下边距各10px）
-        available_height = self.height() - 20
+        # 使用实际窗口计算的行数
+        available_height = self.height() - p2
         # 允许更小的行数以支持分屏（最小 5 行）
         new_rows = max(5, int(available_height / self.char_height))
 
         if new_cols != self.term_cols or new_rows != self.term_rows:
+            old_cols, old_rows = self.term_cols, self.term_rows
             self.term_cols = new_cols
             self.term_rows = new_rows
 
@@ -552,6 +561,7 @@ class TerminalWidget(QWidget):
             # 强制使缓存失效，确保使用新的尺寸重绘
             self._cache_valid = False
             self.update()
+            print(f"[Terminal] Size: {old_cols}x{old_rows} -> {new_cols}x{new_rows} (widget: {self.width()}x{self.height()}, char_w: {self.char_width:.1f})")
 
     def _update_pty_size(self):
         """更新PTY终端大小"""
@@ -757,12 +767,12 @@ class TerminalWidget(QWidget):
 
         # 如果 painter 的 metrics 与之前计算的不同，更新并重新计算终端大小
         if abs(painter_advance - self.char_width) > 1:
+            old_cw = self.char_width
             self.char_width = float(painter_advance)
             self.char_height = float(fm.height())
             self.char_ascent = float(fm.ascent())
-            # 强制重新计算终端大小
-            self.term_cols = 0
-            self.term_rows = 0
+            print(f"[Terminal] Calibration: char_width {old_cw:.1f} -> {self.char_width:.1f}")
+            # 立即重新计算终端大小（不设置为0，避免当前帧渲染空白）
             QTimer.singleShot(0, self._update_terminal_size)
 
     @property
@@ -852,8 +862,8 @@ class TerminalWidget(QWidget):
             if self._select_all_mode:
                 # 全选模式：高亮所有可见行
                 for sel_row in range(self.term_rows):
-                    x = int(10)
-                    y = int(10 + sel_row * self.char_height)
+                    x = self.PADDING
+                    y = int(self.PADDING + sel_row * self.char_height)
                     width = int(self.term_cols * self.char_width)
                     height = int(self.char_height)
                     painter.fillRect(x, y, width, height, self._selection_color)
@@ -892,8 +902,8 @@ class TerminalWidget(QWidget):
                             col_start = 0
                             col_end = self.term_cols - 1
 
-                        x = int(10 + col_start * self.char_width)
-                        y = int(10 + sel_row * self.char_height)
+                        x = int(self.PADDING + col_start * self.char_width)
+                        y = int(self.PADDING + sel_row * self.char_height)
                         width = int((col_end - col_start + 1) * self.char_width)
                         height = int(self.char_height)
 
@@ -907,8 +917,8 @@ class TerminalWidget(QWidget):
             for idx, (match_row, match_col, match_len) in enumerate(self._search_matches):
                 display_row = match_row - display_start
                 if 0 <= display_row < self.term_rows:
-                    x = int(10 + match_col * self.char_width)
-                    y = int(10 + display_row * self.char_height)
+                    x = int(self.PADDING + match_col * self.char_width)
+                    y = int(self.PADDING + display_row * self.char_height)
                     width = int(match_len * self.char_width)
                     height = int(self.char_height)
 
@@ -923,8 +933,8 @@ class TerminalWidget(QWidget):
             cy = self.screen.cursor.y
 
             if 0 <= cy < self.term_rows and 0 <= cx < self.term_cols:
-                cursor_x = int(10 + cx * self.char_width)
-                cursor_y = int(10 + cy * self.char_height)
+                cursor_x = int(self.PADDING + cx * self.char_width)
+                cursor_y = int(self.PADDING + cy * self.char_height)
 
                 painter.fillRect(
                     cursor_x, cursor_y,
@@ -938,8 +948,8 @@ class TerminalWidget(QWidget):
             cy = self.screen.cursor.y
 
             if 0 <= cy < self.term_rows:
-                preedit_x = int(10 + cx * self.char_width)
-                preedit_y = int(10 + cy * self.char_height)
+                preedit_x = int(self.PADDING + cx * self.char_width)
+                preedit_y = int(self.PADDING + cy * self.char_height)
 
                 # 设置预编辑文本样式
                 painter.setFont(self.term_font)
@@ -1015,19 +1025,21 @@ class TerminalWidget(QWidget):
                     display_lines.append(self.screen.buffer[buffer_row])
 
         # 计算可见区域的最大列数（防止绘制到可见区域之外）
-        visible_width = self._cache_pixmap.width() - 20  # 减去左右边距各10px
+        visible_width = self._cache_pixmap.width() - self.PADDING * 2
         max_visible_cols = int(visible_width / self.char_width) if self.char_width > 0 else self.term_cols
 
-        # 遍历绘制 - 优化版本：使用缓存减少重复计算
-        num_cols = min(self.screen.columns, self.term_cols, max_visible_cols)
+        # 使用 term_cols 为主限制（已从 widget 尺寸计算得出），
+        # max_visible_cols 为安全上限，screen.columns 仅作参考（可能滞后）
+        num_cols = min(max(self.screen.columns, self.term_cols), max_visible_cols)
         char_width = self.char_width
         char_height = self.char_height
         int_char_height = int(char_height)
         bg_default = self.bg_color
         last_fg_color = None  # 缓存上一个前景色，减少 setPen 调用
+        padding = self.PADDING  # 局部变量加速
 
         for display_row, buffer_line in enumerate(display_lines):
-            row_y = int(10 + display_row * char_height)
+            row_y = int(padding + display_row * char_height)
             text_y = int(row_y + self.char_ascent)
 
             for col in range(num_cols):
@@ -1058,7 +1070,7 @@ class TerminalWidget(QWidget):
                 else:
                     continue
 
-                x = int(10 + col * char_width)
+                x = int(padding + col * char_width)
 
                 # 获取颜色（使用已提取的属性）
                 fg_color = self._get_char_color(char_fg, char_bold)
@@ -1527,8 +1539,8 @@ class TerminalWidget(QWidget):
             if self.screen and hasattr(self.screen, 'cursor'):
                 cx = self.screen.cursor.x
                 cy = self.screen.cursor.y
-                x = int(10 + cx * self.char_width)
-                y = int(10 + cy * self.char_height)
+                x = int(self.PADDING + cx * self.char_width)
+                y = int(self.PADDING + cy * self.char_height)
                 return QRect(x, y, int(self.char_width), int(self.char_height))
         elif query == Qt.InputMethodQuery.ImFont:
             # 返回当前字体，用于输入法渲染
@@ -1629,9 +1641,8 @@ class TerminalWidget(QWidget):
 
     def _pos_to_cell(self, pos: QPoint) -> tuple:
         """将鼠标位置转换为终端单元格坐标 (row, col) - 返回显示区域内的相对行号"""
-        # 考虑边距 (10px)
-        x = pos.x() - 10
-        y = pos.y() - 10
+        x = pos.x() - self.PADDING
+        y = pos.y() - self.PADDING
 
         col = max(0, min(int(x / self.char_width), self.term_cols - 1))
         row = max(0, min(int(y / self.char_height), self.term_rows - 1))
@@ -1644,8 +1655,8 @@ class TerminalWidget(QWidget):
         使用上次渲染时记录的 display_start，确保鼠标坐标与屏幕显示内容一致。
         避免因新输出导致 history_count 变化而产生偏移。
         """
-        x = pos.x() - 10
-        y = pos.y() - 10
+        x = pos.x() - self.PADDING
+        y = pos.y() - self.PADDING
 
         col = max(0, min(int(x / self.char_width), self.term_cols - 1))
         display_row = max(0, min(int(y / self.char_height), self.term_rows - 1))
