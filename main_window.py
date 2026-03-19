@@ -3430,13 +3430,13 @@ class MainWindow(QMainWindow):
         if pinned:
             self.main_toolbar.setVisible(False)
 
-        # 为 flow 中的按钮建立 _flow_btn_widgets 映射（全部分组）
+        # 为 flow 中的按钮建立 _flow_btn_widgets 映射（全部分组，含跨组移入"预设与控制"的按钮）
         for group_name in effective_group_order:
-            if group_name == "预设与控制":
-                continue
             if group_name in self._group_button_dicts:
                 for btn_name, widget in self._group_button_dicts[group_name].items():
-                    self._flow_btn_widgets[btn_name] = widget
+                    # 核心控件不需要映射（它们不通过 _apply_toolbar_config 控制可见性）
+                    if widget not in self._core_toolbar_widgets:
+                        self._flow_btn_widgets[btn_name] = widget
 
         if self.toolbar_config:
             self._apply_toolbar_config(self.toolbar_config)
@@ -4015,11 +4015,15 @@ class MainWindow(QMainWindow):
 
             # 4. 按分组顺序将所有组按钮添加回 main_toolbar
             for group_name in effective_group_order:
-                if group_name == "预设与控制":
-                    continue
                 if group_name not in self._group_button_dicts:
                     continue
                 buttons_dict = self._group_button_dicts[group_name]
+                if group_name == "预设与控制":
+                    # 核心按钮已在步骤3恢复，只处理被跨组移入的额外按钮
+                    extra_dict = {k: v for k, v in buttons_dict.items() if v not in self._core_toolbar_widgets}
+                    if not extra_dict:
+                        continue
+                    buttons_dict = extra_dict
                 if not buttons_dict:
                     continue
                 self.main_toolbar.addSeparator()
@@ -4124,11 +4128,16 @@ class MainWindow(QMainWindow):
 
         # 2. 按分组顺序添加所有组的按钮
         for group_name in effective_group_order:
-            if group_name == "预设与控制":
-                continue
             if group_name not in self._group_button_dicts:
                 continue
             buttons_dict = self._group_button_dicts[group_name]
+            if group_name == "预设与控制":
+                # 核心按钮已在步骤1添加，只处理被跨组移入的额外按钮
+                core_names = {w.objectName() if hasattr(w, 'objectName') else '' for w in self._core_toolbar_widgets if w is not None}
+                extra_dict = {k: v for k, v in buttons_dict.items() if k not in core_names and v not in self._core_toolbar_widgets}
+                if not extra_dict:
+                    continue
+                buttons_dict = extra_dict
             if not buttons_dict:
                 continue
             # 每组前加分隔符
