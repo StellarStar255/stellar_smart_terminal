@@ -4750,6 +4750,8 @@ class MainWindow(QMainWindow):
                     terminal.manage_local_presets_requested.disconnect()
                     terminal.add_local_command_requested.disconnect()
                     terminal.close_split_requested.disconnect()
+                    terminal.split_horizontal_requested.disconnect()
+                    terminal.split_vertical_requested.disconnect()
                 except:
                     pass
 
@@ -4765,6 +4767,8 @@ class MainWindow(QMainWindow):
                 terminal.manage_local_presets_requested.connect(self._manage_local_presets)
                 terminal.add_local_command_requested.connect(self._add_new_local_preset)
                 terminal.close_split_requested.connect(self._close_current_split)
+                terminal.split_horizontal_requested.connect(self._split_current_tab)
+                terminal.split_vertical_requested.connect(self._split_vertical_current_terminal)
                 terminal.installEventFilter(self)
 
                 # 重新设置快速命令提供者，指向当前窗口的预设
@@ -4882,6 +4886,8 @@ class MainWindow(QMainWindow):
         terminal.manage_local_presets_requested.connect(self._manage_local_presets)
         terminal.add_local_command_requested.connect(self._add_new_local_preset)
         terminal.close_split_requested.connect(self._close_current_split)
+        terminal.split_horizontal_requested.connect(self._split_current_tab)
+        terminal.split_vertical_requested.connect(self._split_vertical_current_terminal)
 
         # 设置工作目录（用于自动启动时）
         terminal.set_working_dir(self._window_cwd)

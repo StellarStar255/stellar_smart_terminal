@@ -366,6 +366,8 @@ TRANSLATIONS = {
     "ctx.open_current_dir": {"zh": "打开当前目录", "en": "Open Current Directory"},
     "ctx.select_all": {"zh": "全选", "en": "Select All"},
     "ctx.clear_selection": {"zh": "清除选择", "en": "Clear Selection"},
+    "ctx.split_horizontal": {"zh": "左右分屏", "en": "Split Horizontal"},
+    "ctx.split_vertical": {"zh": "上下分屏", "en": "Split Vertical"},
     "ctx.close_split": {"zh": "关闭当前分屏", "en": "Close Current Split"},
 
     # ===== 状态栏/通用 =====

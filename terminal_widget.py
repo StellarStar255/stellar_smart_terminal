@@ -176,6 +176,8 @@ class TerminalWidget(QWidget):
     add_command_requested = pyqtSignal()  # 请求添加新命令
     manage_local_presets_requested = pyqtSignal()  # 请求打开本地预设管理对话框
     add_local_command_requested = pyqtSignal()  # 请求添加新本地命令
+    split_horizontal_requested = pyqtSignal()  # 请求左右分屏
+    split_vertical_requested = pyqtSignal()  # 请求上下分屏
     close_split_requested = pyqtSignal()  # 请求关闭当前分屏
 
     # 鲜艳的终端颜色 - One Dark Pro 风格
@@ -1988,6 +1990,11 @@ class TerminalWidget(QWidget):
             menu.addAction(clear_selection_action)
 
         menu.addSeparator()
+
+        # 分屏
+        split_action = QAction(t("toolbar.split"), self)
+        split_action.triggered.connect(self.split_horizontal_requested.emit)
+        menu.addAction(split_action)
 
         # 关闭当前分屏
         close_split_action = QAction(t("ctx.close_split"), self)
