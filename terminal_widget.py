@@ -209,7 +209,7 @@ class TerminalWidget(QWidget):
     # 预编译正则表达式（用于过滤不支持的转义序列）
     _RE_SYNC_OUTPUT = re.compile(r'\x1b\[\?2026[hl]')
     _RE_KITTY_KEYBOARD = re.compile(r'\x1b\[[\?<>=]+u')
-    _RE_TERMINAL_QUERY = re.compile(r'\x1b\[>[\d;]*[cmu]')
+    _RE_TERMINAL_QUERY = re.compile(r'\x1b\[>[\d;]*[cmuq]')
     _RE_FOCUS_REPORT = re.compile(r'\x1b\[\?1004[hl]')
     _RE_CURSOR_STYLE = re.compile(r'\x1b\[\d* q')  # DECSCUSR: CSI Ps SP q
     _RE_OSC_HYPERLINK = re.compile(r'\x1b\]8;[^;\x07\x1b]*;[^\x07\x1b]*(?:\x07|\x1b\\)')
@@ -330,6 +330,10 @@ class TerminalWidget(QWidget):
         # 内容变化标志（脏标记）
         self._content_dirty = False
 
+        # resize 后等待子进程重绘的标志
+        self._awaiting_resize_redraw = False
+        self._resize_data_timer = None
+
         # 双缓冲缓存 - 避免每次paintEvent都重绘
         self._cache_pixmap: Optional[QPixmap] = None
         self._cache_valid = False
@@ -366,6 +370,8 @@ class TerminalWidget(QWidget):
 
         # 启用输入法支持（中文等）
         self.setAttribute(Qt.WidgetAttribute.WA_InputMethodEnabled, True)
+        # 声明本 widget 完全不透明，避免 Qt 在 paintEvent 前绘制父/兄弟 widget 的内容
+        self.setAttribute(Qt.WidgetAttribute.WA_OpaquePaintEvent, True)
 
         # 背景色和前景色 - One Dark Pro 风格
         self.bg_color = QColor("#282c34")
@@ -537,6 +543,24 @@ class TerminalWidget(QWidget):
         if self.width() <= 0 or self.height() <= 0:
             return
 
+        # 在高 DPI 屏幕上，__init__ 中通过 QFontMetricsF(font) 计算的 char_width
+        # 可能使用默认 96 DPI，与实际渲染 DPI 不符（如 200% 缩放时差 2 倍）。
+        # 每次 resize 都通过临时 QPixmap + QPainter 验证真实字符宽度。
+        from PyQt6.QtGui import QPixmap, QPainter
+        _pix = QPixmap(1, 1)
+        _painter = QPainter(_pix)
+        _painter.setFont(self.term_font)
+        _fm = _painter.fontMetrics()
+        real_cw = float(_fm.horizontalAdvance('W'))
+        real_ch = float(_fm.height())
+        real_ascent = float(_fm.ascent())
+        _painter.end()
+        if real_cw > 1 and abs(real_cw - self.char_width) > 0.5:
+            print(f"[Terminal] DPI fix: char_width {self.char_width:.1f} -> {real_cw:.1f}")
+            self.char_width = real_cw
+            self.char_height = real_ch
+            self.char_ascent = real_ascent
+
         p2 = self.PADDING * 2  # 左右/上下边距总和
         # 计算可用宽度
         available_width = self.width() - p2
@@ -555,13 +579,44 @@ class TerminalWidget(QWidget):
             # 重新创建screen（HistoryScreen的resize参数顺序是lines, columns）
             self.screen.resize(self.term_rows, self.term_cols)
 
+            # resize 后 pyte 会按新尺寸重排旧内容，而像 Claude Code (Ink) 这样的 TUI
+            # 收到 SIGWINCH 后会发送完整重绘，使用 CUF (\x1b[nC]) 创建间距。
+            # CUF 不会清除经过的单元格——如果这些单元格包含 resize 重排的旧内容，
+            # 渲染时就会看到"重影"（旧文字透过空隙显示）。
+            # 解决方案：resize 后清空可见屏幕，保留光标位置。
+            # 子进程的完整重绘会在 SIGWINCH 后到达，覆盖所有内容。
+            saved_cursor = (self.screen.cursor.x, self.screen.cursor.y)
+            self.screen.erase_in_display(2)
+            self.screen.cursor.x, self.screen.cursor.y = saved_cursor
+
             # 更新PTY大小
             self._update_pty_size()
 
-            # 强制使缓存失效，确保使用新的尺寸重绘
+            # resize 后 pyte 会按新尺寸重排旧内容，但子进程（如 Claude Code 的 Ink TUI）
+            # 会在收到 SIGWINCH 后发送完整重绘。在重绘数据到达前，pyte 的 buffer 处于
+            # "中间态"（旧内容被错误折行），直接渲染会导致显示混乱。
+            # 因此：设置标志位，让 paintEvent 暂时复用旧缓存，等新数据到达后再重建。
+            self._awaiting_resize_redraw = True
+            # 安全超时：如果 500ms 内没有收到新数据（无子进程运行等），强制解除等待
+            QTimer.singleShot(500, self._clear_resize_wait)
+
             self._cache_valid = False
             self.update()
             print(f"[Terminal] Size: {old_cols}x{old_rows} -> {new_cols}x{new_rows} (widget: {self.width()}x{self.height()}, char_w: {self.char_width:.1f})")
+
+    def _clear_resize_wait(self):
+        """超时后强制解除 resize 重绘等待"""
+        if self._awaiting_resize_redraw:
+            self._awaiting_resize_redraw = False
+            self._cache_valid = False
+            self.update()
+
+    def _finish_resize_redraw(self):
+        """子进程重绘数据到齐后，解除 resize 等待并刷新显示"""
+        self._awaiting_resize_redraw = False
+        self._cache_valid = False
+        self._display_info['valid'] = False
+        self.update()
 
     def _update_pty_size(self):
         """更新PTY终端大小"""
@@ -740,6 +795,20 @@ class TerminalWidget(QWidget):
             # 标记内容已变化，让定时器统一处理重绘（避免高频输出时的重绘风暴）
             self._content_dirty = True
 
+            # 收到新数据，说明子进程已开始重绘。
+            # 但子进程（如 Claude Code/Ink TUI）的完整重绘会分多个数据块到达，
+            # 不能在第一个块就解除等待，否则会渲染不完整的中间态导致重影。
+            # 改用短延时：每次收到数据时重置一个 80ms 计时器，
+            # 让所有数据块到齐后再解除等待并重建缓存。
+            if self._awaiting_resize_redraw:
+                if hasattr(self, '_resize_data_timer') and self._resize_data_timer is not None:
+                    self._resize_data_timer.stop()
+                else:
+                    self._resize_data_timer = QTimer()
+                    self._resize_data_timer.setSingleShot(True)
+                    self._resize_data_timer.timeout.connect(self._finish_resize_redraw)
+                self._resize_data_timer.start(80)
+
             # 缓冲输出，由定时器统一发送（避免高频输出时的信号风暴）
             self._output_buffer.append(text)
         except Exception as e:
@@ -835,11 +904,11 @@ class TerminalWidget(QWidget):
         if not painter.isActive():
             return
 
-        # 如果正在 resize（防抖等待中），直接绘制旧缓存（不缩放）避免文字拉伸
-        if self._resize_pending and self._cache_pixmap is not None and not self._cache_pixmap.isNull():
-            painter.fillRect(self.rect(), self.bg_color)  # 先填充背景
-            # 直接绘制旧缓存，不缩放——多出的区域显示背景色，缩小则自动裁剪
-            painter.drawPixmap(0, 0, self._cache_pixmap)
+        # 如果正在 resize（防抖等待中）或等待子进程 resize 重绘，
+        # 显示空白背景等待子进程重绘完成。
+        # （之前用旧缓存过渡，但旧缓存可能来自不同状态导致"重影"）
+        if self._resize_pending or self._awaiting_resize_redraw:
+            painter.fillRect(self.rect(), self.bg_color)
             return
 
         # 检查是否需要重建缓存
@@ -1028,9 +1097,9 @@ class TerminalWidget(QWidget):
         visible_width = self._cache_pixmap.width() - self.PADDING * 2
         max_visible_cols = int(visible_width / self.char_width) if self.char_width > 0 else self.term_cols
 
-        # 使用 term_cols 为主限制（已从 widget 尺寸计算得出），
-        # max_visible_cols 为安全上限，screen.columns 仅作参考（可能滞后）
-        num_cols = min(max(self.screen.columns, self.term_cols), max_visible_cols)
+        # 使用 term_cols 为主限制（从 widget 尺寸计算得出），
+        # max_visible_cols 为安全上限。不使用 screen.columns 因为 resize 后它可能滞后。
+        num_cols = min(self.term_cols, max_visible_cols)
         char_width = self.char_width
         char_height = self.char_height
         int_char_height = int(char_height)
