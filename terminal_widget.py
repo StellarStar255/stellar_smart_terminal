@@ -7,6 +7,7 @@ import os
 import re
 import sys
 import shutil
+import codecs
 from typing import Optional, List
 from pathlib import Path
 import unicodedata
@@ -209,9 +210,9 @@ class TerminalWidget(QWidget):
     _RE_TERMINAL_QUERY = re.compile(r'\x1b\[>[\d;]*[cmu]')
     _RE_FOCUS_REPORT = re.compile(r'\x1b\[\?1004[hl]')
     _RE_CURSOR_STYLE = re.compile(r'\x1b\[\d* q')  # DECSCUSR: CSI Ps SP q
-    _RE_OSC_HYPERLINK = re.compile(r'\x1b\]8;[^;]*;[^\x07]*\x07')
-    _RE_OSC_HYPERLINK_END = re.compile(r'\x1b\]8;;\x07')
-    _RE_OSC_TITLE = re.compile(r'\x1b\][012];[^\x07]*\x07')
+    _RE_OSC_HYPERLINK = re.compile(r'\x1b\]8;[^;\x07\x1b]*;[^\x07\x1b]*(?:\x07|\x1b\\)')
+    _RE_OSC_HYPERLINK_END = re.compile(r'\x1b\]8;;(?:\x07|\x1b\\)')
+    _RE_OSC_TITLE = re.compile(r'\x1b\][012];[^\x07\x1b]*(?:\x07|\x1b\\)')
     # 捕获所有其他未处理的 OSC 序列 (OSC 7=CWD, 133=shell integration 等)
     # 防止 Linux 上 shell 发送的 OSC 序列中的数字泄漏到显示缓冲区
     _RE_OSC_OTHER = re.compile(r'\x1b\]\d+;[^\x07\x1b]*(?:\x07|\x1b\\)')
@@ -302,6 +303,9 @@ class TerminalWidget(QWidget):
 
         # 计算字符尺寸（初始值，showEvent时会重新计算）
         self._calculate_char_size()
+
+        # UTF-8 增量解码器 - 正确处理跨数据块的多字节字符
+        self._utf8_decoder = codecs.getincrementaldecoder('utf-8')('replace')
 
         # 光标是否由应用自己管理（TUI模式）
         self.app_cursor_mode = False
@@ -656,7 +660,7 @@ class TerminalWidget(QWidget):
     def _on_output(self, data: bytes):
         """处理输出数据"""
         try:
-            text = data.decode('utf-8', errors='replace')
+            text = self._utf8_decoder.decode(data)
 
             # 发送原始输出信号（只有启用 API 服务器时才发射）
             if self._api_output_enabled:
