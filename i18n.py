@@ -18,6 +18,7 @@ TRANSLATIONS = {
     "window.search_placeholder": {"zh": "搜索...", "en": "Search..."},
     "window.compact_display": {"zh": "简洁显示", "en": "Compact"},
     "window.compact_tooltip": {"zh": "只显示文件夹名", "en": "Show folder name only"},
+    "window.font_size_tooltip": {"zh": "列表字体大小", "en": "List font size"},
     "window.drag_hint": {"zh": "↕ 拖拽项目调整顺序", "en": "↕ Drag items to reorder"},
     "window.sort_time": {"zh": "时间↑", "en": "Time↑"},
     "window.sort_name": {"zh": "名称↓", "en": "Name↓"},

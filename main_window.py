@@ -275,6 +275,7 @@ class WindowNavigatorPanel(QWidget):
 
         self._setup_ui()
         self._apply_style()
+        self._load_navigator_config()
 
         # 缓存上次的窗口信息，避免不必要的刷新
         self._last_window_info = []  # [(title, color), ...]
@@ -356,7 +357,10 @@ class WindowNavigatorPanel(QWidget):
         self.window_list.model().rowsMoved.connect(self._on_rows_moved)
         layout.addWidget(self.window_list)
 
-        # 简洁显示复选框
+        # 简洁显示 + 字体大小行
+        compact_row = QHBoxLayout()
+        compact_row.setSpacing(8)
+
         self.compact_checkbox = QCheckBox(t("window.compact_display"))
         self.compact_checkbox.setChecked(True)  # 默认开启简洁显示
         self.compact_checkbox.setToolTip(t("window.compact_tooltip"))
@@ -372,7 +376,47 @@ class WindowNavigatorPanel(QWidget):
             }
         """)
         self.compact_checkbox.stateChanged.connect(self._toggle_compact_mode)
-        layout.addWidget(self.compact_checkbox)
+        compact_row.addWidget(self.compact_checkbox)
+
+        compact_row.addStretch()
+
+        # 字体大小调节
+        self._font_size = 12  # 默认字体大小
+        font_size_label = QLabel("A")
+        font_size_label.setStyleSheet("color: #aaaaaa; font-size: 11px; border: none;")
+        compact_row.addWidget(font_size_label)
+
+        self.font_size_spin = QSpinBox()
+        self.font_size_spin.setRange(8, 24)
+        self.font_size_spin.setValue(self._font_size)
+        self.font_size_spin.setSuffix("px")
+        self.font_size_spin.setToolTip(t("window.font_size_tooltip"))
+        self.font_size_spin.setFixedWidth(68)
+        self.font_size_spin.setStyleSheet("""
+            QSpinBox {
+                background-color: #16213e;
+                border: 1px solid #3d3d5c;
+                border-radius: 3px;
+                padding: 1px 2px;
+                color: #eaeaea;
+                font-size: 11px;
+            }
+            QSpinBox:hover {
+                border-color: #667eea;
+            }
+            QSpinBox::up-button, QSpinBox::down-button {
+                width: 14px;
+                background-color: #2d2d44;
+                border: none;
+            }
+            QSpinBox::up-button:hover, QSpinBox::down-button:hover {
+                background-color: #3d3d5c;
+            }
+        """)
+        self.font_size_spin.valueChanged.connect(self._on_font_size_changed)
+        compact_row.addWidget(self.font_size_spin)
+
+        layout.addLayout(compact_row)
 
         # 拖拽提示标签（默认隐藏）
         self.drag_hint_label = QLabel(t("window.drag_hint"))
@@ -440,6 +484,32 @@ class WindowNavigatorPanel(QWidget):
         """切换简洁显示模式"""
         self._compact_mode = (state == Qt.CheckState.Checked.value)
         self._force_refresh()
+
+    def _on_font_size_changed(self, size):
+        """字体大小变更"""
+        self._font_size = size
+        self._apply_list_font_size()
+        self._save_navigator_config()
+
+    def _apply_list_font_size(self):
+        """应用字体大小到列表"""
+        self.window_list.setStyleSheet(f"""
+            QListWidget {{
+                background-color: #16213e;
+                border: 1px solid #3d3d5c;
+                border-radius: 4px;
+                font-size: {self._font_size}px;
+                outline: none;
+            }}
+            QListWidget::item {{
+                padding: 8px;
+                border-bottom: 1px solid #2d2d44;
+                border-radius: 4px;
+            }}
+            QListWidget::item:selected {{
+                background-color: #2d2d44;
+            }}
+        """)
 
     def _extract_folder_name(self, title: str, window=None) -> str:
         """从窗口标题中提取文件夹名
@@ -746,8 +816,57 @@ class WindowNavigatorPanel(QWidget):
         # 强制刷新
         self._force_refresh()
 
+    def hideEvent(self, event):
+        """隐藏时保存设置"""
+        self._save_navigator_config()
+        super().hideEvent(event)
+
+    def _save_navigator_config(self):
+        """保存导航面板设置到主配置文件"""
+        try:
+            config_file = Path(__file__).parent / ".smart_terminal_config.json"
+            config = {}
+            if config_file.exists():
+                with open(config_file, 'r', encoding='utf-8') as f:
+                    config = json.load(f)
+            config['navigator_geometry'] = [self.x(), self.y(), self.width(), self.height()]
+            config['navigator_font_size'] = self._font_size
+            with open(config_file, 'w', encoding='utf-8') as f:
+                json.dump(config, f, ensure_ascii=False, indent=2)
+        except Exception:
+            pass
+
+    def _load_navigator_config(self):
+        """从主配置文件加载导航面板设置"""
+        try:
+            config_file = Path(__file__).parent / ".smart_terminal_config.json"
+            if config_file.exists():
+                with open(config_file, 'r', encoding='utf-8') as f:
+                    config = json.load(f)
+                # 恢复字体大小
+                font_size = config.get('navigator_font_size', 12)
+                if 8 <= font_size <= 24:
+                    self._font_size = font_size
+                    self.font_size_spin.setValue(font_size)
+                    self._apply_list_font_size()
+                # 恢复窗口位置和大小
+                geo = config.get('navigator_geometry')
+                if geo and len(geo) == 4:
+                    x, y, w, h = geo
+                    # 确保窗口在屏幕可见范围内
+                    from PyQt6.QtWidgets import QApplication
+                    screen = QApplication.primaryScreen()
+                    if screen:
+                        screen_rect = screen.availableGeometry()
+                        if (x + w > 0 and x < screen_rect.width() and
+                                y + h > 0 and y < screen_rect.height()):
+                            self.setGeometry(x, y, max(w, 200), max(h, 150))
+        except Exception:
+            pass
+
     def closeEvent(self, event):
-        """关闭时停止定时器并发送关闭信号"""
+        """关闭时保存设置、停止定时器并发送关闭信号"""
+        self._save_navigator_config()
         self._refresh_timer.stop()
         self.panel_closed.emit()
         super().closeEvent(event)
