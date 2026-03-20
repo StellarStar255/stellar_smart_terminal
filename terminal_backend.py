@@ -353,6 +353,18 @@ if IS_WINDOWS:
 
                 # 6. 构建环境变量块（Unicode）
                 env = os.environ.copy()
+                # 显式设置终端类型和能力标识。
+                # 在 Windows 上，Node.js CLI 工具（如 Claude Code/Ink）会检查多个
+                # 环境变量来判断终端是否支持 Unicode、颜色、交互式渲染等。
+                # 缺少这些变量会导致回退到精简布局（无 box-drawing 边框）。
+                env['TERM'] = 'xterm-256color'
+                env['COLORTERM'] = 'truecolor'
+                env['FORCE_COLOR'] = '3'        # 强制 24-bit 颜色支持
+                env['TERM_PROGRAM'] = 'vscode'   # 标识为已知支持完整渲染的终端
+                env['TERM_PROGRAM_VERSION'] = '1.96.0'
+                if 'WT_SESSION' not in env:
+                    import uuid
+                    env['WT_SESSION'] = str(uuid.uuid4())
                 env_block = '\0'.join(f'{k}={v}' for k, v in env.items()) + '\0\0'
 
                 # 7. 创建进程

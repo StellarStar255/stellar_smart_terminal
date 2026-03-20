@@ -88,6 +88,26 @@ class CompatibleHistoryScreen(pyte.HistoryScreen):
             self._saved_main_cursor = None
         self._in_alt_screen = False
 
+    # ------ CUF 修复 ------
+
+    def cursor_forward(self, count=None):
+        """CUF (\x1b[nC) 修复：光标前移时清除经过的单元格。
+
+        标准 VT100 行为是 CUF 不修改经过的单元格，但 TUI 框架（如 Ink/Claude Code）
+        用 CUF 代替空格来创建间距，期望这些区域显示为空白。
+        如果不清除，resize 或 TUI 更新后旧内容会在 CUF 跳过的区域残留（"重影"）。
+        """
+        n = count or 1
+        default_char = self.default_char
+        y = self.cursor.y
+        x = self.cursor.x
+        buf_line = self.buffer[y]
+        for i in range(n):
+            col = x + i
+            if col < self.columns:
+                buf_line[col] = default_char
+        super().cursor_forward(count)
+
     # ------ 原有功能 ------
 
     def draw(self, *chars):
@@ -751,10 +771,23 @@ class TerminalWidget(QWidget):
                 self._write_to_backend(response.encode())
                 text = self._RE_DA_QUERY.sub('', text)
 
+            # 响应 Secondary DA 查询 (\x1b[>c 或 \x1b[>0c)
+            # Claude Code / Ink 用此检测终端类型和版本来决定渲染模式。
+            # 不回复会导致超时→回退到精简布局（无 box-drawing 边框）。
+            if re.search(r'\x1b\[>0?c', text):
+                # 回复为 VT520 兼容 (65), 版本 100
+                response = '\x1b[>65;100;0c'
+                self._write_to_backend(response.encode())
+
+            # 响应 XTVERSION 查询 (\x1b[>0q)
+            if '\x1b[>0q' in text:
+                response = '\x1bP>|SmartTerminal(1.0)\x1b\\'
+                self._write_to_backend(response.encode())
+
             # 只过滤pyte完全不支持且会导致问题的序列（使用预编译正则）
             text = self._RE_SYNC_OUTPUT.sub('', text)      # Sync output (不支持)
             text = self._RE_KITTY_KEYBOARD.sub('', text)   # Kitty keyboard protocol
-            text = self._RE_TERMINAL_QUERY.sub('', text)   # 终端查询响应
+            text = self._RE_TERMINAL_QUERY.sub('', text)   # 终端查询响应（已回复，过滤掉不传给pyte）
             text = self._RE_FOCUS_REPORT.sub('', text)     # Focus reporting
             text = self._RE_CURSOR_STYLE.sub('', text)     # 光标样式
 
@@ -827,6 +860,51 @@ class TerminalWidget(QWidget):
             combined = ''.join(self._output_buffer)
             self._output_buffer.clear()
             self.output_recorded.emit(combined)
+
+    def _debug_dump_buffer(self):
+        """调试：将 pyte 缓冲区内容导出到文件"""
+        dump_path = os.path.join(os.path.dirname(__file__), 'pyte_buffer_dump.txt')
+        with open(dump_path, 'w', encoding='utf-8') as f:
+            f.write(f"=== PYTE BUFFER DUMP ===\n")
+            f.write(f"term_cols={self.term_cols}, term_rows={self.term_rows}\n")
+            f.write(f"screen.columns={self.screen.columns}, screen.lines={self.screen.lines}\n")
+            f.write(f"scroll_offset={self.scroll_offset}\n")
+            history_count, total_lines, start_line = self._get_display_info()
+            f.write(f"history_count={history_count}, total_lines={total_lines}, start_line={start_line}\n\n")
+
+            f.write("--- CURRENT SCREEN BUFFER ---\n")
+            for row in range(self.screen.lines):
+                chars = []
+                for col in range(min(self.screen.columns, 200)):
+                    try:
+                        ch = self.screen.buffer[row][col]
+                        t = ch.data if hasattr(ch, 'data') else str(ch)
+                        chars.append(t if t else ' ')
+                    except (KeyError, IndexError, TypeError):
+                        chars.append(' ')
+                line = ''.join(chars).rstrip()
+                if line:
+                    f.write(f"  row {row:2d}: |{line}|\n")
+                else:
+                    f.write(f"  row {row:2d}: |\n")
+
+            f.write("\n--- HISTORY (last 10 lines) ---\n")
+            history = self._get_history_top()
+            if history:
+                h_start = max(0, len(history) - 10)
+                for i in range(h_start, len(history)):
+                    chars = []
+                    for col in range(min(self.screen.columns, 200)):
+                        try:
+                            ch = history[i][col]
+                            t = ch.data if hasattr(ch, 'data') else str(ch)
+                            chars.append(t if t else ' ')
+                        except (KeyError, IndexError, TypeError):
+                            chars.append(' ')
+                    line = ''.join(chars).rstrip()
+                    f.write(f"  hist {i:3d}: |{line}|\n")
+
+        print(f"[Terminal] Buffer dumped to {dump_path}")
 
     def _calibrate_char_width(self, painter: QPainter):
         """通过实际渲染校准字符宽度"""
@@ -922,9 +1000,13 @@ class TerminalWidget(QWidget):
         if need_rebuild:
             self._rebuild_cache()
 
-        # 直接绘制缓存的内容
+        # 先填充背景确保完全不透明（防止其他 tab/widget 内容透出）
+        painter.fillRect(self.rect(), self.bg_color)
+        # 使用 Source 合成模式：完全替换像素，不做 alpha 混合
+        painter.setCompositionMode(QPainter.CompositionMode.CompositionMode_Source)
         if self._cache_pixmap and not self._cache_pixmap.isNull():
             painter.drawPixmap(0, 0, self._cache_pixmap)
+        painter.setCompositionMode(QPainter.CompositionMode.CompositionMode_SourceOver)
 
         # 选区高亮单独绘制（不在缓存中，避免拖动时重建缓存）
         if self._has_selection():
@@ -1309,6 +1391,12 @@ class TerminalWidget(QWidget):
         key = event.key()
         modifiers = event.modifiers()
         text = event.text()
+
+        # 调试：Ctrl+Shift+D 导出 pyte 缓冲区到文件
+        if (key == Qt.Key.Key_D and
+            modifiers == (Qt.KeyboardModifier.ControlModifier | Qt.KeyboardModifier.ShiftModifier)):
+            self._debug_dump_buffer()
+            return
 
         # 物理 Ctrl+C 发送中断信号到终端（优先级最高）
         # macOS: 物理 Ctrl 对应 MetaModifier, Cmd 对应 ControlModifier
