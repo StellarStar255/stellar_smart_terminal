@@ -7464,6 +7464,23 @@ class MainWindow(QMainWindow):
                 'git_panel_visible': getattr(self, 'git_panel_visible', False),
                 'log_panel_visible': getattr(self, 'log_panel_visible', False),
             }
+            # 保存窗口导航面板设置
+            nav = MainWindow._global_window_navigator
+            if nav is not None and not sip.isdeleted(nav):
+                config['navigator_geometry'] = [nav.x(), nav.y(), nav.width(), nav.height()]
+                config['navigator_font_size'] = nav._font_size
+            else:
+                # 导航面板已关闭，保留之前保存的设置
+                try:
+                    if self.CONFIG_FILE.exists():
+                        with open(self.CONFIG_FILE, 'r', encoding='utf-8') as f2:
+                            old = json.load(f2)
+                        if 'navigator_geometry' in old:
+                            config['navigator_geometry'] = old['navigator_geometry']
+                        if 'navigator_font_size' in old:
+                            config['navigator_font_size'] = old['navigator_font_size']
+                except Exception:
+                    pass
             with open(self.CONFIG_FILE, 'w', encoding='utf-8') as f:
                 json.dump(config, f, ensure_ascii=False, indent=2)
         except Exception:
