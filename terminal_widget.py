@@ -243,9 +243,18 @@ class TerminalWidget(QWidget):
     # APC (Application Program Command): \x1b_ ... ST
     # PM (Privacy Message): \x1b^ ... ST
     # ST = \x07 或 \x1b\\
-    _RE_DCS = re.compile(r'\x1bP[^\x1b]*(?:\x1b\x5c|\x07)')
-    _RE_APC = re.compile(r'\x1b_[^\x1b]*(?:\x1b\x5c|\x07)')
-    _RE_PM = re.compile(r'\x1b\^[^\x1b]*(?:\x1b\x5c|\x07)')
+    # 使用 [\s\S]*? (非贪婪) 匹配内容（包括嵌入的 ESC 字符，如 SIXEL 数据）
+    _RE_DCS = re.compile(r'\x1bP[\s\S]*?(?:\x1b\x5c|\x07)')
+    _RE_APC = re.compile(r'\x1b_[\s\S]*?(?:\x1b\x5c|\x07)')
+    _RE_PM = re.compile(r'\x1b\^[\s\S]*?(?:\x1b\x5c|\x07)')
+    # 匹配数据末尾不完整的 DCS/APC/PM/OSC 序列（跨数据块时缓冲用）
+    # 也匹配末尾孤立的 \x1b（可能是下一个转义序列的开始）
+    _RE_INCOMPLETE_STRING_SEQ = re.compile(
+        r'(?:'
+        r'(?:\x1b[P_\^]|\x1b\])(?:(?!\x1b\x5c|\x07)[\s\S])*'  # DCS/APC/PM/OSC 未闭合
+        r'|\x1b$'                                                 # 末尾孤立 ESC
+        r')$'
+    )
 
     # 终端内容边距（像素），左右各 PADDING，上下各 PADDING
     PADDING = 8
@@ -342,6 +351,9 @@ class TerminalWidget(QWidget):
 
         # UTF-8 增量解码器 - 正确处理跨数据块的多字节字符
         self._utf8_decoder = codecs.getincrementaldecoder('utf-8')('replace')
+
+        # 跨数据块的不完整 DCS/APC/PM 序列缓冲
+        self._pending_string_seq = ''
 
         # 光标是否由应用自己管理（TUI模式）
         self.app_cursor_mode = False
@@ -805,6 +817,11 @@ class TerminalWidget(QWidget):
                 response = '\x1bP>|SmartTerminal(1.0)\x1b\\'
                 self._write_to_backend(response.encode())
 
+            # 拼接上一次遗留的不完整字符串序列（跨数据块的 DCS/APC/PM/OSC）
+            if self._pending_string_seq:
+                text = self._pending_string_seq + text
+                self._pending_string_seq = ''
+
             # 只过滤pyte完全不支持且会导致问题的序列（使用预编译正则）
             text = self._RE_SYNC_OUTPUT.sub('', text)      # Sync output (不支持)
             text = self._RE_KITTY_KEYBOARD.sub('', text)   # Kitty keyboard protocol
@@ -821,7 +838,13 @@ class TerminalWidget(QWidget):
             # pyte 不支持的字符串序列（内容会泄漏到显示缓冲区）
             text = self._RE_DCS.sub('', text)               # DCS 设备控制字符串
             text = self._RE_APC.sub('', text)               # APC 应用程序命令
-            text = self._RE_PM.sub('', text)                # PM 隐私消息
+            text = self._RE_PM.sub('', text)
+
+            # 检查末尾是否有不完整的字符串序列（DCS/APC/PM/OSC 跨块），缓冲到下次
+            m = self._RE_INCOMPLETE_STRING_SEQ.search(text)
+            if m:
+                self._pending_string_seq = text[m.start():]
+                text = text[:m.start()]
 
             # 检测鼠标模式启用/禁用
             # 鼠标模式序列: \x1b[?1000h (启用), \x1b[?1000l (禁用)
@@ -844,19 +867,16 @@ class TerminalWidget(QWidget):
             # 记录 feed 前的历史行数，用于滚动位置稳定化
             old_total = self.screen._total_history_lines
 
-            # 送入pyte处理（带错误恢复）
+            # 送入pyte处理
             try:
                 self.stream.feed(text)
             except Exception as feed_err:
-                # pyte 处理异常时尝试逐字符恢复，避免丢失整块数据
-                print(f"[Terminal] stream.feed error: {feed_err}, attempting char-by-char recovery")
+                # 记录错误但不做逐字符恢复——stream.feed 可能已部分处理了 text，
+                # 逐字符重新送入会导致已处理部分被重复执行，并把转义序列拆散
+                # 显示为乱码字符（括号、数字等）。直接跳过即可。
+                print(f"[Terminal] stream.feed error: {feed_err}, skipping block ({len(text)} chars)")
                 if self._debug_capture_enabled and self._debug_capture_file:
                     self._debug_capture_file.write(f"FEED ERROR: {feed_err}\n")
-                for ch in text:
-                    try:
-                        self.stream.feed(ch)
-                    except Exception:
-                        pass  # 跳过无法处理的单个字符
 
             # 滚动位置稳定化：当用户处于回滚浏览状态时，新输出不应导致显示内容跳动
             # 通过增加 scroll_offset 来补偿新增的历史行，保持 display_start 不变
