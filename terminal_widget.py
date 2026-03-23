@@ -162,7 +162,7 @@ class CompatibleHistoryScreen(pyte.HistoryScreen):
 
 from PyQt6.QtWidgets import (
     QWidget, QVBoxLayout, QApplication, QMenu, QLineEdit,
-    QHBoxLayout, QPushButton, QLabel, QFileDialog
+    QHBoxLayout, QPushButton, QLabel, QFileDialog, QSizePolicy
 )
 from PyQt6.QtCore import QThread, pyqtSignal, Qt, QTimer, QEvent, QPoint, QUrl, QMimeData
 from PyQt6.QtGui import (
@@ -239,9 +239,20 @@ class TerminalWidget(QWidget):
     # 防止 Linux 上 shell 发送的 OSC 序列中的数字泄漏到显示缓冲区
     _RE_OSC_OTHER = re.compile(r'\x1b\]\d+;[^\x07\x1b]*(?:\x07|\x1b\\)')
     _RE_DA_QUERY = re.compile(r'\x1b\[0?c')
+    # DCS (Device Control String): \x1bP ... ST — pyte 不支持，内容会泄漏到显示缓冲区
+    # APC (Application Program Command): \x1b_ ... ST
+    # PM (Privacy Message): \x1b^ ... ST
+    # ST = \x07 或 \x1b\\
+    _RE_DCS = re.compile(r'\x1bP[^\x1b]*(?:\x1b\x5c|\x07)')
+    _RE_APC = re.compile(r'\x1b_[^\x1b]*(?:\x1b\x5c|\x07)')
+    _RE_PM = re.compile(r'\x1b\^[^\x1b]*(?:\x1b\x5c|\x07)')
 
     # 终端内容边距（像素），左右各 PADDING，上下各 PADDING
     PADDING = 8
+
+    # 原始输出诊断捕获（调试用）
+    _debug_capture_enabled = False
+    _debug_capture_file = None
 
     # 媒体文件扩展名集合（类级别，避免重复创建）
     _AUDIO_EXTENSIONS = frozenset({'.wav', '.mp3', '.m4a', '.ogg', '.flac', '.webm', '.aac'})
@@ -387,6 +398,8 @@ class TerminalWidget(QWidget):
         # 设置
         self.setFocusPolicy(Qt.FocusPolicy.StrongFocus)
         self.setMinimumSize(400, 300)
+        # 防止 sizeHint 与 term_cols/term_rows 形成反馈循环导致 resize 震荡
+        self.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Expanding)
 
         # 启用输入法支持（中文等）
         self.setAttribute(Qt.WidgetAttribute.WA_InputMethodEnabled, True)
@@ -505,12 +518,12 @@ class TerminalWidget(QWidget):
         self._update_terminal_size()
 
     def sizeHint(self):
+        """返回固定的默认大小建议，不依赖当前 term_cols/term_rows。
+        避免 sizeHint ↔ term_cols 反馈循环导致的 resize 震荡。
+        实际大小由父布局（QSplitter/QTabWidget）决定。
+        """
         from PyQt6.QtCore import QSize
-        p2 = self.PADDING * 2
-        return QSize(
-            int(self.term_cols * self.char_width + p2),
-            int(self.term_rows * self.char_height + p2)
-        )
+        return QSize(800, 600)
 
     def _toggle_cursor(self):
         """切换光标可见性 - 只更新光标区域，不重建整个缓存"""
@@ -753,6 +766,14 @@ class TerminalWidget(QWidget):
             if self._api_output_enabled:
                 self.raw_output_received.emit(text)
 
+            # 诊断捕获：记录过滤前的原始文本
+            if self._debug_capture_enabled and self._debug_capture_file:
+                from datetime import datetime
+                ts = datetime.now().strftime('%H:%M:%S.%f')[:12]
+                self._debug_capture_file.write(f"\n{'='*60}\n")
+                self._debug_capture_file.write(f"[{ts}] RAW ({len(text)} chars):\n")
+                self._debug_capture_file.write(repr(text) + '\n')
+
             # 响应光标位置查询 (DSR - Device Status Report)
             # 当应用发送 \x1b[6n 时，终端应回复 \x1b[{row};{col}R
             if '\x1b[6n' in text:
@@ -797,6 +818,10 @@ class TerminalWidget(QWidget):
             text = self._RE_OSC_TITLE.sub('', text)         # OSC 0,1,2 标题
             text = self._RE_OSC_OTHER.sub('', text)         # 其他 OSC 序列 (7, 133 等)
 
+            # pyte 不支持的字符串序列（内容会泄漏到显示缓冲区）
+            text = self._RE_DCS.sub('', text)               # DCS 设备控制字符串
+            text = self._RE_APC.sub('', text)               # APC 应用程序命令
+            text = self._RE_PM.sub('', text)                # PM 隐私消息
 
             # 检测鼠标模式启用/禁用
             # 鼠标模式序列: \x1b[?1000h (启用), \x1b[?1000l (禁用)
@@ -810,11 +835,28 @@ class TerminalWidget(QWidget):
             text = text.replace('\u23FA', '')  # ⏺ (录制符号)
             text = text.replace('\uFFFD', '')  # � (替换字符)
 
+            # 诊断捕获：记录过滤后的文本
+            if self._debug_capture_enabled and self._debug_capture_file:
+                self._debug_capture_file.write(f"FILTERED ({len(text)} chars):\n")
+                self._debug_capture_file.write(repr(text) + '\n')
+                self._debug_capture_file.flush()
+
             # 记录 feed 前的历史行数，用于滚动位置稳定化
             old_total = self.screen._total_history_lines
 
-            # 送入pyte处理
-            self.stream.feed(text)
+            # 送入pyte处理（带错误恢复）
+            try:
+                self.stream.feed(text)
+            except Exception as feed_err:
+                # pyte 处理异常时尝试逐字符恢复，避免丢失整块数据
+                print(f"[Terminal] stream.feed error: {feed_err}, attempting char-by-char recovery")
+                if self._debug_capture_enabled and self._debug_capture_file:
+                    self._debug_capture_file.write(f"FEED ERROR: {feed_err}\n")
+                for ch in text:
+                    try:
+                        self.stream.feed(ch)
+                    except Exception:
+                        pass  # 跳过无法处理的单个字符
 
             # 滚动位置稳定化：当用户处于回滚浏览状态时，新输出不应导致显示内容跳动
             # 通过增加 scroll_offset 来补偿新增的历史行，保持 display_start 不变
@@ -849,9 +891,29 @@ class TerminalWidget(QWidget):
             print(f"Output error: {e}")
             traceback.print_exc()
 
+    def toggle_debug_capture(self):
+        """切换原始输出诊断捕获（用于排查内容过滤问题）"""
+        if self._debug_capture_enabled:
+            # 关闭捕获
+            self._debug_capture_enabled = False
+            if self._debug_capture_file:
+                self._debug_capture_file.close()
+                self._debug_capture_file = None
+            print("[Terminal] Debug capture DISABLED")
+        else:
+            # 开启捕获
+            capture_path = os.path.join(os.path.dirname(__file__), 'terminal_raw_capture.log')
+            self._debug_capture_file = open(capture_path, 'w', encoding='utf-8')
+            self._debug_capture_enabled = True
+            print(f"[Terminal] Debug capture ENABLED → {capture_path}")
+
     def _on_process_finished(self, status: int):
         """进程结束"""
         self.session_ended.emit()
+        # 关闭诊断捕获文件
+        if self._debug_capture_file:
+            self._debug_capture_file.close()
+            self._debug_capture_file = None
 
     def _flush_output_buffer(self):
         """刷新输出缓冲区，批量发送 output_recorded 信号"""
@@ -982,11 +1044,13 @@ class TerminalWidget(QWidget):
         if not painter.isActive():
             return
 
-        # 如果正在 resize（防抖等待中）或等待子进程 resize 重绘，
-        # 显示空白背景等待子进程重绘完成。
-        # （之前用旧缓存过渡，但旧缓存可能来自不同状态导致"重影"）
+        # resize 期间继续显示旧缓存内容（而非空白），避免频繁 resize 时内容"消失"。
+        # 之前显示空白是为了防止重影，但 resize 震荡会导致内容长时间不可见。
+        # 旧缓存可能尺寸不匹配，但仍比空白好——内容至少可读。
         if self._resize_pending or self._awaiting_resize_redraw:
             painter.fillRect(self.rect(), self.bg_color)
+            if self._cache_pixmap and not self._cache_pixmap.isNull():
+                painter.drawPixmap(0, 0, self._cache_pixmap)
             return
 
         # 检查是否需要重建缓存
@@ -1396,6 +1460,12 @@ class TerminalWidget(QWidget):
         if (key == Qt.Key.Key_D and
             modifiers == (Qt.KeyboardModifier.ControlModifier | Qt.KeyboardModifier.ShiftModifier)):
             self._debug_dump_buffer()
+            return
+
+        # 调试：Ctrl+Shift+R 切换原始输出诊断捕获
+        if (key == Qt.Key.Key_R and
+            modifiers == (Qt.KeyboardModifier.ControlModifier | Qt.KeyboardModifier.ShiftModifier)):
+            self.toggle_debug_capture()
             return
 
         # 物理 Ctrl+C 发送中断信号到终端（优先级最高）
