@@ -2093,6 +2093,7 @@ class MainWindow(QMainWindow):
         self.auto_save_timer = QTimer()
         self.command_history = []
         self.presets = []  # 预设命令列表
+        self._presets_modified = False  # 标记预设是否在本窗口中被修改（防止多窗口覆盖）
         self.local_presets = []  # 本地快速命令列表（目录级别）
         self.pending_commands = []  # 待执行的命令队列
         self.current_theme = "深蓝"  # 当前主题名称
@@ -7439,8 +7440,22 @@ class MainWindow(QMainWindow):
             dir_history = self.working_dir_history if hasattr(self, 'working_dir_history') else []
             # 使用窗口级别的工作目录
             last_cwd = self._window_cwd if hasattr(self, '_window_cwd') else os.getcwd()
+
+            # 防止多窗口覆盖：如果本窗口没有修改预设，从磁盘加载最新的预设
+            # 这样关闭窗口时不会覆盖其他窗口保存的预设
+            presets_to_save = self.presets
+            if not getattr(self, '_presets_modified', False):
+                try:
+                    if self.CONFIG_FILE.exists():
+                        with open(self.CONFIG_FILE, 'r', encoding='utf-8') as f:
+                            existing_config = json.load(f)
+                        if 'presets' in existing_config:
+                            presets_to_save = existing_config['presets']
+                except Exception:
+                    pass  # 读取失败时使用内存中的预设
+
             config = {
-                'presets': self.presets,
+                'presets': presets_to_save,
                 'last_preset_index': current_index,
                 'image_prefix_enabled': image_prefix,
                 'image_save_local': image_local,
@@ -7589,6 +7604,7 @@ class MainWindow(QMainWindow):
         dialog = PresetDialog(self.presets, self)
         if dialog.exec() == QDialog.DialogCode.Accepted:
             self.presets = dialog.get_presets()
+            self._presets_modified = True  # 标记预设已修改
             self._populate_presets()
             self._save_config()
             self.statusbar.showMessage(t("status.preset_saved"), 3000)
@@ -7598,6 +7614,7 @@ class MainWindow(QMainWindow):
         dialog = PresetDialog(self.presets, self, auto_add=True)
         if dialog.exec() == QDialog.DialogCode.Accepted:
             self.presets = dialog.get_presets()
+            self._presets_modified = True  # 标记预设已修改
             self._populate_presets()
             self._save_config()
             self.statusbar.showMessage(t("status.preset_saved"), 3000)
