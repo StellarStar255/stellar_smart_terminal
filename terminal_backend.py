@@ -449,11 +449,14 @@ if IS_WINDOWS:
                     break
 
             # 进程结束处理
+            # 注意：先捕获回调引用，避免与 stop() 的竞争条件
+            # stop() 可能在另一个线程中将 on_exit 设为 None
             if self._running:
                 self._running = False
                 exit_code = self._get_exit_code()
-                if self.on_exit:
-                    self.on_exit(exit_code)
+                exit_callback = self.on_exit  # 捕获回调引用
+                if exit_callback:
+                    exit_callback(exit_code)
 
         def _get_exit_code(self) -> int:
             """获取子进程退出码"""
@@ -674,7 +677,7 @@ else:
             try:
                 size = struct.pack('HHHH', rows, cols, 0, 0)
                 fcntl.ioctl(fd, termios.TIOCSWINSZ, size)
-            except:
+            except Exception:
                 pass
 
         def _read_loop(self):
@@ -703,8 +706,10 @@ else:
                                 pid, status = os.waitpid(self._child_pid, os.WNOHANG)
                                 if pid != 0:
                                     self._running = False
-                                    if self.on_exit:
-                                        self.on_exit(status)
+                                    # 捕获回调引用，避免与 stop() 的竞争条件
+                                    exit_callback = self.on_exit
+                                    if exit_callback:
+                                        exit_callback(status)
                                     break
                             except ChildProcessError:
                                 break
@@ -773,7 +778,7 @@ else:
             if self._master_fd is not None:
                 try:
                     os.close(self._master_fd)
-                except:
+                except Exception:
                     pass
                 self._master_fd = None
 

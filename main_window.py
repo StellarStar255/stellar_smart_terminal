@@ -2332,7 +2332,7 @@ class MainWindow(QMainWindow):
                         self._apply_macos_window_behavior(ns_window)
                         print(f"已设置窗口属性: {window_title}")
                         return
-                except:
+                except Exception:
                     continue
 
             # 如果没找到匹配的，对所有标准窗口应用设置
@@ -2341,7 +2341,7 @@ class MainWindow(QMainWindow):
                     # 跳过没有标题的窗口（可能是系统窗口）
                     if ns_window.title():
                         self._apply_macos_window_behavior(ns_window)
-                except:
+                except Exception:
                     continue
 
         except Exception as e:
@@ -4880,8 +4880,8 @@ class MainWindow(QMainWindow):
                     terminal.close_split_requested.disconnect()
                     terminal.split_horizontal_requested.disconnect()
                     terminal.split_vertical_requested.disconnect()
-                except:
-                    pass
+                except (TypeError, RuntimeError):
+                    pass  # Signal may already be disconnected
 
                 # 重新连接到当前窗口
                 terminal.input_recorded.connect(self._on_input)

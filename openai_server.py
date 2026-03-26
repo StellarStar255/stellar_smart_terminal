@@ -108,10 +108,10 @@ class TerminalBridge(QObject):
 
     def _do_send_input(self, text: str):
         """在主线程中发送输入到终端"""
-        if self.terminal and self.terminal.master_fd is not None:
+        if self.terminal and hasattr(self.terminal, '_backend') and self.terminal._backend is not None:
             try:
-                os.write(self.terminal.master_fd, text.encode('utf-8'))
-            except OSError:
+                self.terminal._write_to_backend(text.encode('utf-8'))
+            except (OSError, AttributeError):
                 pass
 
     def start_request(self) -> bool:
@@ -197,12 +197,12 @@ class TerminalBridge(QObject):
             try:
                 # 使用 put_nowait 避免阻塞，如果 Queue 满则丢弃旧数据
                 self.output_buffer.put_nowait(text)
-            except:
+            except Exception:
                 # Queue 满时，丢弃最旧的数据并添加新数据
                 try:
                     self.output_buffer.get_nowait()
                     self.output_buffer.put_nowait(text)
-                except:
+                except Exception:
                     pass  # 极端情况下忽略
 
     def get_output(self, timeout: float = 0.1) -> Optional[str]:
@@ -621,7 +621,7 @@ class OpenAIRequestHandler(BaseHTTPRequestHandler):
             print(f"[OpenAI Server] Error: {e}")
             try:
                 self._send_error(500, str(e))
-            except:
+            except Exception:
                 pass
 
     def _build_input(self, messages: list) -> str:

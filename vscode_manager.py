@@ -198,7 +198,7 @@ class VSCodeManager(QObject):
                 timeout=10
             )
             return result.returncode == 0
-        except:
+        except Exception:
             return False
 
     def get_vscode_version(self) -> str:
@@ -212,7 +212,7 @@ class VSCodeManager(QObject):
             )
             if result.returncode == 0:
                 return result.stdout.strip().split('\n')[0]
-        except:
+        except Exception:
             pass
         return "未知"
 
