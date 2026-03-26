@@ -78,7 +78,7 @@ echo.
 :: Set up the file association
 echo Setting .py file association...
 
-:: Create the file type
+:: Create the file type in HKCR (system-wide)
 reg add "HKCR\.py" /ve /d "Python.File" /f >nul
 reg add "HKCR\.py" /v "Content Type" /d "text/plain" /f >nul
 
@@ -100,7 +100,7 @@ echo ============================================
 echo.
 echo Python path: %PYTHON_PATH%
 echo.
-echo You can now double-click app.py to run the Smart Terminal.
+echo You can now double-click .py files to run them.
 echo Using pythonw.exe = no console window (ideal for GUI apps)
 echo.
 
