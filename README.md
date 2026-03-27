@@ -28,6 +28,12 @@ python app.py
 - PyQt6 >= 6.5.0
 - pyte >= 0.8.0
 
+## Troubleshooting / 故障排除
+```shell
+pip uninstall PyQt6 PyQt6-Qt6 PyQt6-sip -y
+pip install PyQt6==6.7.1 PyQt6-Qt6==6.7.1 --no-cache-dir
+```
+
 ## License / 许可
 
 [MIT](LICENSE)
