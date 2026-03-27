@@ -4898,6 +4898,7 @@ class MainWindow(QMainWindow):
                 terminal.close_split_requested.connect(self._close_current_split)
                 terminal.split_horizontal_requested.connect(self._split_current_tab)
                 terminal.split_vertical_requested.connect(self._split_vertical_current_terminal)
+                terminal.move_split_left_requested.connect(self._move_split_left)
                 terminal.installEventFilter(self)
 
                 # 重新设置快速命令提供者，指向当前窗口的预设
@@ -5017,6 +5018,7 @@ class MainWindow(QMainWindow):
         terminal.close_split_requested.connect(self._close_current_split)
         terminal.split_horizontal_requested.connect(self._split_current_tab)
         terminal.split_vertical_requested.connect(self._split_vertical_current_terminal)
+        terminal.move_split_left_requested.connect(self._move_split_left)
 
         # 设置工作目录（用于自动启动时）
         terminal.set_working_dir(self._window_cwd)
@@ -5208,6 +5210,52 @@ class MainWindow(QMainWindow):
             splitter.setSizes(sizes)
 
         self.statusbar.showMessage(t("status.close_split_done", count=len(terminals)), 3000)
+
+    def _move_split_left(self):
+        """将当前分屏与左边的分屏交换位置"""
+        idx = self.tab_widget.currentIndex()
+        if idx < 0:
+            return
+
+        splitter = self.tab_splitters.get(idx)
+        if not splitter:
+            return
+
+        # 找到当前活动终端在 splitter 中的索引
+        terminal = self.active_terminal
+        if not terminal:
+            return
+
+        # 查找终端（或其父 vertical splitter）在主 splitter 中的位置
+        widget_in_splitter = terminal
+        while widget_in_splitter.parent() != splitter:
+            widget_in_splitter = widget_in_splitter.parent()
+            if widget_in_splitter is None:
+                return
+
+        current_index = splitter.indexOf(widget_in_splitter)
+        if current_index <= 0:
+            self.statusbar.showMessage(t("status.move_split_left_fail"), 3000)
+            return
+
+        # 保存当前 sizes
+        sizes = splitter.sizes()
+
+        # 交换：把当前 widget 插入到左边位置
+        splitter.insertWidget(current_index - 1, widget_in_splitter)
+
+        # 交换 sizes
+        sizes[current_index], sizes[current_index - 1] = sizes[current_index - 1], sizes[current_index]
+        splitter.setSizes(sizes)
+
+        # 同步 tab_terminals 列表中的顺序
+        terminals = self.tab_terminals.get(idx, [])
+        term_idx = terminals.index(terminal) if terminal in terminals else -1
+        if term_idx > 0:
+            terminals[term_idx], terminals[term_idx - 1] = terminals[term_idx - 1], terminals[term_idx]
+
+        terminal.setFocus()
+        self.statusbar.showMessage(t("status.move_split_left_done"), 3000)
 
     def _on_terminal_ended(self, terminal):
         """单个终端进程结束"""

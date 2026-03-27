@@ -370,6 +370,7 @@ TRANSLATIONS = {
     "ctx.split_horizontal": {"zh": "左右分屏", "en": "Split Horizontal"},
     "ctx.split_vertical": {"zh": "上下分屏", "en": "Split Vertical"},
     "ctx.close_split": {"zh": "关闭当前分屏", "en": "Close Current Split"},
+    "ctx.move_split_left": {"zh": "向左移动", "en": "Move to Left"},
 
     # ===== 状态栏/通用 =====
     "status.dir_history_tooltip": {"zh": "历史目录", "en": "Directory History"},
@@ -419,6 +420,8 @@ TRANSLATIONS = {
     "status.split_done": {"zh": "已分屏: 当前标签页有 {count} 个终端", "en": "Split: {count} terminals in current tab"},
     "status.vsplit_done": {"zh": "已垂直分屏: 当前标签页有 {count} 个终端", "en": "V-Split: {count} terminals in current tab"},
     "status.close_split_done": {"zh": "已关闭分屏: 当前标签页有 {count} 个终端", "en": "Closed split: {count} terminals in current tab"},
+    "status.move_split_left_done": {"zh": "已将分屏向左移动", "en": "Moved split to the left"},
+    "status.move_split_left_fail": {"zh": "当前分屏已在最左侧", "en": "Current split is already at the leftmost position"},
     "status.theme_switched": {"zh": "已切换到 {name} 主题", "en": "Switched to {name} theme"},
     "status.switched_dir": {"zh": "已切换到: {path}", "en": "Switched to: {path}"},
     "status.exported": {"zh": "已导出: {path}", "en": "Exported: {path}"},
