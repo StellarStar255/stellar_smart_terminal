@@ -33,6 +33,8 @@ class ServerConfig:
     clear_after_query: bool = False  # 每次 query 后清除会话（发送 /clear）
     rate_limit_queries: int = 10  # 每多少次请求后暂停
     rate_limit_pause: float = 10.0  # 暂停时间（秒）
+    api_key: str = ""  # Optional API key for authentication (empty = no auth)
+    allowed_origins: List[str] = field(default_factory=list)  # CORS allowed origins (empty = localhost only)
 
     def __post_init__(self):
         if not self.prompt_patterns:
@@ -539,14 +541,48 @@ class OpenAIRequestHandler(BaseHTTPRequestHandler):
     def log_message(self, format, *args):
         pass
 
+    def _get_cors_origin(self) -> str:
+        """Return the CORS origin header value based on config."""
+        if self.config.allowed_origins:
+            origin = self.headers.get('Origin', '')
+            if origin in self.config.allowed_origins:
+                return origin
+            return ''  # Origin not allowed
+        # Default: only allow localhost origins
+        origin = self.headers.get('Origin', '')
+        if origin:
+            from urllib.parse import urlparse
+            try:
+                parsed = urlparse(origin)
+                if parsed.hostname in ('localhost', '127.0.0.1', '::1'):
+                    return origin
+            except Exception:
+                pass
+            return ''  # Non-localhost origin blocked
+        return ''  # No origin header
+
+    def _check_auth(self) -> bool:
+        """Check API key authentication if configured."""
+        if not self.config.api_key:
+            return True  # No auth configured
+        auth_header = self.headers.get('Authorization', '')
+        if auth_header.startswith('Bearer '):
+            return auth_header[7:] == self.config.api_key
+        return False
+
     def do_OPTIONS(self):
         self.send_response(200)
-        self.send_header('Access-Control-Allow-Origin', '*')
+        cors_origin = self._get_cors_origin()
+        if cors_origin:
+            self.send_header('Access-Control-Allow-Origin', cors_origin)
         self.send_header('Access-Control-Allow-Methods', 'GET, POST, OPTIONS')
         self.send_header('Access-Control-Allow-Headers', 'Content-Type, Authorization')
         self.end_headers()
 
     def do_GET(self):
+        if not self._check_auth():
+            self._send_error(401, "Invalid or missing API key")
+            return
         if self.path == '/v1/models':
             self._handle_models()
         elif self.path == '/health':
@@ -555,6 +591,9 @@ class OpenAIRequestHandler(BaseHTTPRequestHandler):
             self._send_error(404, "Not Found")
 
     def do_POST(self):
+        if not self._check_auth():
+            self._send_error(401, "Invalid or missing API key")
+            return
         if self.path == '/v1/chat/completions':
             self._handle_chat_completions()
         else:
@@ -576,21 +615,22 @@ class OpenAIRequestHandler(BaseHTTPRequestHandler):
     def _handle_chat_completions(self):
         try:
             content_length = int(self.headers.get('Content-Length', 0))
-            if content_length == 0:
+            if content_length <= 0:
                 self._send_error(400, "Empty request body")
                 return
             if content_length > self.MAX_REQUEST_SIZE:
                 self._send_error(413, "Request too large")
                 return
 
-            body_bytes = b''
+            body_buf = bytearray()
             remaining = content_length
             while remaining > 0:
                 chunk = self.rfile.read(min(remaining, 65536))
                 if not chunk:
                     break
-                body_bytes += chunk
+                body_buf.extend(chunk)
                 remaining -= len(chunk)
+            body_bytes = bytes(body_buf)
 
             try:
                 request = json.loads(body_bytes.decode('utf-8'))
@@ -953,7 +993,9 @@ class OpenAIRequestHandler(BaseHTTPRequestHandler):
             self.send_header('Content-Type', 'text/event-stream')
             self.send_header('Cache-Control', 'no-cache')
             self.send_header('Connection', 'close')  # 使用 close 确保响应完成后连接关闭
-            self.send_header('Access-Control-Allow-Origin', '*')
+            cors_origin = self._get_cors_origin()
+            if cors_origin:
+                self.send_header('Access-Control-Allow-Origin', cors_origin)
             self.end_headers()
 
             completion_id = f"chatcmpl-{uuid.uuid4().hex[:8]}"
@@ -1322,7 +1364,9 @@ class OpenAIRequestHandler(BaseHTTPRequestHandler):
         try:
             self.send_response(status)
             self.send_header('Content-Type', 'application/json; charset=utf-8')
-            self.send_header('Access-Control-Allow-Origin', '*')
+            cors_origin = self._get_cors_origin()
+            if cors_origin:
+                self.send_header('Access-Control-Allow-Origin', cors_origin)
             self.end_headers()
             self.wfile.write(json.dumps(data, ensure_ascii=False).encode('utf-8'))
         except BrokenPipeError:

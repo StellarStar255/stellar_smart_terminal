@@ -89,8 +89,18 @@ class GitManager(QObject):
             self._stop_watching()
             return False
 
-        # 获取仓库根目录
-        repo_root = os.path.dirname(git_dir)
+        # 获取仓库根目录 (prefer git rev-parse for worktree correctness)
+        try:
+            result = subprocess.run(
+                ['git', 'rev-parse', '--show-toplevel'],
+                cwd=path, capture_output=True, text=True, timeout=5
+            )
+            if result.returncode == 0:
+                repo_root = result.stdout.strip()
+            else:
+                repo_root = os.path.dirname(git_dir)
+        except Exception:
+            repo_root = os.path.dirname(git_dir)
 
         # 如果是同一个仓库，不需要重新设置
         if self._repo_path == repo_root:
@@ -102,7 +112,7 @@ class GitManager(QObject):
         return True
 
     def _find_git_dir(self, path: str) -> Optional[str]:
-        """查找 .git 目录
+        """查找 .git 目录（支持普通仓库和 git worktree）
 
         Args:
             path: 起始目录
@@ -115,6 +125,20 @@ class GitManager(QObject):
             git_path = os.path.join(current, '.git')
             if os.path.isdir(git_path):
                 return git_path
+            # Support git worktrees where .git is a file containing "gitdir: <path>"
+            if os.path.isfile(git_path):
+                try:
+                    with open(git_path, 'r') as f:
+                        content = f.read().strip()
+                    if content.startswith('gitdir:'):
+                        gitdir = content[len('gitdir:'):].strip()
+                        if not os.path.isabs(gitdir):
+                            gitdir = os.path.join(current, gitdir)
+                        gitdir = os.path.normpath(gitdir)
+                        if os.path.isdir(gitdir):
+                            return gitdir
+                except Exception:
+                    pass
             current = os.path.dirname(current)
         return None
 
@@ -151,6 +175,12 @@ class GitManager(QObject):
 
     def _on_file_changed(self, path: str):
         """文件变更回调"""
+        # Re-add path if QFileSystemWatcher dropped it (common when files are
+        # replaced atomically, e.g. git's index and HEAD files)
+        if self._watcher and os.path.exists(path):
+            watched = self._watcher.files()
+            if path not in watched:
+                self._watcher.addPath(path)
         self._debounce_timer.start()
 
     def _on_dir_changed(self, path: str):
@@ -224,7 +254,7 @@ class GitManager(QObject):
             # 处理重命名（格式：R  old_path -> new_path）
             old_path = None
             if ' -> ' in path:
-                old_path, path = path.split(' -> ')
+                old_path, path = path.split(' -> ', 1)
 
             # 暂存区有变更
             if index_status != ' ' and index_status != '?':
@@ -332,9 +362,13 @@ class GitManager(QObject):
         success, output = self._run_git('ls-files', '--error-unmatch', '--', path, check=False)
 
         if not success:
-            # 未跟踪文件，直接删除
+            # 未跟踪文件，直接删除（with path traversal protection）
             try:
-                full_path = os.path.join(self._repo_path, path)
+                full_path = os.path.realpath(os.path.join(self._repo_path, path))
+                repo_real = os.path.realpath(self._repo_path)
+                if not full_path.startswith(repo_real + os.sep) and full_path != repo_real:
+                    self.error_occurred.emit(t("git_mgr.delete_failed", error="Path outside repository"))
+                    return False
                 if os.path.exists(full_path):
                     os.remove(full_path)
                 self.status_changed.emit()
@@ -395,12 +429,23 @@ class GitManager(QObject):
         """获取当前分支名
 
         Returns:
-            分支名
+            分支名（detached HEAD 时返回短 hash）
         """
         success, output = self._run_git('rev-parse', '--abbrev-ref', 'HEAD')
         if success:
-            return output.strip()
+            branch = output.strip()
+            if branch == "HEAD":
+                # Detached HEAD — return short commit hash instead
+                ok, short = self._run_git('rev-parse', '--short', 'HEAD')
+                if ok:
+                    return f"(detached {short.strip()})"
+            return branch
         return "unknown"
+
+    def is_detached_head(self) -> bool:
+        """Check if HEAD is detached."""
+        success, output = self._run_git('rev-parse', '--abbrev-ref', 'HEAD')
+        return success and output.strip() == "HEAD"
 
     def get_branches(self) -> List[GitBranch]:
         """获取所有分支
@@ -495,6 +540,10 @@ class GitManager(QObject):
         Returns:
             是否成功
         """
+        if self.is_detached_head():
+            self.error_occurred.emit(t("git_mgr.push_failed", error="Cannot push in detached HEAD state"))
+            return False
+
         if branch is None:
             branch = self.get_current_branch()
 
@@ -514,6 +563,10 @@ class GitManager(QObject):
         Returns:
             是否成功
         """
+        if self.is_detached_head():
+            self.error_occurred.emit(t("git_mgr.pull_failed", error="Cannot pull in detached HEAD state"))
+            return False
+
         if branch is None:
             branch = self.get_current_branch()
 

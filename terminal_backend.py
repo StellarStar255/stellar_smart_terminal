@@ -256,10 +256,6 @@ if IS_WINDOWS:
                 return False
 
             try:
-                # 设置终端环境变量
-                os.environ.setdefault('TERM', 'xterm-256color')
-                os.environ.setdefault('COLORTERM', 'truecolor')
-
                 # 1. 创建管道
                 pipe_in_read = wintypes.HANDLE()
                 pipe_in_write = wintypes.HANDLE()
@@ -549,7 +545,13 @@ if IS_WINDOWS:
                     pass
                 self._h_process = None
 
-            self._attr_list_buf = None
+            # Delete attribute list if it was initialized
+            if self._attr_list_buf is not None:
+                try:
+                    kernel32.DeleteProcThreadAttributeList(self._attr_list_buf)
+                except Exception:
+                    pass
+                self._attr_list_buf = None
 
         @property
         def is_running(self) -> bool:
@@ -649,7 +651,13 @@ else:
                     for var in session_vars:
                         env.pop(var, None)
 
-                    os.execvpe(command[0], command, env)
+                    try:
+                        os.execvpe(command[0], command, env)
+                    except Exception:
+                        # execvpe failed — must exit the forked child immediately
+                        # to avoid running a duplicate of the parent process.
+                        # Use os._exit (not sys.exit) to avoid flushing parent's buffers.
+                        os._exit(127)
 
                 else:
                     # 父进程
@@ -706,11 +714,11 @@ else:
                                 pid, status = os.waitpid(self._child_pid, os.WNOHANG)
                                 if pid != 0:
                                     self._running = False
-                                    # 捕获回调引用，避免与 stop() 的竞争条件
+                                    exit_code = self._decode_wait_status(status)
                                     exit_callback = self.on_exit
                                     if exit_callback:
-                                        exit_callback(status)
-                                    break
+                                        exit_callback(exit_code)
+                                    return  # already reaped, skip post-loop reap
                             except ChildProcessError:
                                 break
 
@@ -718,6 +726,33 @@ else:
                     break
                 except Exception:
                     break
+
+            # Reap the child process to avoid zombies (EOF or error path)
+            self._reap_child()
+
+        @staticmethod
+        def _decode_wait_status(status: int) -> int:
+            """Decode raw os.waitpid status into an exit code."""
+            if os.WIFEXITED(status):
+                return os.WEXITSTATUS(status)
+            elif os.WIFSIGNALED(status):
+                return -os.WTERMSIG(status)
+            return -1
+
+        def _reap_child(self):
+            """Reap the child process to prevent zombies."""
+            if self._child_pid is None:
+                return
+            try:
+                pid, status = os.waitpid(self._child_pid, os.WNOHANG)
+                if pid != 0:
+                    self._running = False
+                    exit_code = self._decode_wait_status(status)
+                    exit_callback = self.on_exit
+                    if exit_callback:
+                        exit_callback(exit_code)
+            except ChildProcessError:
+                pass
 
         def write(self, data: bytes) -> bool:
             if self._master_fd is None:
@@ -782,8 +817,13 @@ else:
                     pass
                 self._master_fd = None
 
-            # 最后清理子进程引用
-            self._child_pid = None
+            # Reap the child process to prevent zombies
+            if self._child_pid is not None:
+                try:
+                    os.waitpid(self._child_pid, os.WNOHANG)
+                except ChildProcessError:
+                    pass
+                self._child_pid = None
 
         @property
         def is_running(self) -> bool:

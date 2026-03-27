@@ -1,7 +1,6 @@
 """
 工具函数模块
 """
-import os
 import re
 import shutil
 from datetime import datetime
@@ -17,8 +16,11 @@ ALL_EXTENSIONS = IMAGE_EXTENSIONS | DOCUMENT_EXTENSIONS | CODE_EXTENSIONS
 
 # 预编译文件路径匹配正则表达式
 _ext_pattern = '|'.join(ext[1:] for ext in ALL_EXTENSIONS)
-_RE_ABS_PATH = re.compile(r'(/[^\s:*?"<>|\r\n]+\.(?:' + _ext_pattern + r'))', re.IGNORECASE)
-_RE_REL_PATH = re.compile(r'(?:^|[\s(])([./]?[\w\-./]+\.(?:' + _ext_pattern + r'))', re.IGNORECASE)
+# Unix absolute paths: /home/user/file.py
+_RE_UNIX_ABS_PATH = re.compile(r'(/[^\s:*?"<>|\r\n]+\.(?:' + _ext_pattern + r'))', re.IGNORECASE)
+# Windows absolute paths: C:\Users\file.py or D:/path/file.py
+_RE_WIN_ABS_PATH = re.compile(r'([A-Za-z]:[\\\/][^\s:*?"<>|\r\n]*\.(?:' + _ext_pattern + r'))', re.IGNORECASE)
+_RE_REL_PATH = re.compile(r'(?:^|[\s(])([./]?[\w\-./\\]+\.(?:' + _ext_pattern + r'))', re.IGNORECASE)
 
 
 def get_project_root() -> Path:
@@ -41,8 +43,8 @@ def get_exports_dir() -> Path:
 
 
 def generate_session_id() -> str:
-    """生成会话ID"""
-    return datetime.now().strftime("%Y%m%d_%H%M%S")
+    """生成会话ID（包含微秒避免同秒碰撞）"""
+    return datetime.now().strftime("%Y%m%d_%H%M%S_%f")
 
 
 def extract_file_paths(text: str, validate_exists: bool = True) -> Set[str]:
@@ -57,9 +59,9 @@ def extract_file_paths(text: str, validate_exists: bool = True) -> Set[str]:
     """
     paths = set()
 
-    # 使用预编译的正则表达式匹配路径
-    abs_matches = _RE_ABS_PATH.findall(text)
-    paths.update(abs_matches)
+    # 使用预编译的正则表达式匹配路径（Unix + Windows 绝对路径）
+    paths.update(_RE_UNIX_ABS_PATH.findall(text))
+    paths.update(_RE_WIN_ABS_PATH.findall(text))
 
     rel_matches = _RE_REL_PATH.findall(text)
     paths.update(rel_matches)
@@ -117,25 +119,22 @@ def copy_files_to_export(files: List[str], export_dir: Path) -> dict:
     return mapping
 
 
+_RE_ANSI_STRIP = re.compile('|'.join([
+    r'\x1b\[[0-9;?]*[a-zA-Z]',          # CSI序列 (包括 \x1b[?25h 等)
+    r'\x1b\](?:[^\x07\x1b]|\x1b[^\\])*(?:\x07|\x1b\\)',  # OSC序列 (BEL 或 ST 终止)
+    r'\x1b[PX^_].*?\x1b\\',             # 其他转义序列
+    r'\x1b[()][AB012]',                  # 字符集选择
+    r'\x1b[=>]',                         # 键盘模式
+    r'\x1b\[[\d;]*[ q]',                # 光标样式
+    r'\r',                               # 回车符（避免覆盖行）
+]))
+_RE_CONTROL_CHARS = re.compile(r'[\x00-\x08\x0b\x0c\x0e-\x1f]')
+
+
 def strip_ansi(text: str) -> str:
     """移除ANSI转义序列和终端控制字符"""
-    # 移除各种ANSI/终端控制序列
-    patterns = [
-        r'\x1b\[[0-9;?]*[a-zA-Z]',      # CSI序列 (包括 \x1b[?25h 等)
-        r'\x1b\][^\x07]*\x07',           # OSC序列 (如标题设置)
-        r'\x1b[PX^_].*?\x1b\\',          # 其他转义序列
-        r'\x1b[()][AB012]',              # 字符集选择
-        r'\x1b[=>]',                     # 键盘模式
-        r'\x1b\[[\d;]*[ q]',             # 光标样式
-        r'\r',                           # 回车符（避免覆盖行）
-    ]
-    result = text
-    for pattern in patterns:
-        result = re.sub(pattern, '', result)
-
-    # 移除其他不可见控制字符（保留换行和制表符）
-    result = re.sub(r'[\x00-\x08\x0b\x0c\x0e-\x1f]', '', result)
-
+    result = _RE_ANSI_STRIP.sub('', text)
+    result = _RE_CONTROL_CHARS.sub('', result)
     return result
 
 
@@ -153,8 +152,10 @@ def format_timestamp(dt: datetime = None) -> str:
 
 def format_file_size(size_bytes: int) -> str:
     """格式化文件大小"""
-    for unit in ['B', 'KB', 'MB', 'GB']:
+    if size_bytes < 1024:
+        return f"{size_bytes} B"
+    for unit in ['KB', 'MB', 'GB']:
+        size_bytes /= 1024
         if size_bytes < 1024:
             return f"{size_bytes:.1f} {unit}"
-        size_bytes /= 1024
     return f"{size_bytes:.1f} TB"

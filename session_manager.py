@@ -3,6 +3,8 @@
 负责会话的创建、存储、加载和管理
 """
 import json
+import re
+import tempfile
 from datetime import datetime
 from pathlib import Path
 from typing import List, Optional, Dict, Any
@@ -29,7 +31,9 @@ class SessionEntry:
 
     @classmethod
     def from_dict(cls, data: dict) -> 'SessionEntry':
-        return cls(**data)
+        # Filter to known fields only for forward compatibility
+        known = {'type', 'content', 'timestamp', 'files'}
+        return cls(**{k: v for k, v in data.items() if k in known})
 
 
 @dataclass
@@ -56,10 +60,10 @@ class Session:
     def from_dict(cls, data: dict) -> 'Session':
         entries = [SessionEntry.from_dict(e) for e in data.get('entries', [])]
         return cls(
-            session_id=data['session_id'],
-            start_time=data['start_time'],
+            session_id=data.get('session_id', ''),
+            start_time=data.get('start_time', ''),
             end_time=data.get('end_time'),
-            command=data['command'],
+            command=data.get('command', ''),
             working_directory=data.get('working_directory', ''),
             entries=entries
         )
@@ -150,22 +154,48 @@ class SessionManager:
         self.current_session = None
         return session
 
+    _SESSION_ID_RE = re.compile(r'^[\w\-]+$')
+
+    def _validate_session_id(self, session_id: str) -> bool:
+        """Validate session_id to prevent path traversal."""
+        return bool(self._SESSION_ID_RE.match(session_id))
+
     def save_session(self, session: Session) -> Path:
-        """保存会话到文件"""
+        """保存会话到文件（原子写入防止损坏）"""
         file_path = self.sessions_dir / f"{session.session_id}.json"
-        with open(file_path, 'w', encoding='utf-8') as f:
-            json.dump(session.to_dict(), f, ensure_ascii=False, indent=2)
+        # Write to a temp file first, then atomically replace
+        try:
+            fd, tmp_path = tempfile.mkstemp(
+                dir=self.sessions_dir, suffix='.tmp', prefix='.session_'
+            )
+            try:
+                with open(fd, 'w', encoding='utf-8') as f:
+                    json.dump(session.to_dict(), f, ensure_ascii=False, indent=2)
+                Path(tmp_path).replace(file_path)
+            except BaseException:
+                Path(tmp_path).unlink(missing_ok=True)
+                raise
+        except OSError:
+            # Fallback to direct write if temp file fails
+            with open(file_path, 'w', encoding='utf-8') as f:
+                json.dump(session.to_dict(), f, ensure_ascii=False, indent=2)
         return file_path
 
     def load_session(self, session_id: str) -> Optional[Session]:
         """加载指定会话"""
+        if not self._validate_session_id(session_id):
+            return None
+
         file_path = self.sessions_dir / f"{session_id}.json"
         if not file_path.exists():
             return None
 
-        with open(file_path, 'r', encoding='utf-8') as f:
-            data = json.load(f)
-        return Session.from_dict(data)
+        try:
+            with open(file_path, 'r', encoding='utf-8') as f:
+                data = json.load(f)
+            return Session.from_dict(data)
+        except (json.JSONDecodeError, KeyError, TypeError):
+            return None
 
     def list_sessions(self) -> List[Dict[str, Any]]:
         """列出所有会话（摘要信息）"""
@@ -187,6 +217,9 @@ class SessionManager:
 
     def delete_session(self, session_id: str) -> bool:
         """删除指定会话"""
+        if not self._validate_session_id(session_id):
+            return False
+
         file_path = self.sessions_dir / f"{session_id}.json"
         if file_path.exists():
             file_path.unlink()

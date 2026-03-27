@@ -53,7 +53,7 @@ class Exporter:
             raise ValueError(f"Unsupported format: {format}")
 
         if open_after and format == 'html':
-            webbrowser.open(f'file://{output_path}')
+            webbrowser.open(output_path.as_uri())
 
         return output_path
 
@@ -95,11 +95,12 @@ class Exporter:
             if entry.files:
                 files_html = '<div class="files">'
                 for f in entry.files:
-                    rel_path = file_mapping.get(f, f)
+                    rel_path = self._escape_html(file_mapping.get(f, f))
+                    fname = self._escape_html(Path(f).name)
                     if is_image_file(f):
-                        files_html += f'<div class="file-preview"><img src="{rel_path}" alt="{Path(f).name}"><span>{Path(f).name}</span></div>'
+                        files_html += f'<div class="file-preview"><img src="{rel_path}" alt="{fname}"><span>{fname}</span></div>'
                     else:
-                        files_html += f'<div class="file-link"><a href="{rel_path}">{Path(f).name}</a></div>'
+                        files_html += f'<div class="file-link"><a href="{rel_path}">{fname}</a></div>'
                 files_html += '</div>'
 
             entries_html.append(f'''
@@ -118,7 +119,7 @@ class Exporter:
 <head>
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
-    <title>会话记录 - {session.session_id}</title>
+    <title>会话记录 - {self._escape_html(session.session_id)}</title>
     <style>
         * {{
             margin: 0;
@@ -252,11 +253,11 @@ class Exporter:
     <div class="header">
         <h1>智能终端 - 会话记录</h1>
         <div class="meta">
-            <span>会话ID: {session.session_id}</span>
-            <span>命令: {session.command}</span>
-            <span>开始: {session.start_time}</span>
-            <span>结束: {session.end_time or 'N/A'}</span>
-            <span>工作目录: {session.working_directory}</span>
+            <span>会话ID: {self._escape_html(session.session_id)}</span>
+            <span>命令: {self._escape_html(session.command)}</span>
+            <span>开始: {self._escape_html(session.start_time)}</span>
+            <span>结束: {self._escape_html(session.end_time or 'N/A')}</span>
+            <span>工作目录: {self._escape_html(session.working_directory)}</span>
         </div>
     </div>
     <div class="entries">
@@ -436,18 +437,19 @@ class Exporter:
 
     def _merge_messages(self, messages: list) -> list:
         """合并连续的相同角色消息"""
+        import copy
         if not messages:
             return messages
 
         merged = []
         for msg in messages:
             if not merged:
-                merged.append(msg.copy())
+                merged.append(copy.deepcopy(msg))
                 continue
 
             last = merged[-1]
             if last["role"] != msg["role"]:
-                merged.append(msg.copy())
+                merged.append(copy.deepcopy(msg))
                 continue
 
             # 相同角色，需要合并
@@ -460,10 +462,10 @@ class Exporter:
                 last["content"] = last_content + "\n" + curr_content
             elif isinstance(last_content, list) and isinstance(curr_content, list):
                 # 两个都是多模态
-                last["content"].extend(curr_content)
+                last["content"].extend(copy.deepcopy(curr_content))
             elif isinstance(last_content, str) and isinstance(curr_content, list):
                 # 上一个是文本，当前是多模态
-                last["content"] = [{"type": "text", "text": last_content}] + curr_content
+                last["content"] = [{"type": "text", "text": last_content}] + copy.deepcopy(curr_content)
             elif isinstance(last_content, list) and isinstance(curr_content, str):
                 # 上一个是多模态，当前是文本
                 last["content"].append({"type": "text", "text": curr_content})
@@ -648,63 +650,6 @@ class Exporter:
                 result.append(line)
 
         return '\n'.join(result)
-
-    def _ansi_to_html(self, text: str) -> str:
-        """将ANSI颜色转换为HTML标签"""
-        import re
-
-        ansi_colors = {
-            '30': 'ansi-black',
-            '31': 'ansi-red',
-            '32': 'ansi-green',
-            '33': 'ansi-yellow',
-            '34': 'ansi-blue',
-            '35': 'ansi-magenta',
-            '36': 'ansi-cyan',
-            '37': 'ansi-white',
-            # 亮色 (90-97)
-            '90': 'ansi-black',
-            '91': 'ansi-red',
-            '92': 'ansi-green',
-            '93': 'ansi-yellow',
-            '94': 'ansi-blue',
-            '95': 'ansi-magenta',
-            '96': 'ansi-cyan',
-            '97': 'ansi-white',
-            '1': 'ansi-bold',
-            '2': 'ansi-dim',
-        }
-
-        result = text
-        # 简化处理：将常见ANSI序列转为span
-        pattern = r'\x1b\[([0-9;]+)m'
-
-        def replace_ansi(match):
-            codes = match.group(1).split(';')
-            classes = []
-            for code in codes:
-                if code in ansi_colors:
-                    classes.append(ansi_colors[code])
-                elif code == '0':
-                    return '</span>'
-            if classes:
-                return f'<span class="{" ".join(classes)}">'
-            return ''
-
-        result = re.sub(pattern, replace_ansi, result)
-
-        # 移除所有未处理的转义序列
-        result = re.sub(r'\x1b\[[0-9;?]*[a-zA-Z]', '', result)  # CSI序列
-        result = re.sub(r'\x1b\][^\x07]*\x07', '', result)       # OSC序列
-        result = re.sub(r'\x1b[()][AB012]', '', result)          # 字符集
-        result = re.sub(r'\x1b[=>]', '', result)                 # 键盘模式
-        result = re.sub(r'\r', '', result)                       # 回车符
-
-        # 移除控制字符（保留换行和制表符）
-        result = re.sub(r'[\x00-\x08\x0b\x0c\x0e-\x1f]', '', result)
-
-        return result
-
 
 def export_session(session: Session, format: str = 'html', open_after: bool = True) -> Path:
     """便捷导出函数"""

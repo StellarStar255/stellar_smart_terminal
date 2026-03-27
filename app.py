@@ -40,7 +40,7 @@ from PyQt6.QtGui import QFont, QPalette, QColor, QIcon, QPixmap
 from PyQt6.QtCore import Qt, QSize
 
 from main_window import MainWindow
-from i18n import t, set_language, get_language
+from i18n import t
 
 
 def setup_app_style(app: QApplication):
@@ -72,7 +72,7 @@ def _ensure_linux_desktop_file(icon_path: Path):
     content = f"""[Desktop Entry]
 Name=Smart Terminal
 Comment=Smart Terminal with AI Integration
-Exec={sys.executable} {Path(__file__).resolve()}
+Exec="{sys.executable}" "{Path(__file__).resolve()}"
 Icon={icon_abs}
 Terminal=false
 Type=Application
@@ -82,10 +82,10 @@ StartupWMClass=smart-terminal
     try:
         # 只在内容变化或文件不存在时写入
         if desktop_file.exists():
-            if desktop_file.read_text() == content:
+            if desktop_file.read_text(encoding='utf-8') == content:
                 return
         desktop_dir.mkdir(parents=True, exist_ok=True)
-        desktop_file.write_text(content)
+        desktop_file.write_text(content, encoding='utf-8')
     except OSError:
         pass  # 静默失败，不影响应用启动
 
