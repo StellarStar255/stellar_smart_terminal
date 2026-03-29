@@ -40,6 +40,9 @@ class CompatibleHistoryScreen(pyte.HistoryScreen):
         self._saved_main_cursor = None
         self._saved_main_history_lines = 0
 
+        # DECCKM (Application Cursor Keys) 模式追踪
+        self._decckm = False
+
     def select_graphic_rendition(self, *attrs, **kwargs):
         # 移除 private 参数（新版 pyte 会传递，但基类不支持）
         kwargs.pop('private', None)
@@ -48,17 +51,23 @@ class CompatibleHistoryScreen(pyte.HistoryScreen):
     # ------ 备用屏幕缓冲区 ------
 
     def set_mode(self, *modes, **kwargs):
-        """拦截 private mode 设置，处理备用屏幕切换"""
-        if kwargs.get('private') and not self._in_alt_screen:
-            if self._ALT_SCREEN_MODES & set(modes):
+        """拦截 private mode 设置，处理备用屏幕切换和 DECCKM"""
+        if kwargs.get('private'):
+            if not self._in_alt_screen and (self._ALT_SCREEN_MODES & set(modes)):
                 self._enter_alt_screen(save_cursor=(1049 in modes))
+            # DECCKM (mode 1): 应用光标键模式
+            if 1 in modes:
+                self._decckm = True
         super().set_mode(*modes, **kwargs)
 
     def reset_mode(self, *modes, **kwargs):
-        """拦截 private mode 重置，处理备用屏幕退出"""
-        if kwargs.get('private') and self._in_alt_screen:
-            if self._ALT_SCREEN_MODES & set(modes):
+        """拦截 private mode 重置，处理备用屏幕退出和 DECCKM"""
+        if kwargs.get('private'):
+            if self._in_alt_screen and (self._ALT_SCREEN_MODES & set(modes)):
                 self._leave_alt_screen(restore_cursor=(1049 in modes))
+            # DECCKM (mode 1): 关闭应用光标键模式
+            if 1 in modes:
+                self._decckm = False
         super().reset_mode(*modes, **kwargs)
 
     def _enter_alt_screen(self, save_cursor=True):
@@ -323,9 +332,6 @@ class TerminalWidget(QWidget):
 
         # UTF-8 增量解码器 - 正确处理跨数据块的多字节字符
         self._utf8_decoder = codecs.getincrementaldecoder('utf-8')('replace')
-
-        # 光标是否由应用自己管理（TUI模式）
-        self.app_cursor_mode = False
 
         # 输入缓冲
         self.input_buffer = ""
@@ -1645,13 +1651,13 @@ class TerminalWidget(QWidget):
         elif key == Qt.Key.Key_Escape:
             data = b'\x1b'
         elif key == Qt.Key.Key_Up:
-            data = b'\x1b[A'
+            data = b'\x1bOA' if self.screen._decckm else b'\x1b[A'
         elif key == Qt.Key.Key_Down:
-            data = b'\x1b[B'
+            data = b'\x1bOB' if self.screen._decckm else b'\x1b[B'
         elif key == Qt.Key.Key_Right:
-            data = b'\x1b[C'
+            data = b'\x1bOC' if self.screen._decckm else b'\x1b[C'
         elif key == Qt.Key.Key_Left:
-            data = b'\x1b[D'
+            data = b'\x1bOD' if self.screen._decckm else b'\x1b[D'
         elif key == Qt.Key.Key_Home:
             data = b'\x1b[H'
         elif key == Qt.Key.Key_End:
@@ -2086,15 +2092,17 @@ class TerminalWidget(QWidget):
         if diff == 0:
             return
 
-        # 发送方向键
+        # 发送方向键（根据 DECCKM 模式选择正确的转义序列）
+        right_key = b'\x1bOC' if self.screen._decckm else b'\x1b[C'
+        left_key = b'\x1bOD' if self.screen._decckm else b'\x1b[D'
         if diff > 0:
             # 向右移动
             for _ in range(diff):
-                self._write_to_backend(b'\x1b[C')  # Right arrow
+                self._write_to_backend(right_key)
         else:
             # 向左移动
             for _ in range(-diff):
-                self._write_to_backend(b'\x1b[D')  # Left arrow
+                self._write_to_backend(left_key)
 
     def contextMenuEvent(self, event):
         """右键菜单"""
