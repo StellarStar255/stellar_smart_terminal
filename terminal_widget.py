@@ -468,6 +468,7 @@ class TerminalWidget(QWidget):
 
         # 鼠标模式跟踪（TUI 程序如 Gemini 会启用鼠标模式）
         self._mouse_mode = False  # 是否启用了鼠标报告模式
+        self._mouse_mode_click = False  # 当前点击是否在鼠标模式下发起
 
         # 快速命令提供者回调（由主窗口设置，返回预设列表）
         self.quick_commands_provider = None
@@ -1911,17 +1912,14 @@ class TerminalWidget(QWidget):
 
         重要：按住 Shift 键可以强制使用本地选择模式（绕过程序的鼠标捕获）
         选择坐标使用绝对行号，支持跨页选择。
+        鼠标模式下，单击仍然使用本地光标定位（通过方向键），
+        拖动选择和其他鼠标事件则正常转发给程序。
         """
         import time
         self.setFocus(Qt.FocusReason.MouseFocusReason)
 
         # Shift 键或回滚历史时强制使用本地选择模式（绕过鼠标模式）
         force_local_selection = (event.modifiers() & Qt.KeyboardModifier.ShiftModifier) or self.scroll_offset > 0
-
-        # 如果鼠标模式启用且没有强制本地选择，将事件发送给程序
-        if self._mouse_mode and not force_local_selection:
-            self._send_mouse_event(event, 'press')
-            return
 
         if event.button() == Qt.MouseButton.LeftButton:
             current_time = time.time()
@@ -1948,20 +1946,31 @@ class TerminalWidget(QWidget):
 
             if self._click_count == 2:
                 # 双击选词
+                if self._mouse_mode and not force_local_selection:
+                    self._send_mouse_event(event, 'press')
                 self._select_word_at(abs_cell)
             elif self._click_count >= 3:
                 # 三击选行
+                if self._mouse_mode and not force_local_selection:
+                    self._send_mouse_event(event, 'press')
                 self._select_line_at(abs_cell)
                 self._click_count = 0  # 重置
             else:
                 # 单击开始选择 - 使用绝对坐标
+                # 即使鼠标模式启用，也记录按下位置用于后续的单击光标定位
                 self._selection_start = abs_cell
                 self._selection_end = abs_cell
                 self._is_selecting = True
                 self._select_all_mode = False  # 清除全选模式
+                # 记录是否处于鼠标模式，用于 release 时决定是否也转发事件
+                self._mouse_mode_click = self._mouse_mode and not force_local_selection
 
             self.update()
-        super().mousePressEvent(event)
+        elif self._mouse_mode and not force_local_selection:
+            # 非左键在鼠标模式下转发给程序
+            self._send_mouse_event(event, 'press')
+        # 接受事件，确保 Qt 将后续的 mouseReleaseEvent 发送给本控件
+        event.accept()
 
     def mouseMoveEvent(self, event: QMouseEvent):
         """鼠标移动 - 更新选择区域（使用绝对坐标），支持拖动时自动滚动"""
@@ -1969,7 +1978,8 @@ class TerminalWidget(QWidget):
         force_local_selection = (event.modifiers() & Qt.KeyboardModifier.ShiftModifier) or self.scroll_offset > 0
 
         # 如果鼠标模式启用且没有强制本地选择，且正在拖动（按住按钮）
-        if self._mouse_mode and not force_local_selection and event.buttons():
+        # 但如果 _is_selecting 为 True（左键单击流程），继续本地选择而不转发
+        if self._mouse_mode and not force_local_selection and event.buttons() and not self._is_selecting:
             self._send_mouse_event(event, 'move')
             return
 
@@ -2009,8 +2019,8 @@ class TerminalWidget(QWidget):
         # Shift 键或回滚历史时强制使用本地选择模式
         force_local_selection = (event.modifiers() & Qt.KeyboardModifier.ShiftModifier) or self.scroll_offset > 0
 
-        # 如果鼠标模式启用且没有强制本地选择
-        if self._mouse_mode and not force_local_selection:
+        # 如果鼠标模式启用且没有强制本地选择，且不在本地选择流程中
+        if self._mouse_mode and not force_local_selection and not self._is_selecting:
             self._send_mouse_event(event, 'release')
             return
 
@@ -2019,7 +2029,11 @@ class TerminalWidget(QWidget):
             self._is_selecting = False
 
             # 检查是否是单击（没有拖动选择）
-            if self._selection_start == self._selection_end:
+            # 使用容差判断：如果起止位置在同一行且列差距 ≤ 1，视为单击
+            start_row, start_col = self._selection_start
+            end_row, end_col = self._selection_end
+            is_click = (start_row == end_row and abs(start_col - end_col) <= 1)
+            if is_click:
                 # 单击 - 尝试移动光标到点击位置（使用相对坐标）
                 display_cell = self._pos_to_cell(event.pos())
                 self._move_cursor_to_click(display_cell)
@@ -2033,7 +2047,8 @@ class TerminalWidget(QWidget):
     def _move_cursor_to_click(self, click_pos: tuple):
         """通过发送方向键移动光标到点击位置
 
-        仅当点击在光标所在行时生效
+        仅当点击在光标所在行时生效。
+        支持 Python REPL 等交互式程序中的光标定位。
         """
         if not click_pos or self._backend is None:
             return
@@ -2046,6 +2061,24 @@ class TerminalWidget(QWidget):
         # 只有点击在光标所在行才移动
         if click_row != cursor_row:
             return
+
+        # 获取当前行内容，确定可编辑区域的起始位置（跳过提示符）
+        # 例如 Python REPL 的 ">>> " 或 "... "
+        line = self.screen.display[cursor_row]
+        # 找到行中最后一个不可编辑的位置（光标不应移动到提示符区域之前）
+        # 通过使用 Home 键的位置来限制：光标不能移到比提示符末尾更左的位置
+        # 简单方法：限制 click_col 不小于提示符后的第一个位置
+        # 检测常见提示符模式
+        prompt_end = 0
+        stripped = line.rstrip()
+        for prefix in ['>>> ', '... ', '$ ', '% ', '# ', '> ', '→ ']:
+            if stripped.startswith(prefix):
+                prompt_end = len(prefix)
+                break
+
+        # 确保点击位置不在提示符区域内
+        if click_col < prompt_end:
+            click_col = prompt_end
 
         # 计算需要移动的距离
         diff = click_col - cursor_col
