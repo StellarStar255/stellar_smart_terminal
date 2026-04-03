@@ -2824,6 +2824,7 @@ class MainWindow(QMainWindow):
 
         self.preset_combo = QComboBox()
         self.preset_combo.setMinimumWidth(200)
+        self.preset_combo.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Fixed)
         self.preset_combo.setStyleSheet("""
             QComboBox {
                 background-color: #16213e;
@@ -2883,7 +2884,15 @@ class MainWindow(QMainWindow):
         """)
         self.preset_switch_btn.clicked.connect(lambda: self.preset_combo.showPopup())
         self._populate_presets()
-        toolbar.addWidget(self.preset_combo)
+
+        # 用容器包裹 preset_combo，使其在工具栏中自动扩展填满可用空间
+        self._preset_combo_container = QWidget()
+        _pc_layout = QHBoxLayout(self._preset_combo_container)
+        _pc_layout.setContentsMargins(0, 0, 0, 0)
+        _pc_layout.setSpacing(0)
+        _pc_layout.addWidget(self.preset_combo)
+        self._preset_combo_container.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Preferred)
+        toolbar.addWidget(self._preset_combo_container)
         toolbar.addWidget(self.preset_switch_btn)
 
         # 管理预设按钮
@@ -2917,7 +2926,7 @@ class MainWindow(QMainWindow):
         self._core_toolbar_widgets = [
             self._title_color_container,
             self.preset_label,
-            self.preset_combo,
+            self._preset_combo_container,
             self.preset_switch_btn,
             self.manage_preset_btn,
             None,  # separator
@@ -3485,7 +3494,7 @@ class MainWindow(QMainWindow):
         self._toolbar_actions = {}
 
         button_widgets = {
-            "preset_combo": self.preset_combo,
+            "preset_combo": self._preset_combo_container,
             "preset_switch_btn": self.preset_switch_btn,
             "manage_preset_btn": self.manage_preset_btn,
             "start_btn": self.start_btn,
