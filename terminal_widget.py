@@ -43,6 +43,9 @@ class CompatibleHistoryScreen(pyte.HistoryScreen):
         # DECCKM (Application Cursor Keys) 模式追踪
         self._decckm = False
 
+        # Bracketed Paste (mode 2004) 模式追踪
+        self._bracketed_paste = False
+
     def select_graphic_rendition(self, *attrs, **kwargs):
         # 移除 private 参数（新版 pyte 会传递，但基类不支持）
         kwargs.pop('private', None)
@@ -58,6 +61,9 @@ class CompatibleHistoryScreen(pyte.HistoryScreen):
             # DECCKM (mode 1): 应用光标键模式
             if 1 in modes:
                 self._decckm = True
+            # Bracketed Paste (mode 2004)
+            if 2004 in modes:
+                self._bracketed_paste = True
         super().set_mode(*modes, **kwargs)
 
     def reset_mode(self, *modes, **kwargs):
@@ -68,6 +74,9 @@ class CompatibleHistoryScreen(pyte.HistoryScreen):
             # DECCKM (mode 1): 关闭应用光标键模式
             if 1 in modes:
                 self._decckm = False
+            # Bracketed Paste (mode 2004)
+            if 2004 in modes:
+                self._bracketed_paste = False
         super().reset_mode(*modes, **kwargs)
 
     def _enter_alt_screen(self, save_cursor=True):
@@ -2810,6 +2819,23 @@ class TerminalWidget(QWidget):
         except Exception:
             pass
 
+    def _write_paste(self, data: bytes) -> bool:
+        """将粘贴内容写入后端，必要时以 Bracketed Paste 序列包裹
+
+        当应用（如 Claude Code）启用了 DECSET 2004 时，终端需要把粘贴内容
+        包裹在 ESC[200~ ... ESC[201~ 之间，应用据此识别"整块粘贴"（而不是
+        逐字键入），从而可以对粘贴的图片路径进行特殊处理（例如显示 [Image #N]）。
+        """
+        if self._is_bracketed_paste_enabled():
+            data = b'\x1b[200~' + data + b'\x1b[201~'
+        return self._write_to_backend(data)
+
+    def _is_bracketed_paste_enabled(self) -> bool:
+        try:
+            return bool(getattr(self.screen, '_bracketed_paste', False))
+        except Exception:
+            return False
+
     def _prepare_paste_text(self, text: str) -> bytes:
         """准备粘贴文本：将换行符转换为回车符（终端标准行为）
 
@@ -2822,23 +2848,36 @@ class TerminalWidget(QWidget):
         return text.encode('utf-8')
 
     def _paste_from_clipboard_macos(self, clipboard):
-        """macOS 粘贴处理 - 避免调用 mimeData() 防止 segfault"""
-        # clipboard.text() 是安全的，即使剪贴板含有图片也不会崩溃
-        text = clipboard.text()
+        """macOS 粘贴处理 - 避免调用 mimeData() 防止 segfault
 
-        if text:
-            # 有文本内容，转换换行符后粘贴
-            data = self._prepare_paste_text(text)
-            if self._write_to_backend(data):
-                self.input_buffer += text
+        重要顺序：先通过原生 JXA 检查图片/文件（public.file-url / public.tiff /
+        public.png）。若剪贴板中存在图片或文件 URL，则由原生分支保存图片并插入
+        生成的路径。只有当剪贴板里既没有图片也没有文件 URL 时，才回落到
+        clipboard.text() 作为普通文本粘贴。
+
+        原因：从 Finder 复制图片文件（或某些应用复制图片）时，剪贴板会同时包含
+        file-url / 图片数据以及一份文本表示（文件路径字符串）。如果先读取
+        clipboard.text()，就会把那段文本路径原样粘入终端，从而绕过图片保存与
+        正常的图片粘贴流程。
+        """
+        # 先用原生 API 处理图片/文件。若处理成功（含图片/文件），直接返回。
+        if self._paste_clipboard_data_macos_native():
             return
 
-        # 文本为空，可能是图片或文件
-        # 使用 macOS 原生 API (通过 osascript 在子进程中运行) 安全处理
-        self._paste_clipboard_data_macos_native()
+        # 剪贴板中没有图片/文件，按普通文本处理
+        # clipboard.text() 在此分支是安全的（无图片数据，不会触发 TIFF segfault）
+        text = clipboard.text()
+        if text:
+            data = self._prepare_paste_text(text)
+            if self._write_paste(data):
+                self.input_buffer += text
 
-    def _paste_clipboard_data_macos_native(self):
-        """macOS: 使用 osascript + JXA 原生 API 安全处理剪贴板图片/文件"""
+    def _paste_clipboard_data_macos_native(self) -> bool:
+        """macOS: 使用 osascript + JXA 原生 API 安全处理剪贴板图片/文件
+
+        返回 True 表示剪贴板中含图片/文件并已处理；返回 False 表示剪贴板里
+        没有图片或文件 URL（调用方应回落到文本粘贴）。
+        """
         import subprocess
         from datetime import datetime
         import tempfile
@@ -2905,15 +2944,20 @@ if (hasFileURL) {{
             output = result.stdout.strip()
 
             if output == "IMAGE_OK" and os.path.isfile(save_path):
-                prefix = '@' if self.image_prefix_enabled else ''
-                path_text = prefix + save_path + ' '
+                # 粘贴图片时只发送原始路径（不加 @ 前缀、不加尾部空格）。
+                # 若应用（如 Claude Code）启用了 Bracketed Paste，_write_paste
+                # 会将内容包裹在 ESC[200~/ESC[201~ 之间，应用据此识别为整块粘贴
+                # 并把路径显示为 [Image #N]；未启用时则直接落为原始路径文本。
+                path_text = save_path
                 data = path_text.encode('utf-8')
-                if self._write_to_backend(data):
+                if self._write_paste(data):
                     self.input_buffer += path_text
                     self.image_pasted.emit(save_path)
+                return True
 
             elif output.startswith("FILES:"):
                 file_paths = output[6:].split('\n')
+                handled_any = False
                 for fp in file_paths:
                     fp = fp.strip()
                     if not fp:
@@ -2928,12 +2972,20 @@ if (hasFileURL) {{
                     else:
                         path_text = prefix + fp + ' '
                     data = path_text.encode('utf-8')
-                    if self._write_to_backend(data):
+                    if self._write_paste(data):
                         self.input_buffer += path_text
+                        handled_any = True
                         if is_media:
                             self.image_pasted.emit(fp)
+                # 只要 JXA 检测到 file-url，就算处理完毕（即使写入失败也不应
+                # 回落到文本粘贴，否则会把文件路径的文本表示重复粘一次）
+                return True
+
+            # output == "NOTHING" 或其他非预期输出：剪贴板无图片/文件
+            return False
         except Exception:
-            pass
+            # osascript 失败时，保守地返回 False，让调用方尝试文本粘贴
+            return False
 
     def _paste_from_clipboard_qt(self, clipboard):
         """非 macOS 平台：使用 Qt API 处理剪贴板粘贴"""
@@ -2952,7 +3004,7 @@ if (hasFileURL) {{
                         prefix = '@' if self.image_prefix_enabled else ''
                         path_text = prefix + file_path + ' '
                         data = path_text.encode('utf-8')
-                        if self._write_to_backend(data):
+                        if self._write_paste(data):
                             self.input_buffer += path_text
                             self.image_pasted.emit(file_path)
                         return
@@ -2983,10 +3035,12 @@ if (hasFileURL) {{
                     image_path = temp_dir / f"paste_{timestamp}.png"
 
                 if image.save(str(image_path), "PNG"):
-                    prefix = '@' if self.image_prefix_enabled else ''
-                    path_text = prefix + str(image_path) + ' '
+                    # 发送原始路径；若 Bracketed Paste 启用则由 _write_paste
+                    # 自动包裹 ESC[200~/ESC[201~，Claude Code 等应用据此将路径
+                    # 识别为图片并展示为 [Image #N]。
+                    path_text = str(image_path)
                     data = path_text.encode('utf-8')
-                    if self._write_to_backend(data):
+                    if self._write_paste(data):
                         self.input_buffer += path_text
                         self.image_pasted.emit(str(image_path))
                 return
@@ -2997,7 +3051,7 @@ if (hasFileURL) {{
             return
 
         data = self._prepare_paste_text(text)
-        if self._write_to_backend(data):
+        if self._write_paste(data):
             self.input_buffer += text
 
     def _copy_to_clipboard(self):
