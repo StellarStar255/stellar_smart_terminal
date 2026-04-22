@@ -4420,9 +4420,9 @@ class MainWindow(QMainWindow):
         self._scale_gui_font_sizes(gui_font_size, delta)
         self._apply_application_font(effective_px)
 
-        # 3. 文件编辑器 (默认13pt, 范围6-48)
+        # 3. 文件编辑器 (默认13pt, 范围6-48) — 跟随终端缩放，不受 GUI 字号影响
         if hasattr(self, 'file_editor') and self.file_editor is not None:
-            target_size = gui_target(13, 6, 48)
+            target_size = max(6, min(48, 13 + delta))
             font = self.file_editor.editor.font()
             if font.pointSize() != target_size:
                 font.setPointSize(target_size)
