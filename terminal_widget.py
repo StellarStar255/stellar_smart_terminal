@@ -18,6 +18,15 @@ from terminal_backend import create_backend, TerminalBackend
 from i18n import t
 
 
+# pyte 0.8 未实现 REP (CSI Pn b) —— 把前一个图形字符重复 N 次。
+# nvidia-smi / watch / 部分现代 CLI 会用 "─\x1b[60b" 这种方式画横线，
+# 不注册这个分发会导致整段重复被静默丢弃（表格横线只剩一两格）。
+# pyte.Stream 在实例化时就把 csi 表捕获进 dispatcher 协程，所以必须
+# 在任何 Stream 创建之前就往类属性里写。
+if 'b' not in pyte.Stream.csi:
+    pyte.Stream.csi['b'] = 'repeat'
+
+
 class CompatibleHistoryScreen(pyte.HistoryScreen):
     """兼容性修复：处理新版 pyte 传递的 private 参数
     并实现备用屏幕缓冲区（mode 1049/47/1047），pyte 0.8 原生不支持。
@@ -45,6 +54,9 @@ class CompatibleHistoryScreen(pyte.HistoryScreen):
 
         # Bracketed Paste (mode 2004) 模式追踪
         self._bracketed_paste = False
+
+        # REP (CSI Pn b) 需要记住最近一次 draw 的图形字符
+        self._last_drawn_char = None
 
     def select_graphic_rendition(self, *attrs, **kwargs):
         # 移除 private 参数（新版 pyte 会传递，但基类不支持）
@@ -112,8 +124,24 @@ class CompatibleHistoryScreen(pyte.HistoryScreen):
         self._in_draw = True
         try:
             super().draw(*chars)
+            # 记录最后绘制的字符，供 REP (CSI Pn b) 使用
+            for piece in chars:
+                if piece:
+                    self._last_drawn_char = piece[-1] if isinstance(piece, str) else piece
         finally:
             self._in_draw = False
+
+    def repeat(self, count=1, *args, **kwargs):
+        """REP (CSI Pn b): 将上一个图形字符重复 N 次。"""
+        if self._last_drawn_char is None:
+            return
+        try:
+            n = int(count) if count else 1
+        except (TypeError, ValueError):
+            n = 1
+        # 防御性上限：避免恶意/错误序列写爆一整行
+        n = max(1, min(n, self.columns))
+        self.draw(self._last_drawn_char * n)
 
     def linefeed(self):
         if not self._in_draw:
@@ -151,6 +179,8 @@ class CompatibleHistoryScreen(pyte.HistoryScreen):
             self._in_alt_screen = False
             self._saved_main_buffer = None
             self._saved_main_cursor = None
+        if hasattr(self, '_last_drawn_char'):
+            self._last_drawn_char = None
         super().reset()
 
     def is_soft_wrapped(self, buffer_line) -> bool:
