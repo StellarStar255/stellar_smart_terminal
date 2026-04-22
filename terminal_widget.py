@@ -423,7 +423,7 @@ class TerminalWidget(QWidget):
 
         # 设置
         self.setFocusPolicy(Qt.FocusPolicy.StrongFocus)
-        self.setMinimumSize(400, 300)
+        self.setMinimumSize(80, 40)
         # 防止 sizeHint 与 term_cols/term_rows 形成反馈循环导致 resize 震荡
         self.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Expanding)
 
