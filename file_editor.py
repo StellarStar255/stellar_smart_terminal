@@ -3,6 +3,7 @@
 提供在程序内部编辑文件的功能
 """
 import os
+import re
 from pathlib import Path
 
 from PyQt6.QtWidgets import (
@@ -16,6 +17,29 @@ from PyQt6.QtGui import (
     QKeySequence, QPalette, QShortcut
 )
 from i18n import t
+
+
+# OneDark 调色板（与现有 PythonHighlighter / MarkdownHighlighter 一致）
+_COLOR_KEYWORD = "#c678dd"
+_COLOR_STRING = "#98c379"
+_COLOR_COMMENT = "#5c6370"
+_COLOR_NUMBER = "#d19a66"
+_COLOR_FUNC = "#61afef"
+_COLOR_CLASS = "#e5c07b"
+_COLOR_VAR = "#e06c75"
+_COLOR_OP = "#56b6c2"
+
+
+def _make_format(color, bold=False, italic=False, underline=False):
+    f = QTextCharFormat()
+    f.setForeground(QColor(color))
+    if bold:
+        f.setFontWeight(QFont.Weight.Bold)
+    if italic:
+        f.setFontItalic(True)
+    if underline:
+        f.setFontUnderline(True)
+    return f
 
 
 class PythonHighlighter(QSyntaxHighlighter):
@@ -285,6 +309,267 @@ class MarkdownHighlighter(QSyntaxHighlighter):
             self.setFormat(m.start(), m.end() - m.start(), self.link_format)
 
 
+class GenericHighlighter(QSyntaxHighlighter):
+    """规则驱动的通用语法高亮器
+
+    rules: list of (compiled_regex, fmt, group, claim)
+        - claim=True 的匹配（通常是字符串/行注释）会标记该区间，
+          后续规则在被标记区间内不再上色，避免「字符串里出现的 # 被当成注释」这类覆盖。
+    block_rules: list of (start_regex, end_regex, fmt)
+        - 支持跨行块（如 /* */ 或模板字符串），使用 blockState 维持状态，
+          匹配到的区间自动 claim。
+    """
+
+    def __init__(self, document, rules, block_rules=None, theme=None):
+        super().__init__(document)
+        self.theme = theme or {}
+        self.rules = rules
+        self.block_rules = block_rules or []
+
+    def highlightBlock(self, text):
+        self.setCurrentBlockState(0)
+        blocked = []
+
+        for idx, (start_re, end_re, fmt) in enumerate(self.block_rules, start=1):
+            state_id = idx
+            cursor = 0
+
+            if self.previousBlockState() == state_id:
+                end_m = end_re.search(text)
+                if end_m:
+                    length = end_m.end()
+                    self.setFormat(0, length, fmt)
+                    blocked.append((0, length))
+                    cursor = length
+                else:
+                    self.setFormat(0, len(text), fmt)
+                    blocked.append((0, len(text)))
+                    self.setCurrentBlockState(state_id)
+                    continue
+
+            while cursor < len(text):
+                start_m = start_re.search(text, cursor)
+                if not start_m:
+                    break
+                s = start_m.start()
+                end_m = end_re.search(text, start_m.end())
+                if end_m:
+                    e = end_m.end()
+                    self.setFormat(s, e - s, fmt)
+                    blocked.append((s, e))
+                    cursor = e
+                else:
+                    self.setFormat(s, len(text) - s, fmt)
+                    blocked.append((s, len(text)))
+                    self.setCurrentBlockState(state_id)
+                    break
+
+        def _covered(pos):
+            for s, e in blocked:
+                if s <= pos < e:
+                    return True
+            return False
+
+        for rule in self.rules:
+            if len(rule) == 4:
+                pattern, fmt, group, claim = rule
+            else:
+                pattern, fmt, group = rule
+                claim = False
+            for m in pattern.finditer(text):
+                try:
+                    start = m.start(group)
+                    end = m.end(group)
+                except IndexError:
+                    continue
+                if start < 0 or _covered(start):
+                    continue
+                self.setFormat(start, end - start, fmt)
+                if claim:
+                    blocked.append((start, end))
+
+
+# ---------- 各语言规则表 ----------
+
+def _shell_rules():
+    keywords = (
+        r'\b(if|then|else|elif|fi|for|while|until|do|done|case|esac|in|'
+        r'function|return|break|continue|local|export|readonly|declare|'
+        r'typeset|source|alias|select|time|eval|exec|trap|set|unset|shift|'
+        r'true|false|exit)\b'
+    )
+    builtins = (
+        r'\b(echo|printf|cd|pwd|read|test|kill|wait|getopts|popd|pushd|'
+        r'dirs|jobs|bg|fg|type|which|command|builtin|enable|mapfile|readarray)\b'
+    )
+    kw = _make_format(_COLOR_KEYWORD, bold=True)
+    bt = _make_format(_COLOR_FUNC)
+    st = _make_format(_COLOR_STRING)
+    cm = _make_format(_COLOR_COMMENT, italic=True)
+    vr = _make_format(_COLOR_VAR)
+    nm = _make_format(_COLOR_NUMBER)
+    fn = _make_format(_COLOR_FUNC, bold=True)
+
+    rules = [
+        (re.compile(r'"(?:[^"\\]|\\.)*"'), st, 0, True),
+        (re.compile(r"'[^']*'"), st, 0, True),
+        (re.compile(r'`[^`]*`'), st, 0, True),
+        (re.compile(r'#.*$'), cm, 0, True),
+        (re.compile(r'^\s*(\w+)\s*\(\s*\)'), fn, 1, False),
+        (re.compile(r'\bfunction\s+(\w+)'), fn, 1, False),
+        (re.compile(keywords), kw, 0, False),
+        (re.compile(builtins), bt, 0, False),
+        (re.compile(r'\$\{[^}]*\}'), vr, 0, False),
+        (re.compile(r'\$\([^)]*\)'), vr, 0, False),
+        (re.compile(r'\$\w+'), vr, 0, False),
+        (re.compile(r'\b\d+\b'), nm, 0, False),
+    ]
+    return rules, []
+
+
+def _json_rules():
+    key = _make_format(_COLOR_VAR)
+    st = _make_format(_COLOR_STRING)
+    nm = _make_format(_COLOR_NUMBER)
+    bl = _make_format(_COLOR_KEYWORD, bold=True)
+
+    rules = [
+        (re.compile(r'"(?:[^"\\]|\\.)*"\s*(?=:)'), key, 0, True),
+        (re.compile(r'"(?:[^"\\]|\\.)*"'), st, 0, True),
+        (re.compile(r'-?\b\d+(?:\.\d+)?(?:[eE][+-]?\d+)?\b'), nm, 0, False),
+        (re.compile(r'\b(true|false|null)\b'), bl, 0, False),
+    ]
+    return rules, []
+
+
+def _yaml_rules():
+    key = _make_format(_COLOR_VAR)
+    st = _make_format(_COLOR_STRING)
+    cm = _make_format(_COLOR_COMMENT, italic=True)
+    nm = _make_format(_COLOR_NUMBER)
+    kw = _make_format(_COLOR_KEYWORD, bold=True)
+    anchor = _make_format(_COLOR_CLASS)
+    dash = _make_format(_COLOR_OP)
+
+    rules = [
+        (re.compile(r'"(?:[^"\\]|\\.)*"'), st, 0, True),
+        (re.compile(r"'(?:[^'\\]|\\.)*'"), st, 0, True),
+        (re.compile(r'#.*$'), cm, 0, True),
+        (re.compile(r'^\s*-\s+([\w.\-]+)(?=\s*:)'), key, 1, False),
+        (re.compile(r'^\s*([\w.\-]+)(?=\s*:)'), key, 1, False),
+        (re.compile(r'^\s*(-)\s'), dash, 1, False),
+        (re.compile(r'[&*][\w\-]+'), anchor, 0, False),
+        (re.compile(r'\b(true|false|yes|no|on|off|null|True|False|Null|TRUE|FALSE|YES|NO)\b'), kw, 0, False),
+        (re.compile(r'(?<![\w.])-?\d+(?:\.\d+)?(?![\w.])'), nm, 0, False),
+    ]
+    return rules, []
+
+
+def _js_ts_rules(is_ts=False):
+    kws = [
+        'const', 'let', 'var', 'function', 'if', 'else', 'for', 'while', 'do',
+        'return', 'class', 'extends', 'import', 'export', 'from', 'as',
+        'async', 'await', 'try', 'catch', 'finally', 'throw', 'new', 'this',
+        'super', 'typeof', 'instanceof', 'in', 'of', 'switch', 'case',
+        'default', 'break', 'continue', 'yield', 'delete', 'void',
+        'true', 'false', 'null', 'undefined', 'static', 'get', 'set',
+    ]
+    if is_ts:
+        kws += [
+            'interface', 'type', 'enum', 'implements', 'public', 'private',
+            'protected', 'readonly', 'namespace', 'declare', 'abstract',
+            'keyof', 'infer', 'is', 'any', 'unknown', 'never', 'number',
+            'string', 'boolean', 'object',
+        ]
+    kw = _make_format(_COLOR_KEYWORD, bold=True)
+    st = _make_format(_COLOR_STRING)
+    cm = _make_format(_COLOR_COMMENT, italic=True)
+    nm = _make_format(_COLOR_NUMBER)
+    fn = _make_format(_COLOR_FUNC)
+    cls = _make_format(_COLOR_CLASS)
+
+    block_rules = [
+        (re.compile(r'/\*'), re.compile(r'\*/'), cm),
+        (re.compile(r'`'), re.compile(r'`'), st),
+    ]
+    rules = [
+        (re.compile(r'//.*$'), cm, 0, True),
+        (re.compile(r'"(?:[^"\\]|\\.)*"'), st, 0, True),
+        (re.compile(r"'(?:[^'\\]|\\.)*'"), st, 0, True),
+        (re.compile(r'\b(' + '|'.join(kws) + r')\b'), kw, 0, False),
+        (re.compile(r'\b([A-Z][A-Za-z0-9_]*)\b'), cls, 1, False),
+        (re.compile(r'\b([a-zA-Z_]\w*)(?=\s*\()'), fn, 1, False),
+        (re.compile(r'\b\d+(?:\.\d+)?(?:[eE][+-]?\d+)?\b'), nm, 0, False),
+    ]
+    return rules, block_rules
+
+
+def _dockerfile_rules():
+    instructions = (
+        r'^\s*(FROM|RUN|CMD|LABEL|MAINTAINER|EXPOSE|ENV|ADD|COPY|ENTRYPOINT|'
+        r'VOLUME|USER|WORKDIR|ARG|ONBUILD|STOPSIGNAL|HEALTHCHECK|SHELL)\b'
+    )
+    kw = _make_format(_COLOR_KEYWORD, bold=True)
+    st = _make_format(_COLOR_STRING)
+    cm = _make_format(_COLOR_COMMENT, italic=True)
+    vr = _make_format(_COLOR_VAR)
+
+    rules = [
+        (re.compile(r'"(?:[^"\\]|\\.)*"'), st, 0, True),
+        (re.compile(r"'(?:[^'\\]|\\.)*'"), st, 0, True),
+        (re.compile(r'#.*$'), cm, 0, True),
+        (re.compile(instructions), kw, 1, False),
+        (re.compile(r'\$\{[^}]*\}'), vr, 0, False),
+        (re.compile(r'\$\w+'), vr, 0, False),
+    ]
+    return rules, []
+
+
+def _makefile_rules():
+    directives = (
+        r'^\s*(include|sinclude|-include|ifeq|ifneq|ifdef|ifndef|else|endif|'
+        r'define|endef|export|unexport|override|vpath)\b'
+    )
+    kw = _make_format(_COLOR_KEYWORD, bold=True)
+    st = _make_format(_COLOR_STRING)
+    cm = _make_format(_COLOR_COMMENT, italic=True)
+    vr = _make_format(_COLOR_VAR)
+    target = _make_format(_COLOR_FUNC, bold=True)
+    auto = _make_format(_COLOR_CLASS)
+
+    rules = [
+        (re.compile(r'"(?:[^"\\]|\\.)*"'), st, 0, True),
+        (re.compile(r"'(?:[^'\\]|\\.)*'"), st, 0, True),
+        (re.compile(r'#.*$'), cm, 0, True),
+        (re.compile(r'^([A-Za-z0-9_.\-%\s]+?)(?=:[^=])'), target, 1, False),
+        (re.compile(directives), kw, 1, False),
+        (re.compile(r'\$\([^)]*\)'), vr, 0, False),
+        (re.compile(r'\$\{[^}]*\}'), vr, 0, False),
+        (re.compile(r'\$[@<^%*+?|]'), auto, 0, False),
+    ]
+    return rules, []
+
+
+def _ini_rules():
+    section = _make_format(_COLOR_CLASS, bold=True)
+    key = _make_format(_COLOR_VAR)
+    st = _make_format(_COLOR_STRING)
+    cm = _make_format(_COLOR_COMMENT, italic=True)
+    nm = _make_format(_COLOR_NUMBER)
+    bl = _make_format(_COLOR_KEYWORD, bold=True)
+
+    rules = [
+        (re.compile(r'"(?:[^"\\]|\\.)*"'), st, 0, True),
+        (re.compile(r"'(?:[^'\\]|\\.)*'"), st, 0, True),
+        (re.compile(r'[#;].*$'), cm, 0, True),
+        (re.compile(r'^\s*(\[[^\]]*\])'), section, 1, False),
+        (re.compile(r'^\s*([\w.\-]+)(?=\s*=)'), key, 1, False),
+        (re.compile(r'\b(true|false|True|False|TRUE|FALSE)\b'), bl, 0, False),
+        (re.compile(r'(?<![\w.])-?\d+(?:\.\d+)?(?![\w.])'), nm, 0, False),
+    ]
+    return rules, []
+
+
 class FileEditorWidget(QWidget):
     """文件编辑器组件"""
 
@@ -514,17 +799,45 @@ class FileEditorWidget(QWidget):
     def _setup_highlighter(self, file_path: str):
         """根据文件类型设置语法高亮"""
         ext = Path(file_path).suffix.lower()
+        name = Path(file_path).name.lower()
 
         # 移除旧的高亮器
         if self._highlighter:
             self._highlighter.setDocument(None)
             self._highlighter = None
 
-        # Python 文件使用 Python 高亮器
+        doc = self.editor.document()
+
         if ext == '.py':
-            self._highlighter = PythonHighlighter(self.editor.document(), self.theme)
-        elif ext == '.md' or ext == '.markdown':
-            self._highlighter = MarkdownHighlighter(self.editor.document(), self.theme)
+            self._highlighter = PythonHighlighter(doc, self.theme)
+        elif ext in ('.md', '.markdown'):
+            self._highlighter = MarkdownHighlighter(doc, self.theme)
+        elif ext in ('.sh', '.bash', '.zsh', '.ksh', '.fish') or \
+                name in ('.bashrc', '.bash_profile', '.zshrc', '.profile', '.zprofile'):
+            rules, blocks = _shell_rules()
+            self._highlighter = GenericHighlighter(doc, rules, blocks, self.theme)
+        elif ext == '.json':
+            rules, blocks = _json_rules()
+            self._highlighter = GenericHighlighter(doc, rules, blocks, self.theme)
+        elif ext in ('.yml', '.yaml'):
+            rules, blocks = _yaml_rules()
+            self._highlighter = GenericHighlighter(doc, rules, blocks, self.theme)
+        elif ext in ('.js', '.jsx', '.mjs', '.cjs'):
+            rules, blocks = _js_ts_rules(is_ts=False)
+            self._highlighter = GenericHighlighter(doc, rules, blocks, self.theme)
+        elif ext in ('.ts', '.tsx'):
+            rules, blocks = _js_ts_rules(is_ts=True)
+            self._highlighter = GenericHighlighter(doc, rules, blocks, self.theme)
+        elif name == 'dockerfile' or name.startswith('dockerfile.') or ext == '.dockerfile':
+            rules, blocks = _dockerfile_rules()
+            self._highlighter = GenericHighlighter(doc, rules, blocks, self.theme)
+        elif name in ('makefile', 'gnumakefile', 'bsdmakefile') or \
+                name.startswith('makefile.') or ext in ('.mk', '.make'):
+            rules, blocks = _makefile_rules()
+            self._highlighter = GenericHighlighter(doc, rules, blocks, self.theme)
+        elif ext in ('.toml', '.ini', '.conf', '.cfg', '.properties'):
+            rules, blocks = _ini_rules()
+            self._highlighter = GenericHighlighter(doc, rules, blocks, self.theme)
 
     def save_file(self) -> bool:
         """保存文件"""
