@@ -11,10 +11,10 @@ from PyQt6.QtWidgets import (
     QPushButton, QLabel, QFrame, QMessageBox,
     QSplitter
 )
-from PyQt6.QtCore import Qt, pyqtSignal
+from PyQt6.QtCore import Qt, pyqtSignal, QRect, QSize
 from PyQt6.QtGui import (
     QFont, QColor, QTextCharFormat, QSyntaxHighlighter,
-    QKeySequence, QPalette, QShortcut
+    QKeySequence, QPalette, QShortcut, QPainter
 )
 from i18n import t
 
@@ -570,6 +570,89 @@ def _ini_rules():
     return rules, []
 
 
+class _LineNumberArea(QWidget):
+    """左侧行号条 — 由 CodeEditor 管理绘制"""
+
+    def __init__(self, editor):
+        super().__init__(editor)
+        self._editor = editor
+
+    def sizeHint(self):
+        return QSize(self._editor.line_number_area_width(), 0)
+
+    def paintEvent(self, event):
+        self._editor.line_number_area_paint_event(event)
+
+
+class CodeEditor(QPlainTextEdit):
+    """带左侧行号条的编辑器"""
+
+    def __init__(self, parent=None):
+        super().__init__(parent)
+        self._line_number_area = _LineNumberArea(self)
+        self._line_number_fg = QColor("#5c6370")
+        self._line_number_bg = QColor("#21252b")
+
+        self.blockCountChanged.connect(lambda _=0: self._update_viewport_margin())
+        self.updateRequest.connect(self._on_update_request)
+        self._update_viewport_margin()
+
+    def line_number_area_width(self) -> int:
+        digits = max(3, len(str(max(1, self.blockCount()))))
+        return self.fontMetrics().horizontalAdvance('9') * digits + 12
+
+    def _update_viewport_margin(self):
+        self.setViewportMargins(self.line_number_area_width(), 0, 0, 0)
+
+    def _on_update_request(self, rect, dy):
+        if dy:
+            self._line_number_area.scroll(0, dy)
+        else:
+            self._line_number_area.update(
+                0, rect.y(), self._line_number_area.width(), rect.height()
+            )
+        if rect.contains(self.viewport().rect()):
+            self._update_viewport_margin()
+
+    def resizeEvent(self, event):
+        super().resizeEvent(event)
+        cr = self.contentsRect()
+        self._line_number_area.setGeometry(
+            QRect(cr.left(), cr.top(), self.line_number_area_width(), cr.height())
+        )
+
+    def line_number_area_paint_event(self, event):
+        painter = QPainter(self._line_number_area)
+        painter.fillRect(event.rect(), self._line_number_bg)
+        painter.setFont(self.font())
+        painter.setPen(self._line_number_fg)
+
+        block = self.firstVisibleBlock()
+        block_number = block.blockNumber()
+        top = int(self.blockBoundingGeometry(block).translated(self.contentOffset()).top())
+        bottom = top + int(self.blockBoundingRect(block).height())
+        line_height = self.fontMetrics().height()
+        right_pad = 6
+        width = self._line_number_area.width() - right_pad
+
+        while block.isValid() and top <= event.rect().bottom():
+            if block.isVisible() and bottom >= event.rect().top():
+                painter.drawText(
+                    0, top, width, line_height,
+                    Qt.AlignmentFlag.AlignRight | Qt.AlignmentFlag.AlignVCenter,
+                    str(block_number + 1),
+                )
+            block = block.next()
+            top = bottom
+            bottom = top + int(self.blockBoundingRect(block).height())
+            block_number += 1
+
+    def set_line_number_colors(self, fg: str, bg: str):
+        self._line_number_fg = QColor(fg)
+        self._line_number_bg = QColor(bg)
+        self._line_number_area.update()
+
+
 class FileEditorWidget(QWidget):
     """文件编辑器组件"""
 
@@ -623,7 +706,7 @@ class FileEditorWidget(QWidget):
         layout.addWidget(self.header)
 
         # 编辑器
-        self.editor = QPlainTextEdit()
+        self.editor = CodeEditor()
         self.editor.setLineWrapMode(QPlainTextEdit.LineWrapMode.NoWrap)
         self.editor.textChanged.connect(self._on_text_changed)
 
@@ -727,11 +810,21 @@ class FileEditorWidget(QWidget):
                 background-color: {editor_bg};
                 color: {editor_fg};
                 border: none;
-                padding: 4px 12px;
+                padding: 4px 12px 4px 8px;
                 selection-background-color: {accent};
                 selection-color: white;
             }}
         """)
+
+        # 行号条配色：默认用稍暗的 bg + 暗灰 fg，浅色主题则反向
+        gutter_bg = self.theme.get('editor_gutter_bg')
+        gutter_fg = self.theme.get('editor_gutter_fg')
+        if not gutter_bg:
+            gutter_bg = "#e8e8e8" if self.theme.get('is_light_theme') else "#21252b"
+        if not gutter_fg:
+            gutter_fg = "#888" if self.theme.get('is_light_theme') else "#5c6370"
+        if isinstance(self.editor, CodeEditor):
+            self.editor.set_line_number_colors(gutter_fg, gutter_bg)
 
     def apply_theme(self, theme: dict):
         """应用新主题"""
