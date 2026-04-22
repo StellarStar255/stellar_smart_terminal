@@ -2061,6 +2061,9 @@ class MainWindow(QMainWindow):
     # 全局共享的窗口导航面板
     _global_window_navigator = None
 
+    # QApplication 全局 stylesheet 原值快照（进程级共享，仅初始化一次）
+    _original_app_stylesheet = None
+
     def __init__(self, initial_tab_data=None, window_title=None):
         """初始化主窗口
 
@@ -4405,8 +4408,17 @@ class MainWindow(QMainWindow):
                 return max(lo, min(hi, gui_font_size))
             return max(lo, min(hi, default + delta))
 
-        # 2. 全局 GUI 字体（工具栏、标签栏、状态栏等）— 通过缩放样式表中的 font-size
+        # 2. 全局 GUI 字体（工具栏、标签栏、状态栏等）
+        #    - 缩放样式表中显式写了 font-size 的控件
+        #    - 同时更新 QApplication 默认字体，让未显式设置 font-size 的控件（Start/Stop/Switch 等）也等比缩放
+        if gui_font_size > 0:
+            effective_px = gui_font_size
+        elif delta != 0:
+            effective_px = max(8, min(32, 12 + delta))
+        else:
+            effective_px = None
         self._scale_gui_font_sizes(gui_font_size, delta)
+        self._apply_application_font(effective_px)
 
         # 3. 文件编辑器 (默认13pt, 范围6-48)
         if hasattr(self, 'file_editor') and self.file_editor is not None:
@@ -4498,6 +4510,36 @@ class MainWindow(QMainWindow):
                 dead_ids.append(wid)
         for wid in dead_ids:
             del self._original_widget_styles[wid]
+
+    def _apply_application_font(self, effective_px):
+        """让 QApplication 层面的 stylesheet 承担通用字号缩放。
+
+        原因：Qt6 下 QApplication.setFont(...) 对已存在的 widget 并不会可靠地
+        重新解析字体；而 app 级 stylesheet 通过 Qt 的层叠（cascade）机制，能把
+        通配的 ``QWidget { font-size: Npx; }`` 应用到所有没有自己显式设 font-size
+        的控件，同时被控件局部 stylesheet 的更具体规则覆盖。
+
+        作用范围：工具栏里 Start/Stop/Switch/Manage 等未显式设字号的按钮。
+        _scale_gui_font_sizes() 不会触到它们，这里补齐。
+
+        effective_px 为 None 时恢复 app 级 stylesheet 的原值（通常为空）。
+        """
+        app = QApplication.instance()
+        if app is None:
+            return
+
+        if MainWindow._original_app_stylesheet is None:
+            MainWindow._original_app_stylesheet = app.styleSheet() or ''
+
+        base = MainWindow._original_app_stylesheet
+        if effective_px is None:
+            new_ss = base
+        else:
+            px = max(7, int(effective_px))
+            new_ss = (base + '\nQWidget { font-size: %dpx; }' % px).strip()
+
+        if app.styleSheet() != new_ss:
+            app.setStyleSheet(new_ss)
 
     @property
     def terminal(self):
