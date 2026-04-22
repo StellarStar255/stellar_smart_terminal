@@ -727,6 +727,7 @@ class FileEditorWidget(QWidget):
                 background-color: {editor_bg};
                 color: {editor_fg};
                 border: none;
+                padding: 4px 12px;
                 selection-background-color: {accent};
                 selection-color: white;
             }}
