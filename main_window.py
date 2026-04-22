@@ -4431,9 +4431,9 @@ class MainWindow(QMainWindow):
                     4 * self.file_editor.editor.fontMetrics().horizontalAdvance(' ')
                 )
 
-        # 4. 资源管理器文件树 (默认13pt, 范围8-28)
+        # 4. 资源管理器文件树 (默认13pt, 范围8-28) — 跟随终端缩放，不受 GUI 字号影响
         if hasattr(self, 'explorer_panel') and self.explorer_panel is not None:
-            target_size = gui_target(13, 8, 28)
+            target_size = max(8, min(28, 13 + delta))
             if hasattr(self.explorer_panel, 'tree_view'):
                 tree = self.explorer_panel.tree_view
                 font = tree.font()
