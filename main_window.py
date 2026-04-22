@@ -2833,7 +2833,7 @@ class MainWindow(QMainWindow):
                 padding: 8px 12px;
                 padding-right: 36px;
                 color: #eaeaea;
-                font-size: 14px;
+                font-size: 12px;
             }
             QComboBox:focus {
                 border-color: #667eea;
@@ -2870,7 +2870,7 @@ class MainWindow(QMainWindow):
                 color: white;
                 border: none;
                 border-radius: 6px;
-                font-size: 14px;
+                font-size: 12px;
                 padding: 4px 8px;
             }
             QPushButton:hover {
@@ -2942,7 +2942,7 @@ class MainWindow(QMainWindow):
         self.image_prefix_checkbox.setStyleSheet("""
             QCheckBox {
                 color: #aaa;
-                font-size: 12px;
+                font-size: 11px;
             }
             QCheckBox::indicator {
                 width: 16px;
@@ -2967,7 +2967,7 @@ class MainWindow(QMainWindow):
         self.image_local_checkbox.setStyleSheet("""
             QCheckBox {
                 color: #aaa;
-                font-size: 12px;
+                font-size: 11px;
             }
             QCheckBox::indicator {
                 width: 16px;
@@ -2992,7 +2992,7 @@ class MainWindow(QMainWindow):
         self.window_nav_checkbox.setStyleSheet("""
             QCheckBox {
                 color: #aaa;
-                font-size: 12px;
+                font-size: 11px;
             }
             QCheckBox::indicator {
                 width: 16px;
@@ -3803,7 +3803,7 @@ class MainWindow(QMainWindow):
     def _update_title_label_color(self):
         """更新标题标签颜色"""
         self.title_label.setStyleSheet(
-            f"color: {self._window_color}; font-size: 16px; font-weight: bold;"
+            f"color: {self._window_color}; font-size: 13px; font-weight: bold;"
         )
 
     def _update_color_btn_style(self):
