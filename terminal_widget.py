@@ -387,9 +387,6 @@ class TerminalWidget(QWidget):
         # 内容变化标志（脏标记）
         self._content_dirty = False
 
-        # resize 后等待子进程重绘的标志
-        self._awaiting_resize_redraw = False
-        self._resize_data_timer = None
 
         # 双缓冲缓存 - 避免每次paintEvent都重绘
         self._cache_pixmap: Optional[QPixmap] = None
@@ -639,44 +636,18 @@ class TerminalWidget(QWidget):
             # 重新创建screen（HistoryScreen的resize参数顺序是lines, columns）
             self.screen.resize(self.term_rows, self.term_cols)
 
-            # resize 后 pyte 会按新尺寸重排旧内容，而像 Claude Code (Ink) 这样的 TUI
-            # 收到 SIGWINCH 后会发送完整重绘，使用 CUF (\x1b[nC]) 创建间距。
-            # CUF 不会清除经过的单元格——如果这些单元格包含 resize 重排的旧内容，
-            # 渲染时就会看到"重影"（旧文字透过空隙显示）。
-            # 解决方案：resize 后清空可见屏幕，保留光标位置。
-            # 子进程的完整重绘会在 SIGWINCH 后到达，覆盖所有内容。
-            saved_cursor = (self.screen.cursor.x, self.screen.cursor.y)
-            self.screen.erase_in_display(2)
-            self.screen.cursor.x, self.screen.cursor.y = saved_cursor
-
-            # 更新PTY大小
+            # 更新PTY大小（子进程会收到 SIGWINCH，可能会发送完整重绘）
             self._update_pty_size()
 
-            # resize 后 pyte 会按新尺寸重排旧内容，但子进程（如 Claude Code 的 Ink TUI）
-            # 会在收到 SIGWINCH 后发送完整重绘。在重绘数据到达前，pyte 的 buffer 处于
-            # "中间态"（旧内容被错误折行），直接渲染会导致显示混乱。
-            # 因此：设置标志位，让 paintEvent 暂时复用旧缓存，等新数据到达后再重建。
-            self._awaiting_resize_redraw = True
-            # 安全超时：如果 500ms 内没有收到新数据（无子进程运行等），强制解除等待
-            QTimer.singleShot(500, self._clear_resize_wait)
+            # 不主动 erase 可见 buffer：让 pyte 自然处理（保留旧内容直到子进程重写）。
+            # 这样即使子进程不响应 SIGWINCH（如 bash 在提示符空闲、进程已退出等），
+            # 也不会出现空白终端。少数 TUI 应用使用 CUF 增量重绘可能短暂出现"重影"，
+            # 但这种情况极少且很快被新重绘覆盖，远好于内容完全消失。
 
             self._cache_valid = False
+            self._display_info['valid'] = False
             self.update()
             print(f"[Terminal] Size: {old_cols}x{old_rows} -> {new_cols}x{new_rows} (widget: {self.width()}x{self.height()}, char_w: {self.char_width:.1f})")
-
-    def _clear_resize_wait(self):
-        """超时后强制解除 resize 重绘等待"""
-        if self._awaiting_resize_redraw:
-            self._awaiting_resize_redraw = False
-            self._cache_valid = False
-            self.update()
-
-    def _finish_resize_redraw(self):
-        """子进程重绘数据到齐后，解除 resize 等待并刷新显示"""
-        self._awaiting_resize_redraw = False
-        self._cache_valid = False
-        self._display_info['valid'] = False
-        self.update()
 
     def _update_pty_size(self):
         """更新PTY终端大小"""
@@ -897,20 +868,6 @@ class TerminalWidget(QWidget):
             # 标记内容已变化，让定时器统一处理重绘（避免高频输出时的重绘风暴）
             self._content_dirty = True
 
-            # 收到新数据，说明子进程已开始重绘。
-            # 但子进程（如 Claude Code/Ink TUI）的完整重绘会分多个数据块到达，
-            # 不能在第一个块就解除等待，否则会渲染不完整的中间态导致重影。
-            # 改用短延时：每次收到数据时重置一个 80ms 计时器，
-            # 让所有数据块到齐后再解除等待并重建缓存。
-            if self._awaiting_resize_redraw:
-                if hasattr(self, '_resize_data_timer') and self._resize_data_timer is not None:
-                    self._resize_data_timer.stop()
-                else:
-                    self._resize_data_timer = QTimer()
-                    self._resize_data_timer.setSingleShot(True)
-                    self._resize_data_timer.timeout.connect(self._finish_resize_redraw)
-                self._resize_data_timer.start(80)
-
             # 缓冲输出，由定时器统一发送（避免高频输出时的信号风暴）
             self._output_buffer.append(text)
         except Exception as e:
@@ -1071,16 +1028,9 @@ class TerminalWidget(QWidget):
         if not painter.isActive():
             return
 
-        # resize 期间继续显示旧缓存内容（而非空白），避免频繁 resize 时内容"消失"。
-        # 之前显示空白是为了防止重影，但 resize 震荡会导致内容长时间不可见。
-        # 旧缓存可能尺寸不匹配，但仍比空白好——内容至少可读。
-        if self._resize_pending or self._awaiting_resize_redraw:
-            painter.fillRect(self.rect(), self.bg_color)
-            if self._cache_pixmap and not self._cache_pixmap.isNull():
-                painter.drawPixmap(0, 0, self._cache_pixmap)
-            return
-
         # 检查是否需要重建缓存
+        # （以前 resize 期间会跳过重建并复用旧缓存以"防重影"，但子进程不响应 SIGWINCH 时
+        # 会卡住整片空白。现在直接走正常重建路径：pyte 自然 reflow，比空白可靠得多。）
         need_rebuild = (
             self._cache_pixmap is None or
             self._cache_pixmap.isNull() or
