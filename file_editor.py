@@ -14,7 +14,7 @@ from PyQt6.QtWidgets import (
 from PyQt6.QtCore import Qt, pyqtSignal, QRect, QSize
 from PyQt6.QtGui import (
     QFont, QColor, QTextCharFormat, QSyntaxHighlighter,
-    QKeySequence, QPalette, QShortcut, QPainter
+    QKeySequence, QPalette, QShortcut, QPainter, QTextCursor
 )
 from i18n import t
 
@@ -727,7 +727,155 @@ class FileEditorWidget(QWidget):
         save_shortcut = QShortcut(QKeySequence.StandardKey.Save, self)
         save_shortcut.activated.connect(self.save_file)
 
+        # Cmd+/ / Ctrl+/ 切换注释（仅在编辑器获焦时触发）
+        comment_shortcut = QShortcut(QKeySequence("Ctrl+/"), self.editor)
+        comment_shortcut.setContext(Qt.ShortcutContext.WidgetWithChildrenShortcut)
+        comment_shortcut.activated.connect(self._toggle_comment)
+
         # 缩放快捷键已移至主窗口全局处理（避免 ambiguous shortcut 冲突）
+
+    def _get_line_comment(self):
+        """根据当前文件类型返回行注释前缀，无法识别时返回 None"""
+        if not self._current_file:
+            return None
+        ext = Path(self._current_file).suffix.lower()
+        name = Path(self._current_file).name.lower()
+
+        if ext == '.py':
+            return '#'
+        if ext in ('.sh', '.bash', '.zsh', '.ksh', '.fish') or \
+                name in ('.bashrc', '.bash_profile', '.zshrc', '.profile', '.zprofile'):
+            return '#'
+        if ext in ('.yml', '.yaml'):
+            return '#'
+        if ext in ('.toml', '.ini', '.conf', '.cfg', '.properties'):
+            return '#'
+        if ext == '.dockerfile' or name == 'dockerfile' or name.startswith('dockerfile.'):
+            return '#'
+        if name in ('makefile', 'gnumakefile', 'bsdmakefile') or \
+                name.startswith('makefile.') or ext in ('.mk', '.make'):
+            return '#'
+        if ext in ('.rb', '.r', '.pl', '.pm', '.tcl', '.awk', '.gitignore', '.dockerignore'):
+            return '#'
+        if ext in ('.js', '.jsx', '.mjs', '.cjs', '.ts', '.tsx',
+                   '.c', '.cpp', '.cc', '.cxx', '.h', '.hpp', '.hh',
+                   '.java', '.cs', '.go', '.rs', '.swift', '.kt', '.kts',
+                   '.scala', '.dart', '.php', '.m', '.mm'):
+            return '//'
+        if ext in ('.lua', '.sql', '.hs', '.elm', '.ada'):
+            return '--'
+        return None
+
+    def _toggle_comment(self):
+        """切换选中行的注释（VS Code 风格）
+
+        - 无选区时作用于光标所在行
+        - 选区跨多行时统一处理
+        - 全部已注释 → 取消注释；否则 → 全部注释（注释插入在最小缩进位置）
+        """
+        prefix = self._get_line_comment()
+        if not prefix:
+            return
+
+        editor = self.editor
+        cursor = editor.textCursor()
+        doc = editor.document()
+
+        sel_start = cursor.selectionStart()
+        sel_end = cursor.selectionEnd()
+        had_selection = sel_start != sel_end
+
+        start_block = doc.findBlock(sel_start)
+        end_block = doc.findBlock(sel_end)
+        # 若选区结束于行首，则不包含该行（与编辑器常见行为一致）
+        if had_selection and sel_end == end_block.position() and end_block != start_block:
+            end_block = end_block.previous()
+
+        start_blk_num = start_block.blockNumber()
+        end_blk_num = end_block.blockNumber()
+
+        # 收集块内容
+        block_infos = []
+        b = start_block
+        while b.isValid():
+            block_infos.append((b.blockNumber(), b.text()))
+            if b.blockNumber() == end_blk_num:
+                break
+            b = b.next()
+
+        line_re = re.compile(r'^(\s*)' + re.escape(prefix) + r'(\s?)')
+
+        all_commented = True
+        has_non_empty = False
+        min_indent = None
+
+        for _, text in block_infos:
+            if not text.strip():
+                continue
+            has_non_empty = True
+            indent_len = len(text) - len(text.lstrip())
+            if min_indent is None or indent_len < min_indent:
+                min_indent = indent_len
+            if not line_re.match(text):
+                all_commented = False
+
+        if not has_non_empty:
+            all_commented = False
+            min_indent = 0
+
+        insert_text = prefix + ' '
+
+        edit_cursor = QTextCursor(doc)
+        edit_cursor.beginEditBlock()
+        try:
+            if all_commented:
+                # 反向遍历，避免位置失效
+                for blk_num, text in reversed(block_infos):
+                    blk = doc.findBlockByNumber(blk_num)
+                    if not blk.isValid():
+                        continue
+                    m = line_re.match(blk.text())
+                    if not m:
+                        continue
+                    remove_start = blk.position() + len(m.group(1))
+                    remove_len = len(prefix) + len(m.group(2))
+                    edit_cursor.setPosition(remove_start)
+                    edit_cursor.setPosition(remove_start + remove_len,
+                                             QTextCursor.MoveMode.KeepAnchor)
+                    edit_cursor.removeSelectedText()
+            else:
+                for blk_num, text in reversed(block_infos):
+                    if not text.strip() and has_non_empty:
+                        # 混合内容时跳过空行
+                        continue
+                    blk = doc.findBlockByNumber(blk_num)
+                    if not blk.isValid():
+                        continue
+                    insert_pos = blk.position() + min(min_indent, len(blk.text()))
+                    edit_cursor.setPosition(insert_pos)
+                    edit_cursor.insertText(insert_text)
+        finally:
+            edit_cursor.endEditBlock()
+
+        # 恢复选区/光标
+        new_start_block = doc.findBlockByNumber(start_blk_num)
+        new_end_block = doc.findBlockByNumber(end_blk_num)
+        new_cursor = editor.textCursor()
+        if had_selection and new_start_block.isValid() and new_end_block.isValid():
+            new_cursor.setPosition(new_start_block.position())
+            end_pos = new_end_block.position() + max(0, new_end_block.length() - 1)
+            new_cursor.setPosition(end_pos, QTextCursor.MoveMode.KeepAnchor)
+        elif new_start_block.isValid():
+            col = sel_start - start_block.position()
+            if all_commented:
+                col = max(0, col - (len(prefix) + 1))
+            else:
+                if col >= (min_indent or 0):
+                    col += len(insert_text)
+            max_col = max(0, new_start_block.length() - 1)
+            col = min(col, max_col)
+            new_cursor.setPosition(new_start_block.position() + col)
+        editor.setTextCursor(new_cursor)
 
     def _zoom_in(self):
         """放大字体"""
