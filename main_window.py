@@ -842,30 +842,6 @@ class WindowNavigatorPanel(QWidget):
         """对一个窗口执行强制关闭（自动保存）"""
         if not window or sip.isdeleted(window):
             return
-        # 简单确认，避免误触
-        msg_box = QMessageBox(self)
-        msg_box.setWindowTitle(t("window.force_close_confirm_title"))
-        msg_box.setText(t("window.force_close_confirm_msg", title=title))
-        msg_box.setIcon(QMessageBox.Icon.Warning)
-        msg_box.setStandardButtons(
-            QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No
-        )
-        msg_box.setDefaultButton(QMessageBox.StandardButton.No)
-        msg_box.setStyleSheet("""
-            QMessageBox { background-color: #f0f0f0; }
-            QMessageBox QLabel { color: #333333; font-size: 13px; }
-            QMessageBox QPushButton {
-                background-color: #e0e0e0;
-                color: #333333;
-                border: 1px solid #999999;
-                padding: 5px 15px;
-                border-radius: 3px;
-                min-width: 60px;
-            }
-            QMessageBox QPushButton:hover { background-color: #d0d0d0; }
-        """)
-        if msg_box.exec() != QMessageBox.StandardButton.Yes:
-            return
 
         try:
             window.force_close_with_save()
