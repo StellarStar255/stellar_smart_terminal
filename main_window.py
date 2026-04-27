@@ -872,7 +872,11 @@ class WindowNavigatorPanel(QWidget):
             return
 
         if not self._quick_close:
-            msg_box = QMessageBox(self)
+            # 父窗口（导航面板）有深色 QWidget 全局 QSS，会级联进 QMessageBox 把
+            # 文字染暗、看不清。这里：
+            # 1. 不传 parent，避免 QSS 级联
+            # 2. 自己组合一套深色主题的 QSS，与导航面板风格一致
+            msg_box = QMessageBox()
             msg_box.setWindowTitle(t("window.force_close_confirm_title"))
             msg_box.setText(t("window.force_close_confirm_msg", title=title))
             msg_box.setIcon(QMessageBox.Icon.Warning)
@@ -881,18 +885,37 @@ class WindowNavigatorPanel(QWidget):
             )
             msg_box.setDefaultButton(QMessageBox.StandardButton.No)
             msg_box.setStyleSheet("""
-                QMessageBox { background-color: #f0f0f0; }
-                QMessageBox QLabel { color: #333333; font-size: 13px; }
-                QMessageBox QPushButton {
-                    background-color: #e0e0e0;
-                    color: #333333;
-                    border: 1px solid #999999;
-                    padding: 5px 15px;
-                    border-radius: 3px;
-                    min-width: 60px;
+                QMessageBox {
+                    background-color: #1a1a2e;
                 }
-                QMessageBox QPushButton:hover { background-color: #d0d0d0; }
+                QMessageBox QLabel {
+                    color: #eaeaea;
+                    background-color: transparent;
+                    font-size: 13px;
+                    border: none;
+                }
+                QMessageBox QPushButton {
+                    background-color: #3d3d5c;
+                    color: #eaeaea;
+                    border: 1px solid #3d3d5c;
+                    border-radius: 4px;
+                    padding: 6px 18px;
+                    min-width: 72px;
+                    font-size: 12px;
+                }
+                QMessageBox QPushButton:hover {
+                    background-color: #667eea;
+                    border-color: #667eea;
+                }
+                QMessageBox QPushButton:default {
+                    background-color: #2d2d44;
+                    border-color: #667eea;
+                }
             """)
+            # 让弹窗显示在导航面板附近
+            geo = self.geometry()
+            msg_box.move(geo.x() + max(0, (geo.width() - 360) // 2),
+                         geo.y() + max(0, (geo.height() - 180) // 2))
             if msg_box.exec() != QMessageBox.StandardButton.Yes:
                 return
 
