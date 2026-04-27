@@ -270,6 +270,8 @@ class WindowNavigatorPanel(QWidget):
         self._sort_mode = 'time'
         # 简洁显示模式：只显示文件夹名
         self._compact_mode = True
+        # 快速关闭：勾选后右键"强制关闭"跳过确认弹窗
+        self._quick_close = False
         # 手动排序的窗口顺序（存储窗口ID）
         self._manual_order = []
 
@@ -380,6 +382,24 @@ class WindowNavigatorPanel(QWidget):
         """)
         self.compact_checkbox.stateChanged.connect(self._toggle_compact_mode)
         compact_row.addWidget(self.compact_checkbox)
+
+        # Quick Close 勾选框：勾选后右键"强制关闭"不再弹确认窗
+        self.quick_close_checkbox = QCheckBox(t("window.quick_close"))
+        self.quick_close_checkbox.setChecked(self._quick_close)
+        self.quick_close_checkbox.setToolTip(t("window.quick_close_tooltip"))
+        self.quick_close_checkbox.setStyleSheet("""
+            QCheckBox {
+                color: #aaaaaa;
+                font-size: 11px;
+                border: none;
+            }
+            QCheckBox::indicator {
+                width: 14px;
+                height: 14px;
+            }
+        """)
+        self.quick_close_checkbox.stateChanged.connect(self._on_quick_close_changed)
+        compact_row.addWidget(self.quick_close_checkbox)
 
         compact_row.addStretch()
 
@@ -838,10 +858,43 @@ class WindowNavigatorPanel(QWidget):
         if chosen is force_close_action:
             self._force_close_window(window, item.text())
 
+    def _on_quick_close_changed(self, state):
+        """Quick Close 勾选状态变化：更新内部标志并保存配置"""
+        self._quick_close = self.quick_close_checkbox.isChecked()
+        self._save_navigator_config()
+
     def _force_close_window(self, window, title):
-        """对一个窗口执行强制关闭（自动保存）"""
+        """对一个窗口执行强制关闭（自动保存）。
+        - 未勾选 Quick Close：弹窗确认后再执行
+        - 勾选了 Quick Close：直接执行，不弹窗
+        """
         if not window or sip.isdeleted(window):
             return
+
+        if not self._quick_close:
+            msg_box = QMessageBox(self)
+            msg_box.setWindowTitle(t("window.force_close_confirm_title"))
+            msg_box.setText(t("window.force_close_confirm_msg", title=title))
+            msg_box.setIcon(QMessageBox.Icon.Warning)
+            msg_box.setStandardButtons(
+                QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No
+            )
+            msg_box.setDefaultButton(QMessageBox.StandardButton.No)
+            msg_box.setStyleSheet("""
+                QMessageBox { background-color: #f0f0f0; }
+                QMessageBox QLabel { color: #333333; font-size: 13px; }
+                QMessageBox QPushButton {
+                    background-color: #e0e0e0;
+                    color: #333333;
+                    border: 1px solid #999999;
+                    padding: 5px 15px;
+                    border-radius: 3px;
+                    min-width: 60px;
+                }
+                QMessageBox QPushButton:hover { background-color: #d0d0d0; }
+            """)
+            if msg_box.exec() != QMessageBox.StandardButton.Yes:
+                return
 
         try:
             window.force_close_with_save()
@@ -886,6 +939,7 @@ class WindowNavigatorPanel(QWidget):
                     config = json.load(f)
             config['navigator_geometry'] = [self.x(), self.y(), self.width(), self.height()]
             config['navigator_font_size'] = self._font_size
+            config['navigator_quick_close'] = bool(self._quick_close)
             with open(config_file, 'w', encoding='utf-8') as f:
                 json.dump(config, f, ensure_ascii=False, indent=2)
         except Exception:
@@ -904,6 +958,12 @@ class WindowNavigatorPanel(QWidget):
                     self._font_size = font_size
                     self.font_size_spin.setValue(font_size)
                     self._apply_list_font_size()
+                # 恢复 Quick Close 偏好
+                quick_close = bool(config.get('navigator_quick_close', False))
+                self._quick_close = quick_close
+                self.quick_close_checkbox.blockSignals(True)
+                self.quick_close_checkbox.setChecked(quick_close)
+                self.quick_close_checkbox.blockSignals(False)
                 # 恢复窗口位置和大小
                 geo = config.get('navigator_geometry')
                 if geo and len(geo) == 4:

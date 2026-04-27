@@ -30,6 +30,10 @@ TRANSLATIONS = {
     "window.refresh": {"zh": "刷新", "en": "Refresh"},
     "window.force_close": {"zh": "强制关闭(自动保存)", "en": "Force Close (Auto-Save)"},
     "window.force_close_tooltip": {"zh": "保存会话和配置后关闭窗口，跳过确认弹窗", "en": "Save session and config, then close without confirmation"},
+    "window.force_close_confirm_title": {"zh": "确认强制关闭", "en": "Confirm Force Close"},
+    "window.force_close_confirm_msg": {"zh": "将自动保存并关闭以下窗口：\n\n{title}\n\n确定继续？", "en": "Will auto-save and close:\n\n{title}\n\nProceed?"},
+    "window.quick_close": {"zh": "Quick Close", "en": "Quick Close"},
+    "window.quick_close_tooltip": {"zh": "勾选后右键强制关闭直接执行，不再弹窗确认", "en": "If checked, right-click force-close skips the confirmation dialog"},
 
     # ===== 预设管理对话框 =====
     "preset.manage_title": {"zh": "管理预设命令", "en": "Manage Presets"},
