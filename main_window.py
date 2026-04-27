@@ -355,6 +355,9 @@ class WindowNavigatorPanel(QWidget):
         self.window_list.currentItemChanged.connect(self._on_current_item_changed)
         # 监听拖拽完成，自动切换到手动排序模式
         self.window_list.model().rowsMoved.connect(self._on_rows_moved)
+        # 右键菜单：强制关闭等
+        self.window_list.setContextMenuPolicy(Qt.ContextMenuPolicy.CustomContextMenu)
+        self.window_list.customContextMenuRequested.connect(self._show_window_context_menu)
         layout.addWidget(self.window_list)
 
         # 简洁显示 + 字体大小行
@@ -795,6 +798,82 @@ class WindowNavigatorPanel(QWidget):
         window = item.data(Qt.ItemDataRole.UserRole)
         if window and not sip.isdeleted(window):
             self._switch_to_window(window)
+
+    def _show_window_context_menu(self, pos):
+        """窗口列表右键菜单：提供强制关闭等操作"""
+        item = self.window_list.itemAt(pos)
+        if item is None:
+            return
+        window = item.data(Qt.ItemDataRole.UserRole)
+        if not window or sip.isdeleted(window):
+            return
+        if not hasattr(window, 'force_close_with_save'):
+            return  # 非 MainWindow 类型，不支持
+
+        menu = QMenu(self)
+        menu.setStyleSheet("""
+            QMenu {
+                background-color: #2d2d44;
+                color: #eaeaea;
+                border: 1px solid #3d3d5c;
+                border-radius: 4px;
+                padding: 4px;
+            }
+            QMenu::item {
+                padding: 6px 20px;
+                border-radius: 3px;
+            }
+            QMenu::item:selected {
+                background-color: #667eea;
+            }
+            QMenu::item:disabled {
+                color: #666;
+            }
+        """)
+
+        force_close_action = menu.addAction(t("window.force_close"))
+        force_close_action.setToolTip(t("window.force_close_tooltip"))
+
+        chosen = menu.exec(self.window_list.viewport().mapToGlobal(pos))
+        if chosen is force_close_action:
+            self._force_close_window(window, item.text())
+
+    def _force_close_window(self, window, title):
+        """对一个窗口执行强制关闭（自动保存）"""
+        if not window or sip.isdeleted(window):
+            return
+        # 简单确认，避免误触
+        msg_box = QMessageBox(self)
+        msg_box.setWindowTitle(t("window.force_close_confirm_title"))
+        msg_box.setText(t("window.force_close_confirm_msg", title=title))
+        msg_box.setIcon(QMessageBox.Icon.Warning)
+        msg_box.setStandardButtons(
+            QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No
+        )
+        msg_box.setDefaultButton(QMessageBox.StandardButton.No)
+        msg_box.setStyleSheet("""
+            QMessageBox { background-color: #f0f0f0; }
+            QMessageBox QLabel { color: #333333; font-size: 13px; }
+            QMessageBox QPushButton {
+                background-color: #e0e0e0;
+                color: #333333;
+                border: 1px solid #999999;
+                padding: 5px 15px;
+                border-radius: 3px;
+                min-width: 60px;
+            }
+            QMessageBox QPushButton:hover { background-color: #d0d0d0; }
+        """)
+        if msg_box.exec() != QMessageBox.StandardButton.Yes:
+            return
+
+        try:
+            window.force_close_with_save()
+        except RuntimeError:
+            # 窗口已被销毁
+            pass
+        # 立即刷新列表
+        QTimer.singleShot(100, self._refresh_window_list)
 
     def _switch_to_window(self, window):
         """切换到指定窗口"""
@@ -7820,8 +7899,29 @@ class MainWindow(QMainWindow):
 
     # ==================== 本地快速命令相关方法结束 ====================
 
+    def force_close_with_save(self):
+        """强制关闭：先自动保存会话+配置，再跳过确认弹窗关闭窗口。
+        由窗口导航面板的右键菜单调用。
+        """
+        try:
+            if getattr(self, 'session_manager', None) is not None:
+                try:
+                    self.session_manager.auto_save()
+                except Exception as e:
+                    print(f"[ForceClose] session auto_save failed: {e}")
+            try:
+                self._save_config()
+            except Exception as e:
+                print(f"[ForceClose] _save_config failed: {e}")
+        finally:
+            self._force_closing = True
+            self.close()
+
     def closeEvent(self, event):
         """窗口关闭事件"""
+        # 强制关闭路径：跳过确认弹窗（保存已在 force_close_with_save 中完成）
+        force_closing = getattr(self, '_force_closing', False)
+
         # 检查是否有任何终端在运行
         any_running = any(
             t.is_running()
@@ -7829,7 +7929,7 @@ class MainWindow(QMainWindow):
             for t in terminals
         )
 
-        if any_running:
+        if any_running and not force_closing:
             # 创建自定义样式的消息框，避免深色主题导致文字不可见
             msg_box = QMessageBox(self)
             msg_box.setWindowTitle(t("msg.confirm_exit_title"))
