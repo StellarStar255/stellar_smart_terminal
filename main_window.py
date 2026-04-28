@@ -2824,6 +2824,11 @@ class MainWindow(QMainWindow):
         # 设置初始比例（Git 面板隐藏，终端占满，日志隐藏）
         self.main_splitter.setSizes([0, 1000, 0])
 
+        # 记忆用户手动调整后的尺寸（仅记录有意义的状态）
+        self.main_splitter.splitterMoved.connect(
+            lambda *_: self._capture_explorer_layout()
+        )
+
         # 日志面板默认隐藏
         self.log_panel_visible = False
         self.log_panel_container.hide()
@@ -6188,6 +6193,11 @@ class MainWindow(QMainWindow):
         # 设置初始比例（资源管理器占更多空间）
         self.explorer_splitter.setSizes([400, 0])
 
+        # 记忆用户手动拖拽过的尺寸
+        self.explorer_splitter.splitterMoved.connect(
+            lambda *_: self._capture_explorer_layout()
+        )
+
         layout.addWidget(self.explorer_splitter)
 
     def _open_file_in_editor(self, file_path: str):
@@ -6210,6 +6220,45 @@ class MainWindow(QMainWindow):
             # 上下分屏：编辑器在 explorer_splitter 中（默认行为）
             self._place_editor_in_explorer_splitter()
 
+    def _capture_explorer_layout(self):
+        """记录当前资源管理器/编辑器的尺寸用于下次还原
+
+        - 仅在用户能看到完整布局时记录（编辑器与对侧 widget 都未折叠）
+        - 通过 splitterMoved 信号触发，由 setSizes 引发的程序性变更也会进入此处，
+          但当目标布局是默认还原值时各项也都 > 0，记录无害
+        """
+        if not hasattr(self, 'file_editor'):
+            return
+
+        if self.main_splitter.indexOf(self.file_editor) >= 0 and self.file_editor.isVisible():
+            sizes = self.main_splitter.sizes()
+            if len(sizes) == 4 and sizes[0] > 0 and sizes[1] > 0 and sizes[2] > 0:
+                self._saved_explorer_main_sizes = list(sizes)
+            return
+
+        if self.explorer_splitter.indexOf(self.file_editor) >= 0 and self.file_editor.isVisible():
+            sizes = self.explorer_splitter.sizes()
+            if len(sizes) == 2 and sizes[0] > 0 and sizes[1] > 0:
+                self._saved_explorer_internal_sizes = list(sizes)
+
+    def _resolve_main_splitter_sizes_with_editor(self):
+        """计算编辑器在 main_splitter 中时的目标尺寸（优先使用记忆值）"""
+        log_width = 300 if self.log_panel_visible else 0
+        saved = getattr(self, '_saved_explorer_main_sizes', None)
+        if saved and len(saved) == 4 and saved[0] > 0 and saved[1] > 0 and saved[2] > 0:
+            sizes = list(saved)
+            sizes[3] = log_width
+            return sizes
+        # 默认值：左面板 300, 编辑器 400, 终端 600, 日志按状态
+        return [300, 400, 600, log_width]
+
+    def _resolve_explorer_splitter_sizes_with_editor(self):
+        """计算编辑器在 explorer_splitter 中时的目标尺寸（优先使用记忆值）"""
+        saved = getattr(self, '_saved_explorer_internal_sizes', None)
+        if saved and len(saved) == 2 and saved[0] > 0 and saved[1] > 0:
+            return list(saved)
+        return [200, 400]
+
     def _place_editor_in_main_splitter(self):
         """将编辑器放到 main_splitter 中（左右分屏模式）"""
         if self.main_splitter.indexOf(self.file_editor) >= 0:
@@ -6222,10 +6271,7 @@ class MainWindow(QMainWindow):
             # 插入到 main_splitter 的 index 1（left_panel 和 tab_widget 之间）
             self.main_splitter.insertWidget(1, self.file_editor)
 
-        # 调整比例：左面板 300, 编辑器 400, 终端 600, 日志 0
-        left_width = 300
-        log_width = 300 if self.log_panel_visible else 0
-        self.main_splitter.setSizes([left_width, 400, 600, log_width])
+        self.main_splitter.setSizes(self._resolve_main_splitter_sizes_with_editor())
 
         # explorer_splitter 中只剩文件树，让它占满
         self.explorer_splitter.setSizes([400, 0])
@@ -6242,7 +6288,7 @@ class MainWindow(QMainWindow):
             # 放回 explorer_splitter
             self.explorer_splitter.addWidget(self.file_editor)
 
-        self.explorer_splitter.setSizes([200, 400])
+        self.explorer_splitter.setSizes(self._resolve_explorer_splitter_sizes_with_editor())
 
         # 恢复 main_splitter 正常比例
         self._update_splitter_sizes()
@@ -6423,9 +6469,7 @@ class MainWindow(QMainWindow):
         # 检查编辑器是否在 main_splitter 中（左右分屏模式，splitter 有 4 个 widget）
         editor_in_main = hasattr(self, 'file_editor') and self.main_splitter.indexOf(self.file_editor) >= 0
         if editor_in_main:
-            editor_width = 400
-            terminal_width = 1000 - left_width - editor_width - log_width
-            self.main_splitter.setSizes([left_width, editor_width, terminal_width, log_width])
+            self.main_splitter.setSizes(self._resolve_main_splitter_sizes_with_editor())
         elif left_width > 0 or log_width > 0:
             terminal_width = 1000 - left_width - log_width
             self.main_splitter.setSizes([left_width, terminal_width, log_width])
@@ -7557,6 +7601,9 @@ class MainWindow(QMainWindow):
         self._saved_explorer_panel_visible = False  # Explorer 面板可见性
         self._saved_git_panel_visible = False  # Git 面板可见性
         self._saved_log_panel_visible = False  # 日志面板可见性
+        # 记忆资源管理器/编辑器拖拽过的尺寸，避免每次重新打开都重置
+        self._saved_explorer_main_sizes = None  # main_splitter 4 项尺寸（左右分屏）
+        self._saved_explorer_internal_sizes = None  # explorer_splitter 2 项尺寸（上下分屏）
         try:
             if self.CONFIG_FILE.exists():
                 with open(self.CONFIG_FILE, 'r', encoding='utf-8') as f:
@@ -7605,6 +7652,13 @@ class MainWindow(QMainWindow):
                     self._saved_explorer_panel_visible = config.get('explorer_panel_visible', False)
                     self._saved_git_panel_visible = config.get('git_panel_visible', False)
                     self._saved_log_panel_visible = config.get('log_panel_visible', False)
+                    # 加载记忆的资源管理器/编辑器尺寸
+                    main_sizes = config.get('explorer_main_splitter_sizes', None)
+                    if isinstance(main_sizes, list) and len(main_sizes) == 4 and all(isinstance(s, int) and s >= 0 for s in main_sizes):
+                        self._saved_explorer_main_sizes = main_sizes
+                    internal_sizes = config.get('explorer_internal_splitter_sizes', None)
+                    if isinstance(internal_sizes, list) and len(internal_sizes) == 2 and all(isinstance(s, int) and s >= 0 for s in internal_sizes):
+                        self._saved_explorer_internal_sizes = internal_sizes
         except Exception:
             self.presets = []
 
@@ -7715,6 +7769,8 @@ class MainWindow(QMainWindow):
                 'explorer_panel_visible': getattr(self, 'explorer_panel_visible', False),
                 'git_panel_visible': getattr(self, 'git_panel_visible', False),
                 'log_panel_visible': getattr(self, 'log_panel_visible', False),
+                'explorer_main_splitter_sizes': getattr(self, '_saved_explorer_main_sizes', None),
+                'explorer_internal_splitter_sizes': getattr(self, '_saved_explorer_internal_sizes', None),
             }
             # 保存窗口导航面板设置
             nav = MainWindow._global_window_navigator
