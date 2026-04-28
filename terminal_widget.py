@@ -1018,6 +1018,23 @@ class TerminalWidget(QWidget):
         # Latin+CJK, CJK+Latin, Latin+Latin: 需要空格（词边界）
         return True
 
+    def _row_tile(self, row, count=1):
+        """返回从 row 起 count 行的 (y, height)，使相邻行像素无缝拼接
+
+        char_height 可能是分数（如 18.5），单纯 int(char_height) 会让
+        每隔几行多 1px 缝隙，导致带背景色的连续行看起来像断开的方块。
+        用「下一格起点 - 当前格起点」算高度可保证逐行无缝。
+        """
+        y_start = int(self.PADDING + row * self.char_height)
+        y_end = int(self.PADDING + (row + count) * self.char_height)
+        return y_start, y_end - y_start
+
+    def _col_tile(self, col, count=1):
+        """返回从 col 起 count 列的 (x, width)，相邻列像素无缝拼接"""
+        x_start = int(self.PADDING + col * self.char_width)
+        x_end = int(self.PADDING + (col + count) * self.char_width)
+        return x_start, x_end - x_start
+
     def paintEvent(self, event: QPaintEvent):
         """绘制终端 - 使用双缓冲提高性能"""
         # 防止在 widget 尺寸为 0 时绘制（如拖拽分离 tab 过渡期间），避免 segfault
@@ -1053,11 +1070,9 @@ class TerminalWidget(QWidget):
         if self._has_selection():
             if self._select_all_mode:
                 # 全选模式：高亮所有可见行
+                x, width = self._col_tile(0, self.term_cols)
                 for sel_row in range(self.term_rows):
-                    x = self.PADDING
-                    y = int(self.PADDING + sel_row * self.char_height)
-                    width = int(self.term_cols * self.char_width)
-                    height = int(self.char_height)
+                    y, height = self._row_tile(sel_row)
                     painter.fillRect(x, y, width, height, self._selection_color)
             else:
                 # 使用绝对坐标计算可见的选择范围
@@ -1094,10 +1109,8 @@ class TerminalWidget(QWidget):
                             col_start = 0
                             col_end = self.term_cols - 1
 
-                        x = int(self.PADDING + col_start * self.char_width)
-                        y = int(self.PADDING + sel_row * self.char_height)
-                        width = int((col_end - col_start + 1) * self.char_width)
-                        height = int(self.char_height)
+                        x, width = self._col_tile(col_start, col_end - col_start + 1)
+                        y, height = self._row_tile(sel_row)
 
                         painter.fillRect(x, y, width, height, self._selection_color)
 
@@ -1109,10 +1122,8 @@ class TerminalWidget(QWidget):
             for idx, (match_row, match_col, match_len) in enumerate(self._search_matches):
                 display_row = match_row - display_start
                 if 0 <= display_row < self.term_rows:
-                    x = int(self.PADDING + match_col * self.char_width)
-                    y = int(self.PADDING + display_row * self.char_height)
-                    width = int(match_len * self.char_width)
-                    height = int(self.char_height)
+                    x, width = self._col_tile(match_col, match_len)
+                    y, height = self._row_tile(display_row)
 
                     if idx == self._current_match_index:
                         painter.fillRect(x, y, width, height, self._search_current_color)
@@ -1125,12 +1136,12 @@ class TerminalWidget(QWidget):
             cy = self.screen.cursor.y
 
             if 0 <= cy < self.term_rows and 0 <= cx < self.term_cols:
-                cursor_x = int(self.PADDING + cx * self.char_width)
-                cursor_y = int(self.PADDING + cy * self.char_height)
+                cursor_x, cursor_w = self._col_tile(cx)
+                cursor_y, cursor_h = self._row_tile(cy)
 
                 painter.fillRect(
                     cursor_x, cursor_y,
-                    int(self.char_width), int(self.char_height),
+                    cursor_w, cursor_h,
                     self._cursor_color
                 )
 
@@ -1140,15 +1151,14 @@ class TerminalWidget(QWidget):
             cy = self.screen.cursor.y
 
             if 0 <= cy < self.term_rows:
-                preedit_x = int(self.PADDING + cx * self.char_width)
-                preedit_y = int(self.PADDING + cy * self.char_height)
+                preedit_x, _ = self._col_tile(cx)
+                preedit_y, preedit_height = self._row_tile(cy)
 
                 # 设置预编辑文本样式
                 painter.setFont(self.term_font)
 
                 # 计算预编辑文本宽度（使用缓存的 QFontMetrics）
                 preedit_width = self._font_metrics.horizontalAdvance(self._preedit_string)
-                preedit_height = int(self.char_height)
 
                 # 绘制预编辑文本背景（使用缓存的颜色）
                 painter.fillRect(
@@ -1225,13 +1235,14 @@ class TerminalWidget(QWidget):
         num_cols = min(self.term_cols, max_visible_cols)
         char_width = self.char_width
         char_height = self.char_height
-        int_char_height = int(char_height)
         bg_default = self.bg_color
         last_fg_color = None  # 缓存上一个前景色，减少 setPen 调用
         padding = self.PADDING  # 局部变量加速
 
         for display_row, buffer_line in enumerate(display_lines):
             row_y = int(padding + display_row * char_height)
+            # 用下一行起点减去本行起点作为本行高度，防止分数像素累计造成行间空隙
+            row_h = int(padding + (display_row + 1) * char_height) - row_y
             text_y = int(row_y + self.char_ascent)
 
             for col in range(num_cols):
@@ -1277,11 +1288,13 @@ class TerminalWidget(QWidget):
 
                 # 判断宽字符
                 is_wide = self._is_wide_char(char_text)
-                char_draw_width = int(char_width * 2) if is_wide else int(char_width)
+                # 用「下一格起点 - 当前格起点」算宽度，使背景在水平方向也无缝拼接
+                span = 2 if is_wide else 1
+                char_draw_width = int(padding + (col + span) * char_width) - x
 
                 # 绘制背景
                 if bg_color != bg_default:
-                    painter.fillRect(x, row_y, char_draw_width, int_char_height, bg_color)
+                    painter.fillRect(x, row_y, char_draw_width, row_h, bg_color)
 
                 # 绘制字符
                 if char_text != ' ':
