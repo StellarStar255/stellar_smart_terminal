@@ -1953,15 +1953,15 @@ class TerminalWidget(QWidget):
                     return
 
             if self._click_count == 2:
-                # 双击选词
-                if self._mouse_mode and not force_local_selection:
-                    self._send_mouse_event(event, 'press')
-                self._select_word_at(abs_cell)
-            elif self._click_count >= 3:
-                # 三击选行
+                # 双击选行（终端输出场景下选行更常用）
                 if self._mouse_mode and not force_local_selection:
                     self._send_mouse_event(event, 'press')
                 self._select_line_at(abs_cell)
+            elif self._click_count >= 3:
+                # 三击选词（仍保留按词选择能力）
+                if self._mouse_mode and not force_local_selection:
+                    self._send_mouse_event(event, 'press')
+                self._select_word_at(abs_cell)
                 self._click_count = 0  # 重置
             else:
                 # 单击开始选择 - 使用绝对坐标
