@@ -497,6 +497,7 @@ class TerminalWidget(QWidget):
         self._auto_scroll_timer = QTimer()
         self._auto_scroll_timer.timeout.connect(self._auto_scroll_tick)
         self._auto_scroll_direction = 0  # -1: 向上, 0: 不滚动, 1: 向下
+        self._auto_scroll_pull = 0  # 鼠标拉出边缘的距离（像素），用于自适应速度
         self._last_mouse_pos = None  # 记录最后的鼠标位置
 
         # URL检测正则
@@ -1574,6 +1575,13 @@ class TerminalWidget(QWidget):
                 event.accept()
                 return
 
+        # === macOS 上 Cmd+A 始终触发全选（包括历史），便于复制终端内容 ===
+        # Win/Linux 上保留 Ctrl+A 发送 \x01 给 shell（行首）这类终端语义
+        if sys.platform == 'darwin' and event.matches(QKeySequence.StandardKey.SelectAll):
+            self._select_all_content()
+            event.accept()
+            return
+
         # === 终端未运行时的 GUI 快捷键 ===
         if self._backend is None:
             if event.matches(QKeySequence.StandardKey.SelectAll):
@@ -1828,19 +1836,29 @@ class TerminalWidget(QWidget):
             self.update()
 
     def _auto_scroll_tick(self):
-        """自动滚动定时器回调 - 支持拖动选择时跨页"""
+        """自动滚动定时器回调 - 支持拖动选择时跨页
+
+        滚动速度与「鼠标拉出边缘的距离」自适应：
+        - 鼠标越远离边缘（甚至超出 widget），每次 tick 滚动行数越多
+        - 用户向上猛拉时立即跨大段历史，轻微靠近边缘时则慢速精细滚动
+        """
         if not self._is_selecting or self._auto_scroll_direction == 0:
             self._auto_scroll_timer.stop()
             return
 
-        # 获取历史记录行数
+        # 自适应步长：边缘 1 行/tick，越远越快
+        pull = max(0, self._auto_scroll_pull)
+        step = max(1, 1 + pull // 6)
+        # 上限避免一次跨太远导致选择终点跳动失控
+        step = min(step, max(self.term_rows, 8))
+
         history_lines = self._get_history_count()
         max_scroll = history_lines
 
         if self._auto_scroll_direction < 0:
             # 向上滚动（查看历史）
             if self.scroll_offset < max_scroll:
-                self.scroll_offset = min(self.scroll_offset + 2, max_scroll)
+                self.scroll_offset = min(self.scroll_offset + step, max_scroll)
                 self._cache_valid = False  # 直接使缓存失效
                 # 更新选择终点（扩展到新滚动位置的顶部）
                 if self._last_mouse_pos:
@@ -1849,7 +1867,7 @@ class TerminalWidget(QWidget):
         else:
             # 向下滚动（回到最新）
             if self.scroll_offset > 0:
-                self.scroll_offset = max(self.scroll_offset - 2, 0)
+                self.scroll_offset = max(self.scroll_offset - step, 0)
                 self._cache_valid = False  # 直接使缓存失效
                 # 更新选择终点（扩展到新滚动位置的底部）
                 if self._last_mouse_pos:
@@ -2003,24 +2021,27 @@ class TerminalWidget(QWidget):
             self._last_mouse_pos = event.pos()
             self._selection_end = self._pos_to_absolute_cell(event.pos())
 
-            # 检测是否需要自动滚动（鼠标在边缘区域）
+            # 检测是否需要自动滚动（鼠标在边缘区域）— 拉得越远滚得越快
             y = event.pos().y()
-            edge_zone = 20  # 边缘区域大小（像素）
+            edge_zone = 24  # 进入边缘的阈值（像素）
             widget_height = self.height()
 
             if y < edge_zone:
-                # 鼠标在顶部边缘 - 向上滚动（查看历史）
+                # 鼠标在顶部边缘 / 已拉出 widget 上方 - 向上滚动（查看历史）
                 self._auto_scroll_direction = -1
+                self._auto_scroll_pull = edge_zone - y  # y 越小（甚至为负）值越大
                 if not self._auto_scroll_timer.isActive():
-                    self._auto_scroll_timer.start(50)  # 50ms 间隔
+                    self._auto_scroll_timer.start(30)  # 间隔更小，反馈更跟手
             elif y > widget_height - edge_zone:
-                # 鼠标在底部边缘 - 向下滚动（回到最新）
+                # 鼠标在底部边缘 / 已拉出 widget 下方 - 向下滚动（回到最新）
                 self._auto_scroll_direction = 1
+                self._auto_scroll_pull = y - (widget_height - edge_zone)
                 if not self._auto_scroll_timer.isActive():
-                    self._auto_scroll_timer.start(50)
+                    self._auto_scroll_timer.start(30)
             else:
                 # 不在边缘，停止自动滚动
                 self._auto_scroll_direction = 0
+                self._auto_scroll_pull = 0
                 self._auto_scroll_timer.stop()
 
             self.update()
@@ -2031,6 +2052,7 @@ class TerminalWidget(QWidget):
         # 停止自动滚动
         self._auto_scroll_timer.stop()
         self._auto_scroll_direction = 0
+        self._auto_scroll_pull = 0
 
         # Shift 键或回滚历史时强制使用本地选择模式
         force_local_selection = (event.modifiers() & Qt.KeyboardModifier.ShiftModifier) or self.scroll_offset > 0
