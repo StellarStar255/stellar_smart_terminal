@@ -1953,12 +1953,20 @@ class TerminalWidget(QWidget):
                     return
 
             if self._click_count == 2:
-                # 双击选行（终端输出场景下选行更常用）
+                # 双击：若当前已是该行的整行选择，则降级为选词；否则选行
                 if self._mouse_mode and not force_local_selection:
                     self._send_mouse_event(event, 'press')
-                self._select_line_at(abs_cell)
+                row = abs_cell[0]
+                already_line_selected = (
+                    self._selection_start == (row, 0)
+                    and self._selection_end == (row, self.term_cols - 1)
+                )
+                if already_line_selected:
+                    self._select_word_at(abs_cell)
+                else:
+                    self._select_line_at(abs_cell)
             elif self._click_count >= 3:
-                # 三击选词（仍保留按词选择能力）
+                # 三击：始终选词（保留按词选择能力）
                 if self._mouse_mode and not force_local_selection:
                     self._send_mouse_event(event, 'press')
                 self._select_word_at(abs_cell)
