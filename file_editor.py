@@ -9,7 +9,7 @@ from pathlib import Path
 from PyQt6.QtWidgets import (
     QWidget, QVBoxLayout, QHBoxLayout, QPlainTextEdit,
     QPushButton, QLabel, QFrame, QMessageBox,
-    QSplitter
+    QSplitter, QLineEdit, QTextEdit
 )
 from PyQt6.QtCore import Qt, pyqtSignal, QRect, QSize
 from PyQt6.QtGui import (
@@ -653,6 +653,306 @@ class CodeEditor(QPlainTextEdit):
         self._line_number_area.update()
 
 
+class _SearchBar(QFrame):
+    """文件编辑器顶部的查找栏（Cmd+F 唤出）
+
+    - 实时搜索：输入即匹配
+    - 高亮所有命中，当前命中用更深色突出
+    - Enter / Shift+Enter 跳转下一个 / 上一个
+    - Esc 关闭并把焦点还给编辑器
+    """
+
+    def __init__(self, editor: QPlainTextEdit, theme: dict, parent=None):
+        super().__init__(parent)
+        self.editor = editor
+        self.theme = theme or {}
+        self._matches = []  # list[(start, end)]
+        self._current = -1
+
+        self.setFocusPolicy(Qt.FocusPolicy.NoFocus)
+
+        h = QHBoxLayout(self)
+        h.setContentsMargins(8, 4, 8, 4)
+        h.setSpacing(6)
+
+        self.input = QLineEdit()
+        self.input.setPlaceholderText(t("editor.search_placeholder"))
+        self.input.textChanged.connect(self._on_text_changed)
+        self.input.returnPressed.connect(self._goto_next)
+        self.input.installEventFilter(self)
+        h.addWidget(self.input, 1)
+
+        self.count_label = QLabel("")
+        self.count_label.setMinimumWidth(60)
+        self.count_label.setAlignment(Qt.AlignmentFlag.AlignRight | Qt.AlignmentFlag.AlignVCenter)
+        h.addWidget(self.count_label)
+
+        self.case_btn = QPushButton("Aa")
+        self.case_btn.setCheckable(True)
+        self.case_btn.setFixedSize(28, 22)
+        self.case_btn.setToolTip(t("editor.search_case_tooltip"))
+        self.case_btn.toggled.connect(lambda _: self._update_matches(reset_current=False))
+        h.addWidget(self.case_btn)
+
+        self.word_btn = QPushButton("│ab│")
+        self.word_btn.setCheckable(True)
+        self.word_btn.setFixedSize(36, 22)
+        self.word_btn.setToolTip(t("editor.search_word_tooltip"))
+        self.word_btn.toggled.connect(lambda _: self._update_matches(reset_current=False))
+        h.addWidget(self.word_btn)
+
+        self.regex_btn = QPushButton(".*")
+        self.regex_btn.setCheckable(True)
+        self.regex_btn.setFixedSize(28, 22)
+        self.regex_btn.setToolTip(t("editor.search_regex_tooltip"))
+        self.regex_btn.toggled.connect(lambda _: self._update_matches(reset_current=False))
+        h.addWidget(self.regex_btn)
+
+        self.prev_btn = QPushButton("↑")
+        self.prev_btn.setFixedSize(28, 22)
+        self.prev_btn.setToolTip(t("editor.search_prev_tooltip"))
+        self.prev_btn.clicked.connect(self._goto_prev)
+        h.addWidget(self.prev_btn)
+
+        self.next_btn = QPushButton("↓")
+        self.next_btn.setFixedSize(28, 22)
+        self.next_btn.setToolTip(t("editor.search_next_tooltip"))
+        self.next_btn.clicked.connect(self._goto_next)
+        h.addWidget(self.next_btn)
+
+        self.close_btn = QPushButton("×")
+        self.close_btn.setFixedSize(22, 22)
+        self.close_btn.setToolTip(t("editor.search_close_tooltip"))
+        self.close_btn.clicked.connect(self.close_search)
+        h.addWidget(self.close_btn)
+
+        self.apply_theme(self.theme)
+        self.hide()
+
+    def apply_theme(self, theme: dict):
+        self.theme = theme or {}
+        bg_medium = self.theme.get('bg_medium', '#16213e')
+        bg_dark = self.theme.get('bg_dark', '#1a1a2e')
+        text = self.theme.get('text', '#eaeaea')
+        text_dim = self.theme.get('text_dim', '#888888')
+        border = self.theme.get('border', '#3d3d5c')
+        accent = self.theme.get('accent', '#667eea')
+        accent_hover = self.theme.get('accent_hover', '#7a8efa')
+
+        self.setStyleSheet(f"""
+            _SearchBar, QFrame#_SearchBar {{
+                background-color: {bg_medium};
+                border-bottom: 1px solid {border};
+            }}
+            QLineEdit {{
+                background-color: {bg_dark};
+                color: {text};
+                border: 1px solid {border};
+                border-radius: 3px;
+                padding: 2px 6px;
+                selection-background-color: {accent};
+                selection-color: white;
+            }}
+            QLineEdit:focus {{
+                border: 1px solid {accent};
+            }}
+            QLabel {{
+                color: {text_dim};
+            }}
+            QPushButton {{
+                background-color: transparent;
+                color: {text_dim};
+                border: 1px solid transparent;
+                border-radius: 3px;
+                font-weight: bold;
+            }}
+            QPushButton:hover {{
+                background-color: {bg_dark};
+                color: {text};
+                border: 1px solid {border};
+            }}
+            QPushButton:checked {{
+                background-color: {accent};
+                color: white;
+                border: 1px solid {accent_hover};
+            }}
+        """)
+
+    def apply_language(self):
+        self.input.setPlaceholderText(t("editor.search_placeholder"))
+        self.case_btn.setToolTip(t("editor.search_case_tooltip"))
+        self.word_btn.setToolTip(t("editor.search_word_tooltip"))
+        self.regex_btn.setToolTip(t("editor.search_regex_tooltip"))
+        self.prev_btn.setToolTip(t("editor.search_prev_tooltip"))
+        self.next_btn.setToolTip(t("editor.search_next_tooltip"))
+        self.close_btn.setToolTip(t("editor.search_close_tooltip"))
+
+    def eventFilter(self, obj, event):
+        if obj is self.input and event.type() == event.Type.KeyPress:
+            key = event.key()
+            mods = event.modifiers()
+            if key == Qt.Key.Key_Escape:
+                self.close_search()
+                return True
+            if key in (Qt.Key.Key_Return, Qt.Key.Key_Enter):
+                if mods & Qt.KeyboardModifier.ShiftModifier:
+                    self._goto_prev()
+                else:
+                    self._goto_next()
+                return True
+            if key == Qt.Key.Key_F3:
+                if mods & Qt.KeyboardModifier.ShiftModifier:
+                    self._goto_prev()
+                else:
+                    self._goto_next()
+                return True
+        return super().eventFilter(obj, event)
+
+    def open_search(self):
+        # 用编辑器当前选中文本作为初始查找内容（若存在且单行）
+        cursor = self.editor.textCursor()
+        seed = ""
+        if cursor.hasSelection():
+            sel = cursor.selectedText()
+            # Qt 用 U+2029 段落分隔符表示换行，过滤多行选中
+            if ' ' not in sel and 0 < len(sel) <= 200:
+                seed = sel
+        self.show()
+        if seed:
+            self.input.setText(seed)
+            self.input.selectAll()
+        self.input.setFocus()
+        self.input.selectAll()
+        self._update_matches(reset_current=False)
+
+    def close_search(self):
+        self.hide()
+        self.editor.setExtraSelections([])
+        self.editor.setFocus()
+
+    def _on_text_changed(self, _text):
+        self._update_matches(reset_current=True)
+
+    def _build_pattern(self, query):
+        if not query:
+            return None
+        flags = 0 if self.case_btn.isChecked() else re.IGNORECASE
+        if self.regex_btn.isChecked():
+            try:
+                return re.compile(query, flags)
+            except re.error:
+                return None
+        pattern = re.escape(query)
+        if self.word_btn.isChecked():
+            pattern = r'\b' + pattern + r'\b'
+        try:
+            return re.compile(pattern, flags)
+        except re.error:
+            return None
+
+    def _update_matches(self, reset_current: bool):
+        query = self.input.text()
+        text = self.editor.toPlainText()
+        pattern = self._build_pattern(query)
+
+        self._matches = []
+        if pattern and text:
+            for m in pattern.finditer(text):
+                start, end = m.start(), m.end()
+                if end > start:
+                    self._matches.append((start, end))
+                else:
+                    # 防止零宽匹配死循环
+                    continue
+
+        if not self._matches:
+            self._current = -1
+        elif reset_current:
+            cursor_pos = self.editor.textCursor().selectionStart()
+            self._current = 0
+            for i, (s, _e) in enumerate(self._matches):
+                if s >= cursor_pos:
+                    self._current = i
+                    break
+        else:
+            if self._current < 0 or self._current >= len(self._matches):
+                self._current = 0
+
+        self._refresh_highlights()
+        if self._current >= 0:
+            self._scroll_to_current()
+        self._update_count()
+        self._update_input_validity(query, pattern)
+
+    def _refresh_highlights(self):
+        selections = []
+        all_match_color = QColor(self.theme.get('search_match_bg', '#5a4a1a'))
+        current_match_color = QColor(self.theme.get('search_current_bg', '#c89020'))
+        text_color = QColor(self.theme.get('text', '#eaeaea'))
+
+        for i, (start, end) in enumerate(self._matches):
+            sel = QTextEdit.ExtraSelection()
+            fmt = QTextCharFormat()
+            fmt.setBackground(current_match_color if i == self._current else all_match_color)
+            fmt.setForeground(text_color)
+            sel.format = fmt
+            cur = QTextCursor(self.editor.document())
+            cur.setPosition(start)
+            cur.setPosition(end, QTextCursor.MoveMode.KeepAnchor)
+            sel.cursor = cur
+            selections.append(sel)
+        self.editor.setExtraSelections(selections)
+
+    def _scroll_to_current(self):
+        if self._current < 0 or not self._matches:
+            return
+        start, end = self._matches[self._current]
+        # 用一个临时 cursor 让编辑器滚动到位，但不修改实际选择/焦点
+        cur = QTextCursor(self.editor.document())
+        cur.setPosition(start)
+        cur.setPosition(end, QTextCursor.MoveMode.KeepAnchor)
+        self.editor.setTextCursor(cur)
+        self.editor.ensureCursorVisible()
+        # 把焦点还给输入框，让用户继续输入
+        self.input.setFocus()
+
+    def _goto_next(self):
+        if not self._matches:
+            return
+        self._current = (self._current + 1) % len(self._matches)
+        self._refresh_highlights()
+        self._scroll_to_current()
+        self._update_count()
+
+    def _goto_prev(self):
+        if not self._matches:
+            return
+        self._current = (self._current - 1) % len(self._matches)
+        self._refresh_highlights()
+        self._scroll_to_current()
+        self._update_count()
+
+    def _update_count(self):
+        if not self.input.text():
+            self.count_label.setText("")
+        elif not self._matches:
+            self.count_label.setText(t("editor.search_no_results"))
+        else:
+            self.count_label.setText(f"{self._current + 1} / {len(self._matches)}")
+
+    def _update_input_validity(self, query, pattern):
+        # 正则模式下编译失败给出红色边框提示
+        if query and self.regex_btn.isChecked() and pattern is None:
+            invalid_color = self.theme.get('error', '#ef4444')
+            border = self.theme.get('border', '#3d3d5c')
+            self.input.setStyleSheet(
+                f"QLineEdit {{ border: 1px solid {invalid_color}; }}"
+                f"QLineEdit:focus {{ border: 1px solid {invalid_color}; }}"
+            )
+        else:
+            self.input.setStyleSheet("")
+
+
 class FileEditorWidget(QWidget):
     """文件编辑器组件"""
 
@@ -719,6 +1019,10 @@ class FileEditorWidget(QWidget):
         font_metrics = self.editor.fontMetrics()
         self.editor.setTabStopDistance(4 * font_metrics.horizontalAdvance(' '))
 
+        # 查找栏（默认隐藏，Cmd+F 唤出）
+        self.search_bar = _SearchBar(self.editor, self.theme, self)
+        layout.addWidget(self.search_bar)
+
         layout.addWidget(self.editor)
 
     def _setup_shortcuts(self):
@@ -732,7 +1036,48 @@ class FileEditorWidget(QWidget):
         comment_shortcut.setContext(Qt.ShortcutContext.WidgetWithChildrenShortcut)
         comment_shortcut.activated.connect(self._toggle_comment)
 
+        # Cmd+F / Ctrl+F 唤出查找栏
+        find_shortcut = QShortcut(QKeySequence.StandardKey.Find, self)
+        find_shortcut.setContext(Qt.ShortcutContext.WidgetWithChildrenShortcut)
+        find_shortcut.activated.connect(self._open_search)
+
+        # Cmd+G / Ctrl+G 跳到下一个匹配；Shift+Cmd+G 跳到上一个
+        find_next_shortcut = QShortcut(QKeySequence.StandardKey.FindNext, self)
+        find_next_shortcut.setContext(Qt.ShortcutContext.WidgetWithChildrenShortcut)
+        find_next_shortcut.activated.connect(self._find_next_or_open)
+
+        find_prev_shortcut = QShortcut(QKeySequence.StandardKey.FindPrevious, self)
+        find_prev_shortcut.setContext(Qt.ShortcutContext.WidgetWithChildrenShortcut)
+        find_prev_shortcut.activated.connect(self._find_prev_or_open)
+
+        # Esc 在编辑器有焦点时关闭查找栏（如果可见）
+        esc_shortcut = QShortcut(QKeySequence(Qt.Key.Key_Escape), self.editor)
+        esc_shortcut.setContext(Qt.ShortcutContext.WidgetWithChildrenShortcut)
+        esc_shortcut.activated.connect(self._close_search_if_open)
+
         # 缩放快捷键已移至主窗口全局处理（避免 ambiguous shortcut 冲突）
+
+    def _open_search(self):
+        if hasattr(self, 'search_bar'):
+            self.search_bar.open_search()
+
+    def _find_next_or_open(self):
+        if hasattr(self, 'search_bar'):
+            if self.search_bar.isHidden() or not self.search_bar.input.text():
+                self.search_bar.open_search()
+            else:
+                self.search_bar._goto_next()
+
+    def _find_prev_or_open(self):
+        if hasattr(self, 'search_bar'):
+            if self.search_bar.isHidden() or not self.search_bar.input.text():
+                self.search_bar.open_search()
+            else:
+                self.search_bar._goto_prev()
+
+    def _close_search_if_open(self):
+        if hasattr(self, 'search_bar') and not self.search_bar.isHidden():
+            self.search_bar.close_search()
 
     def _get_line_comment(self):
         """根据当前文件类型返回行注释前缀，无法识别时返回 None"""
@@ -978,12 +1323,16 @@ class FileEditorWidget(QWidget):
         """应用新主题"""
         self.theme = theme
         self._apply_theme()
+        if hasattr(self, 'search_bar'):
+            self.search_bar.apply_theme(theme)
 
     def apply_language(self):
         """语言切换时更新界面文本"""
         self.close_btn.setToolTip(t("editor.close_tooltip"))
         if not self._current_file:
             self.file_label.setText(t("editor.no_file"))
+        if hasattr(self, 'search_bar'):
+            self.search_bar.apply_language()
 
     def open_file(self, file_path: str) -> bool:
         """打开文件"""
@@ -1029,6 +1378,10 @@ class FileEditorWidget(QWidget):
         self._current_file = file_path
         self._original_content = content  # 保存原始内容用于比较
         self.editor.setPlainText(content)
+
+        # 切换文件时关闭已打开的查找栏（旧文件的高亮已无意义）
+        if hasattr(self, 'search_bar') and not self.search_bar.isHidden():
+            self.search_bar.close_search()
 
         # 根据文件类型设置语法高亮
         self._setup_highlighter(file_path)

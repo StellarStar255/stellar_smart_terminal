@@ -309,6 +309,14 @@ TRANSLATIONS = {
     "editor.save_failed_msg": {"zh": "无法保存文件: {error}", "en": "Cannot save file: {error}"},
     "editor.save_as_title": {"zh": "另存为", "en": "Save As"},
     "editor.all_files": {"zh": "所有文件 (*.*)", "en": "All Files (*.*)"},
+    "editor.search_placeholder": {"zh": "在文件中查找…", "en": "Find in file..."},
+    "editor.search_case_tooltip": {"zh": "区分大小写", "en": "Match case"},
+    "editor.search_word_tooltip": {"zh": "全字匹配", "en": "Match whole word"},
+    "editor.search_regex_tooltip": {"zh": "正则表达式", "en": "Regular expression"},
+    "editor.search_prev_tooltip": {"zh": "上一个匹配", "en": "Previous match"},
+    "editor.search_next_tooltip": {"zh": "下一个匹配", "en": "Next match"},
+    "editor.search_close_tooltip": {"zh": "关闭查找 (Esc)", "en": "Close search (Esc)"},
+    "editor.search_no_results": {"zh": "无匹配", "en": "No results"},
 
     # ===== 历史对话框 =====
     "history.title": {"zh": "历史会话", "en": "Session History"},
