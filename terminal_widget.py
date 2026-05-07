@@ -830,8 +830,9 @@ class TerminalWidget(QWidget):
             if '\x1b[?1000l' in text or '\x1b[?1002l' in text or '\x1b[?1003l' in text or '\x1b[?1006l' in text:
                 self._mouse_mode = False
 
-            # 过滤有问题的字符
-            text = text.replace('\u23FA', '')  # ⏺ (录制符号)
+            # 仅过滤纯噪声：UTF-8 解码失败产生的替换字符（不是程序真正输出的内容）
+            # 注意：不要过滤可显示的 Unicode 符号（如 ⏺ U+23FA），否则 codex /
+            # claude code 这类用 BMP 符号做行首/状态标记的工具会丢失关键信息。
             text = text.replace('\uFFFD', '')  # � (替换字符)
 
             # 诊断捕获：记录过滤后的文本
