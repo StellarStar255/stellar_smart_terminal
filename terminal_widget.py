@@ -799,10 +799,19 @@ class TerminalWidget(QWidget):
                 response = '\x1b[>65;100;0c'
                 self._write_to_backend(response.encode())
 
-            # 响应 XTVERSION 查询 (\x1b[>0q)
-            if '\x1b[>0q' in text:
+            # 响应 XTVERSION 查询 (\x1b[>q 或 \x1b[>0q)
+            # XTVERSION 标准允许省略参数（默认 0），codex 用的 ratatui/crossterm
+            # 走的就是裸 \x1b[>q 形式。Pp 任意数字都视为 XTVERSION 请求。
+            # 不回复 → 上层 TUI 超时 → 降级渲染（box-drawing 边框丢失等症状）
+            if re.search(r'\x1b\[>\d*q', text):
                 response = '\x1bP>|SmartTerminal(1.0)\x1b\\'
                 self._write_to_backend(response.encode())
+
+            # 响应 DSR 操作状态查询 (\x1b[5n) — 回复 "OK"
+            # crossterm 等库会用此查询来确认终端就绪
+            if '\x1b[5n' in text:
+                self._write_to_backend(b'\x1b[0n')
+                text = text.replace('\x1b[5n', '')
 
             # 只过滤pyte完全不支持且会导致问题的序列（使用预编译正则）
             text = self._RE_SYNC_OUTPUT.sub('', text)      # Sync output (不支持)
@@ -1258,16 +1267,12 @@ class TerminalWidget(QWidget):
                 if hasattr(char, 'data'):
                     # pyte Char 对象 - 直接访问属性更快
                     char_text = char.data
-                    if not char_text:
-                        continue
                     char_fg = char.fg
                     char_bg = char.bg
                     char_bold = char.bold
                     char_reverse = char.reverse
                 elif isinstance(char, str):
                     char_text = char
-                    if not char_text:
-                        continue
                     char_fg = 'default'
                     char_bg = 'default'
                     char_bold = False
@@ -1275,9 +1280,7 @@ class TerminalWidget(QWidget):
                 else:
                     continue
 
-                x = int(padding + col * char_width)
-
-                # 获取颜色（使用已提取的属性）
+                # 计算颜色（提前到 skip 之前，以便空 data 时也能填充背景）
                 fg_color = self._get_char_color(char_fg, char_bold)
                 bg_color = self._get_char_color(char_bg, False, is_bg=True)
 
@@ -1285,21 +1288,27 @@ class TerminalWidget(QWidget):
                 if char_reverse:
                     fg_color, bg_color = bg_color, fg_color
 
-                # 确保前景色可见
-                fg_color = self._ensure_visible(fg_color, bg_color)
+                has_bg = bg_color != bg_default
+                # 空 data 且无背景色 → 真的没东西可画，跳过
+                if not char_text and not has_bg:
+                    continue
 
-                # 判断宽字符
-                is_wide = self._is_wide_char(char_text)
+                x = int(padding + col * char_width)
+
+                # 判断宽字符（空 data 视为单宽，等同于普通空格的填充）
+                is_wide = bool(char_text) and self._is_wide_char(char_text)
                 # 用「下一格起点 - 当前格起点」算宽度，使背景在水平方向也无缝拼接
                 span = 2 if is_wide else 1
                 char_draw_width = int(padding + (col + span) * char_width) - x
 
-                # 绘制背景
-                if bg_color != bg_default:
+                # 绘制背景（包括 codex 等 TUI 给整行铺色的高亮，即便 data 为空格/空）
+                if has_bg:
                     painter.fillRect(x, row_y, char_draw_width, row_h, bg_color)
 
                 # 绘制字符
-                if char_text != ' ':
+                if char_text and char_text != ' ':
+                    # 确保前景色可见（空格无需绘制，节省一次比较）
+                    fg_color = self._ensure_visible(fg_color, bg_color)
                     # 只在颜色变化时调用 setPen
                     if fg_color != last_fg_color:
                         painter.setPen(fg_color)

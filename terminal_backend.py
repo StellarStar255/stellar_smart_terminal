@@ -627,6 +627,16 @@ else:
                     env['COLORTERM'] = 'truecolor'
                     env['COLUMNS'] = str(cols)
                     env['LINES'] = str(rows)
+                    # TUI 类工具（codex / claude code / ink 等）会检查 TERM_PROGRAM
+                    # 来决定是否启用完整的 Unicode box-drawing 渲染。如果不存在或
+                    # 是未知值，会降级为 ASCII 字符 (|、_) 画框。
+                    # 这里冒充 VS Code 集成终端，是公认支持完整渲染的现代终端。
+                    env['TERM_PROGRAM'] = 'vscode'
+                    env['TERM_PROGRAM_VERSION'] = '1.96.0'
+                    env['FORCE_COLOR'] = '3'  # 强制 24-bit 颜色支持
+                    # 清除其他终端的标识，避免冲突的检测
+                    for stale in ('LC_TERMINAL', 'LC_TERMINAL_VERSION'):
+                        env.pop(stale, None)
 
                     # 确保 UTF-8 编码支持（修复中文等 Unicode 字符显示乱码问题）
                     if 'LANG' not in env or 'UTF-8' not in env.get('LANG', ''):
@@ -647,6 +657,7 @@ else:
                         'SHELL_SESSION_DIR',         # Shell 会话目录
                         'SECURITYSESSIONID',         # Security 会话ID
                         'ITERM_SESSION_ID',          # iTerm2 会话ID（如果有）
+                        'ITERM_PROFILE',             # iTerm2 配置文件（避免被识别为 iTerm）
                     ]
                     for var in session_vars:
                         env.pop(var, None)
