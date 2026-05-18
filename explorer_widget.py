@@ -18,7 +18,10 @@ from PyQt6.QtWidgets import (
     QAbstractItemView, QFileDialog, QApplication, QProgressDialog
 )
 from PyQt6.QtCore import Qt, QDir, QModelIndex, pyqtSignal, QTimer, QEventLoop
-from PyQt6.QtGui import QFileSystemModel, QAction, QDesktopServices, QCursor
+from PyQt6.QtGui import (
+    QFileSystemModel, QAction, QDesktopServices, QCursor,
+    QShortcut, QKeySequence,
+)
 from PyQt6.QtCore import QUrl
 
 
@@ -180,6 +183,30 @@ class ExplorerPanel(QWidget):
         """连接信号"""
         self.tree_view.doubleClicked.connect(self._on_double_click)
         self.tree_view.customContextMenuRequested.connect(self._show_context_menu)
+
+        # Cmd+C / Cmd+V — 当 tree_view 或其子项有焦点时触发
+        copy_sc = QShortcut(QKeySequence.StandardKey.Copy, self.tree_view)
+        copy_sc.setContext(Qt.ShortcutContext.WidgetWithChildrenShortcut)
+        copy_sc.activated.connect(lambda: self._clipboard_copy_selection(None))
+
+        paste_sc = QShortcut(QKeySequence.StandardKey.Paste, self.tree_view)
+        paste_sc.setContext(Qt.ShortcutContext.WidgetWithChildrenShortcut)
+        paste_sc.activated.connect(self._paste_via_shortcut)
+
+    def _paste_via_shortcut(self):
+        """Cmd+V：粘贴到当前选中项目录（或当前根目录）"""
+        target = None
+        for idx in self.tree_view.selectionModel().selectedIndexes():
+            if idx.column() != 0:
+                continue
+            p = self.model.filePath(idx)
+            if not p:
+                continue
+            target = p if os.path.isdir(p) else os.path.dirname(p)
+            break
+        if not target:
+            target = self._current_path or os.path.expanduser("~")
+        self._clipboard_paste_into(target)
 
     def _update_style(self):
         """更新样式"""
@@ -552,7 +579,7 @@ class ExplorerPanel(QWidget):
             copy_action.triggered.connect(lambda: self._clipboard_copy_selection(file_path))
 
             paste_target = file_path if is_dir else os.path.dirname(file_path)
-            if explorer_clipboard.has_items():
+            if explorer_clipboard.has_pastable():
                 paste_action = menu.addAction(
                     t("explorer.paste_with_label", label=explorer_clipboard.describe())
                 )
@@ -597,7 +624,7 @@ class ExplorerPanel(QWidget):
             new_folder_action = menu.addAction(t("explorer.new_folder"))
             new_folder_action.triggered.connect(lambda: self._new_folder(self._current_path))
 
-            if explorer_clipboard.has_items():
+            if explorer_clipboard.has_pastable():
                 menu.addSeparator()
                 paste_action = menu.addAction(
                     t("explorer.paste_with_label", label=explorer_clipboard.describe())
@@ -701,7 +728,7 @@ class ExplorerPanel(QWidget):
     # ---------- 跨面板复制 / 粘贴 ----------
 
     def _clipboard_copy_selection(self, fallback_path: str = None):
-        """把当前选中的文件 / 文件夹放入跨面板剪贴板。
+        """把当前选中的文件 / 文件夹放入跨面板剪贴板（同时写到系统剪贴板）。
 
         若 fallback_path 不在选中范围内，则只复制 fallback_path（右键单项）。
         """
@@ -719,11 +746,18 @@ class ExplorerPanel(QWidget):
             paths = [fallback_path]
         if not paths:
             return
-        explorer_clipboard.set_items([("local", p) for p in paths])
+        explorer_clipboard.set_items(
+            [("local", p) for p in paths],
+            push_local_paths=paths,
+        )
 
     def _clipboard_paste_into(self, target_dir: str):
-        """把跨面板剪贴板里的项目粘贴到 target_dir（可能含远程源）"""
-        items = explorer_clipboard.get_items()
+        """把剪贴板里的项目粘贴到 target_dir。
+
+        优先内部剪贴板（含远程信息）；若系统剪贴板已被外部应用更新（Finder 等），
+        改为按系统剪贴板里的 file URL 走本地复制。
+        """
+        items = explorer_clipboard.effective_items()
         if not items or not target_dir:
             return
         try:

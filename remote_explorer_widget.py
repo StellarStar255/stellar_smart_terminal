@@ -22,7 +22,7 @@ from PyQt6.QtWidgets import (
     QApplication, QSizePolicy, QProgressDialog,
 )
 from PyQt6.QtCore import Qt, pyqtSignal, QTimer, QMimeData, QUrl
-from PyQt6.QtGui import QAction, QCursor, QDrag
+from PyQt6.QtGui import QAction, QCursor, QDrag, QShortcut, QKeySequence
 
 from i18n import t
 import explorer_clipboard
@@ -273,6 +273,15 @@ class RemoteExplorerPanel(QWidget):
         self._tree.itemExpanded.connect(self._on_item_expanded)
         self._tree.itemDoubleClicked.connect(self._on_item_double_clicked)
         tp_layout.addWidget(self._tree, 1)
+
+        # Cmd+C / Cmd+V — 当 tree 或其子项有焦点时触发
+        copy_sc = QShortcut(QKeySequence.StandardKey.Copy, self._tree)
+        copy_sc.setContext(Qt.ShortcutContext.WidgetWithChildrenShortcut)
+        copy_sc.activated.connect(lambda: self._clipboard_copy_selection(None))
+
+        paste_sc = QShortcut(QKeySequence.StandardKey.Paste, self._tree)
+        paste_sc.setContext(Qt.ShortcutContext.WidgetWithChildrenShortcut)
+        paste_sc.activated.connect(self._paste_via_shortcut)
 
         self._stack.addWidget(self._tree_page)
 
@@ -638,14 +647,30 @@ class RemoteExplorerPanel(QWidget):
         menu = QMenu(self)
 
         if entry is None:
-            # 空白区域：粘贴到当前 path / 新建 / 刷新
-            if explorer_clipboard.has_items():
+            # 空白区域：新建文件 / 新建文件夹 / 上传 / 粘贴 / 刷新（全都作用在当前 path）
+            cwd = self._current_path
+            act_new_file = QAction(t("remote.new_file"), self)
+            act_new_file.triggered.connect(lambda: self._new_file_at(cwd, None))
+            menu.addAction(act_new_file)
+
+            act_new_dir = QAction(t("remote.new_folder"), self)
+            act_new_dir.triggered.connect(lambda: self._new_folder_at(cwd, None))
+            menu.addAction(act_new_dir)
+
+            act_upload = QAction(t("remote.upload"), self)
+            act_upload.triggered.connect(lambda: self._upload_at(cwd, None))
+            menu.addAction(act_upload)
+
+            menu.addSeparator()
+
+            if explorer_clipboard.has_pastable():
                 act_paste = QAction(
                     t("remote.paste_with_label", label=explorer_clipboard.describe()), self,
                 )
-                act_paste.triggered.connect(lambda: self._clipboard_paste_into(self._current_path))
+                act_paste.triggered.connect(lambda: self._clipboard_paste_into(cwd))
                 menu.addAction(act_paste)
                 menu.addSeparator()
+
             act_refresh = QAction(t("remote.refresh"), self)
             act_refresh.triggered.connect(self._on_refresh)
             menu.addAction(act_refresh)
@@ -679,7 +704,7 @@ class RemoteExplorerPanel(QWidget):
         act_copy.triggered.connect(lambda: self._clipboard_copy_selection(entry))
         menu.addAction(act_copy)
 
-        if explorer_clipboard.has_items():
+        if explorer_clipboard.has_pastable():
             # 文件项目 → 粘贴到其父目录；目录项目 → 粘贴到它里面
             paste_dir = entry.path if entry.is_dir else (
                 posixpath.dirname(entry.path.rstrip("/")) or "/"
@@ -713,11 +738,29 @@ class RemoteExplorerPanel(QWidget):
 
     # ---------- 跨面板复制 / 粘贴 ----------
 
+    def _paste_via_shortcut(self):
+        """Cmd+V：粘贴到当前选中目录（或当前路径）"""
+        if self._session is None:
+            return
+        target = None
+        for it in self._tree.selectedItems():
+            e: RemoteEntry = it.data(0, _ROLE_ENTRY)
+            if e is None:
+                continue
+            target = e.path if e.is_dir else (
+                posixpath.dirname(e.path.rstrip("/")) or "/"
+            )
+            break
+        if not target:
+            target = self._current_path or "/"
+        self._clipboard_paste_into(target)
+
     def _clipboard_copy_selection(self, fallback_entry: Optional[RemoteEntry] = None):
         """把当前选中的远程文件 / 目录放入跨面板剪贴板。
 
-        选中里包含 fallback_entry 时按整体选中复制；否则只复制 fallback_entry。
-        这样右键点未选中项也能复制单项，符合常见 UX。
+        - 选中里包含 fallback_entry 时按整体选中复制；否则只复制 fallback_entry
+        - 同时把可下载的文件下载到本地 temp，写到系统剪贴板，
+          这样 Finder 等外部程序可以直接粘贴
         """
         if self._session is None:
             return
@@ -740,14 +783,28 @@ class RemoteExplorerPanel(QWidget):
                 continue
             seen.add(e.path)
             payload.append(("remote", host_alias, e.path, self._session))
-        if payload:
-            explorer_clipboard.set_items(payload)
+        if not payload:
+            return
+
+        # 同步下载文件项到本地 temp 供系统剪贴板使用（目录跳过避免大下载）
+        file_entries = [e for e in entries if not e.is_dir]
+        local_paths_for_system: list[str] = []
+        if file_entries:
+            try:
+                local_paths_for_system = self._sync_download_for_drag(file_entries)
+            except Exception:
+                local_paths_for_system = []
+
+        explorer_clipboard.set_items(
+            payload,
+            push_local_paths=local_paths_for_system or None,
+        )
 
     def _clipboard_paste_into(self, target_dir: str):
         """把跨面板剪贴板里的项目粘贴到当前远端 target_dir"""
         if self._session is None:
             return
-        items = explorer_clipboard.get_items()
+        items = explorer_clipboard.effective_items()
         if not items or not target_dir:
             return
         sess = self._session
@@ -1041,27 +1098,33 @@ class RemoteExplorerPanel(QWidget):
                 self._error_signal.emit(str(e))
         fut.add_done_callback(on_done)
 
-    def _new_file_under(self, parent_entry: RemoteEntry, parent_item: QTreeWidgetItem):
+    def _new_file_at(self, parent_path: str, parent_item: Optional[QTreeWidgetItem]):
         name, ok = QInputDialog.getText(self, t("remote.new_file"), t("remote.prompt_new_name"))
         if not ok or not name.strip():
             return
-        path = posixpath.join(parent_entry.path, name.strip())
+        path = posixpath.join(parent_path, name.strip())
         sess = self._session
         if sess is None:
             return
         fut = sess.submit(sess.write_file, path, b"")
-        self._refresh_after(fut, parent_item, parent_entry.path)
+        self._refresh_after(fut, parent_item, parent_path)
 
-    def _new_folder_under(self, parent_entry: RemoteEntry, parent_item: QTreeWidgetItem):
+    def _new_folder_at(self, parent_path: str, parent_item: Optional[QTreeWidgetItem]):
         name, ok = QInputDialog.getText(self, t("remote.new_folder"), t("remote.prompt_new_name"))
         if not ok or not name.strip():
             return
-        path = posixpath.join(parent_entry.path, name.strip())
+        path = posixpath.join(parent_path, name.strip())
         sess = self._session
         if sess is None:
             return
         fut = sess.submit(sess.mkdir, path)
-        self._refresh_after(fut, parent_item, parent_entry.path)
+        self._refresh_after(fut, parent_item, parent_path)
+
+    def _new_file_under(self, parent_entry: RemoteEntry, parent_item: QTreeWidgetItem):
+        self._new_file_at(parent_entry.path, parent_item)
+
+    def _new_folder_under(self, parent_entry: RemoteEntry, parent_item: QTreeWidgetItem):
+        self._new_folder_at(parent_entry.path, parent_item)
 
     def _rename_entry(self, entry: RemoteEntry, item: QTreeWidgetItem):
         new_name, ok = QInputDialog.getText(
@@ -1117,16 +1180,19 @@ class RemoteExplorerPanel(QWidget):
             return
         self.open_terminal_at.emit(self._session.host_config, entry.path)
 
-    def _upload_into(self, dir_entry: RemoteEntry, dir_item: QTreeWidgetItem):
+    def _upload_at(self, parent_path: str, parent_item: Optional[QTreeWidgetItem]):
         local_path, _ = QFileDialog.getOpenFileName(self, t("remote.upload"))
         if not local_path:
             return
         sess = self._session
         if sess is None:
             return
-        remote_path = posixpath.join(dir_entry.path, os.path.basename(local_path))
+        remote_path = posixpath.join(parent_path, os.path.basename(local_path))
         fut = sess.submit(sess.upload, local_path, remote_path)
-        self._refresh_after(fut, dir_item, dir_entry.path)
+        self._refresh_after(fut, parent_item, parent_path)
+
+    def _upload_into(self, dir_entry: RemoteEntry, dir_item: QTreeWidgetItem):
+        self._upload_at(dir_entry.path, dir_item)
 
     def _handle_drop_upload(self, local_paths: list[str], target_dir: str,
                               target_item: Optional[QTreeWidgetItem]):
