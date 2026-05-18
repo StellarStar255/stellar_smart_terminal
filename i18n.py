@@ -351,6 +351,8 @@ TRANSLATIONS = {
     "remote.add_host_title": {"zh": "添加 SSH 主机", "en": "Add SSH Host"},
     "remote.add_host_hint": {"zh": "格式: [user@]host[:port]\n例: deploy@10.0.0.5:22", "en": "Format: [user@]host[:port]\nExample: deploy@10.0.0.5:22"},
     "remote.editing_remote": {"zh": "[远程] {host}:{path}", "en": "[remote] {host}:{path}"},
+    "remote.open_terminal_here": {"zh": "在此处打开 SSH 终端", "en": "Open SSH terminal here"},
+    "remote.terminal_tab_name": {"zh": "SSH: {host}", "en": "SSH: {host}"},
 
     # ===== 历史对话框 =====
     "history.title": {"zh": "历史会话", "en": "Session History"},

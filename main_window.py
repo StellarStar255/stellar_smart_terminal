@@ -6561,6 +6561,12 @@ class MainWindow(QMainWindow):
         self.remote_panel = RemoteExplorerPanel(theme=current_theme)
         # 远程文件打开 → 注入到本地编辑器（透明处理远程保存）
         self.remote_panel.file_open_requested.connect(self._open_remote_file_in_editor)
+        # 连接成功后自动开一个 SSH 终端 tab
+        self.remote_panel.host_connected.connect(
+            lambda host: self._open_ssh_terminal_tab(host, None)
+        )
+        # 右键 "在此处打开终端" → 同样开一个 SSH tab，且 cd 进指定目录
+        self.remote_panel.open_terminal_at.connect(self._open_ssh_terminal_tab)
         layout.addWidget(self.remote_panel)
 
     def _toggle_remote_panel(self):
@@ -6602,6 +6608,55 @@ class MainWindow(QMainWindow):
         self._update_splitter_sizes()
         self.main_splitter.setUpdatesEnabled(True)
         QTimer.singleShot(0, self._flush_terminal_resizes)
+
+    def _open_ssh_terminal_tab(self, host_config, remote_cd_path):
+        """新开一个 tab 跑 ssh 到远端
+
+        Args:
+            host_config: ssh_session.HostConfig（用别名/host/user/port/key/proxyjump）
+            remote_cd_path: 可选，连接后在远程 cd 到该目录；为 None 则去 $HOME
+        """
+        # 构造 ssh 命令
+        # 优先用别名（ssh CLI 会自动应用 ~/.ssh/config）；
+        # 别名形如 user@host:port 这种手工加的，就拆开来拼参数。
+        alias = host_config.alias
+        is_config_alias = "@" not in alias and ":" not in alias
+        ssh_args = ["ssh"]
+        if is_config_alias:
+            ssh_args.append(alias)
+        else:
+            if host_config.identity_file and os.path.isfile(host_config.identity_file):
+                ssh_args.extend(["-i", host_config.identity_file])
+            if host_config.port and host_config.port != 22:
+                ssh_args.extend(["-p", str(host_config.port)])
+            target = f"{host_config.user}@{host_config.hostname}" if host_config.user else host_config.hostname
+            ssh_args.append(target)
+        # 交互式 shell + 可选 cd
+        if remote_cd_path:
+            # -t 强制分配 tty；cd 后 exec $SHELL -l 进入交互
+            ssh_args.extend(["-t", f"cd {self._shell_quote(remote_cd_path)} && exec \\$SHELL -l"])
+
+        # 新 tab，标签名标记 SSH host
+        tab_name = t("remote.terminal_tab_name", host=alias)
+        idx = self._add_new_tab(tab_name=tab_name)
+        # 获取这个 tab 的第一个终端，启动 ssh
+        terms = self.tab_terminals.get(idx, [])
+        if not terms:
+            return
+        term = terms[0]
+        cmd_string = " ".join(self._shell_quote(a) for a in ssh_args)
+        # 用 _start_and_execute：先起 shell，再回车跑 ssh；ssh 退出后用户回到本地 shell
+        try:
+            term._start_and_execute([cmd_string])
+        except Exception as e:
+            self.statusbar.showMessage(f"Failed to start SSH: {e}", 5000)
+
+    @staticmethod
+    def _shell_quote(s: str) -> str:
+        """简单的 POSIX shell 引用（仅在 ssh 命令拼接时用）"""
+        if s and all(c.isalnum() or c in "@/_.-+:=,%" for c in s):
+            return s
+        return "'" + s.replace("'", "'\\''") + "'"
 
     def _open_remote_file_in_editor(self, host_alias: str, remote_path: str,
                                       local_temp_path: str, session):

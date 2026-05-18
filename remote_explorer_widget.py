@@ -41,6 +41,12 @@ class RemoteExplorerPanel(QWidget):
     file_open_requested = pyqtSignal(str, str, str, object)
     # 错误展示（让主窗口统一弹消息或刷新状态栏）
     error_occurred = pyqtSignal(str)
+    # 主机连接成功 → 主窗口可以开一个 SSH 终端 tab 进去
+    # 参数: HostConfig
+    host_connected = pyqtSignal(object)
+    # 在指定远程目录打开 SSH 终端（右键菜单触发）
+    # 参数: (HostConfig, remote_path)
+    open_terminal_at = pyqtSignal(object, str)
 
     def __init__(self, theme: Optional[dict] = None, parent: Optional[QWidget] = None):
         super().__init__(parent)
@@ -347,6 +353,8 @@ class RemoteExplorerPanel(QWidget):
         self._current_path = sess.home()
         self._path_edit.setText(self._current_path)
         self._populate_tree_root()
+        # 通知主窗口：可以开一个 SSH 终端 tab 进去
+        self.host_connected.emit(sess.host_config)
 
     def _on_session_connect_failed(self, sess: SSHSession, msg: str):
         if sess is not self._session:
@@ -502,6 +510,9 @@ class RemoteExplorerPanel(QWidget):
             menu.addSeparator()
 
         if entry.is_dir:
+            act_term = QAction(t("remote.open_terminal_here"), self)
+            act_term.triggered.connect(lambda: self._open_terminal_here(entry))
+            menu.addAction(act_term)
             act_new_file = QAction(t("remote.new_file"), self)
             act_new_file.triggered.connect(lambda: self._new_file_under(entry, item))
             menu.addAction(act_new_file)
@@ -664,6 +675,11 @@ class RemoteExplorerPanel(QWidget):
             except Exception as e:
                 QTimer.singleShot(0, lambda: self._toast_error(str(e)))
         fut.add_done_callback(on_done)
+
+    def _open_terminal_here(self, entry: RemoteEntry):
+        if self._session is None:
+            return
+        self.open_terminal_at.emit(self._session.host_config, entry.path)
 
     def _upload_into(self, dir_entry: RemoteEntry, dir_item: QTreeWidgetItem):
         local_path, _ = QFileDialog.getOpenFileName(self, t("remote.upload"))
