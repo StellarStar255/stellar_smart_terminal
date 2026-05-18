@@ -868,6 +868,13 @@ class WindowNavigatorPanel(QWidget):
         """对一个窗口执行强制关闭（自动保存）。
         - 未勾选 Quick Close：弹窗确认后再执行
         - 勾选了 Quick Close：直接执行，不弹窗
+
+        关闭动作通过 QTimer.singleShot(0, ...) 推迟一拍执行 —— 否则在 Quick Close
+        路径下我们仍处于右键菜单 exec() 的调用栈内，同步触发窗口销毁链
+        （terminal.cleanup() 会 deleteLater 大量子 widget）会在 macOS Qt 上
+        发生重入崩溃（菜单尚未完全清理 → 子 widget 提前销毁 → 段错误）。
+        非 Quick Close 路径下因为 msg_box.exec() 自己跑了一层嵌套事件循环，
+        deferred deletion 在那时就被处理掉了，所以才没崩。
         """
         if not window or sip.isdeleted(window):
             return
@@ -920,13 +927,18 @@ class WindowNavigatorPanel(QWidget):
             if msg_box.exec() != QMessageBox.StandardButton.Yes:
                 return
 
-        try:
-            window.force_close_with_save()
-        except RuntimeError:
-            # 窗口已被销毁
-            pass
-        # 立即刷新列表
-        QTimer.singleShot(100, self._refresh_window_list)
+        # 推迟一拍：等当前事件处理（包括右键菜单的 exec）完全退栈再真正关窗
+        def do_close():
+            try:
+                if window and not sip.isdeleted(window):
+                    window.force_close_with_save()
+            except RuntimeError:
+                # 窗口已被销毁
+                pass
+            # 关闭完成后再刷新列表
+            QTimer.singleShot(100, self._refresh_window_list)
+
+        QTimer.singleShot(0, do_close)
 
     def _switch_to_window(self, window):
         """切换到指定窗口"""
