@@ -1251,23 +1251,11 @@ class TerminalWidget(QWidget):
         last_fg_color = None  # 缓存上一个前景色，减少 setPen 调用
         padding = self.PADDING  # 局部变量加速
 
-        # 缓存 font_metrics 的 horizontalAdvance 引用：每个 wide char 需要查一次
-        fm_advance = self._font_metrics.horizontalAdvance
-
         for display_row, buffer_line in enumerate(display_lines):
             row_y = int(padding + display_row * char_height)
             # 用下一行起点减去本行起点作为本行高度，防止分数像素累计造成行间空隙
             row_h = int(padding + (display_row + 1) * char_height) - row_y
             text_y = int(row_y + self.char_ascent)
-
-            # 跟踪本行的"物理绘制 x"：等于上一个字符绘制后的右边界。
-            # 正常情况下 physical_x ≈ col * char_width，但当 TUI 程序
-            # （如 Claude Code 的 Ink/React 输入框）把连续 CJK 字符写到相邻
-            # 列、没有遵循 pyte 的 stub 占位语义时，char_width=7.19 而 CJK
-            # 字形 advance=12.00，列位置 N*7.19 与 (N+1)*7.19 只相差 7.19px，
-            # 而字形本身宽 12px → 视觉重叠 5px → 用户感受到"中文挤在一起"。
-            # 用 max(cell_x, physical_x) 把后一个字符往右推到不会重叠的位置。
-            physical_x = padding
 
             for col in range(num_cols):
                 try:
@@ -1278,7 +1266,6 @@ class TerminalWidget(QWidget):
                 # 优化：一次性获取所有属性，避免多次 getattr 调用
                 # pyte 的 Char 是 namedtuple，可以直接访问属性
                 if hasattr(char, 'data'):
-                    # pyte Char 对象 - 直接访问属性更快
                     char_text = char.data
                     char_fg = char.fg
                     char_bg = char.bg
@@ -1303,54 +1290,35 @@ class TerminalWidget(QWidget):
 
                 has_bg = bg_color != bg_default
                 # 空 data 且无背景色 → 真的没东西可画，跳过
-                # 但仍要把 physical_x 推到当前 cell 末尾，否则 stub 会被
-                # 误算成"上一个 wide 字符的延伸"
-                cell_x = int(padding + col * char_width)
                 if not char_text and not has_bg:
-                    # stub 或空格无内容也无背景：重置 physical_x 到下一格起点
-                    if physical_x < cell_x + char_width:
-                        physical_x = cell_x + char_width
                     continue
+
+                x = int(padding + col * char_width)
 
                 # 判断宽字符（空 data 视为单宽，等同于普通空格的填充）
                 is_wide = bool(char_text) and self._is_wide_char(char_text)
-                # 列对齐的 cell 起点（背景绘制用此对齐，保证行连续背景无缝）
-                # 但实际字形可能要推到 physical_x（避免重叠）
-                draw_x = cell_x if int(physical_x) <= cell_x else int(physical_x)
                 # 用「下一格起点 - 当前格起点」算宽度，使背景在水平方向也无缝拼接
                 span = 2 if is_wide else 1
-                char_draw_width = int(padding + (col + span) * char_width) - cell_x
+                char_draw_width = int(padding + (col + span) * char_width) - x
 
                 # 绘制背景（包括 codex 等 TUI 给整行铺色的高亮，即便 data 为空格/空）
-                # 背景仍以 cell_x 为左边界、char_draw_width 为宽，保证整行背景拼接
                 if has_bg:
-                    painter.fillRect(cell_x, row_y, char_draw_width, row_h, bg_color)
+                    painter.fillRect(x, row_y, char_draw_width, row_h, bg_color)
 
-                # 绘制字符
+                # 绘制字符 —— 一律严格按 cell_x 列对齐绘制。
+                # 之前尝试用 physical_x 跟踪字体实际 advance，去推开相邻列里的 CJK
+                # 防"挤在一起"，但代价是：当 TUI 程序通过 cursor positioning 重
+                # 绘部分单元格时（典型例子：Claude/Ink 输入框回车后清屏 + 重写），
+                # 单元格之间的 advance 不再连续，physical_x 累计的偏移会让后续字符
+                # 整体右移、与原内容/光标对不齐 → 出现 "你好" 看起来鬼影 / 错位。
+                # 列对齐的简单实现兼容性最好，少数 TUI 写 CJK 不留 stub 那是 TUI 端
+                # 的问题（与 macOS 系统终端一致行为），我们不去补偿。
                 if char_text and char_text != ' ':
-                    # 确保前景色可见（空格无需绘制，节省一次比较）
                     fg_color = self._ensure_visible(fg_color, bg_color)
-                    # 只在颜色变化时调用 setPen
                     if fg_color != last_fg_color:
                         painter.setPen(fg_color)
                         last_fg_color = fg_color
-                    painter.drawText(draw_x, text_y, char_text)
-
-                    # 更新 physical_x：本字符绘制后的实际右边界
-                    if is_wide:
-                        # 用字体实际 advance（macOS Monaco 12pt: CJK=12, W=7.19）
-                        # 而不是 2*char_width=14.38，否则相邻 CJK 字符会保留 ~2.4px
-                        # 间隙；但若 TUI 已把它们安排到相邻列，则用 advance 把
-                        # 第二个字符推到第一个字符之后避免重叠。
-                        actual_advance = fm_advance(char_text)
-                        # 取 max：advance 通常 < 2 cells，正常情况退化到 cell 边界；
-                        # 异常情况（adjacent CJK without stub）推到 advance 边界。
-                        physical_x = draw_x + max(actual_advance, char_width)
-                    else:
-                        physical_x = draw_x + char_width
-                else:
-                    # 空格或者 char_text 为空但有 bg：推 physical_x 到 cell 末尾
-                    physical_x = cell_x + (span * char_width)
+                    painter.drawText(x, text_y, char_text)
 
         # 注意：选区高亮和搜索高亮已移至 paintEvent 中单独绘制，
         # 这样拖动选择时不会触发缓存重建，大幅提升性能
