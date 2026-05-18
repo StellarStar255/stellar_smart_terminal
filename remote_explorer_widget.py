@@ -522,21 +522,29 @@ class RemoteExplorerPanel(QWidget):
         fut.add_done_callback(on_done)
 
     def _apply_top_level(self, entries: list[RemoteEntry]):
-        """把目录内容直接放到树根"""
+        """把目录内容直接放到树根（批量插入 + 关闭重绘减少卡顿）"""
         try:
+            self._tree.setUpdatesEnabled(False)
             self._tree.clear()
+            items: list[QTreeWidgetItem] = []
+            for e in entries:
+                icon = "📁 " if e.is_dir else "📄 "
+                item = QTreeWidgetItem([icon + e.name])
+                item.setData(0, _ROLE_ENTRY, e)
+                item.setData(0, _ROLE_LOADED, False)
+                if e.is_dir:
+                    # 占位让箭头出现，展开时才真正去 listdir
+                    item.addChild(QTreeWidgetItem(["…"]))
+                items.append(item)
+            if items:
+                self._tree.addTopLevelItems(items)
         except RuntimeError:
             return
-        for e in entries:
-            icon = "📁 " if e.is_dir else "📄 "
-            item = QTreeWidgetItem([icon + e.name])
-            item.setData(0, _ROLE_ENTRY, e)
-            item.setData(0, _ROLE_LOADED, False)
-            if e.is_dir:
-                # 占位让箭头出现，展开时才真正去 listdir
-                placeholder = QTreeWidgetItem(["…"])
-                item.addChild(placeholder)
-            self._tree.addTopLevelItem(item)
+        finally:
+            try:
+                self._tree.setUpdatesEnabled(True)
+            except RuntimeError:
+                pass
 
     def _on_item_expanded(self, item: QTreeWidgetItem):
         if item.data(0, _ROLE_LOADED):
@@ -549,7 +557,9 @@ class RemoteExplorerPanel(QWidget):
         self._fill_children(item, entry.path)
 
     def _on_refresh(self):
-        # 重新加载当前 path
+        # 用户点刷新 → 绕过缓存，重新拉
+        if self._session is not None:
+            self._session.invalidate_cache(self._current_path)
         self._populate_tree_root()
 
     def _fill_children(self, parent_item: QTreeWidgetItem, path: str):
@@ -570,19 +580,26 @@ class RemoteExplorerPanel(QWidget):
     def _apply_children(self, parent_item: QTreeWidgetItem, entries: list[RemoteEntry]):
         # 父项可能已被释放（用户断开了），守一下
         try:
+            self._tree.setUpdatesEnabled(False)
             parent_item.takeChildren()
+            children: list[QTreeWidgetItem] = []
+            for e in entries:
+                icon = "📁 " if e.is_dir else "📄 "
+                child = QTreeWidgetItem([icon + e.name])
+                child.setData(0, _ROLE_ENTRY, e)
+                child.setData(0, _ROLE_LOADED, False)
+                if e.is_dir:
+                    child.addChild(QTreeWidgetItem(["…"]))
+                children.append(child)
+            if children:
+                parent_item.addChildren(children)
         except RuntimeError:
             return
-        for e in entries:
-            icon = "📁 " if e.is_dir else "📄 "
-            child = QTreeWidgetItem([icon + e.name])
-            child.setData(0, _ROLE_ENTRY, e)
-            child.setData(0, _ROLE_LOADED, False)
-            if e.is_dir:
-                # 加一个占位让箭头出现
-                placeholder = QTreeWidgetItem(["…"])
-                child.addChild(placeholder)
-            parent_item.addChild(child)
+        finally:
+            try:
+                self._tree.setUpdatesEnabled(True)
+            except RuntimeError:
+                pass
 
     def _on_item_double_clicked(self, item: QTreeWidgetItem, _col: int):
         entry: RemoteEntry = item.data(0, _ROLE_ENTRY)
@@ -789,9 +806,9 @@ class RemoteExplorerPanel(QWidget):
     def _clipboard_copy_selection(self, fallback_entry: Optional[RemoteEntry] = None):
         """把当前选中的远程文件 / 目录放入跨面板剪贴板。
 
-        - 选中里包含 fallback_entry 时按整体选中复制；否则只复制 fallback_entry
-        - 同时把可下载的文件下载到本地 temp，写到系统剪贴板，
-          这样 Finder 等外部程序可以直接粘贴
+        Cmd+C 保持即时响应：不预下载文件，只把远端路径作为纯文本写到
+        系统剪贴板（应用内粘贴用我们的 internal clipboard，含 session 信息）。
+        若需要把远端文件粘到 Finder，请用拖拽或右键 "Download to local…"。
         """
         if self._session is None:
             return
@@ -817,19 +834,9 @@ class RemoteExplorerPanel(QWidget):
         if not payload:
             return
 
-        # 同步下载文件项到本地 temp 供系统剪贴板使用（目录跳过避免大下载）
-        file_entries = [e for e in entries if not e.is_dir]
-        local_paths_for_system: list[str] = []
-        if file_entries:
-            try:
-                local_paths_for_system = self._sync_download_for_drag(file_entries)
-            except Exception:
-                local_paths_for_system = []
-
-        explorer_clipboard.set_items(
-            payload,
-            push_local_paths=local_paths_for_system or None,
-        )
+        # 系统剪贴板放纯文本路径（即时，不阻塞下载）
+        QApplication.clipboard().setText("\n".join(it[2] for it in payload))
+        explorer_clipboard.set_items(payload, push_local_paths=None)
 
     def _clipboard_paste_into(self, target_dir: str):
         """把跨面板剪贴板里的项目粘贴到当前远端 target_dir"""
@@ -1385,6 +1392,9 @@ class RemoteExplorerPanel(QWidget):
             item.takeChildren()
         except RuntimeError:
             return
+        # 显式刷新 → 绕过缓存
+        if self._session is not None:
+            self._session.invalidate_cache(path)
         self._on_item_expanded(item)
         # 强制展开
         try:

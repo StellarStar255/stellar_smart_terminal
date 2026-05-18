@@ -11,8 +11,10 @@ Design notes:
   UI doesn't have to know about ssh_config quirks.
 """
 import os
+import posixpath
 import stat
 import threading
+import time
 from concurrent.futures import Future, ThreadPoolExecutor
 from dataclasses import dataclass, field
 from pathlib import Path
@@ -138,6 +140,10 @@ class SSHSession(QObject):
         self._executor = ThreadPoolExecutor(max_workers=1, thread_name_prefix=f"ssh-{host_config.alias}")
         self._lock = threading.Lock()  # serializes paramiko calls just in case
         self._home: Optional[str] = None
+        # 路径 → (timestamp, entries) 的 listdir 缓存，节省重复网络往返
+        self._listdir_cache: dict[str, tuple[float, list["RemoteEntry"]]] = {}
+        self._cache_ttl = 30.0  # seconds
+        self._cache_lock = threading.Lock()
 
     # --- lifecycle ---
 
@@ -245,13 +251,34 @@ class SSHSession(QObject):
     def home(self) -> str:
         return self._home or "/"
 
-    def listdir(self, path: str) -> list[RemoteEntry]:
+    # --- cache helpers ---
+
+    @staticmethod
+    def _parent(path: str) -> str:
+        return posixpath.dirname(path.rstrip("/")) or "/"
+
+    def invalidate_cache(self, path: Optional[str] = None):
+        """清除某个路径（或全部）的 listdir 缓存。在改动远端后调用。"""
+        with self._cache_lock:
+            if path is None:
+                self._listdir_cache.clear()
+            else:
+                self._listdir_cache.pop(path, None)
+
+    def listdir(self, path: str, use_cache: bool = True) -> list[RemoteEntry]:
+        if use_cache:
+            with self._cache_lock:
+                cached = self._listdir_cache.get(path)
+            if cached and (time.time() - cached[0]) < self._cache_ttl:
+                return list(cached[1])
         sftp = self._require()
         attrs = sftp.listdir_attr(path)
         entries = [_attr_to_entry(path, a) for a in attrs]
         # 隐藏 .开头 默认不过滤（UI 自己决定），这里只排个序
         entries.sort(key=lambda e: (not e.is_dir, e.name.lower()))
-        return entries
+        with self._cache_lock:
+            self._listdir_cache[path] = (time.time(), entries)
+        return list(entries)
 
     def stat(self, path: str) -> RemoteEntry:
         sftp = self._require()
@@ -279,26 +306,35 @@ class SSHSession(QObject):
         # paramiko 的 put_fo 走原子重命名，但这里我们只是覆盖写
         with sftp.open(path, "wb") as fh:
             fh.write(content)
+        self.invalidate_cache(self._parent(path))
 
     def mkdir(self, path: str):
         sftp = self._require()
         sftp.mkdir(path)
+        self.invalidate_cache(self._parent(path))
 
     def rmdir(self, path: str):
         sftp = self._require()
         sftp.rmdir(path)
+        self.invalidate_cache(self._parent(path))
+        self.invalidate_cache(path)
 
     def remove(self, path: str):
         sftp = self._require()
         sftp.remove(path)
+        self.invalidate_cache(self._parent(path))
 
     def rename(self, old: str, new: str):
         sftp = self._require()
         sftp.rename(old, new)
+        self.invalidate_cache(self._parent(old))
+        self.invalidate_cache(self._parent(new))
+        self.invalidate_cache(old)
 
     def upload(self, local_path: str, remote_path: str):
         sftp = self._require()
         sftp.put(local_path, remote_path)
+        self.invalidate_cache(self._parent(remote_path))
 
     def download(self, remote_path: str, local_path: str):
         sftp = self._require()
@@ -314,6 +350,8 @@ class SSHSession(QObject):
             else:
                 sftp.remove(child)
         sftp.rmdir(path)
+        self.invalidate_cache(self._parent(path))
+        self.invalidate_cache(path)
 
     def _require(self) -> paramiko.SFTPClient:
         if self._sftp is None:
