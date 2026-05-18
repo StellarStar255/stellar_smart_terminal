@@ -379,6 +379,20 @@ TRANSLATIONS = {
     "remote.session_lost": {"zh": "源 SSH 会话已断开，无法粘贴远程文件。", "en": "Source SSH session is no longer connected; cannot paste remote item."},
     "remote.overwrite_title": {"zh": "目标已存在", "en": "Target exists"},
     "remote.overwrite_msg": {"zh": "'{name}' 已存在，是否覆盖？", "en": "'{name}' already exists. Overwrite?"},
+    "remote.move_confirm_title": {"zh": "确认移动", "en": "Confirm Move"},
+    "remote.move_confirm_msg_one": {
+        "zh": "将「{name}」移动到「{target}」？",
+        "en": "Move \"{name}\" into \"{target}\"?"
+    },
+    "remote.move_confirm_msg_many": {
+        "zh": "将 {count} 项移动到「{target}」？",
+        "en": "Move {count} items into \"{target}\"?"
+    },
+    "remote.move_into_self": {
+        "zh": "不能把「{name}」移动到它自己或它的子目录里",
+        "en": "Cannot move \"{name}\" into itself or one of its subdirectories"
+    },
+    "remote.move_progress": {"zh": "正在移动到 {target}…", "en": "Moving to {target}…"},
 
     # ===== 历史对话框 =====
     "history.title": {"zh": "历史会话", "en": "Session History"},

@@ -36,10 +36,14 @@ _ROLE_LOADED = Qt.ItemDataRole.UserRole + 1
 
 
 class _RemoteTreeWidget(QTreeWidget):
-    """支持文件拖入（上传）/ 拖出（下载到临时文件后给外部 URL）的远程文件树
+    """支持文件拖入（上传）/ 拖出（下载到临时文件后给外部 URL）的远程文件树。
+    并支持**内部**拖拽（同一棵远程树里把文件/目录移动到另一个文件夹）。
 
-    panel: 反向引用 RemoteExplorerPanel，用于实际执行 SFTP 上传/下载。
+    panel: 反向引用 RemoteExplorerPanel，用于实际执行 SFTP 上传/下载/move。
     """
+
+    # 内部拖拽用的私有 MIME 类型：标识这次 drag 起源于自己这棵树
+    REMOTE_PATHS_MIME = "application/x-stellar-remote-paths"
 
     def __init__(self, panel):
         super().__init__()
@@ -52,21 +56,59 @@ class _RemoteTreeWidget(QTreeWidget):
         # Cmd（macOS）/ Ctrl（其他平台）+ 点击=切换单个选中
         self.setSelectionMode(QTreeWidget.SelectionMode.ExtendedSelection)
 
-    # ----- 接收外部文件 → 上传 -----
+    # ----- 工具：判断 event 是否是本树发出的内部拖拽 -----
+
+    def _is_internal_drag(self, event) -> bool:
+        return event.source() is self and event.mimeData().hasFormat(self.REMOTE_PATHS_MIME)
+
+    # ----- 接收外部文件 → 上传 / 内部拖拽 → 移动 -----
 
     def dragEnterEvent(self, event):
-        if event.mimeData().hasUrls():
+        if self._is_internal_drag(event):
+            # 内部移动：用 MoveAction（macOS 上会显示绿色 + 改成移动光标）
+            event.setDropAction(Qt.DropAction.MoveAction)
+            event.accept()
+        elif event.mimeData().hasUrls():
             event.acceptProposedAction()
         else:
             super().dragEnterEvent(event)
 
     def dragMoveEvent(self, event):
-        if event.mimeData().hasUrls():
+        if self._is_internal_drag(event):
+            event.setDropAction(Qt.DropAction.MoveAction)
+            event.accept()
+        elif event.mimeData().hasUrls():
             event.acceptProposedAction()
         else:
             super().dragMoveEvent(event)
 
     def dropEvent(self, event):
+        # 解析落点目标目录（内部、外部都要用）
+        target_item = self.itemAt(event.position().toPoint())
+        target_dir = None
+        if target_item is not None:
+            entry: RemoteEntry = target_item.data(0, _ROLE_ENTRY)
+            if entry and entry.is_dir:
+                target_dir = entry.path
+            elif entry:
+                # 文件 → 用其所在目录
+                target_dir = posixpath.dirname(entry.path.rstrip("/")) or "/"
+        if not target_dir:
+            target_dir = self._panel._current_path
+
+        # ---- 内部拖拽：远端 → 远端 移动 ----
+        if self._is_internal_drag(event):
+            raw = bytes(event.mimeData().data(self.REMOTE_PATHS_MIME)).decode("utf-8", "replace")
+            src_paths = [p for p in raw.splitlines() if p]
+            if not src_paths:
+                event.ignore()
+                return
+            event.setDropAction(Qt.DropAction.MoveAction)
+            event.accept()
+            self._panel._handle_internal_move(src_paths, target_dir, target_item)
+            return
+
+        # ---- 外部拖入：本地文件 → 上传 ----
         if not event.mimeData().hasUrls():
             super().dropEvent(event)
             return
@@ -80,40 +122,39 @@ class _RemoteTreeWidget(QTreeWidget):
         if not local_paths:
             event.ignore()
             return
-        # 找到落点对应的目标目录：落在目录上 → 进入它；落在文件 / 空白上 → 当前路径
-        target_item = self.itemAt(event.position().toPoint())
-        target_dir = None
-        if target_item is not None:
-            entry: RemoteEntry = target_item.data(0, _ROLE_ENTRY)
-            if entry and entry.is_dir:
-                target_dir = entry.path
-            elif entry:
-                # 文件 → 用其所在目录
-                target_dir = posixpath.dirname(entry.path.rstrip("/")) or "/"
-        if not target_dir:
-            target_dir = self._panel._current_path
         event.acceptProposedAction()
         self._panel._handle_drop_upload(local_paths, target_dir, target_item)
 
-    # ----- 拖出 → 把远程文件下载到本地临时并发出 file URL -----
+    # ----- 拖出 → 内部 MIME（用于本树内部移动）+ 外部 URL（用于拖到 Finder 等） -----
 
     def startDrag(self, supported_actions):
         items = self.selectedItems()
         if not items:
             return
         entries = [it.data(0, _ROLE_ENTRY) for it in items]
-        entries = [e for e in entries if e is not None and not e.is_dir]
-        # MVP：只支持拖出文件，不支持目录（避免递归大下载）
+        entries = [e for e in entries if e is not None]
         if not entries:
             return
-        local_paths = self._panel._sync_download_for_drag(entries)
-        if not local_paths:
-            return
+
         mime = QMimeData()
-        mime.setUrls([QUrl.fromLocalFile(p) for p in local_paths])
+        # 内部拖拽用：完整远端路径列表（不论文件/目录都带上）
+        paths_text = "\n".join(e.path for e in entries)
+        mime.setData(self.REMOTE_PATHS_MIME, paths_text.encode("utf-8"))
+        # 同时塞一份 plain text，方便用户把路径拖到终端/编辑器里粘
+        mime.setText(paths_text)
+
+        # 外部拖拽用：只有文件才提前下载到本地临时文件 → file:// URL
+        # 目录不支持外部 drag-out（防止递归大下载）
+        file_entries = [e for e in entries if not e.is_dir]
+        if file_entries:
+            local_paths = self._panel._sync_download_for_drag(file_entries)
+            if local_paths:
+                mime.setUrls([QUrl.fromLocalFile(p) for p in local_paths])
+
         drag = QDrag(self)
         drag.setMimeData(mime)
-        drag.exec(Qt.DropAction.CopyAction)
+        # 同时支持 Move（内部）和 Copy（外部）；具体由接收方决定
+        drag.exec(Qt.DropAction.MoveAction | Qt.DropAction.CopyAction)
 
 
 class RemoteExplorerPanel(QWidget):
@@ -1417,6 +1458,107 @@ class RemoteExplorerPanel(QWidget):
         else:
             # 落在空白 → 当前路径
             self._populate_tree_root()
+
+    # ---------- 内部拖拽：远端 → 远端 移动 ----------
+
+    def _handle_internal_move(self, src_paths: list[str], target_dir: str,
+                              target_item: Optional[QTreeWidgetItem]):
+        """把源路径(都是同一台主机的远端路径)用 SFTP rename 移到 target_dir。
+        sftp.rename 是服务器端原子操作，不需要下载+重传。
+        """
+        if self._session is None or not src_paths or not target_dir:
+            return
+        sess = self._session
+
+        # 1) 过滤掉 no-op 和危险情况
+        moves: list[tuple[str, str, str]] = []  # (src, dst, name)
+        for src in src_paths:
+            src = src.rstrip("/") or "/"
+            name = posixpath.basename(src) or src
+            parent = posixpath.dirname(src) or "/"
+            # 已经在目标目录里 → 跳过
+            if parent == target_dir.rstrip("/") or parent == target_dir:
+                continue
+            # 不能移动到自己里/自己子目录里
+            target_norm = target_dir.rstrip("/") + "/"
+            if target_norm == src + "/" or target_norm.startswith(src + "/"):
+                QMessageBox.warning(
+                    self, t("remote.op_failed_title"),
+                    t("remote.move_into_self", name=name),
+                )
+                return
+            dst = posixpath.join(target_dir, name)
+            moves.append((src, dst, name))
+
+        if not moves:
+            return  # 全是 no-op
+
+        # 2) 确认
+        if len(moves) == 1:
+            msg = t("remote.move_confirm_msg_one", name=moves[0][2], target=target_dir)
+        else:
+            msg = t("remote.move_confirm_msg_many", count=len(moves), target=target_dir)
+        reply = QMessageBox.question(
+            self, t("remote.move_confirm_title"), msg,
+            QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No,
+            QMessageBox.StandardButton.Yes,
+        )
+        if reply != QMessageBox.StandardButton.Yes:
+            return
+
+        # 3) 进度对话框 + 后台 rename
+        total = len(moves)
+        progress = QProgressDialog(
+            t("remote.move_progress", target=target_dir), "Cancel", 0, total, self
+        )
+        progress.setWindowTitle(t("remote.title"))
+        progress.setMinimumDuration(300)
+        progress.setValue(0)
+
+        done_counter = {"n": 0, "errors": []}
+        # 记录受影响的父目录，最后一次性刷新
+        affected_parents: set[str] = {target_dir}
+
+        def make_done(src_, name_):
+            def cb(f):
+                try:
+                    f.result()
+                except Exception as e:
+                    done_counter["errors"].append(f"{name_}: {e}")
+                done_counter["n"] += 1
+            return cb
+
+        for src, dst, name in moves:
+            affected_parents.add(posixpath.dirname(src) or "/")
+            fut = sess.submit(sess.rename, src, dst)
+            fut.add_done_callback(make_done(src, name))
+
+        # 主线程轮询进度
+        from PyQt6.QtCore import QEventLoop
+        loop = QEventLoop()
+        timer = QTimer()
+        timer.setInterval(80)
+        def tick():
+            progress.setValue(done_counter["n"])
+            if done_counter["n"] >= total or progress.wasCanceled():
+                timer.stop()
+                loop.quit()
+        timer.timeout.connect(tick)
+        timer.start()
+        loop.exec()
+        progress.setValue(total)
+
+        if done_counter["errors"]:
+            QMessageBox.warning(
+                self, t("remote.op_failed_title"),
+                "\n".join(done_counter["errors"]),
+            )
+
+        # 4) 刷新受影响的所有父目录（源们 + 目标）
+        for p in affected_parents:
+            sess.invalidate_cache(p)
+        # 简单粗暴：整树重刷一次，省得逐个找 item
+        self._populate_tree_root()
 
     def _sync_download_for_drag(self, entries: list[RemoteEntry]) -> list[str]:
         """同步下载选中文件用于拖出。返回本地临时路径列表。
