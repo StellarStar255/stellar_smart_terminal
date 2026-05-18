@@ -638,13 +638,44 @@ class RemoteExplorerPanel(QWidget):
 
     # ---------- 文件操作 ----------
 
+    def _make_menu(self) -> QMenu:
+        """与本地 Explorer 一致：高亮当前 hover 的菜单项"""
+        bg_medium = self.theme.get('bg_medium', '#16213e')
+        text = self.theme.get('text', '#eaeaea')
+        border = self.theme.get('border', '#3d3d5c')
+        accent = self.theme.get('accent', '#667eea')
+        menu = QMenu(self)
+        menu.setStyleSheet(f"""
+            QMenu {{
+                background-color: {bg_medium};
+                color: {text};
+                border: 1px solid {border};
+                border-radius: 4px;
+                padding: 4px;
+            }}
+            QMenu::item {{
+                padding: 6px 20px;
+                border-radius: 3px;
+            }}
+            QMenu::item:selected {{
+                background-color: {accent};
+                color: white;
+            }}
+            QMenu::separator {{
+                height: 1px;
+                background-color: {border};
+                margin: 4px 10px;
+            }}
+        """)
+        return menu
+
     def _on_context_menu(self, pos):
         if self._session is None:
             return
         item = self._tree.itemAt(pos)
         entry: Optional[RemoteEntry] = item.data(0, _ROLE_ENTRY) if item is not None else None
 
-        menu = QMenu(self)
+        menu = self._make_menu()
 
         if entry is None:
             # 空白区域：新建文件 / 新建文件夹 / 上传 / 粘贴 / 刷新（全都作用在当前 path）
