@@ -47,6 +47,7 @@ from exporter import export_session
 from history_dialog import HistoryDialog
 from openai_server import OpenAIServerManager
 from git_widget import GitPanel
+from remote_explorer_widget import RemoteExplorerPanel
 from explorer_widget import ExplorerPanel
 from toolbar_manager import ToolbarManagerDialog
 from file_editor import FileEditorWidget
@@ -2770,6 +2771,13 @@ class MainWindow(QMainWindow):
         self.git_panel_container.hide()
         self.git_panel_visible = False
 
+        # Remote Explorer 面板容器（SSH/SFTP 文件浏览）
+        self.remote_panel_container = QWidget()
+        self._setup_remote_panel()
+        self.left_panel_layout.addWidget(self.remote_panel_container)
+        self.remote_panel_container.hide()
+        self.remote_panel_visible = False
+
         self.main_splitter.addWidget(self.left_panel_container)
         self.left_panel_container.hide()  # 默认隐藏
 
@@ -3253,6 +3261,22 @@ class MainWindow(QMainWindow):
         """)
         self.git_toggle_btn.clicked.connect(self._toggle_git_panel)
 
+        self.remote_toggle_btn = QPushButton("Remote")
+        self.remote_toggle_btn.setObjectName("remoteToggleBtn")
+        self.remote_toggle_btn.setCheckable(True)
+        self.remote_toggle_btn.setStyleSheet("""
+            QPushButton {
+                background-color: #38bdf8;
+            }
+            QPushButton:hover {
+                background-color: #7dd3fc;
+            }
+            QPushButton:checked {
+                background-color: #0284c7;
+            }
+        """)
+        self.remote_toggle_btn.clicked.connect(self._toggle_remote_panel)
+
         self.vscode_open_btn = QPushButton("VS Code")
         self.vscode_open_btn.setObjectName("vscodeOpenBtn")
         self.vscode_open_btn.setToolTip(t("toolbar.vscode_tooltip"))
@@ -3543,6 +3567,7 @@ class MainWindow(QMainWindow):
             "面板与编辑器": {
                 "explorer_toggle_btn": self.explorer_toggle_btn,
                 "git_toggle_btn": self.git_toggle_btn,
+                "remote_toggle_btn": self.remote_toggle_btn,
                 "vscode_open_btn": self.vscode_open_btn,
                 "cursor_open_btn": self.cursor_open_btn,
                 "log_toggle_btn": self.log_toggle_btn,
@@ -3563,7 +3588,7 @@ class MainWindow(QMainWindow):
             "选项": ["image_prefix_checkbox", "image_local_checkbox", "window_nav_checkbox"],
             "操作": ["export_btn", "history_btn", "clear_btn"],
             "分屏管理": ["split_btn", "split_v_btn", "close_split_btn", "close_tab_btn"],
-            "面板与编辑器": ["explorer_toggle_btn", "git_toggle_btn", "vscode_open_btn", "cursor_open_btn", "log_toggle_btn"],
+            "面板与编辑器": ["explorer_toggle_btn", "git_toggle_btn", "remote_toggle_btn", "vscode_open_btn", "cursor_open_btn", "log_toggle_btn"],
             "主题": ["theme_combo", "icon_tint_checkbox"],
             "设置": ["llm_config_btn", "gui_font_spin", "opacity_spin", "lang_combo"],
         }
@@ -3657,6 +3682,7 @@ class MainWindow(QMainWindow):
             "close_tab_btn": self.close_tab_btn,
             "explorer_toggle_btn": self.explorer_toggle_btn,
             "git_toggle_btn": self.git_toggle_btn,
+            "remote_toggle_btn": self.remote_toggle_btn,
             "vscode_open_btn": self.vscode_open_btn,
             "cursor_open_btn": self.cursor_open_btn,
             "log_toggle_btn": self.log_toggle_btn,
@@ -6362,6 +6388,12 @@ class MainWindow(QMainWindow):
             self.git_panel_visible = False
             self.git_toggle_btn.setChecked(False)
             self.git_panel_container.hide()
+            # 隐藏 Remote 面板
+            if getattr(self, 'remote_panel_visible', False):
+                self.remote_panel_visible = False
+                if hasattr(self, 'remote_toggle_btn'):
+                    self.remote_toggle_btn.setChecked(False)
+                self.remote_panel_container.hide()
 
             self.explorer_panel_container.show()
             self.left_panel_container.show()
@@ -6391,7 +6423,7 @@ class MainWindow(QMainWindow):
                 self.explorer_splitter.setSizes([400, 0])
 
             # 如果其他面板也隐藏，则隐藏整个左侧容器
-            if not self.git_panel_visible:
+            if not self.git_panel_visible and not getattr(self, 'remote_panel_visible', False):
                 self.left_panel_container.hide()
 
             self._update_splitter_sizes()
@@ -6477,19 +6509,149 @@ class MainWindow(QMainWindow):
             self.left_panel_container.show()
             # 设置仓库路径
             self.git_panel.set_repository(self._window_cwd)
+            # 同时隐藏 Remote 面板
+            if getattr(self, 'remote_panel_visible', False):
+                self.remote_panel_visible = False
+                if hasattr(self, 'remote_toggle_btn'):
+                    self.remote_toggle_btn.setChecked(False)
+                self.remote_panel_container.hide()
         else:
             self.git_panel_container.hide()
             # 如果其他面板也隐藏，则隐藏整个左侧容器
-            if not self.explorer_panel_visible:
+            if not self.explorer_panel_visible and not getattr(self, 'remote_panel_visible', False):
                 self.left_panel_container.hide()
 
         self._update_splitter_sizes()
         self.main_splitter.setUpdatesEnabled(True)
         QTimer.singleShot(0, self._flush_terminal_resizes)
 
+    def _setup_remote_panel(self):
+        """设置 Remote Explorer 面板（SSH/SFTP）"""
+        from PyQt6.QtWidgets import QVBoxLayout, QHBoxLayout, QFrame, QLabel, QPushButton
+
+        layout = QVBoxLayout(self.remote_panel_container)
+        layout.setContentsMargins(0, 0, 0, 0)
+        layout.setSpacing(0)
+
+        # 标题栏
+        self._remote_header = QFrame()
+        self._remote_header.setStyleSheet("""
+            QFrame { background-color: #16213e; border-bottom: 1px solid #3d3d5c; }
+        """)
+        rh_layout = QHBoxLayout(self._remote_header)
+        rh_layout.setContentsMargins(10, 5, 10, 5)
+
+        self._remote_title = QLabel(t("remote.title"))
+        self._remote_title.setStyleSheet("color: #38bdf8; font-weight: bold;")
+        rh_layout.addWidget(self._remote_title)
+        rh_layout.addStretch()
+
+        hide_btn = QPushButton("×")
+        hide_btn.setFixedSize(24, 24)
+        hide_btn.setStyleSheet("""
+            QPushButton { background-color: transparent; color: #888; border: none; font-size: 16px; }
+            QPushButton:hover { color: #eaeaea; }
+        """)
+        hide_btn.clicked.connect(self._toggle_remote_panel)
+        rh_layout.addWidget(hide_btn)
+
+        layout.addWidget(self._remote_header)
+
+        current_theme = self.THEMES.get(self.current_theme, self.THEMES["深蓝"])
+        self.remote_panel = RemoteExplorerPanel(theme=current_theme)
+        # 远程文件打开 → 注入到本地编辑器（透明处理远程保存）
+        self.remote_panel.file_open_requested.connect(self._open_remote_file_in_editor)
+        layout.addWidget(self.remote_panel)
+
+    def _toggle_remote_panel(self):
+        """切换 Remote Explorer 面板显示（与 Explorer / Git 互斥）"""
+        self.remote_panel_visible = not getattr(self, 'remote_panel_visible', False)
+        if hasattr(self, 'remote_toggle_btn'):
+            self.remote_toggle_btn.setChecked(self.remote_panel_visible)
+
+        self.main_splitter.setUpdatesEnabled(False)
+
+        if self.remote_panel_visible:
+            # 隐藏 Explorer / Git
+            if self.explorer_panel_visible:
+                self.explorer_panel_visible = False
+                self.explorer_toggle_btn.setChecked(False)
+                self.explorer_panel_container.hide()
+            if self.git_panel_visible:
+                self.git_panel_visible = False
+                self.git_toggle_btn.setChecked(False)
+                self.git_panel_container.hide()
+
+            # 编辑器若停在 main_splitter，归位
+            if hasattr(self, 'file_editor'):
+                if self.file_editor.isVisible():
+                    self.file_editor.hide()
+                if self.main_splitter.indexOf(self.file_editor) >= 0:
+                    self.file_editor.setParent(None)
+                    self.explorer_splitter.addWidget(self.file_editor)
+                    self.file_editor.hide()
+                    self.explorer_splitter.setSizes([400, 0])
+
+            self.remote_panel_container.show()
+            self.left_panel_container.show()
+        else:
+            self.remote_panel_container.hide()
+            if not self.explorer_panel_visible and not self.git_panel_visible:
+                self.left_panel_container.hide()
+
+        self._update_splitter_sizes()
+        self.main_splitter.setUpdatesEnabled(True)
+        QTimer.singleShot(0, self._flush_terminal_resizes)
+
+    def _open_remote_file_in_editor(self, host_alias: str, remote_path: str,
+                                      local_temp_path: str, session):
+        """远程 Explorer 双击文件后由本方法打开编辑器，并把保存事件转换成上传"""
+        if not hasattr(self, 'file_editor'):
+            return
+        ok = self.file_editor.open_file(local_temp_path)
+        if not ok:
+            return
+        # 把编辑器的「已保存」信号转成上传调用（only this file）
+        # 用一个一次性的连接，文件切换时自动清理
+        if not hasattr(self, '_remote_save_connections'):
+            self._remote_save_connections = {}
+        # 断开旧的连接（如果有）
+        old = self._remote_save_connections.pop(local_temp_path, None)
+        if old:
+            try:
+                self.file_editor.file_saved.disconnect(old)
+            except Exception:
+                pass
+        def on_saved(saved_path: str):
+            if saved_path != local_temp_path:
+                return
+            # 把本地临时文件 push 回远端
+            self.remote_panel.upload_after_save(local_temp_path)
+        self.file_editor.file_saved.connect(on_saved)
+        self._remote_save_connections[local_temp_path] = on_saved
+
+        # 让编辑器标题显示远程身份（在 file_label 后追加）
+        try:
+            current = self.file_editor.file_label.text()
+            self.file_editor.file_label.setText(
+                f"{current}  ·  {t('remote.editing_remote', host=host_alias, path=remote_path)}"
+            )
+        except Exception:
+            pass
+
+        # 显示编辑器（按当前 Explorer 模式安排位置）
+        if getattr(self, '_explorer_split_horizontal', False):
+            self._place_editor_in_main_splitter()
+        else:
+            self._place_editor_in_explorer_splitter()
+
     def _update_splitter_sizes(self):
         """更新分割器大小"""
-        left_visible = self.explorer_panel_visible or self.git_panel_visible
+        left_visible = (
+            self.explorer_panel_visible
+            or self.git_panel_visible
+            or getattr(self, 'remote_panel_visible', False)
+        )
         saved_left = getattr(self, '_saved_left_panel_width', None)
         saved_left = saved_left if isinstance(saved_left, int) and saved_left > 0 else None
         if left_visible:
@@ -6893,6 +7055,13 @@ class MainWindow(QMainWindow):
         if hasattr(self, 'git_panel'):
             if hasattr(self.git_panel, 'apply_language'):
                 self.git_panel.apply_language()
+        if hasattr(self, 'remote_panel'):
+            if hasattr(self.remote_panel, 'apply_language'):
+                self.remote_panel.apply_language()
+            try:
+                self._remote_title.setText(t("remote.title"))
+            except Exception:
+                pass
         if hasattr(self, 'file_editor'):
             if hasattr(self.file_editor, 'apply_language'):
                 self.file_editor.apply_language()
@@ -7323,6 +7492,10 @@ class MainWindow(QMainWindow):
         # Explorer 面板样式
         if hasattr(self, 'explorer_panel'):
             self.explorer_panel.apply_theme(t)
+
+        # Remote Explorer 面板样式
+        if hasattr(self, 'remote_panel'):
+            self.remote_panel.apply_theme(t)
 
         # 内置文件编辑器样式
         if hasattr(self, 'file_editor'):
