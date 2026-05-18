@@ -365,6 +365,11 @@ TRANSLATIONS = {
     "remote.bookmark_remove": {"zh": "移除书签：{path}", "en": "Remove bookmark: {path}"},
     "remote.bookmarks_empty": {"zh": "（暂无书签）", "en": "(no bookmarks yet)"},
     "remote.bookmarks_clear": {"zh": "清空当前主机的所有书签", "en": "Clear all bookmarks for this host"},
+    "remote.bookmarks_clear_confirm_title": {"zh": "确认清空书签", "en": "Confirm Clear Bookmarks"},
+    "remote.bookmarks_clear_confirm_msg": {
+        "zh": "确定要清空主机「{host}」的全部 {count} 个书签吗？\n\n此操作不可撤销。",
+        "en": "Clear all {count} bookmarks for host \"{host}\"?\n\nThis cannot be undone."
+    },
     "remote.bookmarks_tooltip": {"zh": "书签：管理 / 跳转远程路径", "en": "Bookmarks: manage / jump to remote paths"},
     "remote.copy": {"zh": "复制", "en": "Copy"},
     "remote.paste": {"zh": "粘贴", "en": "Paste"},

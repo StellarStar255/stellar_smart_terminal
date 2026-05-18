@@ -641,6 +641,19 @@ class RemoteExplorerPanel(QWidget):
         fut.add_done_callback(on_done)
 
     def _clear_bookmarks(self, host: str):
+        # 二次确认：清空书签不可撤销，避免误点
+        entries = remote_bookmarks.list_for(host)
+        if not entries:
+            return  # 本来就没书签，没什么可清的
+        reply = QMessageBox.question(
+            self,
+            t("remote.bookmarks_clear_confirm_title"),
+            t("remote.bookmarks_clear_confirm_msg", host=host, count=len(entries)),
+            QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No,
+            QMessageBox.StandardButton.No,  # 默认聚焦 No，避免回车误清
+        )
+        if reply != QMessageBox.StandardButton.Yes:
+            return
         remote_bookmarks.clear_for(host)
         self._update_bookmark_btn_state()
 
