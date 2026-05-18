@@ -26,6 +26,7 @@ from PyQt6.QtGui import QAction, QCursor, QDrag, QShortcut, QKeySequence
 
 from i18n import t
 import explorer_clipboard
+import remote_bookmarks
 from ssh_session import HostConfig, RemoteEntry, SSHSession, parse_ssh_config
 
 
@@ -260,6 +261,13 @@ class RemoteExplorerPanel(QWidget):
         self._refresh_btn.clicked.connect(self._on_refresh)
         pb_layout.addWidget(self._refresh_btn)
 
+        # 书签按钮：弹出菜单管理 / 跳转到已保存的远端路径
+        self._bookmark_btn = QPushButton("★")
+        self._bookmark_btn.setFixedSize(22, 22)
+        self._bookmark_btn.setToolTip(t("remote.bookmarks_tooltip"))
+        self._bookmark_btn.clicked.connect(self._show_bookmark_menu)
+        pb_layout.addWidget(self._bookmark_btn)
+
         self._path_edit = QLineEdit()
         self._path_edit.returnPressed.connect(self._on_path_edited)
         pb_layout.addWidget(self._path_edit, 1)
@@ -347,6 +355,7 @@ class RemoteExplorerPanel(QWidget):
         self._up_btn.setToolTip(t("remote.up"))
         self._home_btn.setToolTip(t("remote.go_home"))
         self._refresh_btn.setToolTip(t("remote.refresh"))
+        self._bookmark_btn.setToolTip(t("remote.bookmarks_tooltip"))
         self._empty_hint.setText(t("remote.no_hosts"))
         # 重建主机列表（条目文本本身是别名+真实地址，不用国际化）
         if self._session is None:
@@ -507,6 +516,8 @@ class RemoteExplorerPanel(QWidget):
         self._tree.clear()
         if self._session is None:
             return
+        # path 已变 → 更新 ★/☆ 指示
+        self._update_bookmark_btn_state()
         sess = self._session
         path = self._current_path or "/"
         fut = sess.submit(sess.listdir, path)
@@ -561,6 +572,87 @@ class RemoteExplorerPanel(QWidget):
         if self._session is not None:
             self._session.invalidate_cache(self._current_path)
         self._populate_tree_root()
+
+    # ---------- 书签 ----------
+
+    def _show_bookmark_menu(self):
+        """弹出书签菜单：添加/移除当前路径 + 已保存书签列表"""
+        if self._session is None:
+            return
+        host = self._session.host_config.alias
+        cwd = self._current_path or "/"
+        menu = self._make_menu()
+
+        # 顶部：加/删 当前路径
+        if remote_bookmarks.is_bookmarked(host, cwd):
+            act = QAction(t("remote.bookmark_remove", path=cwd), self)
+            act.triggered.connect(lambda: self._toggle_bookmark(cwd, add=False))
+        else:
+            act = QAction(t("remote.bookmark_add", path=cwd), self)
+            act.triggered.connect(lambda: self._toggle_bookmark(cwd, add=True))
+        menu.addAction(act)
+        menu.addSeparator()
+
+        entries = remote_bookmarks.list_for(host)
+        if not entries:
+            placeholder = QAction(t("remote.bookmarks_empty"), self)
+            placeholder.setEnabled(False)
+            menu.addAction(placeholder)
+        else:
+            for p in entries:
+                act_jump = QAction(p, self)
+                act_jump.triggered.connect(lambda checked=False, path=p: self._goto_bookmark(path))
+                menu.addAction(act_jump)
+            menu.addSeparator()
+            act_clear = QAction(t("remote.bookmarks_clear"), self)
+            act_clear.triggered.connect(lambda: self._clear_bookmarks(host))
+            menu.addAction(act_clear)
+
+        # 弹在按钮正下方
+        pos = self._bookmark_btn.mapToGlobal(self._bookmark_btn.rect().bottomLeft())
+        menu.exec(pos)
+        # 状态可能变了 → 更新按钮显示
+        self._update_bookmark_btn_state()
+
+    def _toggle_bookmark(self, path: str, add: bool):
+        if self._session is None:
+            return
+        host = self._session.host_config.alias
+        if add:
+            remote_bookmarks.add(host, path)
+        else:
+            remote_bookmarks.remove(host, path)
+        self._update_bookmark_btn_state()
+
+    def _goto_bookmark(self, path: str):
+        """跳到一个已保存的书签路径（先 stat 防止路径已失效）"""
+        if self._session is None:
+            return
+        sess = self._session
+        fut = sess.submit(sess.stat, path)
+
+        def on_done(f):
+            try:
+                entry: RemoteEntry = f.result()
+            except Exception as e:
+                self._error_signal.emit(str(e))
+                return
+            self._stat_resolved.emit(entry, path)
+        fut.add_done_callback(on_done)
+
+    def _clear_bookmarks(self, host: str):
+        remote_bookmarks.clear_for(host)
+        self._update_bookmark_btn_state()
+
+    def _update_bookmark_btn_state(self):
+        """根据当前路径是否已收藏，切换 ★/☆ 显示"""
+        if self._session is None:
+            self._bookmark_btn.setText("★")
+            return
+        host = self._session.host_config.alias
+        cwd = self._current_path or "/"
+        starred = remote_bookmarks.is_bookmarked(host, cwd)
+        self._bookmark_btn.setText("★" if starred else "☆")
 
     def _fill_children(self, parent_item: QTreeWidgetItem, path: str):
         if self._session is None:
