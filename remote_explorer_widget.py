@@ -23,6 +23,7 @@ from PyQt6.QtWidgets import (
 )
 from PyQt6.QtCore import Qt, pyqtSignal, QTimer, QMimeData, QUrl
 from PyQt6.QtGui import QAction, QCursor, QDrag, QShortcut, QKeySequence
+from PyQt6 import sip  # 用于检查 C++ 对象是否已被删除
 
 from i18n import t
 import explorer_clipboard
@@ -549,6 +550,18 @@ class RemoteExplorerPanel(QWidget):
         self._add_btn.show()
         self._reload_btn.show()
         self._disconnect_btn.hide()
+
+    def closeEvent(self, event):
+        """窗口被销毁时关掉 SSH 会话，避免后台线程在 panel 已销毁后还回调
+        Qt slot → C++ 侧 use-after-free。
+        """
+        if self._session is not None:
+            try:
+                self._session.disconnect()
+            except Exception as e:
+                print(f"[RemoteExplorerPanel] disconnect on close failed: {e}")
+            self._session = None
+        super().closeEvent(event)
 
     # ---------- 文件树 ----------
 
@@ -1222,14 +1235,28 @@ class RemoteExplorerPanel(QWidget):
         timer = QTimer()
         timer.setInterval(80)
         def tick():
-            progress.setValue(done["n"])
-            if done["n"] >= len(futures):
+            # 父 widget 可能在等待期间被销毁（如用户关掉 panel/窗口），
+            # 此时 progress 也已 deleteLater'd → 任何访问都会段错误
+            try:
+                if sip.isdeleted(progress):
+                    timer.stop()
+                    loop.quit()
+                    return
+                progress.setValue(done["n"])
+                if done["n"] >= len(futures):
+                    timer.stop()
+                    loop.quit()
+            except RuntimeError:
                 timer.stop()
                 loop.quit()
         timer.timeout.connect(tick)
         timer.start()
         loop.exec()
-        progress.setValue(len(futures))
+        try:
+            if not sip.isdeleted(progress):
+                progress.setValue(len(futures))
+        except RuntimeError:
+            pass
         if done["errors"] and not tolerate_errors:
             raise RuntimeError("; ".join(done["errors"]))
 
@@ -1433,31 +1460,51 @@ class RemoteExplorerPanel(QWidget):
         timer = QTimer()
         timer.setInterval(80)
         def tick():
-            progress.setValue(done_counter["n"])
-            if done_counter["n"] >= total or progress.wasCanceled():
+            try:
+                if sip.isdeleted(progress):
+                    timer.stop()
+                    loop.quit()
+                    return
+                progress.setValue(done_counter["n"])
+                if done_counter["n"] >= total or progress.wasCanceled():
+                    timer.stop()
+                    loop.quit()
+            except RuntimeError:
+                # progress 或 panel 在事件循环里被销毁
                 timer.stop()
                 loop.quit()
         timer.timeout.connect(tick)
         timer.start()
         loop.exec()
-        progress.setValue(total)
+        # panel 还活着才继续做后续 UI 更新
+        if sip.isdeleted(self):
+            return
+        try:
+            if not sip.isdeleted(progress):
+                progress.setValue(total)
+        except RuntimeError:
+            pass
 
         if done_counter["errors"]:
-            QMessageBox.warning(
-                self, t("remote.op_failed_title"),
-                "\n".join(done_counter["errors"]),
-            )
-        # 刷新目标目录视图
-        if target_item is not None:
-            entry: RemoteEntry = target_item.data(0, _ROLE_ENTRY)
-            if entry and entry.is_dir:
-                self._reload_subtree(target_item, target_dir)
+            try:
+                QMessageBox.warning(
+                    self, t("remote.op_failed_title"),
+                    "\n".join(done_counter["errors"]),
+                )
+            except RuntimeError:
+                pass
+        # 刷新目标目录视图（panel 已被销毁时跳过）
+        try:
+            if target_item is not None and not sip.isdeleted(target_item):
+                entry: RemoteEntry = target_item.data(0, _ROLE_ENTRY)
+                if entry and entry.is_dir:
+                    self._reload_subtree(target_item, target_dir)
+                else:
+                    self._populate_tree_root()
             else:
-                # 落在文件上 → 父其实是 target_dir 所在容器（顶层或某个目录项）
                 self._populate_tree_root()
-        else:
-            # 落在空白 → 当前路径
-            self._populate_tree_root()
+        except RuntimeError:
+            pass
 
     # ---------- 内部拖拽：远端 → 远端 移动 ----------
 
@@ -1539,26 +1586,50 @@ class RemoteExplorerPanel(QWidget):
         timer = QTimer()
         timer.setInterval(80)
         def tick():
-            progress.setValue(done_counter["n"])
-            if done_counter["n"] >= total or progress.wasCanceled():
+            try:
+                if sip.isdeleted(progress):
+                    timer.stop()
+                    loop.quit()
+                    return
+                progress.setValue(done_counter["n"])
+                if done_counter["n"] >= total or progress.wasCanceled():
+                    timer.stop()
+                    loop.quit()
+            except RuntimeError:
+                # progress 或 panel 在事件循环里被销毁
                 timer.stop()
                 loop.quit()
         timer.timeout.connect(tick)
         timer.start()
         loop.exec()
-        progress.setValue(total)
+
+        # panel 已销毁就直接收手；移动操作本身在后台线程已完成，
+        # 用户已经关掉了 panel/窗口，没必要再做 UI 更新
+        if sip.isdeleted(self):
+            return
+        try:
+            if not sip.isdeleted(progress):
+                progress.setValue(total)
+        except RuntimeError:
+            pass
 
         if done_counter["errors"]:
-            QMessageBox.warning(
-                self, t("remote.op_failed_title"),
-                "\n".join(done_counter["errors"]),
-            )
+            try:
+                QMessageBox.warning(
+                    self, t("remote.op_failed_title"),
+                    "\n".join(done_counter["errors"]),
+                )
+            except RuntimeError:
+                pass
 
         # 4) 刷新受影响的所有父目录（源们 + 目标）
-        for p in affected_parents:
-            sess.invalidate_cache(p)
-        # 简单粗暴：整树重刷一次，省得逐个找 item
-        self._populate_tree_root()
+        try:
+            for p in affected_parents:
+                sess.invalidate_cache(p)
+            # 简单粗暴：整树重刷一次，省得逐个找 item
+            self._populate_tree_root()
+        except RuntimeError:
+            pass
 
     def _sync_download_for_drag(self, entries: list[RemoteEntry]) -> list[str]:
         """同步下载选中文件用于拖出。返回本地临时路径列表。
@@ -1619,14 +1690,26 @@ class RemoteExplorerPanel(QWidget):
         timer = QTimer()
         timer.setInterval(80)
         def tick():
-            progress.setValue(done_counter["n"])
-            if done_counter["n"] >= len(entries) or progress.wasCanceled():
+            try:
+                if sip.isdeleted(progress):
+                    timer.stop()
+                    loop.quit()
+                    return
+                progress.setValue(done_counter["n"])
+                if done_counter["n"] >= len(entries) or progress.wasCanceled():
+                    timer.stop()
+                    loop.quit()
+            except RuntimeError:
                 timer.stop()
                 loop.quit()
         timer.timeout.connect(tick)
         timer.start()
         loop.exec()
-        progress.setValue(len(entries))
+        try:
+            if not sip.isdeleted(progress):
+                progress.setValue(len(entries))
+        except RuntimeError:
+            pass
 
         if done_counter["errors"]:
             QMessageBox.warning(
