@@ -57,107 +57,136 @@ class _RemoteTreeWidget(QTreeWidget):
         # Cmd（macOS）/ Ctrl（其他平台）+ 点击=切换单个选中
         self.setSelectionMode(QTreeWidget.SelectionMode.ExtendedSelection)
 
-    # ----- 工具：判断 event 是否是本树发出的内部拖拽 -----
+    # ----- 工具 -----
+
+    def _alive(self) -> bool:
+        """C++ 对象是否仍存活。PyQt6 在 widget 被销毁后，留下的 Python wrapper
+        访问任何成员都会抛 `RuntimeError: wrapped C/C++ object ... has been deleted`，
+        而且这个异常如果发生在 Qt 内部回调（如 startDrag）里，PyQt 会 abort 进程。
+        所有的事件回调入口先 check 一下。"""
+        try:
+            return not sip.isdeleted(self)
+        except Exception:
+            return False
 
     def _is_internal_drag(self, event) -> bool:
-        return event.source() is self and event.mimeData().hasFormat(self.REMOTE_PATHS_MIME)
+        try:
+            return event.source() is self and event.mimeData().hasFormat(self.REMOTE_PATHS_MIME)
+        except RuntimeError:
+            return False
 
     # ----- 接收外部文件 → 上传 / 内部拖拽 → 移动 -----
 
     def dragEnterEvent(self, event):
-        if self._is_internal_drag(event):
-            # 内部移动：用 MoveAction（macOS 上会显示绿色 + 改成移动光标）
-            event.setDropAction(Qt.DropAction.MoveAction)
-            event.accept()
-        elif event.mimeData().hasUrls():
-            event.acceptProposedAction()
-        else:
-            super().dragEnterEvent(event)
+        if not self._alive():
+            return
+        try:
+            if self._is_internal_drag(event):
+                event.setDropAction(Qt.DropAction.MoveAction)
+                event.accept()
+            elif event.mimeData().hasUrls():
+                event.acceptProposedAction()
+            else:
+                super().dragEnterEvent(event)
+        except RuntimeError:
+            # widget 在 event 处理过程中被销毁
+            return
 
     def dragMoveEvent(self, event):
-        if self._is_internal_drag(event):
-            event.setDropAction(Qt.DropAction.MoveAction)
-            event.accept()
-        elif event.mimeData().hasUrls():
-            event.acceptProposedAction()
-        else:
-            super().dragMoveEvent(event)
+        if not self._alive():
+            return
+        try:
+            if self._is_internal_drag(event):
+                event.setDropAction(Qt.DropAction.MoveAction)
+                event.accept()
+            elif event.mimeData().hasUrls():
+                event.acceptProposedAction()
+            else:
+                super().dragMoveEvent(event)
+        except RuntimeError:
+            return
 
     def dropEvent(self, event):
-        # 解析落点目标目录（内部、外部都要用）
-        target_item = self.itemAt(event.position().toPoint())
-        target_dir = None
-        if target_item is not None:
-            entry: RemoteEntry = target_item.data(0, _ROLE_ENTRY)
-            if entry and entry.is_dir:
-                target_dir = entry.path
-            elif entry:
-                # 文件 → 用其所在目录
-                target_dir = posixpath.dirname(entry.path.rstrip("/")) or "/"
-        if not target_dir:
-            target_dir = self._panel._current_path
+        if not self._alive():
+            return
+        try:
+            # 解析落点目标目录（内部、外部都要用）
+            target_item = self.itemAt(event.position().toPoint())
+            target_dir = None
+            if target_item is not None:
+                entry: RemoteEntry = target_item.data(0, _ROLE_ENTRY)
+                if entry and entry.is_dir:
+                    target_dir = entry.path
+                elif entry:
+                    target_dir = posixpath.dirname(entry.path.rstrip("/")) or "/"
+            if not target_dir:
+                target_dir = self._panel._current_path
 
-        # ---- 内部拖拽：远端 → 远端 移动 ----
-        if self._is_internal_drag(event):
-            raw = bytes(event.mimeData().data(self.REMOTE_PATHS_MIME)).decode("utf-8", "replace")
-            src_paths = [p for p in raw.splitlines() if p]
-            if not src_paths:
+            # ---- 内部拖拽：远端 → 远端 移动 ----
+            if self._is_internal_drag(event):
+                raw = bytes(event.mimeData().data(self.REMOTE_PATHS_MIME)).decode("utf-8", "replace")
+                src_paths = [p for p in raw.splitlines() if p]
+                if not src_paths:
+                    event.ignore()
+                    return
+                event.setDropAction(Qt.DropAction.MoveAction)
+                event.accept()
+                self._panel._handle_internal_move(src_paths, target_dir, target_item)
+                return
+
+            # ---- 外部拖入：本地文件 → 上传 ----
+            if not event.mimeData().hasUrls():
+                super().dropEvent(event)
+                return
+            urls = event.mimeData().urls()
+            local_paths = []
+            for u in urls:
+                if u.isLocalFile():
+                    p = u.toLocalFile()
+                    if p:
+                        local_paths.append(p)
+            if not local_paths:
                 event.ignore()
                 return
-            event.setDropAction(Qt.DropAction.MoveAction)
-            event.accept()
-            self._panel._handle_internal_move(src_paths, target_dir, target_item)
+            event.acceptProposedAction()
+            self._panel._handle_drop_upload(local_paths, target_dir, target_item)
+        except RuntimeError:
             return
 
-        # ---- 外部拖入：本地文件 → 上传 ----
-        if not event.mimeData().hasUrls():
-            super().dropEvent(event)
-            return
-        urls = event.mimeData().urls()
-        local_paths = []
-        for u in urls:
-            if u.isLocalFile():
-                p = u.toLocalFile()
-                if p:
-                    local_paths.append(p)
-        if not local_paths:
-            event.ignore()
-            return
-        event.acceptProposedAction()
-        self._panel._handle_drop_upload(local_paths, target_dir, target_item)
-
-    # ----- 拖出 → 内部 MIME（用于本树内部移动）+ 外部 URL（用于拖到 Finder 等） -----
+    # ----- 拖出 -----
 
     def startDrag(self, supported_actions):
-        """启动拖拽 —— 必须立即返回，否则鼠标按键已经被用户松开。
+        """启动拖拽 —— 必须立即返回，且必须对 widget 已销毁场景免疫。
 
-        旧实现在这里同步调 _sync_download_for_drag 把文件先下载到本地，
-        网络稍慢就阻塞数秒，等下载完用户早已松手 → drag 根本没"开始"。
-
-        现在只塞自定义 MIME（远端路径列表）+ plain text。
-        - 内部拖拽：dropEvent 通过 event.source() is self + 私有 MIME 识别，
-          走 SFTP rename，不需要本地路径。
-        - 外部 drag-out（拖到 Finder/其他 app）：本实现不再支持直接拖出文件，
-          需要时请用右键菜单 → "Download to local…"。避免阻塞 UI 启动 drag。
+        触发场景：用户关掉了 tab/窗口时，Qt 可能已经把 _RemoteTreeWidget 的
+        C++ 对象 deleteLater，但仍有一个 pending mouseMoveEvent 触发了
+        startDrag —— Python wrapper 还在，但 self.selectedItems() 等任何方法
+        都会抛 RuntimeError，未捕获就会让 PyQt abort 进程，所有窗口跟着崩。
         """
-        items = self.selectedItems()
-        if not items:
+        if not self._alive():
             return
-        entries = [it.data(0, _ROLE_ENTRY) for it in items]
-        entries = [e for e in entries if e is not None]
-        if not entries:
+        try:
+            items = self.selectedItems()
+            if not items:
+                return
+            entries = [it.data(0, _ROLE_ENTRY) for it in items]
+            entries = [e for e in entries if e is not None]
+            if not entries:
+                return
+
+            mime = QMimeData()
+            paths_text = "\n".join(e.path for e in entries)
+            # 私有 MIME：dropEvent 用来识别"这次 drag 来自本树"
+            mime.setData(self.REMOTE_PATHS_MIME, paths_text.encode("utf-8"))
+            # 顺手提供 plain text，把远端路径拖进终端/编辑器即得到字符串
+            mime.setText(paths_text)
+
+            drag = QDrag(self)
+            drag.setMimeData(mime)
+            drag.exec(Qt.DropAction.MoveAction)
+        except RuntimeError:
+            # widget 在 drag 启动过程中被销毁
             return
-
-        mime = QMimeData()
-        paths_text = "\n".join(e.path for e in entries)
-        # 私有 MIME：dropEvent 用来识别"这次 drag 来自本树"
-        mime.setData(self.REMOTE_PATHS_MIME, paths_text.encode("utf-8"))
-        # 顺手提供 plain text，把远端路径拖进终端/编辑器即得到字符串
-        mime.setText(paths_text)
-
-        drag = QDrag(self)
-        drag.setMimeData(mime)
-        drag.exec(Qt.DropAction.MoveAction)
 
 
 class RemoteExplorerPanel(QWidget):
@@ -556,13 +585,20 @@ class RemoteExplorerPanel(QWidget):
     def closeEvent(self, event):
         """窗口被销毁时关掉 SSH 会话，避免后台线程在 panel 已销毁后还回调
         Qt slot → C++ 侧 use-after-free。
+        注意：直接 disconnect() 会阻塞最多 5 秒（paramiko 关 sftp 走 5s timeout）。
+        在 closeEvent 里阻塞会让窗口关闭看起来卡死。这里把 session 引用先摘下
+        来交给一个 daemon 线程异步关闭。
         """
         if self._session is not None:
-            try:
-                self._session.disconnect()
-            except Exception as e:
-                print(f"[RemoteExplorerPanel] disconnect on close failed: {e}")
+            sess = self._session
             self._session = None
+            import threading
+            def _bg_disconnect():
+                try:
+                    sess.disconnect()
+                except Exception as e:
+                    print(f"[RemoteExplorerPanel] async disconnect failed: {e}")
+            threading.Thread(target=_bg_disconnect, name="ssh-bg-disconnect", daemon=True).start()
         super().closeEvent(event)
 
     # ---------- 文件树 ----------
