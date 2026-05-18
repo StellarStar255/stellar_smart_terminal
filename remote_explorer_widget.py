@@ -695,7 +695,7 @@ class RemoteExplorerPanel(QWidget):
         menu = self._make_menu()
 
         if entry is None:
-            # 空白区域：新建文件 / 新建文件夹 / 上传 / 粘贴 / 刷新（全都作用在当前 path）
+            # 空白区域：新建 / 上传 / 终端 / 路径 / 粘贴 / 刷新（都作用在当前 path）
             cwd = self._current_path
             act_new_file = QAction(t("remote.new_file"), self)
             act_new_file.triggered.connect(lambda: self._new_file_at(cwd, None))
@@ -708,6 +708,16 @@ class RemoteExplorerPanel(QWidget):
             act_upload = QAction(t("remote.upload"), self)
             act_upload.triggered.connect(lambda: self._upload_at(cwd, None))
             menu.addAction(act_upload)
+
+            menu.addSeparator()
+
+            act_term = QAction(t("remote.open_terminal_here"), self)
+            act_term.triggered.connect(lambda: self._open_terminal_at_path(cwd))
+            menu.addAction(act_term)
+
+            act_copy_path = QAction(t("remote.copy_path"), self)
+            act_copy_path.triggered.connect(lambda: QApplication.clipboard().setText(cwd))
+            menu.addAction(act_copy_path)
 
             menu.addSeparator()
 
@@ -1214,9 +1224,12 @@ class RemoteExplorerPanel(QWidget):
         fut.add_done_callback(on_done)
 
     def _open_terminal_here(self, entry: RemoteEntry):
+        self._open_terminal_at_path(entry.path)
+
+    def _open_terminal_at_path(self, path: str):
         if self._session is None:
             return
-        self.open_terminal_at.emit(self._session.host_config, entry.path)
+        self.open_terminal_at.emit(self._session.host_config, path)
 
     def _upload_at(self, parent_path: str, parent_item: Optional[QTreeWidgetItem]):
         local_path, _ = QFileDialog.getOpenFileName(self, t("remote.upload"))
