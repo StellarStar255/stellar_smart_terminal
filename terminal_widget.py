@@ -228,6 +228,7 @@ class TerminalWidget(QWidget):
     split_vertical_requested = pyqtSignal()  # 请求上下分屏
     close_split_requested = pyqtSignal()  # 请求关闭当前分屏
     move_split_left_requested = pyqtSignal()  # 请求将当前分屏向左移动
+    move_split_up_requested = pyqtSignal()  # 请求将当前分屏向上移动
 
     # 鲜艳的终端颜色 - One Dark Pro 风格
     DEFAULT_COLORS = {
@@ -2293,10 +2294,15 @@ class TerminalWidget(QWidget):
 
         menu.addSeparator()
 
-        # 分屏
+        # 分屏（左右）
         split_action = QAction(t("toolbar.split"), self)
         split_action.triggered.connect(self.split_horizontal_requested.emit)
         menu.addAction(split_action)
+
+        # 上下分屏
+        vsplit_action = QAction(t("ctx.split_vertical"), self)
+        vsplit_action.triggered.connect(self.split_vertical_requested.emit)
+        menu.addAction(vsplit_action)
 
         # 关闭当前分屏
         close_split_action = QAction(t("ctx.close_split"), self)
@@ -2307,6 +2313,11 @@ class TerminalWidget(QWidget):
         move_left_action = QAction(t("ctx.move_split_left"), self)
         move_left_action.triggered.connect(self.move_split_left_requested.emit)
         menu.addAction(move_left_action)
+
+        # 向上移动分屏（垂直分屏内）
+        move_up_action = QAction(t("ctx.move_split_up"), self)
+        move_up_action.triggered.connect(self.move_split_up_requested.emit)
+        menu.addAction(move_up_action)
 
         menu.exec(event.globalPos())
 

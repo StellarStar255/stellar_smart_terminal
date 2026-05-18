@@ -5131,6 +5131,7 @@ class MainWindow(QMainWindow):
                 terminal.split_horizontal_requested.connect(self._split_current_tab)
                 terminal.split_vertical_requested.connect(self._split_vertical_current_terminal)
                 terminal.move_split_left_requested.connect(self._move_split_left)
+                terminal.move_split_up_requested.connect(self._move_split_up)
                 terminal.installEventFilter(self)
 
                 # 重新设置快速命令提供者，指向当前窗口的预设
@@ -5251,6 +5252,7 @@ class MainWindow(QMainWindow):
         terminal.split_horizontal_requested.connect(self._split_current_tab)
         terminal.split_vertical_requested.connect(self._split_vertical_current_terminal)
         terminal.move_split_left_requested.connect(self._move_split_left)
+        terminal.move_split_up_requested.connect(self._move_split_up)
 
         # 设置工作目录（用于自动启动时）
         terminal.set_working_dir(self._window_cwd)
@@ -5488,6 +5490,29 @@ class MainWindow(QMainWindow):
 
         terminal.setFocus()
         self.statusbar.showMessage(t("status.move_split_left_done"), 3000)
+
+    def _move_split_up(self):
+        """在垂直分屏内，把当前终端与上方的兄弟交换位置"""
+        terminal = self.active_terminal
+        if not terminal:
+            return
+        parent_splitter = terminal.parent()
+        if not isinstance(parent_splitter, QSplitter):
+            self.statusbar.showMessage(t("status.move_split_up_fail"), 3000)
+            return
+        if parent_splitter.orientation() != Qt.Orientation.Vertical:
+            self.statusbar.showMessage(t("status.move_split_up_fail"), 3000)
+            return
+        current_index = parent_splitter.indexOf(terminal)
+        if current_index <= 0:
+            self.statusbar.showMessage(t("status.move_split_up_fail"), 3000)
+            return
+        sizes = parent_splitter.sizes()
+        parent_splitter.insertWidget(current_index - 1, terminal)
+        sizes[current_index], sizes[current_index - 1] = sizes[current_index - 1], sizes[current_index]
+        parent_splitter.setSizes(sizes)
+        terminal.setFocus()
+        self.statusbar.showMessage(t("status.move_split_up_done"), 3000)
 
     def _on_terminal_ended(self, terminal):
         """单个终端进程结束"""
