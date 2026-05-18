@@ -655,24 +655,42 @@ class WindowNavigatorPanel(QWidget):
         if not app:
             return
 
-        # 获取所有 MainWindow 实例（排除已删除的窗口）
+        # 获取所有 MainWindow 实例（排除已删除/正在关闭的窗口）
+        # 强制关闭中的窗口已 hide() 但 sip 对象还未销毁 —— 它正处于不稳定状态，
+        # 任何读取（windowTitle、x()、get_window_color()）都可能与底层
+        # NSWindow detach/deleteLater 重入 → 段错误。
         windows = []
         for w in app.topLevelWidgets():
             try:
-                if isinstance(w, MainWindow) and not sip.isdeleted(w) and w.isVisible():
-                    windows.append(w)
+                if not isinstance(w, MainWindow):
+                    continue
+                if sip.isdeleted(w):
+                    continue
+                # 跳过正在关闭/已隐藏的窗口
+                if getattr(w, '_closing_in_progress', False):
+                    continue
+                if getattr(w, '_force_closing', False):
+                    continue
+                if not w.isVisible():
+                    continue
+                windows.append(w)
             except RuntimeError:
                 continue  # 窗口已被删除，跳过
 
-        # 根据排序模式排序
-        if self._sort_mode == 'time':
-            windows.sort(key=lambda w: w.get_created_time())
-        elif self._sort_mode == 'name':
-            windows.sort(key=lambda w: w.windowTitle())
-        elif self._sort_mode == 'manual' and self._manual_order:
-            # 手动排序：按保存的顺序排列，新窗口放到末尾
-            order_map = {wid: idx for idx, wid in enumerate(self._manual_order)}
-            windows.sort(key=lambda w: order_map.get(id(w), 9999))
+        # 根据排序模式排序（包一层 try：window 可能在 sort key 取值时被销毁）
+        try:
+            if self._sort_mode == 'time':
+                windows.sort(key=lambda w: w.get_created_time())
+            elif self._sort_mode == 'name':
+                windows.sort(key=lambda w: w.windowTitle())
+            elif self._sort_mode == 'manual' and self._manual_order:
+                # 手动排序：按保存的顺序排列，新窗口放到末尾
+                order_map = {wid: idx for idx, wid in enumerate(self._manual_order)}
+                windows.sort(key=lambda w: order_map.get(id(w), 9999))
+        except RuntimeError:
+            # 排序过程中有窗口被删除，重置缓存并下次再刷
+            self._last_window_info = []
+            return
 
         # 检查是否有变化（标题或颜色）
         try:
@@ -869,12 +887,16 @@ class WindowNavigatorPanel(QWidget):
         - 未勾选 Quick Close：弹窗确认后再执行
         - 勾选了 Quick Close：直接执行，不弹窗
 
-        关闭动作通过 QTimer.singleShot(0, ...) 推迟一拍执行 —— 否则在 Quick Close
+        关闭动作通过 QTimer.singleShot(80, ...) 推迟执行 —— 否则在 Quick Close
         路径下我们仍处于右键菜单 exec() 的调用栈内，同步触发窗口销毁链
         （terminal.cleanup() 会 deleteLater 大量子 widget）会在 macOS Qt 上
         发生重入崩溃（菜单尚未完全清理 → 子 widget 提前销毁 → 段错误）。
-        非 Quick Close 路径下因为 msg_box.exec() 自己跑了一层嵌套事件循环，
-        deferred deletion 在那时就被处理掉了，所以才没崩。
+
+        早先用过 singleShot(0)，但 macOS 上 native menu 的 NSPopupMenu 清理
+        会跨越多个 runloop 迭代，0ms 仍可能与菜单清理重叠 → 段错误。
+        80ms 足够让 NSApp 完成菜单 dismiss + widget deferred deletion 后再启动
+        关窗流程；force_close_with_save 内部还会再做一次 hide + 异步真关闭，
+        把 macOS NSWindow detach 与 Qt widget cleanup 隔离开。
         """
         if not window or sip.isdeleted(window):
             return
@@ -928,6 +950,11 @@ class WindowNavigatorPanel(QWidget):
                 return
 
         # 推迟一拍：等当前事件处理（包括右键菜单的 exec）完全退栈再真正关窗
+        # 用 weakref 持有 navigator，避免 do_close 持有强引用导致刷新逻辑
+        # 在 navigator 已被销毁时仍试图访问
+        import weakref
+        nav_ref = weakref.ref(self)
+
         def do_close():
             try:
                 if window and not sip.isdeleted(window):
@@ -935,10 +962,21 @@ class WindowNavigatorPanel(QWidget):
             except RuntimeError:
                 # 窗口已被销毁
                 pass
-            # 关闭完成后再刷新列表
-            QTimer.singleShot(100, self._refresh_window_list)
+            except Exception as e:
+                print(f"[ForceClose] do_close failed: {e}")
+            # 关闭完成后再刷新列表（navigator 仍存活时）
+            def safe_refresh():
+                nav = nav_ref()
+                if nav is not None and not sip.isdeleted(nav):
+                    try:
+                        nav._refresh_window_list()
+                    except RuntimeError:
+                        pass
+            QTimer.singleShot(200, safe_refresh)
 
-        QTimer.singleShot(0, do_close)
+        # 80ms 足以让 macOS native menu 完成 dismiss 与 popup widget 的
+        # deferred deletion 后再启动关窗。0ms 在 macOS 上仍可能与菜单清理重叠。
+        QTimer.singleShot(80, do_close)
 
     def _switch_to_window(self, window):
         """切换到指定窗口"""
@@ -8321,7 +8359,19 @@ class MainWindow(QMainWindow):
     def force_close_with_save(self):
         """强制关闭：先自动保存会话+配置，再跳过确认弹窗关闭窗口。
         由窗口导航面板的右键菜单调用。
+
+        关键点（防 macOS 段错误）：
+        1. 重复进入保护：避免导航面板快速双击触发两次 close 链。
+        2. 先 hide()：让 macOS 立刻把窗口从 NSApp.windows() 中摘除，
+           其他窗口/导航刷新逻辑此时再扫 topLevelWidgets 就不会碰到它。
+        3. 把真正的 close() 推到下一个事件循环：避免 hide → close 与
+           native NSWindow detach 同步重入。
         """
+        if getattr(self, '_force_closing', False):
+            return
+        self._force_closing = True
+
+        # 1) 自动保存（任何异常都不能阻断关窗）
         try:
             if getattr(self, 'session_manager', None) is not None:
                 try:
@@ -8332,21 +8382,46 @@ class MainWindow(QMainWindow):
                 self._save_config()
             except Exception as e:
                 print(f"[ForceClose] _save_config failed: {e}")
-        finally:
-            self._force_closing = True
-            self.close()
+        except Exception as e:
+            print(f"[ForceClose] save phase failed: {e}")
+
+        # 2) 立刻隐藏窗口：让 macOS / 导航面板都不再看到它
+        try:
+            self.hide()
+        except Exception as e:
+            print(f"[ForceClose] hide failed: {e}")
+
+        # 3) 推迟真正的 close() 到下一拍事件循环
+        def _do_close():
+            try:
+                if not sip.isdeleted(self):
+                    self.close()
+            except RuntimeError:
+                pass
+            except Exception as e:
+                print(f"[ForceClose] close failed: {e}")
+        QTimer.singleShot(0, _do_close)
 
     def closeEvent(self, event):
         """窗口关闭事件"""
+        # 防止重入：closeEvent 在 macOS 上可能因 native 事件链被多次触发，
+        # 第二次触发时已经清理过的资源会再次被访问 → 段错误
+        if getattr(self, '_closing_in_progress', False):
+            event.accept()
+            return
+
         # 强制关闭路径：跳过确认弹窗（保存已在 force_close_with_save 中完成）
         force_closing = getattr(self, '_force_closing', False)
 
         # 检查是否有任何终端在运行
-        any_running = any(
-            t.is_running()
-            for terminals in self.tab_terminals.values()
-            for t in terminals
-        )
+        try:
+            any_running = any(
+                term.is_running()
+                for terminals in self.tab_terminals.values()
+                for term in terminals
+            )
+        except Exception:
+            any_running = False
 
         if any_running and not force_closing:
             # 创建自定义样式的消息框，避免深色主题导致文字不可见
@@ -8389,29 +8464,66 @@ class MainWindow(QMainWindow):
                 event.ignore()
                 return
 
-        # 停止所有 OpenAI API 服务器
-        self.openai_server_manager.stop_all()
+        # 标记进入清理阶段，防止重入
+        self._closing_in_progress = True
+
+        # 强制关闭路径下窗口已 hide()，此处再保险确认一次
+        if force_closing:
+            try:
+                self.hide()
+            except Exception:
+                pass
+
+        # 停止所有 OpenAI API 服务器（独立 try：服务器停不掉不该阻塞关窗）
+        try:
+            self.openai_server_manager.stop_all()
+        except Exception as e:
+            print(f"[Close] stop openai servers failed: {e}")
 
         # 停止定时器
-        self.auto_save_timer.stop()
-        self._log_timer.stop()
+        try:
+            self.auto_save_timer.stop()
+        except Exception:
+            pass
+        try:
+            self._log_timer.stop()
+        except Exception:
+            pass
 
         # 完整清理所有终端资源
-        for terminals in self.tab_terminals.values():
-            for terminal in terminals:
-                terminal.cleanup()
+        # 注意：terminal.cleanup() 内部会 join 后端 reader thread (最长 2s)，
+        # 这是阻塞 GUI 线程的同步操作。逐个 try 包住，避免一个终端清理失败
+        # 让整个 closeEvent 抛 Python 异常 → Qt 在 C++ 侧不预期 → 段错误
+        try:
+            for terminals in self.tab_terminals.values():
+                for terminal in terminals:
+                    try:
+                        terminal.cleanup()
+                    except Exception as e:
+                        print(f"[Close] terminal cleanup failed: {e}")
+        except Exception as e:
+            print(f"[Close] terminal cleanup loop failed: {e}")
 
         # 保存配置（包括最后选中的预设）
-        self._save_config()
+        try:
+            self._save_config()
+        except Exception as e:
+            print(f"[Close] save_config failed: {e}")
 
         # 立即刷新窗口导航（窗口关闭时）
         if MainWindow._global_window_navigator is not None:
             navigator = MainWindow._global_window_navigator
             def refresh_navigator():
                 # 安全检查：确保导航面板对象未被删除
-                if MainWindow._global_window_navigator is not None and not sip.isdeleted(navigator):
-                    navigator._refresh_window_list()
-            QTimer.singleShot(100, refresh_navigator)
+                try:
+                    if (MainWindow._global_window_navigator is not None
+                            and not sip.isdeleted(navigator)):
+                        navigator._refresh_window_list()
+                except RuntimeError:
+                    pass
+                except Exception as e:
+                    print(f"[Close] navigator refresh failed: {e}")
+            QTimer.singleShot(200, refresh_navigator)
 
         event.accept()
 
