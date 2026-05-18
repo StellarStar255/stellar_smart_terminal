@@ -48,6 +48,9 @@ class _RemoteTreeWidget(QTreeWidget):
         self.setDragEnabled(True)
         self.setDropIndicatorShown(True)
         self.setDragDropMode(QTreeWidget.DragDropMode.DragDrop)
+        # 多选：单击=选中一个，Shift+点击=连续区间选择，
+        # Cmd（macOS）/ Ctrl（其他平台）+ 点击=切换单个选中
+        self.setSelectionMode(QTreeWidget.SelectionMode.ExtendedSelection)
 
     # ----- 接收外部文件 → 上传 -----
 
