@@ -20,6 +20,56 @@ from PyQt6.QtGui import QFileSystemModel, QAction, QDesktopServices, QCursor
 from PyQt6.QtCore import QUrl
 
 
+class _LocalDropTreeView(QTreeView):
+    """支持把 file:// URL 拖入并复制到落点目录的本地文件树
+
+    与 QFileSystemModel 默认的"移动"语义不同：这里所有外部 URL 都做 **复制**，
+    这样跨窗口/跨远程往本地拖文件不会破坏源。
+    """
+
+    def __init__(self, panel):
+        super().__init__()
+        self._panel = panel
+        self.setAcceptDrops(True)
+        self.setDragEnabled(True)
+        self.setDropIndicatorShown(True)
+        self.setDragDropMode(QTreeView.DragDropMode.DragDrop)
+
+    def dragEnterEvent(self, event):
+        if event.mimeData().hasUrls():
+            event.acceptProposedAction()
+        else:
+            super().dragEnterEvent(event)
+
+    def dragMoveEvent(self, event):
+        if event.mimeData().hasUrls():
+            event.acceptProposedAction()
+        else:
+            super().dragMoveEvent(event)
+
+    def dropEvent(self, event):
+        urls = event.mimeData().urls() if event.mimeData().hasUrls() else []
+        local_paths = [u.toLocalFile() for u in urls if u.isLocalFile() and u.toLocalFile()]
+        if not local_paths:
+            super().dropEvent(event)
+            return
+        # 找到落点目录
+        idx = self.indexAt(event.position().toPoint())
+        target_dir = None
+        if idx.isValid():
+            model = self.model()
+            path = model.filePath(idx)
+            if path:
+                if os.path.isdir(path):
+                    target_dir = path
+                else:
+                    target_dir = os.path.dirname(path)
+        if not target_dir:
+            target_dir = self._panel._current_path or os.path.expanduser("~")
+        event.acceptProposedAction()
+        self._panel._handle_drop_copy(local_paths, target_dir)
+
+
 class FilteredFileSystemModel(QFileSystemModel):
     """过滤隐藏文件的文件系统模型"""
 
@@ -95,8 +145,8 @@ class ExplorerPanel(QWidget):
         self.model.setRootPath("")
         self.model.setFilter(QDir.Filter.AllDirs | QDir.Filter.Files | QDir.Filter.NoDotAndDotDot)
 
-        # 树形视图
-        self.tree_view = QTreeView()
+        # 树形视图（自定义子类，支持把 file:// URL 拖入并复制）
+        self.tree_view = _LocalDropTreeView(self)
         self.tree_view.setModel(self.model)
         self.tree_view.setRootIndex(self.model.index(self._current_path))
 
@@ -220,6 +270,50 @@ class ExplorerPanel(QWidget):
                 width: 0px;
             }}
         """)
+
+    def _handle_drop_copy(self, src_paths: list, target_dir: str):
+        """把从其他面板/Finder 拖入的文件复制到 target_dir。
+
+        - 已存在的目标默认询问覆盖
+        - 目录递归复制
+        """
+        copied = 0
+        errors = []
+        skipped = 0
+        for src in src_paths:
+            try:
+                if not os.path.exists(src):
+                    errors.append(f"{os.path.basename(src)}: not found")
+                    continue
+                dst = os.path.join(target_dir, os.path.basename(src))
+                if os.path.abspath(src) == os.path.abspath(dst):
+                    skipped += 1
+                    continue
+                if os.path.exists(dst):
+                    reply = QMessageBox.question(
+                        self, t("explorer.overwrite_title") if hasattr(self, '_t_overwrite') else "Overwrite?",
+                        f"{os.path.basename(dst)} already exists in this folder. Overwrite?",
+                        QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No,
+                        QMessageBox.StandardButton.No,
+                    )
+                    if reply != QMessageBox.StandardButton.Yes:
+                        skipped += 1
+                        continue
+                    if os.path.isdir(dst) and not os.path.islink(dst):
+                        shutil.rmtree(dst)
+                    else:
+                        os.remove(dst)
+                if os.path.isdir(src) and not os.path.islink(src):
+                    shutil.copytree(src, dst)
+                else:
+                    shutil.copy2(src, dst)
+                copied += 1
+            except Exception as e:
+                errors.append(f"{os.path.basename(src)}: {e}")
+        if errors:
+            QMessageBox.warning(self, "Copy failed", "\n".join(errors))
+        # QFileSystemModel 监听文件系统变化，会自动刷新；保底再 refresh 一次
+        self.refresh()
 
     def set_root_path(self, path: str):
         """设置根目录（路径未变时跳过，避免重复扫描目录）"""

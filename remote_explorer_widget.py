@@ -19,10 +19,10 @@ from PyQt6.QtWidgets import (
     QWidget, QVBoxLayout, QHBoxLayout, QFrame, QLabel, QPushButton,
     QListWidget, QListWidgetItem, QTreeWidget, QTreeWidgetItem, QMenu,
     QInputDialog, QMessageBox, QStackedWidget, QFileDialog, QLineEdit,
-    QApplication, QSizePolicy,
+    QApplication, QSizePolicy, QProgressDialog,
 )
-from PyQt6.QtCore import Qt, pyqtSignal, QTimer
-from PyQt6.QtGui import QAction, QCursor
+from PyQt6.QtCore import Qt, pyqtSignal, QTimer, QMimeData, QUrl
+from PyQt6.QtGui import QAction, QCursor, QDrag
 
 from i18n import t
 from ssh_session import HostConfig, RemoteEntry, SSHSession, parse_ssh_config
@@ -31,6 +31,84 @@ from ssh_session import HostConfig, RemoteEntry, SSHSession, parse_ssh_config
 # 子项的 UserRole 数据键
 _ROLE_ENTRY = Qt.ItemDataRole.UserRole
 _ROLE_LOADED = Qt.ItemDataRole.UserRole + 1
+
+
+class _RemoteTreeWidget(QTreeWidget):
+    """支持文件拖入（上传）/ 拖出（下载到临时文件后给外部 URL）的远程文件树
+
+    panel: 反向引用 RemoteExplorerPanel，用于实际执行 SFTP 上传/下载。
+    """
+
+    def __init__(self, panel):
+        super().__init__()
+        self._panel = panel
+        self.setAcceptDrops(True)
+        self.setDragEnabled(True)
+        self.setDropIndicatorShown(True)
+        self.setDragDropMode(QTreeWidget.DragDropMode.DragDrop)
+
+    # ----- 接收外部文件 → 上传 -----
+
+    def dragEnterEvent(self, event):
+        if event.mimeData().hasUrls():
+            event.acceptProposedAction()
+        else:
+            super().dragEnterEvent(event)
+
+    def dragMoveEvent(self, event):
+        if event.mimeData().hasUrls():
+            event.acceptProposedAction()
+        else:
+            super().dragMoveEvent(event)
+
+    def dropEvent(self, event):
+        if not event.mimeData().hasUrls():
+            super().dropEvent(event)
+            return
+        urls = event.mimeData().urls()
+        local_paths = []
+        for u in urls:
+            if u.isLocalFile():
+                p = u.toLocalFile()
+                if p:
+                    local_paths.append(p)
+        if not local_paths:
+            event.ignore()
+            return
+        # 找到落点对应的目标目录：落在目录上 → 进入它；落在文件 / 空白上 → 当前路径
+        target_item = self.itemAt(event.position().toPoint())
+        target_dir = None
+        if target_item is not None:
+            entry: RemoteEntry = target_item.data(0, _ROLE_ENTRY)
+            if entry and entry.is_dir:
+                target_dir = entry.path
+            elif entry:
+                # 文件 → 用其所在目录
+                target_dir = posixpath.dirname(entry.path.rstrip("/")) or "/"
+        if not target_dir:
+            target_dir = self._panel._current_path
+        event.acceptProposedAction()
+        self._panel._handle_drop_upload(local_paths, target_dir, target_item)
+
+    # ----- 拖出 → 把远程文件下载到本地临时并发出 file URL -----
+
+    def startDrag(self, supported_actions):
+        items = self.selectedItems()
+        if not items:
+            return
+        entries = [it.data(0, _ROLE_ENTRY) for it in items]
+        entries = [e for e in entries if e is not None and not e.is_dir]
+        # MVP：只支持拖出文件，不支持目录（避免递归大下载）
+        if not entries:
+            return
+        local_paths = self._panel._sync_download_for_drag(entries)
+        if not local_paths:
+            return
+        mime = QMimeData()
+        mime.setUrls([QUrl.fromLocalFile(p) for p in local_paths])
+        drag = QDrag(self)
+        drag.setMimeData(mime)
+        drag.exec(Qt.DropAction.CopyAction)
 
 
 class RemoteExplorerPanel(QWidget):
@@ -187,7 +265,7 @@ class RemoteExplorerPanel(QWidget):
 
         tp_layout.addWidget(path_bar)
 
-        self._tree = QTreeWidget()
+        self._tree = _RemoteTreeWidget(self)
         self._tree.setHeaderHidden(True)
         self._tree.setContextMenuPolicy(Qt.ContextMenuPolicy.CustomContextMenu)
         self._tree.customContextMenuRequested.connect(self._on_context_menu)
@@ -748,6 +826,146 @@ class RemoteExplorerPanel(QWidget):
         remote_path = posixpath.join(dir_entry.path, os.path.basename(local_path))
         fut = sess.submit(sess.upload, local_path, remote_path)
         self._refresh_after(fut, dir_item, dir_entry.path)
+
+    def _handle_drop_upload(self, local_paths: list[str], target_dir: str,
+                              target_item: Optional[QTreeWidgetItem]):
+        """处理拖入：把每个本地文件上传到 target_dir，完成后刷新对应子树"""
+        if self._session is None:
+            return
+        sess = self._session
+        total = len(local_paths)
+        progress = QProgressDialog(
+            f"Uploading to {target_dir}...", "Cancel", 0, total, self
+        )
+        progress.setWindowTitle(t("remote.title"))
+        progress.setMinimumDuration(300)
+        progress.setValue(0)
+
+        # 让 progress 通过信号在主线程里更新
+        done_counter = {"n": 0, "errors": []}
+
+        def make_upload_done(local_path):
+            def cb(f):
+                try:
+                    f.result()
+                except Exception as e:
+                    done_counter["errors"].append(f"{os.path.basename(local_path)}: {e}")
+                done_counter["n"] += 1
+                # 不能在工作线程更新 UI，靠 progress.setValue 在主循环里查询
+            return cb
+
+        for lp in local_paths:
+            remote_name = os.path.basename(lp)
+            remote_path = posixpath.join(target_dir, remote_name)
+            fut = sess.submit(sess.upload, lp, remote_path)
+            fut.add_done_callback(make_upload_done(lp))
+
+        # 主线程轮询进度（避免 progress dialog 卡死）
+        from PyQt6.QtCore import QEventLoop
+        loop = QEventLoop()
+        timer = QTimer()
+        timer.setInterval(80)
+        def tick():
+            progress.setValue(done_counter["n"])
+            if done_counter["n"] >= total or progress.wasCanceled():
+                timer.stop()
+                loop.quit()
+        timer.timeout.connect(tick)
+        timer.start()
+        loop.exec()
+        progress.setValue(total)
+
+        if done_counter["errors"]:
+            QMessageBox.warning(
+                self, t("remote.op_failed_title"),
+                "\n".join(done_counter["errors"]),
+            )
+        # 刷新目标目录视图
+        if target_item is not None:
+            entry: RemoteEntry = target_item.data(0, _ROLE_ENTRY)
+            if entry and entry.is_dir:
+                self._reload_subtree(target_item, target_dir)
+            else:
+                # 落在文件上 → 父其实是 target_dir 所在容器（顶层或某个目录项）
+                self._populate_tree_root()
+        else:
+            # 落在空白 → 当前路径
+            self._populate_tree_root()
+
+    def _sync_download_for_drag(self, entries: list[RemoteEntry]) -> list[str]:
+        """同步下载选中文件用于拖出。返回本地临时路径列表。
+
+        拖出操作必须在 startDrag 内完成（QDrag 需要 mime 数据立即就绪），
+        所以这里阻塞主线程并跑进度条。文件大小 > 5MB 会提示确认。
+        """
+        if self._session is None:
+            return []
+        sess = self._session
+
+        # 体积合理性检查
+        big = [e for e in entries if e.size and e.size > 10 * 1024 * 1024]
+        if big:
+            names = ", ".join(e.name for e in big[:3])
+            confirm = QMessageBox.question(
+                self, t("remote.title"),
+                f"Drag will download large files first ({names}...). Continue?",
+                QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No,
+                QMessageBox.StandardButton.No,
+            )
+            if confirm != QMessageBox.StandardButton.Yes:
+                return []
+
+        safe_alias = "".join(c if c.isalnum() or c in '-._' else '_'
+                             for c in sess.host_config.alias)
+        local_dir = os.path.join(
+            tempfile.gettempdir(),
+            f"smart_terminal_remote_drag_{safe_alias}",
+        )
+        os.makedirs(local_dir, exist_ok=True)
+
+        progress = QProgressDialog(
+            "Downloading for drag...", "Cancel", 0, len(entries), self
+        )
+        progress.setMinimumDuration(300)
+        progress.setValue(0)
+
+        done_counter = {"n": 0, "paths": [], "errors": []}
+
+        def make_cb(entry, local_path):
+            def cb(f):
+                try:
+                    f.result()
+                    done_counter["paths"].append(local_path)
+                except Exception as e:
+                    done_counter["errors"].append(f"{entry.name}: {e}")
+                done_counter["n"] += 1
+            return cb
+
+        for e in entries:
+            local_path = os.path.join(local_dir, e.name)
+            fut = sess.submit(sess.download, e.path, local_path)
+            fut.add_done_callback(make_cb(e, local_path))
+
+        from PyQt6.QtCore import QEventLoop
+        loop = QEventLoop()
+        timer = QTimer()
+        timer.setInterval(80)
+        def tick():
+            progress.setValue(done_counter["n"])
+            if done_counter["n"] >= len(entries) or progress.wasCanceled():
+                timer.stop()
+                loop.quit()
+        timer.timeout.connect(tick)
+        timer.start()
+        loop.exec()
+        progress.setValue(len(entries))
+
+        if done_counter["errors"]:
+            QMessageBox.warning(
+                self, t("remote.op_failed_title"),
+                "\n".join(done_counter["errors"]),
+            )
+        return done_counter["paths"]
 
     def _refresh_after(self, fut, item: Optional[QTreeWidgetItem], path: str):
         """操作成功后刷新对应子树。item 为 None 时（顶层操作）重刷整棵树。"""
