@@ -47,6 +47,15 @@ class RemoteExplorerPanel(QWidget):
     # 在指定远程目录打开 SSH 终端（右键菜单触发）
     # 参数: (HostConfig, remote_path)
     open_terminal_at = pyqtSignal(object, str)
+    # —— 内部信号：用于把 SSH 工作线程的结果安全派发回 UI 线程
+    # （直接 QTimer.singleShot 在没有事件循环的工作线程里不会触发）
+    _top_level_ready = pyqtSignal(list)
+    _subtree_ready = pyqtSignal(object, list)         # (parent_item, entries)
+    _error_signal = pyqtSignal(str)
+    _file_downloaded = pyqtSignal(str, str, str, bytes)  # host_alias, remote_path, local_path, data
+    _stat_resolved = pyqtSignal(object, str)          # (entry, requested_path)
+    _refresh_root_signal = pyqtSignal()
+    _refresh_subtree_signal = pyqtSignal(object, str)  # (item, path)
 
     def __init__(self, theme: Optional[dict] = None, parent: Optional[QWidget] = None):
         super().__init__(parent)
@@ -63,6 +72,16 @@ class RemoteExplorerPanel(QWidget):
         self._setup_ui()
         self._apply_theme()
         self._reload_hosts()
+
+        # 内部跨线程信号 → UI 线程槽（QueuedConnection 自动应用）
+        self._top_level_ready.connect(self._apply_top_level)
+        self._subtree_ready.connect(self._apply_children)
+        self._error_signal.connect(self._toast_error)
+        self._file_downloaded.connect(self._on_file_downloaded)
+        self._stat_resolved.connect(self._on_stat_resolved)
+        self._refresh_root_signal.connect(self._populate_tree_root)
+        self._refresh_subtree_signal.connect(self._reload_subtree)
+        self._password_prompt_signal.connect(self._on_password_prompt)
 
     # ---------- UI ----------
 
@@ -323,26 +342,34 @@ class RemoteExplorerPanel(QWidget):
         )
         self._session = sess
 
+    _password_prompt_signal = pyqtSignal(str)  # 在 UI 线程触发输入框
+
     def _prompt_password(self, label: str) -> Optional[str]:
-        # paramiko 回调在后台线程；用 QInputDialog 必须切回 UI 线程
-        result_holder: dict = {}
-        done = [False]
-
-        def show():
-            text, ok = QInputDialog.getText(
-                self, t("remote.password_title"),
-                t("remote.password_prompt", host=label),
-                QLineEdit.EchoMode.Password,
-            )
-            result_holder['value'] = text if ok else None
-            done[0] = True
-
-        QTimer.singleShot(0, show)
-        # 等 UI 完成（粗糙但有效）
-        while not done[0]:
+        # paramiko 回调在后台线程；用 QInputDialog 必须切回 UI 线程。
+        # 这里通过自定义事件 + 信号触发，主线程显示对话框并把结果放回 holder。
+        result_holder: dict = {'done': False, 'value': None, 'label': label}
+        self._pending_password_request = result_holder
+        try:
+            self._password_prompt_signal.emit(label)
+        except Exception:
+            return None
+        # 不能在工作线程里 processEvents（会和主线程冲突），单纯轮询就行
+        while not result_holder['done']:
             time.sleep(0.05)
-            QApplication.processEvents()
-        return result_holder.get('value')
+        return result_holder['value']
+
+    def _on_password_prompt(self, label: str):
+        # 真正在 UI 线程里跑的输入框
+        holder = getattr(self, '_pending_password_request', None)
+        if holder is None:
+            return
+        text, ok = QInputDialog.getText(
+            self, t("remote.password_title"),
+            t("remote.password_prompt", host=label),
+            QLineEdit.EchoMode.Password,
+        )
+        holder['value'] = text if ok else None
+        holder['done'] = True
 
     def _on_session_connected(self, sess: SSHSession):
         if sess is not self._session:
@@ -400,9 +427,10 @@ class RemoteExplorerPanel(QWidget):
             try:
                 entries: list[RemoteEntry] = f.result()
             except Exception as e:
-                QTimer.singleShot(0, lambda: self._toast_error(str(e)))
+                # 在 SSH 工作线程里只能通过信号回 UI 线程，QTimer 在这里不灵
+                self._error_signal.emit(str(e))
                 return
-            QTimer.singleShot(0, lambda: self._apply_top_level(entries))
+            self._top_level_ready.emit(entries)
         fut.add_done_callback(on_done)
 
     def _apply_top_level(self, entries: list[RemoteEntry]):
@@ -446,9 +474,9 @@ class RemoteExplorerPanel(QWidget):
             try:
                 entries: list[RemoteEntry] = f.result()
             except Exception as e:
-                self._toast_error(str(e))
+                self._error_signal.emit(str(e))
                 return
-            QTimer.singleShot(0, lambda: self._apply_children(parent_item, entries))
+            self._subtree_ready.emit(parent_item, entries)
         fut.add_done_callback(on_done)
 
     def _apply_children(self, parent_item: QTreeWidgetItem, entries: list[RemoteEntry]):
@@ -507,18 +535,18 @@ class RemoteExplorerPanel(QWidget):
             try:
                 entry: RemoteEntry = f.result()
             except Exception as e:
-                QTimer.singleShot(0, lambda: self._toast_error(str(e)))
+                self._error_signal.emit(str(e))
                 return
-            def apply():
-                if entry.is_dir:
-                    self._current_path = new_path
-                else:
-                    # 是文件 → 用编辑器打开
-                    self._open_remote_file(entry)
-                self._path_edit.setText(self._current_path)
-                self._populate_tree_root()
-            QTimer.singleShot(0, apply)
+            self._stat_resolved.emit(entry, new_path)
         fut.add_done_callback(on_done)
+
+    def _on_stat_resolved(self, entry: RemoteEntry, requested_path: str):
+        if entry.is_dir:
+            self._current_path = requested_path
+        else:
+            self._open_remote_file(entry)
+        self._path_edit.setText(self._current_path)
+        self._populate_tree_root()
 
     # ---------- 文件操作 ----------
 
@@ -594,19 +622,22 @@ class RemoteExplorerPanel(QWidget):
             try:
                 data = f.result()
             except Exception as e:
-                QTimer.singleShot(0, lambda: self._toast_error(str(e)))
+                self._error_signal.emit(str(e))
                 return
-            def apply():
-                try:
-                    with open(local_path, "wb") as fh:
-                        fh.write(data)
-                except Exception as e:
-                    self._toast_error(str(e))
-                    return
-                self._open_temp_map[local_path] = (host_alias, entry.path)
-                self.file_open_requested.emit(host_alias, entry.path, local_path, sess)
-            QTimer.singleShot(0, apply)
+            self._file_downloaded.emit(host_alias, entry.path, local_path, data)
         fut.add_done_callback(on_done)
+
+    def _on_file_downloaded(self, host_alias: str, remote_path: str,
+                              local_path: str, data: bytes):
+        try:
+            with open(local_path, "wb") as fh:
+                fh.write(data)
+        except Exception as e:
+            self._toast_error(str(e))
+            return
+        self._open_temp_map[local_path] = (host_alias, remote_path)
+        # session 总是当前活动的 session（下载就是用它发起的）
+        self.file_open_requested.emit(host_alias, remote_path, local_path, self._session)
 
     def remote_mapping_for(self, local_path: str) -> Optional[tuple[str, str]]:
         """主窗口的编辑器保存时调，查 local_path 对应哪个 (host_alias, remote_path)"""
@@ -628,7 +659,7 @@ class RemoteExplorerPanel(QWidget):
             try:
                 f.result()
             except Exception as e:
-                QTimer.singleShot(0, lambda: self._toast_error(str(e)))
+                self._error_signal.emit(str(e))
         fut.add_done_callback(on_done)
 
     def _new_file_under(self, parent_entry: RemoteEntry, parent_item: QTreeWidgetItem):
@@ -699,7 +730,7 @@ class RemoteExplorerPanel(QWidget):
             try:
                 f.result()
             except Exception as e:
-                QTimer.singleShot(0, lambda: self._toast_error(str(e)))
+                self._error_signal.emit(str(e))
         fut.add_done_callback(on_done)
 
     def _open_terminal_here(self, entry: RemoteEntry):
@@ -724,12 +755,12 @@ class RemoteExplorerPanel(QWidget):
             try:
                 f.result()
             except Exception as e:
-                QTimer.singleShot(0, lambda: self._toast_error(str(e)))
+                self._error_signal.emit(str(e))
                 return
             if item is None:
-                QTimer.singleShot(0, self._populate_tree_root)
+                self._refresh_root_signal.emit()
             else:
-                QTimer.singleShot(0, lambda: self._reload_subtree(item, path))
+                self._refresh_subtree_signal.emit(item, path)
         fut.add_done_callback(on_done)
 
     def _reload_subtree(self, item: QTreeWidgetItem, path: str):
