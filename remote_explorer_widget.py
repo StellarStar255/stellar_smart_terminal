@@ -385,14 +385,42 @@ class RemoteExplorerPanel(QWidget):
     # ---------- 文件树 ----------
 
     def _populate_tree_root(self):
+        """加载当前路径的内容到顶层（不再包一层 path 节点）
+
+        和本地 Explorer 行为一致：path 在路径栏里显示，文件/目录直接平铺在树根。
+        """
         self._tree.clear()
-        root = QTreeWidgetItem([self._current_path or "/"])
-        root.setData(0, _ROLE_ENTRY, RemoteEntry(
-            name=self._current_path, path=self._current_path, is_dir=True,
-        ))
-        root.setData(0, _ROLE_LOADED, False)
-        self._tree.addTopLevelItem(root)
-        self._tree.expandItem(root)
+        if self._session is None:
+            return
+        sess = self._session
+        path = self._current_path or "/"
+        fut = sess.submit(sess.listdir, path)
+
+        def on_done(f):
+            try:
+                entries: list[RemoteEntry] = f.result()
+            except Exception as e:
+                QTimer.singleShot(0, lambda: self._toast_error(str(e)))
+                return
+            QTimer.singleShot(0, lambda: self._apply_top_level(entries))
+        fut.add_done_callback(on_done)
+
+    def _apply_top_level(self, entries: list[RemoteEntry]):
+        """把目录内容直接放到树根"""
+        try:
+            self._tree.clear()
+        except RuntimeError:
+            return
+        for e in entries:
+            icon = "📁 " if e.is_dir else "📄 "
+            item = QTreeWidgetItem([icon + e.name])
+            item.setData(0, _ROLE_ENTRY, e)
+            item.setData(0, _ROLE_LOADED, False)
+            if e.is_dir:
+                # 占位让箭头出现，展开时才真正去 listdir
+                placeholder = QTreeWidgetItem(["…"])
+                item.addChild(placeholder)
+            self._tree.addTopLevelItem(item)
 
     def _on_item_expanded(self, item: QTreeWidgetItem):
         if item.data(0, _ROLE_LOADED):
@@ -638,8 +666,7 @@ class RemoteExplorerPanel(QWidget):
         if sess is None:
             return
         fut = sess.submit(sess.rename, entry.path, new_path)
-        parent_item = item.parent() or self._tree.topLevelItem(0)
-        self._refresh_after(fut, parent_item, parent_path)
+        self._refresh_after(fut, item.parent(), parent_path)
 
     def _delete_entry(self, entry: RemoteEntry, item: QTreeWidgetItem):
         confirm = QMessageBox.question(
@@ -657,9 +684,8 @@ class RemoteExplorerPanel(QWidget):
             fut = sess.submit(sess.remove_tree, entry.path)
         else:
             fut = sess.submit(sess.remove, entry.path)
-        parent_item = item.parent() or self._tree.topLevelItem(0)
         parent_path = posixpath.dirname(entry.path.rstrip("/")) or "/"
-        self._refresh_after(fut, parent_item, parent_path)
+        self._refresh_after(fut, item.parent(), parent_path)
 
     def _download_to_local(self, entry: RemoteEntry):
         save_path, _ = QFileDialog.getSaveFileName(self, t("remote.download"), entry.name)
@@ -692,14 +718,18 @@ class RemoteExplorerPanel(QWidget):
         fut = sess.submit(sess.upload, local_path, remote_path)
         self._refresh_after(fut, dir_item, dir_entry.path)
 
-    def _refresh_after(self, fut, item: QTreeWidgetItem, path: str):
+    def _refresh_after(self, fut, item: Optional[QTreeWidgetItem], path: str):
+        """操作成功后刷新对应子树。item 为 None 时（顶层操作）重刷整棵树。"""
         def on_done(f):
             try:
                 f.result()
             except Exception as e:
                 QTimer.singleShot(0, lambda: self._toast_error(str(e)))
                 return
-            QTimer.singleShot(0, lambda: self._reload_subtree(item, path))
+            if item is None:
+                QTimer.singleShot(0, self._populate_tree_root)
+            else:
+                QTimer.singleShot(0, lambda: self._reload_subtree(item, path))
         fut.add_done_callback(on_done)
 
     def _reload_subtree(self, item: QTreeWidgetItem, path: str):
