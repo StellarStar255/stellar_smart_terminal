@@ -129,6 +129,17 @@ class _RemoteTreeWidget(QTreeWidget):
     # ----- 拖出 → 内部 MIME（用于本树内部移动）+ 外部 URL（用于拖到 Finder 等） -----
 
     def startDrag(self, supported_actions):
+        """启动拖拽 —— 必须立即返回，否则鼠标按键已经被用户松开。
+
+        旧实现在这里同步调 _sync_download_for_drag 把文件先下载到本地，
+        网络稍慢就阻塞数秒，等下载完用户早已松手 → drag 根本没"开始"。
+
+        现在只塞自定义 MIME（远端路径列表）+ plain text。
+        - 内部拖拽：dropEvent 通过 event.source() is self + 私有 MIME 识别，
+          走 SFTP rename，不需要本地路径。
+        - 外部 drag-out（拖到 Finder/其他 app）：本实现不再支持直接拖出文件，
+          需要时请用右键菜单 → "Download to local…"。避免阻塞 UI 启动 drag。
+        """
         items = self.selectedItems()
         if not items:
             return
@@ -138,24 +149,15 @@ class _RemoteTreeWidget(QTreeWidget):
             return
 
         mime = QMimeData()
-        # 内部拖拽用：完整远端路径列表（不论文件/目录都带上）
         paths_text = "\n".join(e.path for e in entries)
+        # 私有 MIME：dropEvent 用来识别"这次 drag 来自本树"
         mime.setData(self.REMOTE_PATHS_MIME, paths_text.encode("utf-8"))
-        # 同时塞一份 plain text，方便用户把路径拖到终端/编辑器里粘
+        # 顺手提供 plain text，把远端路径拖进终端/编辑器即得到字符串
         mime.setText(paths_text)
-
-        # 外部拖拽用：只有文件才提前下载到本地临时文件 → file:// URL
-        # 目录不支持外部 drag-out（防止递归大下载）
-        file_entries = [e for e in entries if not e.is_dir]
-        if file_entries:
-            local_paths = self._panel._sync_download_for_drag(file_entries)
-            if local_paths:
-                mime.setUrls([QUrl.fromLocalFile(p) for p in local_paths])
 
         drag = QDrag(self)
         drag.setMimeData(mime)
-        # 同时支持 Move（内部）和 Copy（外部）；具体由接收方决定
-        drag.exec(Qt.DropAction.MoveAction | Qt.DropAction.CopyAction)
+        drag.exec(Qt.DropAction.MoveAction)
 
 
 class RemoteExplorerPanel(QWidget):
