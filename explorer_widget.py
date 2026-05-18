@@ -3,19 +3,21 @@ Explorer 文件浏览器面板
 提供类似 Cursor/VS Code 的文件浏览器功能
 """
 import os
+import posixpath
 import sys
 import subprocess
 import shutil
 from pathlib import Path
 
 from i18n import t
+import explorer_clipboard
 
 from PyQt6.QtWidgets import (
     QWidget, QVBoxLayout, QHBoxLayout, QFrame, QLabel,
     QPushButton, QTreeView, QMenu, QInputDialog, QMessageBox,
-    QAbstractItemView, QFileDialog, QApplication
+    QAbstractItemView, QFileDialog, QApplication, QProgressDialog
 )
-from PyQt6.QtCore import Qt, QDir, QModelIndex, pyqtSignal, QTimer
+from PyQt6.QtCore import Qt, QDir, QModelIndex, pyqtSignal, QTimer, QEventLoop
 from PyQt6.QtGui import QFileSystemModel, QAction, QDesktopServices, QCursor
 from PyQt6.QtCore import QUrl
 
@@ -545,6 +547,19 @@ class ExplorerPanel(QWidget):
 
             menu.addSeparator()
 
+            # 复制 / 粘贴（跨面板、跨窗口）
+            copy_action = menu.addAction(t("explorer.copy"))
+            copy_action.triggered.connect(lambda: self._clipboard_copy_selection(file_path))
+
+            paste_target = file_path if is_dir else os.path.dirname(file_path)
+            if explorer_clipboard.has_items():
+                paste_action = menu.addAction(
+                    t("explorer.paste_with_label", label=explorer_clipboard.describe())
+                )
+                paste_action.triggered.connect(lambda: self._clipboard_paste_into(paste_target))
+
+            menu.addSeparator()
+
             # 复制路径
             copy_path_action = menu.addAction(t("explorer.copy_path"))
             copy_path_action.triggered.connect(lambda: self._copy_path(file_path))
@@ -581,6 +596,15 @@ class ExplorerPanel(QWidget):
 
             new_folder_action = menu.addAction(t("explorer.new_folder"))
             new_folder_action.triggered.connect(lambda: self._new_folder(self._current_path))
+
+            if explorer_clipboard.has_items():
+                menu.addSeparator()
+                paste_action = menu.addAction(
+                    t("explorer.paste_with_label", label=explorer_clipboard.describe())
+                )
+                paste_action.triggered.connect(
+                    lambda: self._clipboard_paste_into(self._current_path)
+                )
 
             menu.addSeparator()
 
@@ -673,6 +697,187 @@ class ExplorerPanel(QWidget):
                 self.refresh()
             except Exception as e:
                 QMessageBox.warning(self, t("explorer.error"), t("explorer.delete_failed", error=e))
+
+    # ---------- 跨面板复制 / 粘贴 ----------
+
+    def _clipboard_copy_selection(self, fallback_path: str = None):
+        """把当前选中的文件 / 文件夹放入跨面板剪贴板。
+
+        若 fallback_path 不在选中范围内，则只复制 fallback_path（右键单项）。
+        """
+        indexes = self.tree_view.selectionModel().selectedIndexes()
+        paths: list[str] = []
+        seen = set()
+        for idx in indexes:
+            if idx.column() != 0:
+                continue
+            p = self.model.filePath(idx)
+            if p and p not in seen:
+                seen.add(p)
+                paths.append(p)
+        if fallback_path and fallback_path not in seen:
+            paths = [fallback_path]
+        if not paths:
+            return
+        explorer_clipboard.set_items([("local", p) for p in paths])
+
+    def _clipboard_paste_into(self, target_dir: str):
+        """把跨面板剪贴板里的项目粘贴到 target_dir（可能含远程源）"""
+        items = explorer_clipboard.get_items()
+        if not items or not target_dir:
+            return
+        try:
+            os.makedirs(target_dir, exist_ok=True)
+        except Exception as e:
+            QMessageBox.warning(self, t("explorer.error"),
+                                t("explorer.paste_failed", error=e))
+            return
+
+        errors: list[str] = []
+        skip_all = False
+        overwrite_all = False
+
+        for it in items:
+            kind = it[0]
+            try:
+                if kind == "local":
+                    src = it[1]
+                    name = os.path.basename(src.rstrip("/"))
+                    dst = os.path.join(target_dir, name)
+                    if os.path.abspath(src) == os.path.abspath(dst):
+                        continue
+                    if os.path.exists(dst):
+                        decision = self._ask_overwrite(name, skip_all, overwrite_all)
+                        if decision == "skip":
+                            continue
+                        if decision == "skip_all":
+                            skip_all = True
+                            continue
+                        if decision == "overwrite_all":
+                            overwrite_all = True
+                        # 覆盖前删旧的
+                        if os.path.isdir(dst) and not os.path.islink(dst):
+                            shutil.rmtree(dst)
+                        else:
+                            os.remove(dst)
+                    if os.path.isdir(src) and not os.path.islink(src):
+                        shutil.copytree(src, dst)
+                    else:
+                        shutil.copy2(src, dst)
+
+                elif kind == "remote":
+                    _, host_alias, remote_path, session = it
+                    if session is None or not session.is_connected():
+                        errors.append(f"{remote_path}: {t('remote.session_lost')}")
+                        continue
+                    name = posixpath.basename(remote_path.rstrip("/")) or host_alias
+                    dst = os.path.join(target_dir, name)
+                    if os.path.exists(dst):
+                        decision = self._ask_overwrite(name, skip_all, overwrite_all)
+                        if decision == "skip":
+                            continue
+                        if decision == "skip_all":
+                            skip_all = True
+                            continue
+                        if decision == "overwrite_all":
+                            overwrite_all = True
+                        if os.path.isdir(dst) and not os.path.islink(dst):
+                            shutil.rmtree(dst)
+                        else:
+                            os.remove(dst)
+                    self._download_remote_recursive(session, remote_path, dst)
+                else:
+                    errors.append(f"Unknown clipboard item: {it!r}")
+            except Exception as e:
+                errors.append(f"{it}: {e}")
+
+        if errors:
+            QMessageBox.warning(self, t("explorer.error"), "\n".join(errors))
+        self.refresh()
+
+    def _ask_overwrite(self, name: str, skip_all: bool, overwrite_all: bool) -> str:
+        """返回 'overwrite' / 'skip' / 'overwrite_all' / 'skip_all'"""
+        if overwrite_all:
+            return "overwrite"
+        if skip_all:
+            return "skip"
+        reply = QMessageBox.question(
+            self, t("explorer.overwrite_title"),
+            t("explorer.overwrite_msg", name=name),
+            QMessageBox.StandardButton.Yes
+            | QMessageBox.StandardButton.YesToAll
+            | QMessageBox.StandardButton.No
+            | QMessageBox.StandardButton.NoToAll,
+            QMessageBox.StandardButton.No,
+        )
+        if reply == QMessageBox.StandardButton.Yes:
+            return "overwrite"
+        if reply == QMessageBox.StandardButton.YesToAll:
+            return "overwrite_all"
+        if reply == QMessageBox.StandardButton.NoToAll:
+            return "skip_all"
+        return "skip"
+
+    def _download_remote_recursive(self, session, remote_path: str, local_path: str):
+        """通过 SSH session 把远程文件 / 目录递归下载到 local_path（阻塞，含进度对话框）"""
+        # 先 stat 看是不是目录
+        fut_stat = session.submit(session.stat, remote_path)
+        entry = fut_stat.result()
+        if not entry.is_dir:
+            fut = session.submit(session.download, remote_path, local_path)
+            self._wait_future_with_progress(
+                [fut], t("explorer.pasting"),
+            )
+            return
+        # 递归：先 mkdir，再列出，再为每个子项递归
+        os.makedirs(local_path, exist_ok=True)
+        fut_list = session.submit(session.listdir, remote_path)
+        children = fut_list.result()
+        # 一层一层下载，文件并发用同一 session executor 排队即可
+        for child in children:
+            child_local = os.path.join(local_path, child.name)
+            if child.is_dir and not child.is_link:
+                self._download_remote_recursive(session, child.path, child_local)
+            else:
+                fut = session.submit(session.download, child.path, child_local)
+                self._wait_future_with_progress([fut], t("explorer.pasting"))
+
+    def _wait_future_with_progress(self, futures: list, label: str):
+        """阻塞等待 futures，但跑一个事件循环让 UI 不卡。"""
+        if not futures:
+            return
+        progress = QProgressDialog(label, None, 0, len(futures), self)
+        progress.setWindowModality(Qt.WindowModality.WindowModal)
+        progress.setMinimumDuration(300)
+        progress.setValue(0)
+        done = {"n": 0, "errors": []}
+
+        def make_cb(_):
+            def cb(f):
+                try:
+                    f.result()
+                except Exception as e:
+                    done["errors"].append(str(e))
+                done["n"] += 1
+            return cb
+
+        for fut in futures:
+            fut.add_done_callback(make_cb(fut))
+
+        loop = QEventLoop()
+        timer = QTimer()
+        timer.setInterval(80)
+        def tick():
+            progress.setValue(done["n"])
+            if done["n"] >= len(futures):
+                timer.stop()
+                loop.quit()
+        timer.timeout.connect(tick)
+        timer.start()
+        loop.exec()
+        progress.setValue(len(futures))
+        if done["errors"]:
+            raise RuntimeError("; ".join(done["errors"]))
 
     def _copy_path(self, file_path: str):
         """复制完整路径到剪贴板"""

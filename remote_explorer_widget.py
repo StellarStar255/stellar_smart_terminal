@@ -25,6 +25,7 @@ from PyQt6.QtCore import Qt, pyqtSignal, QTimer, QMimeData, QUrl
 from PyQt6.QtGui import QAction, QCursor, QDrag
 
 from i18n import t
+import explorer_clipboard
 from ssh_session import HostConfig, RemoteEntry, SSHSession, parse_ssh_config
 
 
@@ -629,14 +630,28 @@ class RemoteExplorerPanel(QWidget):
     # ---------- 文件操作 ----------
 
     def _on_context_menu(self, pos):
+        if self._session is None:
+            return
         item = self._tree.itemAt(pos)
-        if item is None:
-            return
-        entry: RemoteEntry = item.data(0, _ROLE_ENTRY)
-        if entry is None:
-            return
+        entry: Optional[RemoteEntry] = item.data(0, _ROLE_ENTRY) if item is not None else None
 
         menu = QMenu(self)
+
+        if entry is None:
+            # 空白区域：粘贴到当前 path / 新建 / 刷新
+            if explorer_clipboard.has_items():
+                act_paste = QAction(
+                    t("remote.paste_with_label", label=explorer_clipboard.describe()), self,
+                )
+                act_paste.triggered.connect(lambda: self._clipboard_paste_into(self._current_path))
+                menu.addAction(act_paste)
+                menu.addSeparator()
+            act_refresh = QAction(t("remote.refresh"), self)
+            act_refresh.triggered.connect(self._on_refresh)
+            menu.addAction(act_refresh)
+            menu.exec(QCursor.pos())
+            return
+
         if not entry.is_dir:
             act_open = QAction(t("remote.open_in_editor"), self)
             act_open.triggered.connect(lambda: self._open_remote_file(entry))
@@ -658,6 +673,24 @@ class RemoteExplorerPanel(QWidget):
             menu.addAction(act_upload)
             menu.addSeparator()
 
+        # 跨面板复制 / 粘贴
+        act_copy = QAction(t("remote.copy"), self)
+        # 选中里若包含右键项则按选中复制；否则只复制右键项
+        act_copy.triggered.connect(lambda: self._clipboard_copy_selection(entry))
+        menu.addAction(act_copy)
+
+        if explorer_clipboard.has_items():
+            # 文件项目 → 粘贴到其父目录；目录项目 → 粘贴到它里面
+            paste_dir = entry.path if entry.is_dir else (
+                posixpath.dirname(entry.path.rstrip("/")) or "/"
+            )
+            act_paste = QAction(
+                t("remote.paste_with_label", label=explorer_clipboard.describe()), self,
+            )
+            act_paste.triggered.connect(lambda: self._clipboard_paste_into(paste_dir))
+            menu.addAction(act_paste)
+        menu.addSeparator()
+
         act_rename = QAction(t("remote.rename"), self)
         act_rename.triggered.connect(lambda: self._rename_entry(entry, item))
         menu.addAction(act_rename)
@@ -672,11 +705,279 @@ class RemoteExplorerPanel(QWidget):
             menu.addAction(act_download)
 
         menu.addSeparator()
-        act_copy = QAction(t("remote.copy_path"), self)
-        act_copy.triggered.connect(lambda: QApplication.clipboard().setText(entry.path))
-        menu.addAction(act_copy)
+        act_copy_path = QAction(t("remote.copy_path"), self)
+        act_copy_path.triggered.connect(lambda: QApplication.clipboard().setText(entry.path))
+        menu.addAction(act_copy_path)
 
         menu.exec(QCursor.pos())
+
+    # ---------- 跨面板复制 / 粘贴 ----------
+
+    def _clipboard_copy_selection(self, fallback_entry: Optional[RemoteEntry] = None):
+        """把当前选中的远程文件 / 目录放入跨面板剪贴板。
+
+        选中里包含 fallback_entry 时按整体选中复制；否则只复制 fallback_entry。
+        这样右键点未选中项也能复制单项，符合常见 UX。
+        """
+        if self._session is None:
+            return
+        host_alias = self._session.host_config.alias
+        selected_entries: list[RemoteEntry] = []
+        for it in self._tree.selectedItems():
+            e: RemoteEntry = it.data(0, _ROLE_ENTRY)
+            if e is not None:
+                selected_entries.append(e)
+
+        if fallback_entry is not None and fallback_entry not in selected_entries:
+            entries = [fallback_entry]
+        else:
+            entries = selected_entries
+
+        payload: list[tuple] = []
+        seen = set()
+        for e in entries:
+            if e.path in seen:
+                continue
+            seen.add(e.path)
+            payload.append(("remote", host_alias, e.path, self._session))
+        if payload:
+            explorer_clipboard.set_items(payload)
+
+    def _clipboard_paste_into(self, target_dir: str):
+        """把跨面板剪贴板里的项目粘贴到当前远端 target_dir"""
+        if self._session is None:
+            return
+        items = explorer_clipboard.get_items()
+        if not items or not target_dir:
+            return
+        sess = self._session
+
+        errors: list[str] = []
+        skip_all = False
+        overwrite_all = False
+
+        for it in items:
+            kind = it[0]
+            try:
+                if kind == "local":
+                    src = it[1]
+                    name = os.path.basename(src.rstrip("/"))
+                    dst = posixpath.join(target_dir, name)
+                    if self._remote_exists(sess, dst):
+                        decision = self._ask_overwrite(name, skip_all, overwrite_all)
+                        if decision == "skip":
+                            continue
+                        if decision == "skip_all":
+                            skip_all = True
+                            continue
+                        if decision == "overwrite_all":
+                            overwrite_all = True
+                        self._remote_remove(sess, dst)
+                    if os.path.isdir(src) and not os.path.islink(src):
+                        self._upload_local_dir(sess, src, dst)
+                    else:
+                        fut = sess.submit(sess.upload, src, dst)
+                        self._wait_future_with_progress([fut], t("remote.pasting_progress",
+                                                                 dst=target_dir))
+
+                elif kind == "remote":
+                    _, host_alias, remote_src, src_sess = it
+                    if src_sess is None or not src_sess.is_connected():
+                        errors.append(f"{remote_src}: {t('remote.session_lost')}")
+                        continue
+                    name = posixpath.basename(remote_src.rstrip("/")) or host_alias
+                    dst = posixpath.join(target_dir, name)
+                    # 同源同路径粘到同一目录 → 跳过避免覆盖自己
+                    if src_sess is sess and remote_src == dst:
+                        continue
+                    if self._remote_exists(sess, dst):
+                        decision = self._ask_overwrite(name, skip_all, overwrite_all)
+                        if decision == "skip":
+                            continue
+                        if decision == "skip_all":
+                            skip_all = True
+                            continue
+                        if decision == "overwrite_all":
+                            overwrite_all = True
+                        self._remote_remove(sess, dst)
+                    # 走临时文件中转：远程源 → 本地 temp → 远程目标
+                    self._remote_to_remote(src_sess, sess, remote_src, dst)
+                else:
+                    errors.append(f"Unknown clipboard item: {it!r}")
+            except Exception as e:
+                errors.append(f"{it}: {e}")
+
+        if errors:
+            QMessageBox.warning(self, t("remote.op_failed_title"), "\n".join(errors))
+        # 刷新当前树根（target_dir 通常就是 _current_path 或它的子目录）
+        if target_dir == self._current_path:
+            self._populate_tree_root()
+        else:
+            # 找到对应的树节点刷新；找不到就重刷整棵树
+            self._refresh_subtree_by_path(target_dir)
+
+    def _refresh_subtree_by_path(self, path: str):
+        """如果 tree 顶层有 path 对应的目录项，把它重刷一下；否则刷整棵树"""
+        for i in range(self._tree.topLevelItemCount()):
+            it = self._tree.topLevelItem(i)
+            entry: RemoteEntry = it.data(0, _ROLE_ENTRY)
+            if entry and entry.is_dir and entry.path == path:
+                self._reload_subtree(it, path)
+                return
+        self._populate_tree_root()
+
+    def _ask_overwrite(self, name: str, skip_all: bool, overwrite_all: bool) -> str:
+        if overwrite_all:
+            return "overwrite"
+        if skip_all:
+            return "skip"
+        reply = QMessageBox.question(
+            self, t("remote.overwrite_title"),
+            t("remote.overwrite_msg", name=name),
+            QMessageBox.StandardButton.Yes
+            | QMessageBox.StandardButton.YesToAll
+            | QMessageBox.StandardButton.No
+            | QMessageBox.StandardButton.NoToAll,
+            QMessageBox.StandardButton.No,
+        )
+        if reply == QMessageBox.StandardButton.Yes:
+            return "overwrite"
+        if reply == QMessageBox.StandardButton.YesToAll:
+            return "overwrite_all"
+        if reply == QMessageBox.StandardButton.NoToAll:
+            return "skip_all"
+        return "skip"
+
+    def _remote_exists(self, sess: SSHSession, path: str) -> bool:
+        fut = sess.submit(sess.stat, path)
+        try:
+            fut.result()
+            return True
+        except Exception:
+            return False
+
+    def _remote_remove(self, sess: SSHSession, path: str):
+        """删除远端文件或目录（递归）"""
+        fut_stat = sess.submit(sess.stat, path)
+        try:
+            entry: RemoteEntry = fut_stat.result()
+        except Exception:
+            return
+        if entry.is_dir and not entry.is_link:
+            fut = sess.submit(sess.remove_tree, path)
+        else:
+            fut = sess.submit(sess.remove, path)
+        fut.result()
+
+    def _upload_local_dir(self, sess: SSHSession, local_dir: str, remote_dir: str):
+        """把本地目录递归上传到 remote_dir"""
+        fut = sess.submit(sess.mkdir, remote_dir)
+        try:
+            fut.result()
+        except Exception:
+            pass  # 可能已存在，忽略
+        futures = []
+        for root, dirs, files in os.walk(local_dir):
+            rel = os.path.relpath(root, local_dir)
+            remote_root = remote_dir if rel == "." else posixpath.join(
+                remote_dir, *rel.split(os.sep)
+            )
+            for d in dirs:
+                r_path = posixpath.join(remote_root, d)
+                f = sess.submit(sess.mkdir, r_path)
+                # mkdir 失败（已存在）不致命，等会回收
+                futures.append(f)
+            for fname in files:
+                local_path = os.path.join(root, fname)
+                r_path = posixpath.join(remote_root, fname)
+                futures.append(sess.submit(sess.upload, local_path, r_path))
+        # 等所有 future 完成；mkdir 的失败吞掉
+        self._wait_future_with_progress(futures, t("remote.pasting_progress",
+                                                   dst=remote_dir),
+                                        tolerate_errors=True)
+
+    def _remote_to_remote(self, src_sess: SSHSession, dst_sess: SSHSession,
+                          src_path: str, dst_path: str):
+        """跨/同 session 远程 → 远程：经本地 temp 中转"""
+        # 先 stat 源判断是不是目录
+        entry: RemoteEntry = src_sess.submit(src_sess.stat, src_path).result()
+        tmp_root = tempfile.mkdtemp(prefix="smart_terminal_paste_")
+        try:
+            tmp_local = os.path.join(tmp_root, os.path.basename(src_path.rstrip("/")) or "item")
+            if entry.is_dir:
+                self._download_remote_recursive(src_sess, src_path, tmp_local)
+                self._upload_local_dir(dst_sess, tmp_local, dst_path)
+            else:
+                fut = src_sess.submit(src_sess.download, src_path, tmp_local)
+                self._wait_future_with_progress([fut], t("remote.pasting_progress",
+                                                         dst=dst_path))
+                fut2 = dst_sess.submit(dst_sess.upload, tmp_local, dst_path)
+                self._wait_future_with_progress([fut2], t("remote.pasting_progress",
+                                                          dst=dst_path))
+        finally:
+            try:
+                import shutil as _shutil
+                _shutil.rmtree(tmp_root, ignore_errors=True)
+            except Exception:
+                pass
+
+    def _download_remote_recursive(self, sess: SSHSession, remote_path: str, local_path: str):
+        """通过 src session 把远程文件 / 目录递归下载到 local_path（阻塞）"""
+        entry: RemoteEntry = sess.submit(sess.stat, remote_path).result()
+        if not entry.is_dir:
+            fut = sess.submit(sess.download, remote_path, local_path)
+            self._wait_future_with_progress([fut], t("remote.pasting_progress",
+                                                     dst=local_path))
+            return
+        os.makedirs(local_path, exist_ok=True)
+        children = sess.submit(sess.listdir, remote_path).result()
+        for child in children:
+            child_local = os.path.join(local_path, child.name)
+            if child.is_dir and not child.is_link:
+                self._download_remote_recursive(sess, child.path, child_local)
+            else:
+                fut = sess.submit(sess.download, child.path, child_local)
+                self._wait_future_with_progress([fut], t("remote.pasting_progress",
+                                                         dst=local_path))
+
+    def _wait_future_with_progress(self, futures: list, label: str,
+                                    tolerate_errors: bool = False):
+        """阻塞等待 futures 完成，跑事件循环避免 UI 卡死"""
+        if not futures:
+            return
+        progress = QProgressDialog(label, None, 0, len(futures), self)
+        progress.setWindowModality(Qt.WindowModality.WindowModal)
+        progress.setMinimumDuration(300)
+        progress.setValue(0)
+        done = {"n": 0, "errors": []}
+
+        def make_cb():
+            def cb(f):
+                try:
+                    f.result()
+                except Exception as e:
+                    done["errors"].append(str(e))
+                done["n"] += 1
+            return cb
+
+        for fut in futures:
+            fut.add_done_callback(make_cb())
+
+        from PyQt6.QtCore import QEventLoop
+        loop = QEventLoop()
+        timer = QTimer()
+        timer.setInterval(80)
+        def tick():
+            progress.setValue(done["n"])
+            if done["n"] >= len(futures):
+                timer.stop()
+                loop.quit()
+        timer.timeout.connect(tick)
+        timer.start()
+        loop.exec()
+        progress.setValue(len(futures))
+        if done["errors"] and not tolerate_errors:
+            raise RuntimeError("; ".join(done["errors"]))
 
     def _open_remote_file(self, entry: RemoteEntry):
         if self._session is None:
