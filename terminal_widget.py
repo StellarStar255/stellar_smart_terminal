@@ -526,15 +526,28 @@ class TerminalWidget(QWidget):
         """计算字符尺寸"""
         # 使用 QFontMetricsF 获取浮点精度的度量
         fmf = QFontMetricsF(self.term_font)
+        self.char_width, self.char_height, self.char_ascent = self._terminal_cell_metrics(fmf)
+        self._font_metrics = QFontMetrics(self.term_font)
 
-        # 使用 horizontalAdvance，这是字符实际占用的水平空间
-        self.char_width = fmf.horizontalAdvance('W')
-        self.char_height = fmf.height()
-        self.char_ascent = fmf.ascent()
+    @staticmethod
+    def _terminal_cell_metrics(font_metrics):
+        """返回适合终端网格的 (cell_width, cell_height, ascent)。
 
-        # 确保 char_width 至少为 1，防止除零错误
-        self.char_width = max(1.0, self.char_width)
-        self.char_height = max(1.0, self.char_height)
+        终端列宽以单列字符为单位，但中文通常经由 fallback 字体绘制。
+        只用拉丁等宽字体的 W 度量会低估 CJK glyph 的宽度/高度，导致
+        输入提交后反色行或下一行重绘时遮住中文的一部分。
+        """
+        latin_width = float(font_metrics.horizontalAdvance('W'))
+        cjk_width = max(
+            float(font_metrics.horizontalAdvance(ch)) for ch in ('你', '好', '呀')
+        ) / 2.0
+        cell_width = max(1.0, latin_width, cjk_width)
+
+        cjk_rect = font_metrics.boundingRect('你好呀')
+        cell_height = max(1.0, float(font_metrics.height()), float(cjk_rect.height()) + 2.0)
+        ascent = max(1.0, float(font_metrics.ascent()), float(-cjk_rect.top()) + 1.0)
+
+        return cell_width, cell_height, ascent
 
     def showEvent(self, event):
         """窗口显示时重新计算字符尺寸"""
@@ -610,12 +623,17 @@ class TerminalWidget(QWidget):
         _painter = QPainter(_pix)
         _painter.setFont(self.term_font)
         _fm = _painter.fontMetrics()
-        real_cw = float(_fm.horizontalAdvance('W'))
-        real_ch = float(_fm.height())
-        real_ascent = float(_fm.ascent())
+        real_cw, real_ch, real_ascent = self._terminal_cell_metrics(_fm)
         _painter.end()
-        if real_cw > 1 and abs(real_cw - self.char_width) > 0.5:
-            print(f"[Terminal] DPI fix: char_width {self.char_width:.1f} -> {real_cw:.1f}")
+        if real_cw > 1 and (
+            abs(real_cw - self.char_width) > 0.5
+            or abs(real_ch - self.char_height) > 0.5
+            or abs(real_ascent - self.char_ascent) > 0.5
+        ):
+            print(
+                f"[Terminal] DPI/CJK metrics fix: "
+                f"{self.char_width:.1f}x{self.char_height:.1f} -> {real_cw:.1f}x{real_ch:.1f}"
+            )
             self.char_width = real_cw
             self.char_height = real_ch
             self.char_ascent = real_ascent
@@ -1107,15 +1125,22 @@ class TerminalWidget(QWidget):
         """通过实际渲染校准字符宽度"""
         # 使用 painter 的 fontMetrics 测量
         fm = painter.fontMetrics()
-        painter_advance = fm.horizontalAdvance('W')
+        painter_width, painter_height, painter_ascent = self._terminal_cell_metrics(fm)
 
         # 如果 painter 的 metrics 与之前计算的不同，更新并重新计算终端大小
-        if abs(painter_advance - self.char_width) > 1:
-            old_cw = self.char_width
-            self.char_width = float(painter_advance)
-            self.char_height = float(fm.height())
-            self.char_ascent = float(fm.ascent())
-            print(f"[Terminal] Calibration: char_width {old_cw:.1f} -> {self.char_width:.1f}")
+        if (
+            abs(painter_width - self.char_width) > 1
+            or abs(painter_height - self.char_height) > 1
+            or abs(painter_ascent - self.char_ascent) > 1
+        ):
+            old_cw, old_ch = self.char_width, self.char_height
+            self.char_width = painter_width
+            self.char_height = painter_height
+            self.char_ascent = painter_ascent
+            print(
+                f"[Terminal] Calibration: "
+                f"{old_cw:.1f}x{old_ch:.1f} -> {self.char_width:.1f}x{self.char_height:.1f}"
+            )
             # 立即重新计算终端大小（不设置为0，避免当前帧渲染空白）
             QTimer.singleShot(0, self._update_terminal_size)
 
@@ -1404,38 +1429,12 @@ class TerminalWidget(QWidget):
         bg_default = self.bg_color
         last_fg_color = None  # 缓存上一个前景色，减少 setPen 调用
         padding = self.PADDING  # 局部变量加速
-        # 用 painter 当前上下文的 fontMetrics（不是 __init__ 缓存的 self._font_metrics）。
-        # 在 HiDPI 上 cache 时机和 painter 实际渲染的 DPI 可能不一致，导致 fm_advance
-        # 报告的 CJK 宽度小于实际绘制宽度 → push 不够 → CJK 仍被下一格覆盖。
-        live_fm = painter.fontMetrics()
-        fm_advance = live_fm.horizontalAdvance
-
-        def _peek_data(line, idx):
-            """安全读 buffer_line[idx].data，越界返回 ''。"""
-            try:
-                nxt = line[idx]
-            except (KeyError, IndexError, TypeError):
-                return ''
-            if hasattr(nxt, 'data'):
-                return nxt.data or ''
-            if isinstance(nxt, str):
-                return nxt
-            return ''
-
         for display_row, buffer_line in enumerate(display_lines):
             row_y = int(padding + display_row * char_height)
             # 用下一行起点减去本行起点作为本行高度，防止分数像素累计造成行间空隙
             row_h = int(padding + (display_row + 1) * char_height) - row_y
             text_y = int(row_y + self.char_ascent)
-
-            # physical_x 跟踪「compressed CJK 连续段」内当前字形的右边界。
-            # 仅在判定 cell N+1 还是 CJK / 非 stub 的情况下推开下一个 CJK，避免
-            # Ink/React TUI 用 cursor positioning 逐字写 CJK 导致下一格 glyph
-            # 直接画到上一格的右半边（视觉上"被切半"）。
-            # 一旦遇到 narrow 字符 / stub / proper layout，立刻 reset 到 cell_x，
-            # 以保持与光标/原有列对齐 —— 这是 a80b748 回滚 physical_x 全局方案的
-            # 根本顾虑（cursor positioning 重绘破坏全局 advance 累计）。
-            physical_x = 0
+            row_cells = []
 
             for col in range(num_cols):
                 try:
@@ -1477,52 +1476,35 @@ class TerminalWidget(QWidget):
 
                 # 判断宽字符（空 data 视为单宽，等同于普通空格的填充）
                 is_wide = bool(char_text) and self._is_wide_char(char_text)
-
-                # compressed 检测仅用于决定 span/背景：当前 wide char 且下一格还有
-                # 非 stub/非空格内容（典型 Ink 写法）。span=1 避免本格背景越界到
-                # 已经被下一个 CJK 占用的列；proper 布局 span=2 保持背景无缝拼接。
-                next_data = _peek_data(buffer_line, col + 1) if is_wide else ''
-                compressed = is_wide and bool(next_data) and next_data != ' '
-
-                # x 决策：只要是 wide CJK 就一律 max(cell_x, physical_x)。
-                # - proper 布局下，前一个 cell 是 narrow/stub，physical_x 已 reset
-                #   到 cell-aligned，等于 cell_x，行为不变。
-                # - compressed 段中（含段尾那个 next 是 stub 的 CJK），physical_x
-                #   领先于 cell_x，max() 把字形推到上一个 CJK 的右边，避免重叠。
-                # narrow 字符总是按 cell_x 绘制，保证与光标/列对齐。
-                # int() 是必需的：physical_x 是 float（fm_advance / char_width 累计），
-                # QPainter.drawText(int, int, str) 不接受 float。
-                if is_wide:
-                    x = int(max(cell_x, physical_x))
-                else:
-                    x = cell_x
-                span = (1 if compressed else 2) if is_wide else 1
+                span = 2 if is_wide else 1
 
                 # 用「下一格起点 - 当前格起点」算宽度，使背景在水平方向也无缝拼接
                 char_draw_width = int(padding + (col + span) * char_width) - cell_x
+                row_cells.append((
+                    cell_x,
+                    char_draw_width,
+                    char_text,
+                    fg_color,
+                    bg_color,
+                    has_bg,
+                ))
 
-                # 绘制背景（包括 codex 等 TUI 给整行铺色的高亮，即便 data 为空格/空）
-                # 背景按 cell 对齐；compressed 模式下字形会越过 cell 边界，这是
-                # Ink 写法的内在限制，背景不去补偿。
+            # 先绘制整行背景，再绘制文字。宽字符在 pyte 中会占用后一格
+            # 空 stub；如果按 cell 交替绘制，带背景的 stub 会盖住中文右半边。
+            for cell_x, char_draw_width, _char_text, _fg_color, bg_color, has_bg in row_cells:
                 if has_bg:
                     painter.fillRect(cell_x, row_y, char_draw_width, row_h, bg_color)
 
-                # 绘制字符
+            for cell_x, _char_draw_width, char_text, fg_color, bg_color, _has_bg in row_cells:
+                # 字符严格按 pyte 的 cell 坐标绘制。pyte 已用 wcwidth 为 CJK
+                # 留出 stub cell；额外按 glyph advance 推动 x 会在 Claude/Ink
+                # 提交后局部重绘时累积偏移，导致中文只显示半个或错位。
                 if char_text and char_text != ' ':
                     fg_color = self._ensure_visible(fg_color, bg_color)
                     if fg_color != last_fg_color:
                         painter.setPen(fg_color)
                         last_fg_color = fg_color
-                    painter.drawText(x, text_y, char_text)
-
-                # 更新 physical_x：
-                # - wide CJK：用实际 glyph advance 累计（保证下个 CJK 不重叠）
-                # - narrow（含 space）：reset 到该 cell 的 cell-aligned 末尾，
-                #   斩断 compressed 累计，保证后续 narrow / 光标按列对齐。
-                if is_wide:
-                    physical_x = x + fm_advance(char_text)
-                else:
-                    physical_x = cell_x + char_width
+                    painter.drawText(cell_x, text_y, char_text)
 
         # 注意：选区高亮和搜索高亮已移至 paintEvent 中单独绘制，
         # 这样拖动选择时不会触发缓存重建，大幅提升性能
