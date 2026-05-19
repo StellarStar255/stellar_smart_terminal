@@ -919,50 +919,189 @@ class TerminalWidget(QWidget):
             self._output_buffer.clear()
             self.output_recorded.emit(combined)
 
+    def _debug_save_cache_pixmap(self):
+        """保存当前 cache pixmap 为 PNG，便于和屏幕实际显示对比。"""
+        if self._cache_pixmap is None or self._cache_pixmap.isNull():
+            return None
+        out_path = os.path.join(os.path.dirname(__file__), 'pyte_cache_dump.png')
+        ok = self._cache_pixmap.save(out_path, "PNG")
+        if ok:
+            return out_path
+        return None
+
+    def _debug_save_widget_screenshot(self):
+        """抓取 widget 当前实际显示（包括 paintEvent 所有 overlay 之后），保存 PNG。
+
+        这个 PNG 应该和你眼睛在 Stellar 窗口看到的内容一致；和 cache pixmap PNG 对比
+        就能定位 bug 是在缓存阶段还是 paintEvent 的 overlay 阶段（cursor / selection /
+        search highlight / IME preedit）。
+        """
+        out_path = os.path.join(os.path.dirname(__file__), 'pyte_widget_screenshot.png')
+        pix = self.grab()
+        if pix.isNull():
+            return None
+        ok = pix.save(out_path, "PNG")
+        if ok:
+            return out_path
+        return None
+
     def _debug_dump_buffer(self):
-        """调试：将 pyte 缓冲区内容导出到文件"""
+        """调试：将 pyte 缓冲区内容导出到文件。
+
+        为了诊断 CJK 渲染问题，包含两类信息：
+        1) 行预览（直接 join，空 data 用 '·' 表示便于看 stub）
+        2) 含 CJK 的行：逐 cell 详细输出（col / repr(data) / east_asian_width）
+        3) Stellar 进程内实测字体度量（QFontInfo / QFontMetricsF / painter.fontMetrics()）
+           —— 这是诊断 char_width 与 CJK glyph advance 不匹配的关键。
+        """
         dump_path = os.path.join(os.path.dirname(__file__), 'pyte_buffer_dump.txt')
+
+        # --- 进程内实测字体度量 ---
+        from PyQt6.QtGui import QFontInfo, QFontMetricsF, QPixmap, QPainter
+        finfo = QFontInfo(self.term_font)
+        fmf = QFontMetricsF(self.term_font)
+        # painter 视角度量（与 _rebuild_cache 时上下文一致）
+        _pix = QPixmap(max(1, int(self.width())), max(1, int(self.height())))
+        _p = QPainter(_pix)
+        _p.setFont(self.term_font)
+        pfm = _p.fontMetrics()
+
+        font_metrics_lines = []
+        font_metrics_lines.append(f"font requested: Monaco 12, actual family={finfo.family()!r}, "
+                                  f"px={finfo.pixelSize()}, pt={finfo.pointSize()}, "
+                                  f"fixedPitch={finfo.fixedPitch()}")
+        font_metrics_lines.append(f"self.char_width = {self.char_width}")
+        font_metrics_lines.append(f"QFontMetricsF: 'W'={fmf.horizontalAdvance('W'):.4f}, "
+                                  f"'你'={fmf.horizontalAdvance('你'):.4f}, "
+                                  f"'好'={fmf.horizontalAdvance('好'):.4f}")
+        font_metrics_lines.append(f"painter.fontMetrics() (int): 'W'={pfm.horizontalAdvance('W')}, "
+                                  f"'你'={pfm.horizontalAdvance('你')}, "
+                                  f"'好'={pfm.horizontalAdvance('好')}, "
+                                  f"'呀'={pfm.horizontalAdvance('呀')}")
+        cjk_adv = pfm.horizontalAdvance('你')
+        alloc = 2 * self.char_width
+        font_metrics_lines.append(f"==> 2*char_width = {alloc:.4f}, painter CJK advance = {cjk_adv}, "
+                                  f"差额 = {alloc - cjk_adv:+.4f} px "
+                                  f"({'cell 比 glyph 宽（正常）' if alloc >= cjk_adv else 'CJK 溢出 cell（异常 → 被后字覆盖）'})")
+        _p.end()
+
+        def _row_has_cjk(row_obj, cols):
+            for c in range(cols):
+                try:
+                    ch = row_obj[c]
+                    t = ch.data if hasattr(ch, 'data') else str(ch)
+                except (KeyError, IndexError, TypeError):
+                    continue
+                if t and unicodedata.east_asian_width(t[0]) in ('F', 'W'):
+                    return True
+            return False
+
+        def _cell_detail(row_obj, cols):
+            lines = []
+            for c in range(cols):
+                try:
+                    ch = row_obj[c]
+                except (KeyError, IndexError, TypeError):
+                    continue
+                if hasattr(ch, 'data'):
+                    t = ch.data
+                    fg = getattr(ch, 'fg', 'default')
+                    bg = getattr(ch, 'bg', 'default')
+                    bold = getattr(ch, 'bold', False)
+                    reverse = getattr(ch, 'reverse', False)
+                    attrs = []
+                    if fg != 'default':
+                        attrs.append(f"fg={fg}")
+                    if bg != 'default':
+                        attrs.append(f"bg={bg}")
+                    if bold:
+                        attrs.append("bold")
+                    if reverse:
+                        attrs.append("reverse")
+                    attr_str = (' [' + ','.join(attrs) + ']') if attrs else ''
+                else:
+                    t = str(ch)
+                    attr_str = ''
+                if not t:
+                    lines.append(f"    col {c:3d}: <empty/stub>{attr_str}")
+                else:
+                    eaw = unicodedata.east_asian_width(t[0])
+                    lines.append(f"    col {c:3d}: {t!r}  eaw={eaw}{attr_str}")
+            return lines
+
         with open(dump_path, 'w', encoding='utf-8') as f:
             f.write(f"=== PYTE BUFFER DUMP ===\n")
             f.write(f"term_cols={self.term_cols}, term_rows={self.term_rows}\n")
             f.write(f"screen.columns={self.screen.columns}, screen.lines={self.screen.lines}\n")
+            f.write(f"char_width={self.char_width}, char_height={self.char_height}\n")
             f.write(f"scroll_offset={self.scroll_offset}\n")
             history_count, total_lines, start_line = self._get_display_info()
-            f.write(f"history_count={history_count}, total_lines={total_lines}, start_line={start_line}\n\n")
+            f.write(f"history_count={history_count}, total_lines={total_lines}, start_line={start_line}\n")
+            f.write(f"cursor: x={self.screen.cursor.x}, y={self.screen.cursor.y}, "
+                    f"hidden={self.screen.cursor.hidden}, "
+                    f"cursor_visible(blink)={self.cursor_visible}, hasFocus={self.hasFocus()}\n")
+            f.write(f"widget.size={self.width()}x{self.height()}, "
+                    f"devicePixelRatioF={self.devicePixelRatioF()}\n")
+            if self._cache_pixmap and not self._cache_pixmap.isNull():
+                f.write(f"cache_pixmap.size={self._cache_pixmap.width()}x{self._cache_pixmap.height()}, "
+                        f"DPR={self._cache_pixmap.devicePixelRatio()}\n")
+            else:
+                f.write("cache_pixmap: <null>\n")
+            f.write("\n=== FONT METRICS (in-process) ===\n")
+            for line in font_metrics_lines:
+                f.write(line + "\n")
+            f.write("\nNote: in row preview, '·' = empty/stub cell, ' ' = real space.\n\n")
+
+            cols = min(self.screen.columns, 200)
 
             f.write("--- CURRENT SCREEN BUFFER ---\n")
             for row in range(self.screen.lines):
+                row_obj = self.screen.buffer[row]
                 chars = []
-                for col in range(min(self.screen.columns, 200)):
+                for col in range(cols):
                     try:
-                        ch = self.screen.buffer[row][col]
+                        ch = row_obj[col]
                         t = ch.data if hasattr(ch, 'data') else str(ch)
-                        chars.append(t if t else ' ')
                     except (KeyError, IndexError, TypeError):
-                        chars.append(' ')
+                        t = ''
+                    chars.append(t if t else '·')
                 line = ''.join(chars).rstrip()
-                if line:
-                    f.write(f"  row {row:2d}: |{line}|\n")
-                else:
-                    f.write(f"  row {row:2d}: |\n")
+                f.write(f"  row {row:2d}: |{line}|\n")
+                if _row_has_cjk(row_obj, cols):
+                    f.write("    -- cell detail (CJK row) --\n")
+                    for ln in _cell_detail(row_obj, cols):
+                        f.write(ln + "\n")
 
             f.write("\n--- HISTORY (last 10 lines) ---\n")
             history = self._get_history_top()
             if history:
                 h_start = max(0, len(history) - 10)
                 for i in range(h_start, len(history)):
+                    row_obj = history[i]
                     chars = []
-                    for col in range(min(self.screen.columns, 200)):
+                    for col in range(cols):
                         try:
-                            ch = history[i][col]
+                            ch = row_obj[col]
                             t = ch.data if hasattr(ch, 'data') else str(ch)
-                            chars.append(t if t else ' ')
                         except (KeyError, IndexError, TypeError):
-                            chars.append(' ')
+                            t = ''
+                        chars.append(t if t else '·')
                     line = ''.join(chars).rstrip()
                     f.write(f"  hist {i:3d}: |{line}|\n")
+                    if _row_has_cjk(row_obj, cols):
+                        f.write("    -- cell detail (CJK row) --\n")
+                        for ln in _cell_detail(row_obj, cols):
+                            f.write(ln + "\n")
 
         print(f"[Terminal] Buffer dumped to {dump_path}")
+
+        cache_png = self._debug_save_cache_pixmap()
+        if cache_png:
+            print(f"[Terminal] Cache pixmap saved to {cache_png}")
+
+        screen_png = self._debug_save_widget_screenshot()
+        if screen_png:
+            print(f"[Terminal] Widget screenshot saved to {screen_png}")
 
     def _calibrate_char_width(self, painter: QPainter):
         """通过实际渲染校准字符宽度"""
@@ -1060,11 +1199,15 @@ class TerminalWidget(QWidget):
         # 检查是否需要重建缓存
         # （以前 resize 期间会跳过重建并复用旧缓存以"防重影"，但子进程不响应 SIGWINCH 时
         # 会卡住整片空白。现在直接走正常重建路径：pyte 自然 reflow，比空白可靠得多。）
+        # cache pixmap 是按 size*DPR 创建的物理像素 pixmap；与 widget logical size
+        # 比较时要乘 DPR 才一致。
+        dpr = self.devicePixelRatioF()
         need_rebuild = (
             self._cache_pixmap is None or
             self._cache_pixmap.isNull() or
             not self._cache_valid or
-            self._cache_pixmap.size() != self.size()
+            self._cache_pixmap.size() != self.size() * dpr or
+            self._cache_pixmap.devicePixelRatio() != dpr
         )
 
         if need_rebuild:
@@ -1196,10 +1339,21 @@ class TerminalWidget(QWidget):
             return
 
         # 创建或调整pixmap大小
-        if self._cache_pixmap is None or self._cache_pixmap.isNull() or self._cache_pixmap.size() != self.size():
-            self._cache_pixmap = QPixmap(self.size())
+        # 在 HiDPI（Retina）上必须显式按 devicePixelRatio 创建 pixmap，否则：
+        # - QPixmap(self.size()) 拿到的是 logical pixel 大小、默认 DPR=1.0
+        # - widget 实际 DPR=2.0 → 贴图时 Qt 会拉伸 / 重采样
+        # - painter 在 1x pixmap 上渲染字体度量会与 logical 坐标不一致
+        # - CJK glyph 视觉宽度被放大、超过 cell 分配 → 后字盖住前字（"被切半"）
+        dpr = self.devicePixelRatioF()
+        target_size = self.size() * dpr
+        if (self._cache_pixmap is None
+                or self._cache_pixmap.isNull()
+                or self._cache_pixmap.size() != target_size
+                or self._cache_pixmap.devicePixelRatio() != dpr):
+            self._cache_pixmap = QPixmap(target_size)
             if self._cache_pixmap.isNull():
                 return
+            self._cache_pixmap.setDevicePixelRatio(dpr)
 
         self._cache_pixmap.fill(self.bg_color)
 
@@ -1250,12 +1404,38 @@ class TerminalWidget(QWidget):
         bg_default = self.bg_color
         last_fg_color = None  # 缓存上一个前景色，减少 setPen 调用
         padding = self.PADDING  # 局部变量加速
+        # 用 painter 当前上下文的 fontMetrics（不是 __init__ 缓存的 self._font_metrics）。
+        # 在 HiDPI 上 cache 时机和 painter 实际渲染的 DPI 可能不一致，导致 fm_advance
+        # 报告的 CJK 宽度小于实际绘制宽度 → push 不够 → CJK 仍被下一格覆盖。
+        live_fm = painter.fontMetrics()
+        fm_advance = live_fm.horizontalAdvance
+
+        def _peek_data(line, idx):
+            """安全读 buffer_line[idx].data，越界返回 ''。"""
+            try:
+                nxt = line[idx]
+            except (KeyError, IndexError, TypeError):
+                return ''
+            if hasattr(nxt, 'data'):
+                return nxt.data or ''
+            if isinstance(nxt, str):
+                return nxt
+            return ''
 
         for display_row, buffer_line in enumerate(display_lines):
             row_y = int(padding + display_row * char_height)
             # 用下一行起点减去本行起点作为本行高度，防止分数像素累计造成行间空隙
             row_h = int(padding + (display_row + 1) * char_height) - row_y
             text_y = int(row_y + self.char_ascent)
+
+            # physical_x 跟踪「compressed CJK 连续段」内当前字形的右边界。
+            # 仅在判定 cell N+1 还是 CJK / 非 stub 的情况下推开下一个 CJK，避免
+            # Ink/React TUI 用 cursor positioning 逐字写 CJK 导致下一格 glyph
+            # 直接画到上一格的右半边（视觉上"被切半"）。
+            # 一旦遇到 narrow 字符 / stub / proper layout，立刻 reset 到 cell_x，
+            # 以保持与光标/原有列对齐 —— 这是 a80b748 回滚 physical_x 全局方案的
+            # 根本顾虑（cursor positioning 重绘破坏全局 advance 累计）。
+            physical_x = 0
 
             for col in range(num_cols):
                 try:
@@ -1293,32 +1473,56 @@ class TerminalWidget(QWidget):
                 if not char_text and not has_bg:
                     continue
 
-                x = int(padding + col * char_width)
+                cell_x = int(padding + col * char_width)
 
                 # 判断宽字符（空 data 视为单宽，等同于普通空格的填充）
                 is_wide = bool(char_text) and self._is_wide_char(char_text)
+
+                # compressed 检测仅用于决定 span/背景：当前 wide char 且下一格还有
+                # 非 stub/非空格内容（典型 Ink 写法）。span=1 避免本格背景越界到
+                # 已经被下一个 CJK 占用的列；proper 布局 span=2 保持背景无缝拼接。
+                next_data = _peek_data(buffer_line, col + 1) if is_wide else ''
+                compressed = is_wide and bool(next_data) and next_data != ' '
+
+                # x 决策：只要是 wide CJK 就一律 max(cell_x, physical_x)。
+                # - proper 布局下，前一个 cell 是 narrow/stub，physical_x 已 reset
+                #   到 cell-aligned，等于 cell_x，行为不变。
+                # - compressed 段中（含段尾那个 next 是 stub 的 CJK），physical_x
+                #   领先于 cell_x，max() 把字形推到上一个 CJK 的右边，避免重叠。
+                # narrow 字符总是按 cell_x 绘制，保证与光标/列对齐。
+                # int() 是必需的：physical_x 是 float（fm_advance / char_width 累计），
+                # QPainter.drawText(int, int, str) 不接受 float。
+                if is_wide:
+                    x = int(max(cell_x, physical_x))
+                else:
+                    x = cell_x
+                span = (1 if compressed else 2) if is_wide else 1
+
                 # 用「下一格起点 - 当前格起点」算宽度，使背景在水平方向也无缝拼接
-                span = 2 if is_wide else 1
-                char_draw_width = int(padding + (col + span) * char_width) - x
+                char_draw_width = int(padding + (col + span) * char_width) - cell_x
 
                 # 绘制背景（包括 codex 等 TUI 给整行铺色的高亮，即便 data 为空格/空）
+                # 背景按 cell 对齐；compressed 模式下字形会越过 cell 边界，这是
+                # Ink 写法的内在限制，背景不去补偿。
                 if has_bg:
-                    painter.fillRect(x, row_y, char_draw_width, row_h, bg_color)
+                    painter.fillRect(cell_x, row_y, char_draw_width, row_h, bg_color)
 
-                # 绘制字符 —— 一律严格按 cell_x 列对齐绘制。
-                # 之前尝试用 physical_x 跟踪字体实际 advance，去推开相邻列里的 CJK
-                # 防"挤在一起"，但代价是：当 TUI 程序通过 cursor positioning 重
-                # 绘部分单元格时（典型例子：Claude/Ink 输入框回车后清屏 + 重写），
-                # 单元格之间的 advance 不再连续，physical_x 累计的偏移会让后续字符
-                # 整体右移、与原内容/光标对不齐 → 出现 "你好" 看起来鬼影 / 错位。
-                # 列对齐的简单实现兼容性最好，少数 TUI 写 CJK 不留 stub 那是 TUI 端
-                # 的问题（与 macOS 系统终端一致行为），我们不去补偿。
+                # 绘制字符
                 if char_text and char_text != ' ':
                     fg_color = self._ensure_visible(fg_color, bg_color)
                     if fg_color != last_fg_color:
                         painter.setPen(fg_color)
                         last_fg_color = fg_color
                     painter.drawText(x, text_y, char_text)
+
+                # 更新 physical_x：
+                # - wide CJK：用实际 glyph advance 累计（保证下个 CJK 不重叠）
+                # - narrow（含 space）：reset 到该 cell 的 cell-aligned 末尾，
+                #   斩断 compressed 累计，保证后续 narrow / 光标按列对齐。
+                if is_wide:
+                    physical_x = x + fm_advance(char_text)
+                else:
+                    physical_x = cell_x + char_width
 
         # 注意：选区高亮和搜索高亮已移至 paintEvent 中单独绘制，
         # 这样拖动选择时不会触发缓存重建，大幅提升性能
@@ -1348,21 +1552,37 @@ class TerminalWidget(QWidget):
         min_contrast = 60  # 最小对比度要求
 
         if contrast < min_contrast:
-            # 判断是深色背景还是浅色背景
             if bg_lum > 128:
-                # 浅色背景 - 降低前景色亮度（使其更深）
-                reduction = min_contrast - contrast
-                r = max(0, fg.red() - int(reduction * 1.2))
-                g = max(0, fg.green() - int(reduction * 1.2))
-                b = max(0, fg.blue() - int(reduction * 1.2))
-                result = QColor(r, g, b)
+                # 浅色背景：向黑色混合，保证低对比文字仍可读。
+                result = fg
+                for factor in (0.75, 0.55, 0.35, 0.2, 0.0):
+                    candidate = QColor(
+                        int(fg.red() * factor),
+                        int(fg.green() * factor),
+                        int(fg.blue() * factor),
+                    )
+                    cand_lum = 0.299 * candidate.red() + 0.587 * candidate.green() + 0.114 * candidate.blue()
+                    if abs(cand_lum - bg_lum) >= min_contrast:
+                        result = candidate
+                        break
             else:
-                # 深色背景 - 提升前景色亮度（使其更亮）
-                boost = min_contrast - contrast
-                r = min(255, fg.red() + int(boost * 1.2))
-                g = min(255, fg.green() + int(boost * 1.2))
-                b = min(255, fg.blue() + int(boost * 1.2))
-                result = QColor(r, g, b)
+                # 深色背景：向白色混合。以前只做小幅 RGB 加法，黑色/深灰
+                # 文字仍会停留在背景附近，Codex/ratatui 的低亮度输入行会不可见。
+                result = fg
+                for factor in (0.35, 0.5, 0.65, 0.8, 1.0):
+                    candidate = QColor(
+                        int(fg.red() + (255 - fg.red()) * factor),
+                        int(fg.green() + (255 - fg.green()) * factor),
+                        int(fg.blue() + (255 - fg.blue()) * factor),
+                    )
+                    cand_lum = 0.299 * candidate.red() + 0.587 * candidate.green() + 0.114 * candidate.blue()
+                    if abs(cand_lum - bg_lum) >= min_contrast:
+                        result = candidate
+                        break
+
+            result_lum = 0.299 * result.red() + 0.587 * result.green() + 0.114 * result.blue()
+            if abs(result_lum - bg_lum) < min_contrast:
+                result = QColor("#1f2328") if bg_lum > 128 else QColor(self._current_colors["default"])
         else:
             result = fg
 
@@ -2771,6 +2991,7 @@ class TerminalWidget(QWidget):
             self._cursor_color = QColor(*cursor_color)
         # 清空颜色缓存
         self._color_cache = {}
+        self._visible_color_cache = {}
 
     def reset_to_dark_theme_colors(self):
         """重置为深色主题颜色"""
@@ -2780,6 +3001,7 @@ class TerminalWidget(QWidget):
         self._cursor_color = QColor(200, 200, 200, 180)
         # 清空颜色缓存
         self._color_cache = {}
+        self._visible_color_cache = {}
 
     def get_cwd(self) -> Optional[str]:
         """获取子进程的当前工作目录"""
