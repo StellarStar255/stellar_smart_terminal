@@ -2711,21 +2711,27 @@ class MainWindow(QMainWindow):
                 background-color: #1a1a2e;
             }
             QTabBar::tab {
-                background-color: #16213e;
+                background-color: #0f1626;
                 color: #888;
-                padding: 8px 16px;
+                padding: 7px 18px;
                 margin-right: 2px;
+                margin-top: 3px;
                 border-top-left-radius: 4px;
                 border-top-right-radius: 4px;
+                border-top: 3px solid transparent;
                 min-width: 100px;
             }
             QTabBar::tab:selected {
                 background-color: #1a1a2e;
-                color: #fff;
+                color: #ffffff;
+                font-weight: bold;
+                margin-top: 0px;
+                padding-top: 10px;
+                border-top: 3px solid #667eea;
             }
             QTabBar::tab:hover:!selected {
                 background-color: #1e2a4a;
-                color: #aaa;
+                color: #cccccc;
             }
         """)
 
@@ -7322,7 +7328,7 @@ class MainWindow(QMainWindow):
             }}
         """)
 
-        # 标签页样式
+        # 标签页样式：选中态与下方 pane 同色融合，靠顶部高亮条 + 加粗白字区分
         self.tab_widget.setStyleSheet(f"""
             QTabWidget::pane {{
                 border: none;
@@ -7330,17 +7336,25 @@ class MainWindow(QMainWindow):
             }}
             QTabBar::tab {{
                 background-color: {t['bg_medium']};
-                color: {t['text']};
-                padding: 8px 16px;
+                color: {t['text_dim']};
+                padding: 7px 18px;
                 margin-right: 2px;
+                margin-top: 3px;
                 border-top-left-radius: 4px;
                 border-top-right-radius: 4px;
+                border-top: 3px solid transparent;
             }}
             QTabBar::tab:selected {{
                 background-color: {t['bg_dark']};
+                color: #ffffff;
+                font-weight: bold;
+                margin-top: 0px;
+                padding-top: 10px;
+                border-top: 3px solid {t['accent']};
             }}
             QTabBar::tab:hover:!selected {{
                 background-color: {t['bg_light']};
+                color: {t['text']};
             }}
         """)
 
