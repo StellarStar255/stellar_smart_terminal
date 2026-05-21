@@ -52,6 +52,22 @@ class _LocalDropTreeView(QTreeView):
         else:
             super().dragMoveEvent(event)
 
+    def keyPressEvent(self, event):
+        # 选中单个条目时，Enter / F2 进入原地重命名
+        key = event.key()
+        if key in (Qt.Key.Key_Return, Qt.Key.Key_Enter, Qt.Key.Key_F2):
+            sel = self.selectionModel()
+            if sel is not None:
+                rows = {i.row(): i for i in sel.selectedIndexes() if i.column() == 0}
+                if len(rows) == 1:
+                    idx = next(iter(rows.values()))
+                    if idx.isValid() and idx != self.rootIndex():
+                        self.setCurrentIndex(idx)
+                        self.edit(idx)
+                        event.accept()
+                        return
+        super().keyPressEvent(event)
+
     def dropEvent(self, event):
         urls = event.mimeData().urls() if event.mimeData().hasUrls() else []
         local_paths = [u.toLocalFile() for u in urls if u.isLocalFile() and u.toLocalFile()]
@@ -149,6 +165,8 @@ class ExplorerPanel(QWidget):
         self.model = QFileSystemModel()
         self.model.setRootPath("")
         self.model.setFilter(QDir.Filter.AllDirs | QDir.Filter.Files | QDir.Filter.NoDotAndDotDot)
+        # 允许通过模型对文件/文件夹原地重命名
+        self.model.setReadOnly(False)
 
         # 树形视图（自定义子类，支持把 file:// URL 拖入并复制）
         self.tree_view = _LocalDropTreeView(self)
@@ -164,6 +182,9 @@ class ExplorerPanel(QWidget):
         # 设置选择模式
         self.tree_view.setSelectionMode(QAbstractItemView.SelectionMode.SingleSelection)
         self.tree_view.setContextMenuPolicy(Qt.ContextMenuPolicy.CustomContextMenu)
+
+        # 编辑触发：仅 F2 / 代码触发，避免双击/单击意外进入重命名（双击仍用于打开文件）
+        self.tree_view.setEditTriggers(QAbstractItemView.EditTrigger.EditKeyPressed)
 
         # 设置动画效果
         self.tree_view.setAnimated(True)
@@ -669,19 +690,13 @@ class ExplorerPanel(QWidget):
                 QMessageBox.warning(self, t("explorer.error"), t("explorer.create_folder_failed", error=e))
 
     def _rename_item(self, file_path: str):
-        """重命名文件/文件夹"""
-        old_name = os.path.basename(file_path)
-        new_name, ok = QInputDialog.getText(
-            self, t("explorer.rename_title"), t("explorer.rename_prompt"),
-            text=old_name
-        )
-        if ok and new_name and new_name != old_name:
-            new_path = os.path.join(os.path.dirname(file_path), new_name)
-            try:
-                os.rename(file_path, new_path)
-                self.refresh()
-            except Exception as e:
-                QMessageBox.warning(self, t("explorer.error"), t("explorer.rename_failed", error=e))
+        """在文件树中原地重命名文件/文件夹（不弹窗）"""
+        idx = self.model.index(file_path)
+        if not idx.isValid():
+            return
+        self.tree_view.setCurrentIndex(idx)
+        self.tree_view.scrollTo(idx)
+        self.tree_view.edit(idx)
 
     def _delete_item(self, file_path: str):
         """删除文件/文件夹"""
