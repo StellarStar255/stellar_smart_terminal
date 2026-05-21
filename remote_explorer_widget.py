@@ -1317,7 +1317,16 @@ class RemoteExplorerPanel(QWidget):
         act_delete.triggered.connect(lambda targets=delete_targets: self._delete_entries(targets))
         menu.addAction(act_delete)
 
-        if not entry.is_dir:
+        # 下载到本地：右键项在选中里 → 批量保存到一个目录；否则单文件另存为
+        download_targets = self._selection_entries_including(entry, item)
+        # 当 anchor 在选中里时是整批；否则只有 anchor 自己
+        if len(download_targets) > 1:
+            act_download = QAction(t("remote.download"), self)
+            act_download.triggered.connect(
+                lambda targets=download_targets: self._download_entries_to_local(targets)
+            )
+            menu.addAction(act_download)
+        elif not entry.is_dir:
             act_download = QAction(t("remote.download"), self)
             act_download.triggered.connect(lambda: self._download_to_local(entry))
             menu.addAction(act_download)
@@ -1351,13 +1360,15 @@ class RemoteExplorerPanel(QWidget):
     def _clipboard_copy_selection(self, fallback_entry: Optional[RemoteEntry] = None):
         """把当前选中的远程文件 / 目录放入跨面板剪贴板。
 
-        Cmd+C 保持即时响应：不预下载文件，只把远端路径作为纯文本写到
-        系统剪贴板（应用内粘贴用我们的 internal clipboard，含 session 信息）。
-        若需要把远端文件粘到 Finder，请用拖拽或右键 "Download to local…"。
+        Cmd+C 立刻给反馈（内部剪贴板 + 系统文字），同时在后台把选中**文件**
+        下载到临时目录，全部就绪后把系统剪贴板替换成本地文件 URL —— 这样
+        用户切到 Finder / Slack / Notes 等任意应用 Cmd+V 都能直接拿到文件。
+        目录因为体量不可控，仍只放路径文本，不做预下载。
         """
         if self._session is None:
             return
-        host_alias = self._session.host_config.alias
+        sess = self._session
+        host_alias = sess.host_config.alias
         selected_entries: list[RemoteEntry] = []
         for it in self._tree.selectedItems():
             e: RemoteEntry = it.data(0, _ROLE_ENTRY)
@@ -1375,13 +1386,126 @@ class RemoteExplorerPanel(QWidget):
             if e.path in seen:
                 continue
             seen.add(e.path)
-            payload.append(("remote", host_alias, e.path, self._session))
+            payload.append(("remote", host_alias, e.path, sess))
         if not payload:
             return
 
-        # 系统剪贴板放纯文本路径（即时，不阻塞下载）
-        QApplication.clipboard().setText("\n".join(it[2] for it in payload))
+        # 1) 内部剪贴板：含 session 信息，用于跨面板/同应用粘贴
         explorer_clipboard.set_items(payload, push_local_paths=None)
+
+        # 2) 系统剪贴板：立即给一个文本快照，免得用户立刻 Cmd+V 啥也没拿到
+        cb = QApplication.clipboard()
+        text_snapshot = "\n".join(it[2] for it in payload)
+        cb.setText(text_snapshot)
+
+        # 3) 后台把文件部分预下载到稳定的临时路径，结束后把剪贴板替换为
+        #    file:// URL（这是 Finder / Slack / 大多数 macOS 应用接受的格式）
+        file_entries = [(host_alias, e) for e in entries if not e.is_dir]
+        if not file_entries:
+            return
+        # 已经缓存的（之前打开过的）秒级就绪 → 先把它们直接写进 URLs；
+        # 还没下载的等下载完一起更新。
+        ready_paths: list[str] = []
+        pending: list[tuple] = []
+        for ha, e in file_entries:
+            local_path = self._temp_local_path_for(ha, e.path, e.name)
+            if (e.size and os.path.isfile(local_path)
+                    and os.path.getsize(local_path) == e.size):
+                ready_paths.append(local_path)
+            else:
+                pending.append((ha, e, local_path))
+
+        if ready_paths and not pending:
+            self._push_files_to_system_clipboard(ready_paths, text_snapshot)
+            return
+
+        self._begin_clipboard_staging(payload, text_snapshot, ready_paths, pending)
+
+    # ---------- 系统剪贴板预下载（让 Cmd+V 在 Finder 等地方拿到真实文件）----------
+
+    def _temp_local_path_for(self, host_alias: str, remote_path: str, name: str) -> str:
+        """与 _open_remote_file 共用的稳定 temp 路径：同一文件再被复制不会重复下载。"""
+        safe_alias = "".join(c if c.isalnum() or c in '-._' else '_' for c in host_alias)
+        local_dir = os.path.join(
+            tempfile.gettempdir(),
+            f"smart_terminal_remote_{safe_alias}",
+            *remote_path.strip("/").split("/")[:-1],
+        )
+        os.makedirs(local_dir, exist_ok=True)
+        return os.path.join(local_dir, name)
+
+    def _begin_clipboard_staging(self, payload: list, text_snapshot: str,
+                                   ready_paths: list, pending: list):
+        """后台拉取 pending 里所有文件，全部完成后把系统剪贴板替换为 file:// URL。
+        过程中在 subtitle 显示 "Preparing N/M files…"。"""
+        sess = self._session
+        if sess is None:
+            return
+        total = len(pending)
+        done_count = [0]
+        completed: list[str] = list(ready_paths)
+        # 标记：这次 staging 的剪贴板文字快照。完成时只在剪贴板仍是该文字时才覆盖
+        # （否则说明用户已经 Cmd+C 复制了别的东西，不应该越权改剪贴板）。
+        self._clipboard_staging_snapshot = text_snapshot
+
+        def update_progress():
+            try:
+                self._subtitle_label.setText(
+                    t("remote.clipboard_preparing", done=done_count[0], total=total)
+                )
+            except RuntimeError:
+                pass
+
+        def finalize():
+            try:
+                if completed:
+                    self._push_files_to_system_clipboard(completed, text_snapshot)
+                # 还原 subtitle
+                if self._session is not None:
+                    self._subtitle_label.setText(self._session.host_config.alias)
+            except RuntimeError:
+                pass
+
+        update_progress()
+
+        for host_alias, entry, local_path in pending:
+            def make_cb(_lp=local_path, _name=entry.name):
+                def cb(f):
+                    try:
+                        f.result()
+                        completed.append(_lp)
+                    except Exception as e:
+                        self._error_signal.emit(f"{_name}: {e}")
+                    done_count[0] += 1
+                    # 进度和最终化都必须切回 UI 线程
+                    QTimer.singleShot(0, update_progress)
+                    if done_count[0] >= total:
+                        QTimer.singleShot(0, finalize)
+                return cb
+            try:
+                fut = sess.submit(sess.download, entry.path, local_path)
+                fut.add_done_callback(make_cb())
+            except Exception as e:
+                self._error_signal.emit(f"{entry.path}: {e}")
+                done_count[0] += 1
+                if done_count[0] >= total:
+                    QTimer.singleShot(0, finalize)
+
+    def _push_files_to_system_clipboard(self, local_paths: list, expected_text: str):
+        """把 file:// URL 写到系统剪贴板，前提是剪贴板还是我们当初放的文字。
+        否则说明用户已经复制了别的东西，不能覆盖。"""
+        cb = QApplication.clipboard()
+        try:
+            current = cb.text()
+        except Exception:
+            current = ""
+        if current != expected_text:
+            return  # 用户已经 Cmd+C 了别的内容
+        mime = QMimeData()
+        mime.setUrls([QUrl.fromLocalFile(p) for p in local_paths])
+        # 同时保留文本，避免有些应用只读文本
+        mime.setText(expected_text)
+        cb.setMimeData(mime)
 
     def _clipboard_paste_into(self, target_dir: str):
         """把跨面板剪贴板里的项目粘贴到当前远端 target_dir。
@@ -1946,6 +2070,57 @@ class RemoteExplorerPanel(QWidget):
             except Exception as e:
                 self._error_signal.emit(str(e))
         fut.add_done_callback(on_done)
+
+    def _download_entries_to_local(self, entries: list[tuple]):
+        """批量下载到本地：让用户选一个目标文件夹，每个条目保留原名落进去。
+        entries: [(RemoteEntry, QTreeWidgetItem), ...]（item 暂未使用，保持签名一致）
+        重名时自动 (N) 后缀，避免覆盖用户已有文件。
+        """
+        if not entries:
+            return
+        sess = self._session
+        if sess is None:
+            return
+        target_dir = QFileDialog.getExistingDirectory(
+            self, t("remote.download_to_folder", count=len(entries))
+        )
+        if not target_dir:
+            return
+
+        def exists_fn(name: str, _target=target_dir) -> bool:
+            return os.path.exists(os.path.join(_target, name))
+
+        for ent, _item in entries:
+            try:
+                name = explorer_clipboard.next_free_name(ent.name, exists_fn)
+                dst = os.path.join(target_dir, name)
+                if ent.is_dir:
+                    # 目录：递归下载（沿用 paste 走的路径）
+                    fut = sess.submit(self._sftp_download_dir_blocking, sess, ent.path, dst)
+                else:
+                    fut = sess.submit(sess.download, ent.path, dst)
+
+                def on_done(f, _name=name):
+                    try:
+                        f.result()
+                    except Exception as e:
+                        self._error_signal.emit(f"{_name}: {e}")
+                fut.add_done_callback(on_done)
+            except Exception as e:
+                self._error_signal.emit(f"{ent.path}: {e}")
+
+    @staticmethod
+    def _sftp_download_dir_blocking(sess, remote_dir: str, local_dir: str):
+        """递归下载远端目录到本地（在 SSH worker 线程里跑，阻塞）"""
+        os.makedirs(local_dir, exist_ok=True)
+        entries = sess.listdir(remote_dir)
+        for e in entries:
+            child_remote = e.path
+            child_local = os.path.join(local_dir, e.name)
+            if e.is_dir:
+                RemoteExplorerPanel._sftp_download_dir_blocking(sess, child_remote, child_local)
+            else:
+                sess.download(child_remote, child_local)
 
     def _open_terminal_here(self, entry: RemoteEntry):
         self._open_terminal_at_path(entry.path)
