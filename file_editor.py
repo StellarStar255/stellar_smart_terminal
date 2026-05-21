@@ -10,13 +10,13 @@ from PyQt6.QtWidgets import (
     QWidget, QVBoxLayout, QHBoxLayout, QPlainTextEdit,
     QPushButton, QLabel, QFrame, QMessageBox,
     QSplitter, QLineEdit, QTextEdit, QStackedWidget, QScrollArea,
-    QSizePolicy,
+    QSizePolicy, QMenu, QFileDialog, QApplication,
 )
 from PyQt6.QtCore import Qt, pyqtSignal, QRect, QSize
 from PyQt6.QtGui import (
     QFont, QColor, QTextCharFormat, QSyntaxHighlighter,
     QKeySequence, QPalette, QShortcut, QPainter, QTextCursor,
-    QPixmap, QImageReader,
+    QPixmap, QImageReader, QCursor, QGuiApplication,
 )
 
 
@@ -1050,7 +1050,17 @@ class FileEditorWidget(QWidget):
             QSizePolicy.Policy.Ignored, QSizePolicy.Policy.Ignored
         )
         self._image_label.setText("")
+        # 图片预览右键菜单：复制到剪贴板 / 另存为
+        self._image_label.setContextMenuPolicy(Qt.ContextMenuPolicy.CustomContextMenu)
+        self._image_label.customContextMenuRequested.connect(self._show_image_context_menu)
         self._image_scroll.setWidget(self._image_label)
+        # ScrollArea 的空白处也允许右键弹同样的菜单
+        self._image_scroll.viewport().setContextMenuPolicy(
+            Qt.ContextMenuPolicy.CustomContextMenu
+        )
+        self._image_scroll.viewport().customContextMenuRequested.connect(
+            self._show_image_context_menu
+        )
         self._stack.addWidget(self._image_scroll)  # index 1
 
         layout.addWidget(self._stack)
@@ -1499,6 +1509,69 @@ class FileEditorWidget(QWidget):
             )
         self._image_label.setPixmap(scaled)
         self._image_label.resize(scaled.size())
+
+    def _show_image_context_menu(self, pos):
+        """图片预览的右键菜单：复制到剪贴板 / 另存为"""
+        if not self._in_image_mode or self._image_pixmap is None or self._image_pixmap.isNull():
+            return
+        menu = QMenu(self)
+        bg_medium = self.theme.get('bg_medium', '#2d2d44')
+        text = self.theme.get('text', '#eaeaea')
+        accent = self.theme.get('accent', '#667eea')
+        border = self.theme.get('border', '#3d3d5c')
+        menu.setStyleSheet(f"""
+            QMenu {{
+                background-color: {bg_medium};
+                color: {text};
+                border: 1px solid {border};
+                border-radius: 4px;
+                padding: 4px;
+            }}
+            QMenu::item {{
+                padding: 6px 20px;
+                border-radius: 3px;
+            }}
+            QMenu::item:selected {{
+                background-color: {accent};
+            }}
+        """)
+        copy_act = menu.addAction(t("editor.copy_image"))
+        save_act = menu.addAction(t("editor.save_image_as"))
+
+        chosen = menu.exec(QCursor.pos())
+        if chosen is copy_act:
+            self._copy_image_to_clipboard()
+        elif chosen is save_act:
+            self._save_image_as()
+
+    def _copy_image_to_clipboard(self):
+        """把原图（不是缩放后的）放到系统剪贴板"""
+        if self._image_pixmap is None or self._image_pixmap.isNull():
+            return
+        clipboard = QGuiApplication.clipboard()
+        if clipboard is None:
+            return
+        # setPixmap 在 macOS / Windows / Linux 上都会同时写 image MIME 数据，
+        # 这样粘贴到 Slack/微信/编辑器等都能直接得到一张图片。
+        clipboard.setPixmap(self._image_pixmap)
+
+    def _save_image_as(self):
+        """把原图另存到本地（默认文件名取自当前文件）"""
+        if self._image_pixmap is None or self._image_pixmap.isNull():
+            return
+        default_name = os.path.basename(self._current_file or "image.png")
+        path, _ = QFileDialog.getSaveFileName(
+            self, t("editor.save_image_as"), default_name,
+            "Images (*.png *.jpg *.jpeg *.bmp *.webp);;All Files (*)"
+        )
+        if not path:
+            return
+        # QPixmap.save 根据扩展名自动选格式；失败时弹错误
+        if not self._image_pixmap.save(path):
+            QMessageBox.warning(
+                self, t("editor.error"),
+                t("editor.save_image_failed", path=path)
+            )
 
     def _setup_highlighter(self, file_path: str):
         """根据文件类型设置语法高亮"""
