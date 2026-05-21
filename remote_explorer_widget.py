@@ -19,7 +19,8 @@ from PyQt6.QtWidgets import (
     QWidget, QVBoxLayout, QHBoxLayout, QFrame, QLabel, QPushButton,
     QListWidget, QListWidgetItem, QTreeWidget, QTreeWidgetItem, QMenu,
     QInputDialog, QMessageBox, QStackedWidget, QFileDialog, QLineEdit,
-    QApplication, QSizePolicy, QProgressDialog,
+    QApplication, QSizePolicy, QProgressDialog, QStyledItemDelegate,
+    QAbstractItemView,
 )
 from PyQt6.QtCore import Qt, pyqtSignal, QTimer, QMimeData, QUrl
 from PyQt6.QtGui import QAction, QCursor, QDrag, QShortcut, QKeySequence
@@ -56,6 +57,90 @@ class _RemoteTreeWidget(QTreeWidget):
         # 多选：单击=选中一个，Shift+点击=连续区间选择，
         # Cmd（macOS）/ Ctrl（其他平台）+ 点击=切换单个选中
         self.setSelectionMode(QTreeWidget.SelectionMode.ExtendedSelection)
+
+        # 编辑触发：只允许 F2 / 代码触发，双击保留给"进入目录 / 打开文件"
+        self.setEditTriggers(QAbstractItemView.EditTrigger.EditKeyPressed)
+
+        # Finder 风格：单击已选中的条目 → 延迟进入原地重命名
+        self._pending_rename_item = None  # QTreeWidgetItem 或 None
+        self._rename_timer = QTimer(self)
+        self._rename_timer.setSingleShot(True)
+        self._rename_timer.timeout.connect(self._fire_pending_rename)
+
+    # ----- 原地重命名键鼠交互 -----
+
+    def _cancel_pending_rename(self):
+        self._rename_timer.stop()
+        self._pending_rename_item = None
+
+    def _fire_pending_rename(self):
+        item = self._pending_rename_item
+        self._pending_rename_item = None
+        if item is None:
+            return
+        try:
+            if sip.isdeleted(item):
+                return
+        except Exception:
+            pass
+        # 仍是唯一选中项时才进入编辑，避免延迟期间用户已切走
+        if item.isSelected() and len(self.selectedItems()) == 1:
+            self.editItem(item, 0)
+
+    def _editable_single_selection(self) -> Optional["QTreeWidgetItem"]:
+        sel = self.selectedItems()
+        if len(sel) != 1:
+            return None
+        item = sel[0]
+        # 仅当条目挂着 RemoteEntry 时才允许重命名（占位 "…" 没有 entry）
+        if item.data(0, _ROLE_ENTRY) is None:
+            return None
+        return item
+
+    def keyPressEvent(self, event):
+        key = event.key()
+        if key in (Qt.Key.Key_Return, Qt.Key.Key_Enter, Qt.Key.Key_F2):
+            item = self._editable_single_selection()
+            if item is not None:
+                self._cancel_pending_rename()
+                self.editItem(item, 0)
+                event.accept()
+                return
+        super().keyPressEvent(event)
+
+    def mousePressEvent(self, event):
+        if (event.button() == Qt.MouseButton.LeftButton
+                and event.modifiers() == Qt.KeyboardModifier.NoModifier):
+            item = self.itemAt(event.position().toPoint())
+            if item is not None and item.data(0, _ROLE_ENTRY) is not None:
+                # 该项在本次点击前已是唯一选中项 → 等双击窗口结束后进入重命名
+                was_only_selected = (
+                    item.isSelected() and len(self.selectedItems()) == 1
+                )
+                if was_only_selected:
+                    self._pending_rename_item = item
+                    self._rename_timer.start(
+                        QApplication.doubleClickInterval() + 80
+                    )
+                else:
+                    self._cancel_pending_rename()
+            else:
+                self._cancel_pending_rename()
+        else:
+            self._cancel_pending_rename()
+        super().mousePressEvent(event)
+
+    def mouseDoubleClickEvent(self, event):
+        # 双击 → 取消延迟重命名，让 itemDoubleClicked 走打开/进入目录
+        self._cancel_pending_rename()
+        super().mouseDoubleClickEvent(event)
+
+    def mouseMoveEvent(self, event):
+        # 按住左键拖动（可能是拖拽）→ 取消延迟重命名
+        if (event.buttons() & Qt.MouseButton.LeftButton
+                and self._pending_rename_item is not None):
+            self._cancel_pending_rename()
+        super().mouseMoveEvent(event)
 
     # ----- 工具 -----
 
@@ -187,6 +272,39 @@ class _RemoteTreeWidget(QTreeWidget):
         except RuntimeError:
             # widget 在 drag 启动过程中被销毁
             return
+
+
+class _RemoteItemDelegate(QStyledItemDelegate):
+    """原地重命名时只把 entry.name 喂给编辑框，避免用户看到/编辑到 emoji 前缀；
+    提交时绕过 model 直接走 SFTP rename，由 panel 在成功后刷新条目文本。"""
+
+    def __init__(self, panel, parent=None):
+        super().__init__(parent)
+        self._panel = panel
+
+    def setEditorData(self, editor, index):
+        item = self._panel._tree.itemFromIndex(index) if index.isValid() else None
+        entry: Optional[RemoteEntry] = (
+            item.data(0, _ROLE_ENTRY) if item is not None else None
+        )
+        if entry is not None and isinstance(editor, QLineEdit):
+            editor.setText(entry.name)
+            editor.selectAll()
+            return
+        super().setEditorData(editor, index)
+
+    def setModelData(self, editor, model, index):
+        item = self._panel._tree.itemFromIndex(index) if index.isValid() else None
+        entry: Optional[RemoteEntry] = (
+            item.data(0, _ROLE_ENTRY) if item is not None else None
+        )
+        if entry is None or not isinstance(editor, QLineEdit):
+            super().setModelData(editor, model, index)
+            return
+        # 不直接写回 model（防止把不带 emoji 的纯名字盖到显示文本上）；
+        # 让 panel 异步走 SFTP rename，成功后会刷新父目录把条目重建出来。
+        new_name = editor.text().strip()
+        self._panel._do_inline_rename(entry, item, new_name)
 
 
 class RemoteExplorerPanel(QWidget):
@@ -356,6 +474,8 @@ class RemoteExplorerPanel(QWidget):
         self._tree.customContextMenuRequested.connect(self._on_context_menu)
         self._tree.itemExpanded.connect(self._on_item_expanded)
         self._tree.itemDoubleClicked.connect(self._on_item_double_clicked)
+        # 原地重命名的编辑器代理（去掉 emoji 前缀，由 panel 异步走 SFTP rename）
+        self._tree.setItemDelegate(_RemoteItemDelegate(self, self._tree))
         tp_layout.addWidget(self._tree, 1)
 
         # Cmd+C / Cmd+V — 当 tree 或其子项有焦点时触发
@@ -406,6 +526,17 @@ class RemoteExplorerPanel(QWidget):
             }}
             QListWidget::item:hover, QTreeWidget::item:hover {{
                 background-color: {bg_hover};
+            }}
+            /* 原地重命名编辑框：显式配色和边距，避免文本被裁切 */
+            QTreeWidget QLineEdit {{
+                background-color: {bg_dark};
+                color: {text};
+                border: 1px solid {accent};
+                padding: 0 4px;
+                margin: 0;
+                min-height: 18px;
+                selection-background-color: {accent};
+                selection-color: white;
             }}
         """
         self._hosts_list.setStyleSheet(list_tree_css)
@@ -638,6 +769,7 @@ class RemoteExplorerPanel(QWidget):
                 item = QTreeWidgetItem([icon + e.name])
                 item.setData(0, _ROLE_ENTRY, e)
                 item.setData(0, _ROLE_LOADED, False)
+                item.setFlags(item.flags() | Qt.ItemFlag.ItemIsEditable)
                 if e.is_dir:
                     # 占位让箭头出现，展开时才真正去 listdir
                     item.addChild(QTreeWidgetItem(["…"]))
@@ -788,6 +920,7 @@ class RemoteExplorerPanel(QWidget):
                 child = QTreeWidgetItem([icon + e.name])
                 child.setData(0, _ROLE_ENTRY, e)
                 child.setData(0, _ROLE_LOADED, False)
+                child.setFlags(child.flags() | Qt.ItemFlag.ItemIsEditable)
                 if e.is_dir:
                     child.addChild(QTreeWidgetItem(["…"]))
                 children.append(child)
@@ -1389,14 +1522,24 @@ class RemoteExplorerPanel(QWidget):
         self._new_folder_at(parent_entry.path, parent_item)
 
     def _rename_entry(self, entry: RemoteEntry, item: QTreeWidgetItem):
-        new_name, ok = QInputDialog.getText(
-            self, t("remote.rename"), t("remote.prompt_rename_to"),
-            QLineEdit.EchoMode.Normal, entry.name,
-        )
-        if not ok or not new_name.strip() or new_name.strip() == entry.name:
+        """从右键菜单触发：在文件树中原地编辑（不弹窗）"""
+        if item is None:
+            return
+        self._tree.setCurrentItem(item)
+        self._tree.scrollToItem(item)
+        self._tree.editItem(item, 0)
+
+    def _do_inline_rename(self, entry: RemoteEntry, item: QTreeWidgetItem, new_name: str):
+        """delegate 提交时调用：校验新名字并异步走 SFTP rename。"""
+        new_name = (new_name or "").strip()
+        if not new_name or new_name == entry.name:
+            return
+        # 不允许通过重命名跨目录移动
+        if "/" in new_name:
+            self._error_signal.emit(t("remote.rename"))
             return
         parent_path = posixpath.dirname(entry.path.rstrip("/")) or "/"
-        new_path = posixpath.join(parent_path, new_name.strip())
+        new_path = posixpath.join(parent_path, new_name)
         sess = self._session
         if sess is None:
             return
