@@ -276,6 +276,13 @@ class WindowNavigatorPanel(QWidget):
         # 手动排序的窗口顺序（存储窗口ID）
         self._manual_order = []
 
+        # QListWidgetItem 的 UserRole 只存 id(window)（Python int），不直接存 QObject 指针。
+        # 否则 force-close 时 Qt 在 dispatchEnterLeave 等回调里读取 item.data() 会
+        # 触发 sip 把已释放的 C++ 指针转回 Python → EXC_BAD_ACCESS。
+        # 这个 dict 把 id 映射回当前活着的 MainWindow（弱引用，避免阻止 GC）。
+        import weakref as _weakref
+        self._window_refs: "dict[int, _weakref.ReferenceType]" = {}
+
         self._setup_ui()
         self._apply_style()
         self._load_navigator_config()
@@ -495,14 +502,41 @@ class WindowNavigatorPanel(QWidget):
             self.drag_hint_label.setVisible(True)
         self._save_manual_order()
 
+    def _resolve_window(self, item):
+        """从 QListWidgetItem 安全地拿回对应的 MainWindow。
+
+        永远只读 item.data() 中的 id（Python int），再用 weakref 字典查活的对象。
+        这样即使底层 C++ 已被释放，也只会拿到 None 而不会段错误。
+        """
+        if item is None:
+            return None
+        wid = item.data(Qt.ItemDataRole.UserRole)
+        if not isinstance(wid, int):
+            return None
+        ref = self._window_refs.get(wid)
+        if ref is None:
+            return None
+        window = ref()
+        if window is None:
+            # 弱引用已失效 → 清理映射
+            self._window_refs.pop(wid, None)
+            return None
+        try:
+            if sip.isdeleted(window):
+                self._window_refs.pop(wid, None)
+                return None
+        except Exception:
+            return None
+        return window
+
     def _save_manual_order(self):
         """保存当前列表顺序"""
         self._manual_order = []
         for i in range(self.window_list.count()):
             item = self.window_list.item(i)
-            window = item.data(Qt.ItemDataRole.UserRole)
-            if window:
-                self._manual_order.append(id(window))
+            wid = item.data(Qt.ItemDataRole.UserRole) if item else None
+            if isinstance(wid, int):
+                self._manual_order.append(wid)
 
     def _toggle_compact_mode(self, state):
         """切换简洁显示模式"""
@@ -711,6 +745,9 @@ class WindowNavigatorPanel(QWidget):
 
         # 更新列表
         self.window_list.clear()
+        # 重建 id → weakref 映射；旧的失效项会自然淘汰
+        import weakref as _weakref
+        new_refs: dict = {}
         for idx, window in enumerate(windows, 1):
             try:
                 if sip.isdeleted(window):
@@ -724,11 +761,15 @@ class WindowNavigatorPanel(QWidget):
                 display_title = f"{idx}. {display_title}"
                 color = window.get_window_color()
                 item = QListWidgetItem(display_title)
-                item.setData(Qt.ItemDataRole.UserRole, window)
+                wid = id(window)
+                # 只把 id（Python int）塞进 UserRole；真正的对象通过 weakref 解
+                item.setData(Qt.ItemDataRole.UserRole, wid)
+                new_refs[wid] = _weakref.ref(window)
                 item.setForeground(QColor(color))
                 self.window_list.addItem(item)
             except RuntimeError:
                 continue  # 窗口在处理过程中被删除，跳过
+        self._window_refs = new_refs
 
         self.window_list.blockSignals(False)
 
@@ -777,8 +818,8 @@ class WindowNavigatorPanel(QWidget):
         """单击切换窗口"""
         # 确保选中项颜色正确显示
         self._update_all_item_colors()
-        window = item.data(Qt.ItemDataRole.UserRole)
-        if window and not sip.isdeleted(window):
+        window = self._resolve_window(item)
+        if window is not None:
             self._switch_to_window(window)
 
     def _on_item_entered(self, item):
@@ -808,8 +849,8 @@ class WindowNavigatorPanel(QWidget):
         # 只更新需要更新的项（选中项、悬停项、以及之前的选中/悬停项）
         for i in range(self.window_list.count()):
             item = self.window_list.item(i)
-            window = item.data(Qt.ItemDataRole.UserRole)
-            if not window or sip.isdeleted(window):
+            window = self._resolve_window(item)
+            if window is None:
                 continue
 
             try:
@@ -834,8 +875,8 @@ class WindowNavigatorPanel(QWidget):
 
     def _on_item_double_clicked(self, item):
         """双击切换窗口"""
-        window = item.data(Qt.ItemDataRole.UserRole)
-        if window and not sip.isdeleted(window):
+        window = self._resolve_window(item)
+        if window is not None:
             self._switch_to_window(window)
 
     def _show_window_context_menu(self, pos):
@@ -843,8 +884,8 @@ class WindowNavigatorPanel(QWidget):
         item = self.window_list.itemAt(pos)
         if item is None:
             return
-        window = item.data(Qt.ItemDataRole.UserRole)
-        if not window or sip.isdeleted(window):
+        window = self._resolve_window(item)
+        if window is None:
             return
         if not hasattr(window, 'force_close_with_save'):
             return  # 非 MainWindow 类型，不支持
@@ -1065,9 +1106,12 @@ class WindowNavigatorPanel(QWidget):
 
         当某个窗口被激活时调用此方法，更新列表的选中状态。
         """
+        target_id = id(window) if window is not None else None
+        if target_id is None:
+            return
         for i in range(self.window_list.count()):
             item = self.window_list.item(i)
-            if item and item.data(Qt.ItemDataRole.UserRole) is window:
+            if item and item.data(Qt.ItemDataRole.UserRole) == target_id:
                 self.window_list.blockSignals(True)
                 self.window_list.setCurrentRow(i)
                 self.window_list.blockSignals(False)
