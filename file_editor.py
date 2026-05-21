@@ -9,13 +9,22 @@ from pathlib import Path
 from PyQt6.QtWidgets import (
     QWidget, QVBoxLayout, QHBoxLayout, QPlainTextEdit,
     QPushButton, QLabel, QFrame, QMessageBox,
-    QSplitter, QLineEdit, QTextEdit
+    QSplitter, QLineEdit, QTextEdit, QStackedWidget, QScrollArea,
+    QSizePolicy,
 )
 from PyQt6.QtCore import Qt, pyqtSignal, QRect, QSize
 from PyQt6.QtGui import (
     QFont, QColor, QTextCharFormat, QSyntaxHighlighter,
-    QKeySequence, QPalette, QShortcut, QPainter, QTextCursor
+    QKeySequence, QPalette, QShortcut, QPainter, QTextCursor,
+    QPixmap, QImageReader,
 )
+
+
+# 支持在编辑器面板里内联预览的图片扩展名
+_IMAGE_EXTENSIONS = {
+    '.png', '.jpg', '.jpeg', '.gif', '.bmp', '.webp', '.tif', '.tiff',
+    '.ico', '.svg', '.heic', '.heif',
+}
 from i18n import t
 
 
@@ -966,6 +975,8 @@ class FileEditorWidget(QWidget):
         self._current_file = None
         self._original_content = ""  # 保存原始内容用于比较
         self._highlighter = None
+        self._in_image_mode = False  # 当前显示的是否是图片预览
+        self._image_pixmap: QPixmap | None = None  # 原始未缩放的 QPixmap
 
         self._setup_ui()
         self._setup_shortcuts()
@@ -1023,7 +1034,26 @@ class FileEditorWidget(QWidget):
         self.search_bar = _SearchBar(self.editor, self.theme, self)
         layout.addWidget(self.search_bar)
 
-        layout.addWidget(self.editor)
+        # 用 QStackedWidget 在 "文本编辑器" 和 "图片预览" 之间切换
+        self._stack = QStackedWidget()
+        self._stack.addWidget(self.editor)  # index 0
+
+        # 图片预览页：QScrollArea 包一个 QLabel，按视口大小等比缩放，不放大原图
+        self._image_scroll = QScrollArea()
+        self._image_scroll.setWidgetResizable(True)
+        self._image_scroll.setAlignment(Qt.AlignmentFlag.AlignCenter)
+        self._image_scroll.setFrameShape(QFrame.Shape.NoFrame)
+
+        self._image_label = QLabel()
+        self._image_label.setAlignment(Qt.AlignmentFlag.AlignCenter)
+        self._image_label.setSizePolicy(
+            QSizePolicy.Policy.Ignored, QSizePolicy.Policy.Ignored
+        )
+        self._image_label.setText("")
+        self._image_scroll.setWidget(self._image_label)
+        self._stack.addWidget(self._image_scroll)  # index 1
+
+        layout.addWidget(self._stack)
 
     def _setup_shortcuts(self):
         """设置快捷键"""
@@ -1340,6 +1370,10 @@ class FileEditorWidget(QWidget):
             QMessageBox.warning(self, t("editor.error"), t("editor.file_not_found", path=file_path))
             return False
 
+        # 图片：走内联预览（QPixmap），跳过 "5MB 文本限制 / UTF-8 解码" 那条路径
+        if Path(file_path).suffix.lower() in _IMAGE_EXTENSIONS:
+            return self._open_image_file(file_path)
+
         # 检查文件大小，太大的文件不打开
         file_size = os.path.getsize(file_path)
         if file_size > 5 * 1024 * 1024:  # 5MB 限制
@@ -1374,6 +1408,11 @@ class FileEditorWidget(QWidget):
             elif reply == QMessageBox.StandardButton.Cancel:
                 return False
 
+        # 切到文本编辑器视图（可能此前在显示图片）
+        self._in_image_mode = False
+        self._image_pixmap = None
+        self._stack.setCurrentIndex(0)
+
         # 加载文件内容
         self._current_file = file_path
         self._original_content = content  # 保存原始内容用于比较
@@ -1390,6 +1429,76 @@ class FileEditorWidget(QWidget):
         self._update_title()
 
         return True
+
+    def _open_image_file(self, file_path: str) -> bool:
+        """把图片读进 QPixmap 并显示在图片预览页"""
+        reader = QImageReader(file_path)
+        reader.setAutoTransform(True)  # 应用 EXIF 旋转
+        image = reader.read()
+        if image.isNull():
+            QMessageBox.warning(
+                self, t("editor.error"),
+                t("editor.read_error", error=reader.errorString() or "decode failed")
+            )
+            return False
+
+        # 当前在文本编辑器里有未保存改动 → 沿用文本路径的提示
+        if not self._in_image_mode and self.is_modified():
+            reply = QMessageBox.question(
+                self, t("editor.save_changes_title"),
+                t("editor.save_changes_msg", name=os.path.basename(self._current_file or "")),
+                QMessageBox.StandardButton.Save |
+                QMessageBox.StandardButton.Discard |
+                QMessageBox.StandardButton.Cancel
+            )
+            if reply == QMessageBox.StandardButton.Save:
+                if not self.save_file():
+                    return False
+            elif reply == QMessageBox.StandardButton.Cancel:
+                return False
+
+        # 关闭可能正在显示文本搜索栏
+        if hasattr(self, 'search_bar') and not self.search_bar.isHidden():
+            self.search_bar.close_search()
+
+        # 清掉文本编辑器内容，避免再次切回文本时还残留上一个图片之前的文本
+        if self._highlighter is not None:
+            self._highlighter.setDocument(None)
+            self._highlighter = None
+        self.editor.blockSignals(True)
+        self.editor.clear()
+        self.editor.blockSignals(False)
+
+        self._current_file = file_path
+        self._original_content = ""  # 图片不参与文本 modified 判定
+        self._image_pixmap = QPixmap.fromImage(image)
+        self._in_image_mode = True
+        self._stack.setCurrentIndex(1)
+        self._apply_image_to_label()
+        self._update_title()
+        return True
+
+    def _apply_image_to_label(self):
+        """把 self._image_pixmap 按视口尺寸等比缩放展示（不放大原图）"""
+        if self._image_pixmap is None or self._image_pixmap.isNull():
+            self._image_label.clear()
+            return
+        viewport = self._image_scroll.viewport()
+        vw = max(1, viewport.width())
+        vh = max(1, viewport.height())
+        pw = self._image_pixmap.width()
+        ph = self._image_pixmap.height()
+        # 不放大；只有图片大于视口时才缩小到视口大小内
+        if pw <= vw and ph <= vh:
+            scaled = self._image_pixmap
+        else:
+            scaled = self._image_pixmap.scaled(
+                vw, vh,
+                Qt.AspectRatioMode.KeepAspectRatio,
+                Qt.TransformationMode.SmoothTransformation,
+            )
+        self._image_label.setPixmap(scaled)
+        self._image_label.resize(scaled.size())
 
     def _setup_highlighter(self, file_path: str):
         """根据文件类型设置语法高亮"""
@@ -1487,6 +1596,8 @@ class FileEditorWidget(QWidget):
         """检查文件是否已修改（通过比较内容）"""
         if not self._current_file:
             return False
+        if self._in_image_mode:
+            return False  # 图片只读，不参与 modified 判定
         return self.editor.toPlainText() != self._original_content
 
     def _close_editor(self):
@@ -1509,9 +1620,19 @@ class FileEditorWidget(QWidget):
         self._current_file = None
         self._original_content = ""
         self.editor.clear()
+        # 复位图片预览
+        self._in_image_mode = False
+        self._image_pixmap = None
+        self._image_label.clear()
+        self._stack.setCurrentIndex(0)
         self._update_title()
         self.editor_closed.emit()
 
     def get_current_file(self) -> str:
         """获取当前打开的文件路径"""
         return self._current_file
+
+    def resizeEvent(self, event):
+        super().resizeEvent(event)
+        if self._in_image_mode and self._image_pixmap is not None:
+            self._apply_image_to_label()
