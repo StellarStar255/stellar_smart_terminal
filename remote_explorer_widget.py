@@ -418,8 +418,16 @@ class RemoteExplorerPanel(QWidget):
 
         self._subtitle_label = QLabel("")
         self._subtitle_label.setStyleSheet("color: #888;")
-        h_layout.addWidget(self._subtitle_label)
-        h_layout.addStretch()
+        # 关键：下载进度文案频繁更新到这个 label。如果让它的 sizeHint 随文字
+        # 变长 / 变短，整个 header / 父 splitter 都会跟着 reflow，看起来像窗口
+        # 一直在轻微抖动。Ignored 水平策略 = "我不在意我的首选宽度，layout 给我
+        # 多少我用多少"，文字变化不再触发布局重算。
+        self._subtitle_label.setSizePolicy(
+            QSizePolicy.Policy.Ignored, QSizePolicy.Policy.Preferred,
+        )
+        self._subtitle_label.setMinimumWidth(0)
+        h_layout.addWidget(self._subtitle_label, 1)  # 占据中间剩余空间
+        # （原来这里有 addStretch；现在交给上面 stretch=1 的 label 接管）
 
         self._reload_btn = QPushButton("⟳")
         self._reload_btn.setFixedSize(24, 24)
@@ -1846,7 +1854,9 @@ class RemoteExplorerPanel(QWidget):
         def progress_cb(done, total):
             # paramiko 在 worker 线程调用 —— 节流后通过信号回 UI 线程
             now = time.monotonic()
-            if now - self._last_progress_emit_ts < 0.1 and done < total:
+            # 350ms 节流（~3Hz）：肉眼看着仍流畅，但 setText 不会高频触发
+            # 任何 layout 重算，避免给用户"窗口一直在抖"的错觉。
+            if now - self._last_progress_emit_ts < 0.35 and done < total:
                 return
             self._last_progress_emit_ts = now
             self._download_progress.emit(remote_path, done, total)
