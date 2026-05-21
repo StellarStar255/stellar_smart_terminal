@@ -25,7 +25,52 @@ updated the clipboard since — use those URLs. Otherwise prefer our
 internal state (which may include remote info the OS can't represent).
 """
 import os
-from typing import Optional
+import re
+from typing import Callable, Optional
+
+
+# ---------- 命名冲突自动加序号尾缀（同文件夹复制粘贴时用）----------
+
+# "foo (3).py" / ".tar.gz" 这种已存在的 "(N)" 后缀检测：避免重复粘贴时
+# 累积成 "foo (1) (1) (1).py"，而是直接从 N+1 继续。
+_SUFFIX_RE = re.compile(r"^(?P<base>.+) \((?P<n>\d+)\)$")
+
+
+def _split_basename(name: str) -> tuple[str, str]:
+    """把 'foo.tar.gz' 拆成 ('foo.tar', '.gz')；仅按最后一个点切分，
+    和 macOS Finder/VS Code 的行为一致。隐藏文件 (.bashrc) 不拆。"""
+    if name.startswith(".") and name.count(".") == 1:
+        return name, ""
+    idx = name.rfind(".")
+    if idx <= 0:
+        return name, ""
+    return name[:idx], name[idx:]
+
+
+def next_free_name(basename: str, exists_fn: Callable[[str], bool]) -> str:
+    """在调用方提供的命名空间里挑下一个不冲突的名字。
+
+    exists_fn(candidate_name) → 用 os.path.exists / SFTP stat 判断；
+    本地和远端粘贴都能用同一段逻辑。
+
+    'foo.png'      → 'foo.png'（不冲突就原样返回）
+                  → 'foo (1).png' → 'foo (2).png' ...
+    'foo (3).png'  → 'foo (4).png'（识别已有后缀，避免堆叠）
+    """
+    if not exists_fn(basename):
+        return basename
+    stem, ext = _split_basename(basename)
+    m = _SUFFIX_RE.match(stem)
+    base_stem = m.group("base") if m else stem
+    i = (int(m.group("n")) + 1) if m else 1
+    while i < 10_000:
+        cand = f"{base_stem} ({i}){ext}"
+        if not exists_fn(cand):
+            return cand
+        i += 1
+    # 兜底：极端情况返回带时间戳的名字，避免死循环
+    import time as _time
+    return f"{base_stem}-{int(_time.time())}{ext}"
 
 
 _items: list[tuple] = []

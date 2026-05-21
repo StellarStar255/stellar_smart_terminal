@@ -8,6 +8,7 @@ import sys
 import subprocess
 import shutil
 from pathlib import Path
+from typing import Optional
 
 from i18n import t
 import explorer_clipboard
@@ -843,8 +844,10 @@ class ExplorerPanel(QWidget):
     def _clipboard_paste_into(self, target_dir: str):
         """把剪贴板里的项目粘贴到 target_dir。
 
-        优先内部剪贴板（含远程信息）；若系统剪贴板已被外部应用更新（Finder 等），
-        改为按系统剪贴板里的 file URL 走本地复制。
+        语义（与 Finder/VS Code 风格一致）：
+        - 源文件夹 == 目标文件夹 → 自动加 "(N)" 序号尾缀，不弹窗。
+        - 跨文件夹 / 跨面板冲突 → 弹一次窗，三选一：覆盖 / 保留二者（加尾缀）/ 取消，
+          可勾选 "对剩余冲突应用相同操作" 一次性处理多个文件。
         """
         items = explorer_clipboard.effective_items()
         if not items or not target_dir:
@@ -856,33 +859,49 @@ class ExplorerPanel(QWidget):
                                 t("explorer.paste_failed", error=e))
             return
 
+        target_abs = os.path.abspath(target_dir)
         errors: list[str] = []
-        skip_all = False
-        overwrite_all = False
+        # 跨文件夹冲突时记住用户的选择
+        sticky_decision: Optional[str] = None  # 'overwrite' / 'keep' / None
+        cancel_all = False
+
+        def local_name_exists(name: str) -> bool:
+            return os.path.exists(os.path.join(target_dir, name))
 
         for it in items:
+            if cancel_all:
+                break
             kind = it[0]
             try:
                 if kind == "local":
                     src = it[1]
                     name = os.path.basename(src.rstrip("/"))
+                    src_dir_abs = os.path.abspath(os.path.dirname(src.rstrip("/")))
+                    same_folder = (src_dir_abs == target_abs)
                     dst = os.path.join(target_dir, name)
-                    if os.path.abspath(src) == os.path.abspath(dst):
-                        continue
-                    if os.path.exists(dst):
-                        decision = self._ask_overwrite(name, skip_all, overwrite_all)
-                        if decision == "skip":
-                            continue
-                        if decision == "skip_all":
-                            skip_all = True
-                            continue
-                        if decision == "overwrite_all":
-                            overwrite_all = True
-                        # 覆盖前删旧的
-                        if os.path.isdir(dst) and not os.path.islink(dst):
-                            shutil.rmtree(dst)
-                        else:
-                            os.remove(dst)
+                    # 同源同目标：原地复制 → 自动 (N) 后缀，绝不弹窗
+                    if same_folder:
+                        if os.path.exists(dst):
+                            name = explorer_clipboard.next_free_name(name, local_name_exists)
+                            dst = os.path.join(target_dir, name)
+                    elif os.path.exists(dst):
+                        # 跨文件夹冲突：问一次
+                        decision = self._resolve_paste_conflict(name, sticky_decision)
+                        if decision is None:
+                            cancel_all = True
+                            break
+                        # decision == ('overwrite'|'keep', sticky)
+                        action, sticky = decision
+                        if sticky:
+                            sticky_decision = action
+                        if action == "overwrite":
+                            if os.path.isdir(dst) and not os.path.islink(dst):
+                                shutil.rmtree(dst)
+                            else:
+                                os.remove(dst)
+                        else:  # keep
+                            name = explorer_clipboard.next_free_name(name, local_name_exists)
+                            dst = os.path.join(target_dir, name)
                     if os.path.isdir(src) and not os.path.islink(src):
                         shutil.copytree(src, dst)
                     else:
@@ -895,19 +914,23 @@ class ExplorerPanel(QWidget):
                         continue
                     name = posixpath.basename(remote_path.rstrip("/")) or host_alias
                     dst = os.path.join(target_dir, name)
+                    # 远端 → 本地，永远算 "跨文件夹"（不同存储）
                     if os.path.exists(dst):
-                        decision = self._ask_overwrite(name, skip_all, overwrite_all)
-                        if decision == "skip":
-                            continue
-                        if decision == "skip_all":
-                            skip_all = True
-                            continue
-                        if decision == "overwrite_all":
-                            overwrite_all = True
-                        if os.path.isdir(dst) and not os.path.islink(dst):
-                            shutil.rmtree(dst)
-                        else:
-                            os.remove(dst)
+                        decision = self._resolve_paste_conflict(name, sticky_decision)
+                        if decision is None:
+                            cancel_all = True
+                            break
+                        action, sticky = decision
+                        if sticky:
+                            sticky_decision = action
+                        if action == "overwrite":
+                            if os.path.isdir(dst) and not os.path.islink(dst):
+                                shutil.rmtree(dst)
+                            else:
+                                os.remove(dst)
+                        else:  # keep
+                            name = explorer_clipboard.next_free_name(name, local_name_exists)
+                            dst = os.path.join(target_dir, name)
                     self._download_remote_recursive(session, remote_path, dst)
                 else:
                     errors.append(f"Unknown clipboard item: {it!r}")
@@ -918,28 +941,34 @@ class ExplorerPanel(QWidget):
             QMessageBox.warning(self, t("explorer.error"), "\n".join(errors))
         self.refresh()
 
-    def _ask_overwrite(self, name: str, skip_all: bool, overwrite_all: bool) -> str:
-        """返回 'overwrite' / 'skip' / 'overwrite_all' / 'skip_all'"""
-        if overwrite_all:
-            return "overwrite"
-        if skip_all:
-            return "skip"
-        reply = QMessageBox.question(
-            self, t("explorer.overwrite_title"),
-            t("explorer.overwrite_msg", name=name),
-            QMessageBox.StandardButton.Yes
-            | QMessageBox.StandardButton.YesToAll
-            | QMessageBox.StandardButton.No
-            | QMessageBox.StandardButton.NoToAll,
-            QMessageBox.StandardButton.No,
-        )
-        if reply == QMessageBox.StandardButton.Yes:
-            return "overwrite"
-        if reply == QMessageBox.StandardButton.YesToAll:
-            return "overwrite_all"
-        if reply == QMessageBox.StandardButton.NoToAll:
-            return "skip_all"
-        return "skip"
+    def _resolve_paste_conflict(self, name: str, sticky: Optional[str]):
+        """跨文件夹冲突时的三选一对话框。
+
+        Returns:
+            ('overwrite', sticky_bool) — 覆盖
+            ('keep',      sticky_bool) — 保留二者（加 (N) 尾缀）
+            None                        — 取消，中止剩余粘贴
+        sticky 已有值时直接复用，不再弹窗。
+        """
+        if sticky in ("overwrite", "keep"):
+            return (sticky, True)
+        box = QMessageBox(self)
+        box.setWindowTitle(t("paste.conflict_title"))
+        box.setText(t("paste.conflict_msg", name=name))
+        box.setIcon(QMessageBox.Icon.Question)
+        keep_btn = box.addButton(t("paste.btn_keep_both"), QMessageBox.ButtonRole.AcceptRole)
+        overwrite_btn = box.addButton(t("paste.btn_overwrite"), QMessageBox.ButtonRole.DestructiveRole)
+        cancel_btn = box.addButton(t("paste.btn_cancel"), QMessageBox.ButtonRole.RejectRole)
+        box.setDefaultButton(keep_btn)
+        from PyQt6.QtWidgets import QCheckBox
+        apply_all = QCheckBox(t("paste.apply_to_all"))
+        box.setCheckBox(apply_all)
+        box.exec()
+        clicked = box.clickedButton()
+        if clicked is cancel_btn or clicked is None:
+            return None
+        action = "overwrite" if clicked is overwrite_btn else "keep"
+        return (action, apply_all.isChecked())
 
     def _download_remote_recursive(self, session, remote_path: str, local_path: str):
         """通过 SSH session 把远程文件 / 目录递归下载到 local_path（阻塞，含进度对话框）"""

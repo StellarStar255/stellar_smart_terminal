@@ -1188,7 +1188,12 @@ class RemoteExplorerPanel(QWidget):
         explorer_clipboard.set_items(payload, push_local_paths=None)
 
     def _clipboard_paste_into(self, target_dir: str):
-        """把跨面板剪贴板里的项目粘贴到当前远端 target_dir"""
+        """把跨面板剪贴板里的项目粘贴到当前远端 target_dir。
+
+        语义（和本地 Explorer 一致）：
+        - 源 = 目标同目录（同一 SSH 会话且同 dir）→ 自动加 "(N)" 尾缀，不弹窗。
+        - 跨目录 / 跨主机 / 本地→远端 冲突 → 弹一次三选一对话框，可"应用到剩余"。
+        """
         if self._session is None:
             return
         items = explorer_clipboard.effective_items()
@@ -1197,32 +1202,46 @@ class RemoteExplorerPanel(QWidget):
         sess = self._session
 
         errors: list[str] = []
-        skip_all = False
-        overwrite_all = False
+        sticky_decision: Optional[str] = None
+        cancel_all = False
+
+        # 把目标目录的现有条目名预拉一次，避免每次起名都来回 stat
+        existing = self._remote_listing_names(sess, target_dir)
+
+        def remote_name_exists(name: str) -> bool:
+            return name in existing
 
         for it in items:
+            if cancel_all:
+                break
             kind = it[0]
             try:
                 if kind == "local":
                     src = it[1]
                     name = os.path.basename(src.rstrip("/"))
                     dst = posixpath.join(target_dir, name)
-                    if self._remote_exists(sess, dst):
-                        decision = self._ask_overwrite(name, skip_all, overwrite_all)
-                        if decision == "skip":
-                            continue
-                        if decision == "skip_all":
-                            skip_all = True
-                            continue
-                        if decision == "overwrite_all":
-                            overwrite_all = True
-                        self._remote_remove(sess, dst)
+                    # 本地 → 远端，永远算跨存储
+                    if remote_name_exists(name):
+                        decision = self._resolve_paste_conflict(name, sticky_decision)
+                        if decision is None:
+                            cancel_all = True
+                            break
+                        action, sticky = decision
+                        if sticky:
+                            sticky_decision = action
+                        if action == "overwrite":
+                            self._remote_remove(sess, dst)
+                            existing.discard(name)
+                        else:
+                            name = explorer_clipboard.next_free_name(name, remote_name_exists)
+                            dst = posixpath.join(target_dir, name)
                     if os.path.isdir(src) and not os.path.islink(src):
                         self._upload_local_dir(sess, src, dst)
                     else:
                         fut = sess.submit(sess.upload, src, dst)
                         self._wait_future_with_progress([fut], t("remote.pasting_progress",
                                                                  dst=target_dir))
+                    existing.add(name)
 
                 elif kind == "remote":
                     _, host_alias, remote_src, src_sess = it
@@ -1231,21 +1250,30 @@ class RemoteExplorerPanel(QWidget):
                         continue
                     name = posixpath.basename(remote_src.rstrip("/")) or host_alias
                     dst = posixpath.join(target_dir, name)
-                    # 同源同路径粘到同一目录 → 跳过避免覆盖自己
-                    if src_sess is sess and remote_src == dst:
-                        continue
-                    if self._remote_exists(sess, dst):
-                        decision = self._ask_overwrite(name, skip_all, overwrite_all)
-                        if decision == "skip":
-                            continue
-                        if decision == "skip_all":
-                            skip_all = True
-                            continue
-                        if decision == "overwrite_all":
-                            overwrite_all = True
-                        self._remote_remove(sess, dst)
+                    src_dir = posixpath.dirname(remote_src.rstrip("/")) or "/"
+                    same_folder = (src_sess is sess and src_dir == target_dir)
+                    # 同源同路径粘到同一目录 → 必走 (N) 序号尾缀
+                    if same_folder:
+                        if remote_name_exists(name):
+                            name = explorer_clipboard.next_free_name(name, remote_name_exists)
+                            dst = posixpath.join(target_dir, name)
+                    elif remote_name_exists(name):
+                        decision = self._resolve_paste_conflict(name, sticky_decision)
+                        if decision is None:
+                            cancel_all = True
+                            break
+                        action, sticky = decision
+                        if sticky:
+                            sticky_decision = action
+                        if action == "overwrite":
+                            self._remote_remove(sess, dst)
+                            existing.discard(name)
+                        else:
+                            name = explorer_clipboard.next_free_name(name, remote_name_exists)
+                            dst = posixpath.join(target_dir, name)
                     # 走临时文件中转：远程源 → 本地 temp → 远程目标
                     self._remote_to_remote(src_sess, sess, remote_src, dst)
+                    existing.add(name)
                 else:
                     errors.append(f"Unknown clipboard item: {it!r}")
             except Exception as e:
@@ -1260,6 +1288,40 @@ class RemoteExplorerPanel(QWidget):
             # 找到对应的树节点刷新；找不到就重刷整棵树
             self._refresh_subtree_by_path(target_dir)
 
+    def _remote_listing_names(self, sess: SSHSession, path: str) -> set:
+        """拉远端 target_dir 下的现有条目名集合，用来快速做命名冲突检查。
+
+        失败时返回空 set，调用方会回落到单次 stat 判定（next_free_name 内会 stat）。
+        """
+        try:
+            fut = sess.submit(sess.listdir, path)
+            entries = fut.result()
+            return {e.name for e in entries}
+        except Exception:
+            return set()
+
+    def _resolve_paste_conflict(self, name: str, sticky: Optional[str]):
+        """跨目录/跨主机冲突时的三选一对话框。返回与本地 Explorer 同语义。"""
+        if sticky in ("overwrite", "keep"):
+            return (sticky, True)
+        box = QMessageBox(self)
+        box.setWindowTitle(t("paste.conflict_title"))
+        box.setText(t("paste.conflict_msg", name=name))
+        box.setIcon(QMessageBox.Icon.Question)
+        keep_btn = box.addButton(t("paste.btn_keep_both"), QMessageBox.ButtonRole.AcceptRole)
+        overwrite_btn = box.addButton(t("paste.btn_overwrite"), QMessageBox.ButtonRole.DestructiveRole)
+        cancel_btn = box.addButton(t("paste.btn_cancel"), QMessageBox.ButtonRole.RejectRole)
+        box.setDefaultButton(keep_btn)
+        from PyQt6.QtWidgets import QCheckBox
+        apply_all = QCheckBox(t("paste.apply_to_all"))
+        box.setCheckBox(apply_all)
+        box.exec()
+        clicked = box.clickedButton()
+        if clicked is cancel_btn or clicked is None:
+            return None
+        action = "overwrite" if clicked is overwrite_btn else "keep"
+        return (action, apply_all.isChecked())
+
     def _refresh_subtree_by_path(self, path: str):
         """如果 tree 顶层有 path 对应的目录项，把它重刷一下；否则刷整棵树"""
         for i in range(self._tree.topLevelItemCount()):
@@ -1269,28 +1331,6 @@ class RemoteExplorerPanel(QWidget):
                 self._reload_subtree(it, path)
                 return
         self._populate_tree_root()
-
-    def _ask_overwrite(self, name: str, skip_all: bool, overwrite_all: bool) -> str:
-        if overwrite_all:
-            return "overwrite"
-        if skip_all:
-            return "skip"
-        reply = QMessageBox.question(
-            self, t("remote.overwrite_title"),
-            t("remote.overwrite_msg", name=name),
-            QMessageBox.StandardButton.Yes
-            | QMessageBox.StandardButton.YesToAll
-            | QMessageBox.StandardButton.No
-            | QMessageBox.StandardButton.NoToAll,
-            QMessageBox.StandardButton.No,
-        )
-        if reply == QMessageBox.StandardButton.Yes:
-            return "overwrite"
-        if reply == QMessageBox.StandardButton.YesToAll:
-            return "overwrite_all"
-        if reply == QMessageBox.StandardButton.NoToAll:
-            return "skip_all"
-        return "skip"
 
     def _remote_exists(self, sess: SSHSession, path: str) -> bool:
         fut = sess.submit(sess.stat, path)
