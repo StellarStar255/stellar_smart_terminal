@@ -332,6 +332,7 @@ class RemoteExplorerPanel(QWidget):
     _stat_resolved = pyqtSignal(object, str)          # (entry, requested_path)
     _refresh_root_signal = pyqtSignal()
     _refresh_subtree_signal = pyqtSignal(object, str)  # (item, path)
+    _auto_refresh_result = pyqtSignal(str, object)    # (path, entries or None on error)
 
     def __init__(self, theme: Optional[dict] = None, parent: Optional[QWidget] = None):
         super().__init__(parent)
@@ -359,6 +360,17 @@ class RemoteExplorerPanel(QWidget):
         # 节流下载进度文案：paramiko 回调每个 chunk 都触发，UI 100ms 一次足够
         self._last_progress_emit_ts = 0.0
         self._stat_resolved.connect(self._on_stat_resolved)
+        self._auto_refresh_result.connect(self._on_auto_refresh_result)
+
+        # 自动刷新（轮询）：连接后启动，断开/隐藏时停。
+        # - 周期 10s；每次只重发那些当前可见（根 + 已展开）的目录的 listdir
+        # - 同 fingerprint（name+is_dir 集合）则不动；变化时做增量 add/remove，
+        #   绝不重建整棵子树，避免毁掉用户的展开/选中状态。
+        self._auto_refresh_timer = QTimer(self)
+        self._auto_refresh_timer.setInterval(10_000)
+        self._auto_refresh_timer.timeout.connect(self._auto_refresh_tick)
+        self._auto_refresh_pending: int = 0  # 本轮还在 in-flight 的 listdir 个数
+        self._auto_refresh_fingerprints: dict[str, frozenset] = {}
         self._refresh_root_signal.connect(self._populate_tree_root)
         self._refresh_subtree_signal.connect(self._reload_subtree)
         self._password_prompt_signal.connect(self._on_password_prompt)
@@ -690,6 +702,7 @@ class RemoteExplorerPanel(QWidget):
         self._current_path = sess.home()
         self._path_edit.setText(self._current_path)
         self._populate_tree_root()
+        self._auto_refresh_timer.start()
         # 通知主窗口：可以开一个 SSH 终端 tab 进去
         self.host_connected.emit(sess.host_config)
 
@@ -712,6 +725,9 @@ class RemoteExplorerPanel(QWidget):
             except Exception:
                 pass
             self._session = None
+        self._auto_refresh_timer.stop()
+        self._auto_refresh_fingerprints.clear()
+        self._auto_refresh_pending = 0
         self._stack.setCurrentWidget(self._hosts_page)
         self._tree.clear()
         self._subtitle_label.setText("")
@@ -745,6 +761,8 @@ class RemoteExplorerPanel(QWidget):
 
         和本地 Explorer 行为一致：path 在路径栏里显示，文件/目录直接平铺在树根。
         """
+        # 整树重建 → 旧的自动刷新指纹全部失效，等 _apply_top_level 后重新基线
+        self._auto_refresh_fingerprints.clear()
         self._tree.clear()
         if self._session is None:
             return
@@ -805,6 +823,159 @@ class RemoteExplorerPanel(QWidget):
         if self._session is not None:
             self._session.invalidate_cache(self._current_path)
         self._populate_tree_root()
+
+    # ---------- 自动刷新（轮询）----------
+
+    def _auto_refresh_tick(self):
+        """每 10s 触发一次：拉根 + 已展开目录，做指纹对比 + 增量更新"""
+        if self._session is None or not self._session.is_connected():
+            return
+        if not self.isVisible():
+            return  # 看不见的 panel 不浪费带宽
+        if self._auto_refresh_pending > 0:
+            return  # 上一轮还没回来，跳过这次
+        targets = self._collect_auto_refresh_paths()
+        if not targets:
+            return
+        sess = self._session
+        self._auto_refresh_pending = len(targets)
+        for path in targets:
+            self._submit_auto_refresh(sess, path)
+
+    def _collect_auto_refresh_paths(self) -> list[str]:
+        """根 + 所有已展开且已加载的子目录的路径，去重，cap 在 8 个以内"""
+        out: list[str] = [self._current_path]
+
+        def walk(item: QTreeWidgetItem):
+            if not item.isExpanded():
+                return
+            if not item.data(0, _ROLE_LOADED):
+                return  # 占位状态 → 真展开时才会拉 listdir
+            entry: RemoteEntry = item.data(0, _ROLE_ENTRY)
+            if entry is not None and entry.is_dir:
+                out.append(entry.path)
+                for i in range(item.childCount()):
+                    walk(item.child(i))
+
+        for i in range(self._tree.topLevelItemCount()):
+            walk(self._tree.topLevelItem(i))
+
+        # 去重 + 限流
+        seen = set()
+        deduped: list[str] = []
+        for p in out:
+            if p in seen:
+                continue
+            seen.add(p)
+            deduped.append(p)
+            if len(deduped) >= 8:
+                break
+        return deduped
+
+    def _submit_auto_refresh(self, sess: SSHSession, path: str):
+        # use_cache=False —— 强制从服务器拉，否则 30s TTL 内永远拿到旧的
+        fut = sess.submit(sess.listdir, path, False)
+
+        def on_done(f):
+            try:
+                entries = f.result()
+            except Exception:
+                entries = None
+            # 通过信号回 UI 线程
+            self._auto_refresh_result.emit(path, entries)
+
+        fut.add_done_callback(on_done)
+
+    def _on_auto_refresh_result(self, path: str, entries):
+        """worker 线程 listdir 完成后回到 UI 线程：指纹对比 + 增量更新"""
+        try:
+            self._auto_refresh_pending = max(0, self._auto_refresh_pending - 1)
+            if entries is None:
+                # 网络错误或目录不存在了：清掉指纹，下次会重新建基线
+                self._auto_refresh_fingerprints.pop(path, None)
+                return
+            fp = frozenset((e.name, bool(e.is_dir)) for e in entries)
+            old_fp = self._auto_refresh_fingerprints.get(path)
+            self._auto_refresh_fingerprints[path] = fp
+            if old_fp is None:
+                # 第一次见这个 path → 只记录基线，不动 UI（避免与手动刷新打架）
+                return
+            if fp == old_fp:
+                return
+            self._auto_refresh_apply(path, entries)
+        except RuntimeError:
+            # widget 已销毁
+            return
+
+    def _auto_refresh_apply(self, path: str, entries: list):
+        """增量更新一个目录的子项：删消失的、加新出现的，不动已存在的"""
+        # 找到父节点
+        if path == self._current_path:
+            parent_item = None
+            existing = [self._tree.topLevelItem(i)
+                        for i in range(self._tree.topLevelItemCount())]
+        else:
+            parent_item = self._find_item_by_path(path)
+            if parent_item is None:
+                return
+            if not parent_item.data(0, _ROLE_LOADED):
+                return  # 父还是占位状态，避免越权填充
+            existing = [parent_item.child(i)
+                        for i in range(parent_item.childCount())]
+
+        existing_by_name: dict[str, QTreeWidgetItem] = {}
+        for it in existing:
+            e: RemoteEntry = it.data(0, _ROLE_ENTRY)
+            if e is not None:
+                existing_by_name[e.name] = it
+
+        new_names = {e.name for e in entries}
+
+        # 删掉已不存在的（保留当前选中项的展开状态等都不受影响）
+        for name in list(existing_by_name):
+            if name in new_names:
+                continue
+            it = existing_by_name.pop(name)
+            if parent_item is None:
+                idx = self._tree.indexOfTopLevelItem(it)
+                if idx >= 0:
+                    self._tree.takeTopLevelItem(idx)
+            else:
+                parent_item.removeChild(it)
+
+        # 把新增的按字典序插进去（保持 listdir 顺序即可）
+        for e in entries:
+            if e.name in existing_by_name:
+                continue
+            icon = "📁 " if e.is_dir else "📄 "
+            child = QTreeWidgetItem([icon + e.name])
+            child.setData(0, _ROLE_ENTRY, e)
+            child.setData(0, _ROLE_LOADED, False)
+            child.setFlags(child.flags() | Qt.ItemFlag.ItemIsEditable)
+            if e.is_dir:
+                child.addChild(QTreeWidgetItem(["…"]))
+            if parent_item is None:
+                self._tree.addTopLevelItem(child)
+            else:
+                parent_item.addChild(child)
+
+    def _find_item_by_path(self, path: str) -> Optional[QTreeWidgetItem]:
+        """在树里 DFS 找 entry.path == path 的 QTreeWidgetItem"""
+        def dfs(item: QTreeWidgetItem) -> Optional[QTreeWidgetItem]:
+            e: RemoteEntry = item.data(0, _ROLE_ENTRY)
+            if e is not None and e.path == path:
+                return item
+            for i in range(item.childCount()):
+                hit = dfs(item.child(i))
+                if hit is not None:
+                    return hit
+            return None
+
+        for i in range(self._tree.topLevelItemCount()):
+            hit = dfs(self._tree.topLevelItem(i))
+            if hit is not None:
+                return hit
+        return None
 
     # ---------- 书签 ----------
 

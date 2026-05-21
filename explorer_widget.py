@@ -219,6 +219,15 @@ class ExplorerPanel(QWidget):
         self._setup_ui()
         self._connect_signals()
 
+        # 自动刷新兜底：QFileSystemModel 已经通过 FSEvents 监听本地变更；
+        # 这里只是一道保险，60s 检查一次当前目录的条目集合，差异时才 refresh。
+        # 没差异 = 一次 os.listdir，开销可忽略。
+        self._auto_refresh_fingerprint: frozenset = frozenset()
+        self._auto_refresh_timer = QTimer(self)
+        self._auto_refresh_timer.setInterval(60_000)
+        self._auto_refresh_timer.timeout.connect(self._auto_refresh_tick)
+        self._auto_refresh_timer.start()
+
     def _setup_ui(self):
         """设置 UI"""
         layout = QVBoxLayout(self)
@@ -449,6 +458,8 @@ class ExplorerPanel(QWidget):
             self._current_path = path
             self.model.setRootPath(path)
             self.tree_view.setRootIndex(self.model.index(path))
+            # 切换了根 → 重置自动刷新基线
+            self._auto_refresh_fingerprint = frozenset()
 
     def refresh(self):
         """刷新文件树"""
@@ -457,6 +468,42 @@ class ExplorerPanel(QWidget):
         self.model.setRootPath("")
         self.model.setRootPath(current)
         self.tree_view.setRootIndex(self.model.index(current))
+        self._auto_refresh_fingerprint = frozenset()
+
+    def _auto_refresh_tick(self):
+        """60s 安全网：QFileSystemModel + FSEvents 已经处理大多数情况，
+        这里只在当前根目录条目集合发生过变化时才真正刷一次。
+        无变化 = 只做一次 os.listdir，几乎零开销。"""
+        if not self.isVisible():
+            return
+        path = self._current_path
+        if not path or not os.path.isdir(path):
+            return
+        try:
+            names = frozenset(os.listdir(path))
+        except OSError:
+            return
+        if names == self._auto_refresh_fingerprint:
+            return
+        # 第一次见这个目录 → 只建基线，不刷新（模型已经有数据了）
+        if not self._auto_refresh_fingerprint:
+            self._auto_refresh_fingerprint = names
+            return
+        # 有变化 → 保存当前选中再刷新，刷完恢复选中
+        sel_path: Optional[str] = None
+        idx = self.tree_view.currentIndex()
+        if idx.isValid():
+            sel_path = self.model.filePath(idx)
+        self.refresh()
+        self._auto_refresh_fingerprint = names
+        if sel_path and os.path.exists(sel_path):
+            QTimer.singleShot(50, lambda p=sel_path: self._reselect_path(p))
+
+    def _reselect_path(self, path: str):
+        idx = self.model.index(path)
+        if idx.isValid():
+            self.tree_view.setCurrentIndex(idx)
+            self.tree_view.scrollTo(idx)
 
     def apply_theme(self, theme: dict):
         """应用主题"""
