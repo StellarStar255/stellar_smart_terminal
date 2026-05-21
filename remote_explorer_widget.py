@@ -327,6 +327,8 @@ class RemoteExplorerPanel(QWidget):
     _subtree_ready = pyqtSignal(object, list)         # (parent_item, entries)
     _error_signal = pyqtSignal(str)
     _file_downloaded = pyqtSignal(str, str, str, bytes)  # host_alias, remote_path, local_path, data
+    _file_ready = pyqtSignal(str, str, str)  # host_alias, remote_path, local_path (流式下载完成)
+    _download_progress = pyqtSignal(str, int, int)  # remote_path, bytes_done, bytes_total
     _stat_resolved = pyqtSignal(object, str)          # (entry, requested_path)
     _refresh_root_signal = pyqtSignal()
     _refresh_subtree_signal = pyqtSignal(object, str)  # (item, path)
@@ -352,6 +354,10 @@ class RemoteExplorerPanel(QWidget):
         self._subtree_ready.connect(self._apply_children)
         self._error_signal.connect(self._toast_error)
         self._file_downloaded.connect(self._on_file_downloaded)
+        self._file_ready.connect(self._on_file_ready)
+        self._download_progress.connect(self._on_download_progress)
+        # 节流下载进度文案：paramiko 回调每个 chunk 都触发，UI 100ms 一次足够
+        self._last_progress_emit_ts = 0.0
         self._stat_resolved.connect(self._on_stat_resolved)
         self._refresh_root_signal.connect(self._populate_tree_root)
         self._refresh_subtree_signal.connect(self._reload_subtree)
@@ -1432,6 +1438,13 @@ class RemoteExplorerPanel(QWidget):
             raise RuntimeError("; ".join(done["errors"]))
 
     def _open_remote_file(self, entry: RemoteEntry):
+        """打开远端文件 —— 流式下载到本地临时文件，带进度，自动缓存。
+
+        与 VS Code 一致的关键点：
+        - 不把整文件塞内存（之前 read_file 是 bytes → 信号 → UI 写盘，5MB 硬上限）
+        - 本地缓存命中（size + mtime 都匹配）直接打开，秒开
+        - 缓存未命中时显示 X.X MB / Y.Y MB 进度文案
+        """
         if self._session is None:
             return
         sess = self._session
@@ -1447,16 +1460,94 @@ class RemoteExplorerPanel(QWidget):
         os.makedirs(local_dir, exist_ok=True)
         local_path = os.path.join(local_dir, entry.name)
 
-        fut = sess.submit(sess.read_file, entry.path)
+        # 缓存命中判定：本地存在 + 文件大小 + mtime 都和 entry 匹配 → 直接复用
+        try:
+            if (os.path.isfile(local_path)
+                    and entry.size
+                    and os.path.getsize(local_path) == entry.size
+                    and entry.mtime
+                    and abs(os.path.getmtime(local_path) - float(entry.mtime)) < 1.0):
+                self._open_temp_map[local_path] = (host_alias, entry.path)
+                self._file_ready.emit(host_alias, entry.path, local_path)
+                return
+        except OSError:
+            pass  # stat 失败就当未命中
+
+        remote_path = entry.path
+        size_hint = entry.size or 0
+        # 立刻给用户视觉反馈，免得点完看不出动静
+        self._subtitle_label.setText(
+            t("remote.downloading", name=entry.name, done=self._fmt_size(0),
+              total=self._fmt_size(size_hint)) if size_hint
+            else t("remote.downloading_unknown", name=entry.name)
+        )
+        self._last_progress_emit_ts = 0.0
+
+        def progress_cb(done, total):
+            # paramiko 在 worker 线程调用 —— 节流后通过信号回 UI 线程
+            now = time.monotonic()
+            if now - self._last_progress_emit_ts < 0.1 and done < total:
+                return
+            self._last_progress_emit_ts = now
+            self._download_progress.emit(remote_path, done, total)
+
+        fut = sess.submit(sess.download_with_progress, remote_path, local_path, progress_cb)
 
         def on_done(f):
             try:
-                data = f.result()
+                attr = f.result()
             except Exception as e:
                 self._error_signal.emit(str(e))
+                # 还原 subtitle
+                self._download_progress.emit(remote_path, -1, -1)
                 return
-            self._file_downloaded.emit(host_alias, entry.path, local_path, data)
+            # 把本地 mtime 同步成远端的 mtime —— 下次再开同一文件可以走缓存秒开
+            try:
+                if attr is not None and attr.st_mtime:
+                    os.utime(local_path, (float(attr.st_mtime), float(attr.st_mtime)))
+            except OSError:
+                pass
+            self._file_ready.emit(host_alias, remote_path, local_path)
         fut.add_done_callback(on_done)
+
+    @staticmethod
+    def _fmt_size(n: int) -> str:
+        if n is None or n < 0:
+            return "?"
+        if n < 1024:
+            return f"{n} B"
+        if n < 1024 * 1024:
+            return f"{n / 1024:.1f} KB"
+        if n < 1024 * 1024 * 1024:
+            return f"{n / (1024 * 1024):.1f} MB"
+        return f"{n / (1024 * 1024 * 1024):.2f} GB"
+
+    def _on_download_progress(self, remote_path: str, done: int, total: int):
+        """节流后的下载进度更新 —— 写到 subtitle 标签上"""
+        if done < 0:
+            # 出错信号：还原 subtitle
+            sess = self._session
+            self._subtitle_label.setText(sess.host_config.alias if sess else "")
+            return
+        name = posixpath.basename(remote_path)
+        if total > 0:
+            self._subtitle_label.setText(
+                t("remote.downloading", name=name,
+                  done=self._fmt_size(done), total=self._fmt_size(total))
+            )
+        else:
+            self._subtitle_label.setText(
+                t("remote.downloading_unknown", name=name)
+            )
+
+    def _on_file_ready(self, host_alias: str, remote_path: str, local_path: str):
+        """流式下载完成（或缓存命中）→ 通知主窗口在编辑器/预览里打开"""
+        # 还原 subtitle 显示
+        sess = self._session
+        if sess is not None:
+            self._subtitle_label.setText(sess.host_config.alias)
+        self._open_temp_map[local_path] = (host_alias, remote_path)
+        self.file_open_requested.emit(host_alias, remote_path, local_path, self._session)
 
     def _on_file_downloaded(self, host_alias: str, remote_path: str,
                               local_path: str, data: bytes):

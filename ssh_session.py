@@ -340,6 +340,31 @@ class SSHSession(QObject):
         sftp = self._require()
         sftp.get(remote_path, local_path)
 
+    def download_with_progress(self, remote_path: str, local_path: str,
+                               progress_cb=None) -> "paramiko.SFTPAttributes":
+        """流式下载到本地，paramiko 会按 32K 块边读边写盘，不会把整个文件塞内存。
+
+        progress_cb(bytes_done, bytes_total) 会被 paramiko 从 worker 线程里
+        高频回调（每个 chunk 一次）。调用方需要自己做节流，并把更新切回 UI 线程。
+        返回远端 stat，供调用方做 size/mtime 缓存判定。
+        """
+        sftp = self._require()
+        attr = sftp.stat(remote_path)
+        # 先下到 .part，再原子改名 —— 避免 UI 看到一个尚在写入的半成品图片
+        tmp_path = local_path + ".part"
+        try:
+            sftp.get(remote_path, tmp_path, callback=progress_cb)
+            os.replace(tmp_path, local_path)
+        except Exception:
+            # 失败时清理半成品
+            try:
+                if os.path.exists(tmp_path):
+                    os.remove(tmp_path)
+            except Exception:
+                pass
+            raise
+        return attr
+
     def remove_tree(self, path: str):
         """递归删除目录（不跨链接）"""
         sftp = self._require()

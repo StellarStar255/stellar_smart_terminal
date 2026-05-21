@@ -334,6 +334,8 @@ TRANSLATIONS = {
     "remote.add_host": {"zh": "添加主机", "en": "Add Host"},
     "remote.refresh_hosts": {"zh": "重新加载 ssh_config", "en": "Reload ssh_config"},
     "remote.connecting": {"zh": "正在连接 {host}…", "en": "Connecting to {host}…"},
+    "remote.downloading": {"zh": "下载 {name}: {done} / {total}", "en": "Downloading {name}: {done} / {total}"},
+    "remote.downloading_unknown": {"zh": "下载 {name}…", "en": "Downloading {name}…"},
     "remote.connect_failed_title": {"zh": "连接失败", "en": "Connection Failed"},
     "remote.connect_failed_msg": {"zh": "无法连接到 {host}:\n{error}", "en": "Could not connect to {host}:\n{error}"},
     "remote.password_prompt": {"zh": "{host} 的密码:", "en": "Password for {host}:"},
