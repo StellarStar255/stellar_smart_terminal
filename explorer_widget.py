@@ -17,7 +17,7 @@ from PyQt6.QtWidgets import (
     QPushButton, QTreeView, QMenu, QInputDialog, QMessageBox,
     QAbstractItemView, QFileDialog, QApplication, QProgressDialog
 )
-from PyQt6.QtCore import Qt, QDir, QModelIndex, pyqtSignal, QTimer, QEventLoop
+from PyQt6.QtCore import Qt, QDir, QModelIndex, QPersistentModelIndex, pyqtSignal, QTimer, QEventLoop
 from PyQt6.QtGui import (
     QFileSystemModel, QAction, QDesktopServices, QCursor,
     QShortcut, QKeySequence,
@@ -39,6 +39,12 @@ class _LocalDropTreeView(QTreeView):
         self.setDragEnabled(True)
         self.setDropIndicatorShown(True)
         self.setDragDropMode(QTreeView.DragDropMode.DragDrop)
+
+        # Finder 风格：已选中的条目再次单击 → 延迟进入原地重命名
+        self._pending_rename_index = None  # QPersistentModelIndex 或 None
+        self._rename_timer = QTimer(self)
+        self._rename_timer.setSingleShot(True)
+        self._rename_timer.timeout.connect(self._fire_pending_rename)
 
     def dragEnterEvent(self, event):
         if event.mimeData().hasUrls():
@@ -62,11 +68,68 @@ class _LocalDropTreeView(QTreeView):
                 if len(rows) == 1:
                     idx = next(iter(rows.values()))
                     if idx.isValid() and idx != self.rootIndex():
+                        self._cancel_pending_rename()
                         self.setCurrentIndex(idx)
                         self.edit(idx)
                         event.accept()
                         return
         super().keyPressEvent(event)
+
+    def _cancel_pending_rename(self):
+        self._rename_timer.stop()
+        self._pending_rename_index = None
+
+    def _fire_pending_rename(self):
+        pidx = self._pending_rename_index
+        self._pending_rename_index = None
+        if pidx is None:
+            return
+        idx = QModelIndex(pidx)
+        if not idx.isValid() or idx == self.rootIndex():
+            return
+        sel = self.selectionModel()
+        if sel is None or not sel.isSelected(idx):
+            return
+        self.edit(idx)
+
+    def mousePressEvent(self, event):
+        # 只在左键、无修饰键、点中实际条目时考虑 Finder 式延迟重命名
+        if (event.button() == Qt.MouseButton.LeftButton
+                and event.modifiers() == Qt.KeyboardModifier.NoModifier):
+            idx = self.indexAt(event.position().toPoint())
+            if idx.isValid() and idx.column() == 0 and idx != self.rootIndex():
+                sel = self.selectionModel()
+                was_only_selected = False
+                if sel is not None:
+                    selected_rows = {(i.row(), i.parent()) for i in sel.selectedIndexes() if i.column() == 0}
+                    was_only_selected = (
+                        sel.isSelected(idx) and len(selected_rows) == 1
+                    )
+                if was_only_selected:
+                    # 该项在本次点击前已是唯一选中项 → 等待双击窗口结束后再进入重命名
+                    self._pending_rename_index = QPersistentModelIndex(idx)
+                    self._rename_timer.start(
+                        QApplication.doubleClickInterval() + 80
+                    )
+                else:
+                    self._cancel_pending_rename()
+            else:
+                self._cancel_pending_rename()
+        else:
+            self._cancel_pending_rename()
+        super().mousePressEvent(event)
+
+    def mouseDoubleClickEvent(self, event):
+        # 双击 → 取消延迟重命名（让 doubleClicked 走打开文件的逻辑）
+        self._cancel_pending_rename()
+        super().mouseDoubleClickEvent(event)
+
+    def mouseMoveEvent(self, event):
+        # 按住左键移动（可能是拖拽）→ 取消延迟重命名
+        if (event.buttons() & Qt.MouseButton.LeftButton
+                and self._pending_rename_index is not None):
+            self._cancel_pending_rename()
+        super().mouseMoveEvent(event)
 
     def dropEvent(self, event):
         urls = event.mimeData().urls() if event.mimeData().hasUrls() else []
@@ -262,6 +325,17 @@ class ExplorerPanel(QWidget):
             QTreeView::item:selected {{
                 background-color: {accent};
                 color: white;
+            }}
+            /* 原地重命名时的编辑框 —— 显式控制配色和边距以避免文本被裁切 */
+            QTreeView QLineEdit {{
+                background-color: {bg_dark};
+                color: {text};
+                border: 1px solid {accent};
+                padding: 0 4px;
+                margin: 0;
+                min-height: 18px;
+                selection-background-color: {accent};
+                selection-color: white;
             }}
             QTreeView::branch {{
                 background-color: {bg_dark};
