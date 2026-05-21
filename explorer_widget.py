@@ -60,8 +60,37 @@ class _LocalDropTreeView(QTreeView):
             super().dragMoveEvent(event)
 
     def keyPressEvent(self, event):
-        # 选中单个条目时，Enter / F2 进入原地重命名
         key = event.key()
+        mods = event.modifiers()
+
+        # Delete 键 或 Cmd+Backspace（macOS Finder 风格）→ 删除选中（支持多选）
+        # Qt 在 macOS 上把 Cmd 映射到 ControlModifier，因此跨平台都用 Control 判定。
+        is_delete = (key == Qt.Key.Key_Delete) or (
+            key == Qt.Key.Key_Backspace
+            and bool(mods & Qt.KeyboardModifier.ControlModifier)
+        )
+        if is_delete:
+            sel = self.selectionModel()
+            if sel is not None:
+                paths: list[str] = []
+                seen = set()
+                model = self.model()
+                for idx in sel.selectedIndexes():
+                    if idx.column() != 0:
+                        continue
+                    if idx == self.rootIndex():
+                        continue
+                    p = model.filePath(idx) if hasattr(model, "filePath") else None
+                    if p and p not in seen:
+                        seen.add(p)
+                        paths.append(p)
+                if paths:
+                    self._cancel_pending_rename()
+                    self._panel._delete_paths(paths)
+                    event.accept()
+                    return
+
+        # 选中单个条目时，Enter / F2 进入原地重命名
         if key in (Qt.Key.Key_Return, Qt.Key.Key_Enter, Qt.Key.Key_F2):
             sel = self.selectionModel()
             if sel is not None:
@@ -252,8 +281,8 @@ class ExplorerPanel(QWidget):
         self.tree_view.hideColumn(2)  # Type
         self.tree_view.hideColumn(3)  # Date Modified
 
-        # 设置选择模式
-        self.tree_view.setSelectionMode(QAbstractItemView.SelectionMode.SingleSelection)
+        # 设置选择模式：ExtendedSelection 让 Cmd/Shift 多选生效，方便批量删除/复制
+        self.tree_view.setSelectionMode(QAbstractItemView.SelectionMode.ExtendedSelection)
         self.tree_view.setContextMenuPolicy(Qt.ContextMenuPolicy.CustomContextMenu)
 
         # 编辑触发：仅 F2 / 代码触发，避免双击/单击意外进入重命名（双击仍用于打开文件）
@@ -711,9 +740,10 @@ class ExplorerPanel(QWidget):
             rename_action = menu.addAction(t("explorer.rename"))
             rename_action.triggered.connect(lambda: self._rename_item(file_path))
 
-            # 删除
+            # 删除：如果右键的对象在当前选中里，则删除整批选中；否则只删该项
+            delete_paths = self._selection_paths_including(file_path)
             delete_action = menu.addAction(t("explorer.delete"))
-            delete_action.triggered.connect(lambda: self._delete_item(file_path))
+            delete_action.triggered.connect(lambda paths=delete_paths: self._delete_paths(paths))
 
             menu.addSeparator()
 
@@ -820,47 +850,109 @@ class ExplorerPanel(QWidget):
         self.tree_view.scrollTo(idx)
         self.tree_view.edit(idx)
 
+    def _selection_paths_including(self, anchor_path: str) -> list[str]:
+        """右键菜单使用：如果 anchor_path 在当前选中里，返回所有选中路径；
+        否则只返回 anchor_path 自己（用户点了一个未选中的项）。"""
+        sel = self.tree_view.selectionModel()
+        if sel is None:
+            return [anchor_path]
+        paths: list[str] = []
+        seen = set()
+        anchor_abs = os.path.abspath(anchor_path) if anchor_path else None
+        anchor_in_selection = False
+        for idx in sel.selectedIndexes():
+            if idx.column() != 0:
+                continue
+            p = self.model.filePath(idx)
+            if not p:
+                continue
+            ap = os.path.abspath(p)
+            if ap in seen:
+                continue
+            seen.add(ap)
+            paths.append(p)
+            if anchor_abs and ap == anchor_abs:
+                anchor_in_selection = True
+        if anchor_in_selection and paths:
+            return paths
+        return [anchor_path]
+
     def _delete_item(self, file_path: str):
-        """删除文件/文件夹"""
-        name = os.path.basename(file_path)
-        is_dir = os.path.isdir(file_path)
-        item_type = t("explorer.folder") if is_dir else t("explorer.file")
+        """单项删除（保留以兼容已有调用方），转发到多项删除"""
+        self._delete_paths([file_path])
+
+    def _delete_paths(self, paths: list[str]):
+        """删除一个或多个本地文件/文件夹，统一确认 + 批量执行。"""
+        # 去重并过滤掉不存在的
+        seen = set()
+        valid: list[str] = []
+        for p in paths:
+            if not p:
+                continue
+            ap = os.path.abspath(p)
+            if ap in seen or not os.path.exists(p):
+                continue
+            seen.add(ap)
+            valid.append(p)
+        if not valid:
+            return
+
+        if len(valid) == 1:
+            p = valid[0]
+            is_dir = os.path.isdir(p)
+            item_type = t("explorer.folder") if is_dir else t("explorer.file")
+            msg = t("explorer.confirm_delete_msg",
+                    type=item_type, name=os.path.basename(p))
+        else:
+            msg = t("explorer.confirm_delete_many_msg", count=len(valid))
 
         reply = QMessageBox.question(
-            self, t("explorer.confirm_delete_title"),
-            t("explorer.confirm_delete_msg", type=item_type, name=name),
-            QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No
+            self, t("explorer.confirm_delete_title"), msg,
+            QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No,
+            QMessageBox.StandardButton.No,
         )
+        if reply != QMessageBox.StandardButton.Yes:
+            return
 
-        if reply == QMessageBox.StandardButton.Yes:
+        errors: list[str] = []
+        for p in valid:
             try:
-                if sys.platform == 'darwin':
-                    # macOS: 移至废纸篓
-                    subprocess.run(['osascript', '-e', f'tell app "Finder" to delete POSIX file "{file_path}"'],
-                                   check=True, capture_output=True)
-                elif sys.platform == 'win32':
-                    # Windows: 使用 send2trash
-                    try:
-                        from send2trash import send2trash
-                        send2trash(file_path)
-                    except ImportError:
-                        # 如果没有 send2trash，直接删除
-                        if is_dir:
-                            shutil.rmtree(file_path)
-                        else:
-                            os.remove(file_path)
-                else:
-                    # Linux: 尝试 gio trash，否则直接删除
-                    result = subprocess.run(['gio', 'trash', file_path], capture_output=True)
-                    if result.returncode != 0:
-                        if is_dir:
-                            shutil.rmtree(file_path)
-                        else:
-                            os.remove(file_path)
-
-                self.refresh()
+                self._send_to_trash(p)
             except Exception as e:
-                QMessageBox.warning(self, t("explorer.error"), t("explorer.delete_failed", error=e))
+                errors.append(f"{os.path.basename(p)}: {e}")
+
+        self.refresh()
+        if errors:
+            QMessageBox.warning(
+                self, t("explorer.error"),
+                t("explorer.delete_failed", error="\n".join(errors)),
+            )
+
+    def _send_to_trash(self, file_path: str):
+        """把单个本地路径移到回收站（平台分发）；失败时回退到永久删除。"""
+        is_dir = os.path.isdir(file_path)
+        if sys.platform == 'darwin':
+            subprocess.run(
+                ['osascript', '-e',
+                 f'tell app "Finder" to delete POSIX file "{file_path}"'],
+                check=True, capture_output=True,
+            )
+        elif sys.platform == 'win32':
+            try:
+                from send2trash import send2trash
+                send2trash(file_path)
+            except ImportError:
+                if is_dir:
+                    shutil.rmtree(file_path)
+                else:
+                    os.remove(file_path)
+        else:
+            result = subprocess.run(['gio', 'trash', file_path], capture_output=True)
+            if result.returncode != 0:
+                if is_dir:
+                    shutil.rmtree(file_path)
+                else:
+                    os.remove(file_path)
 
     # ---------- 跨面板复制 / 粘贴 ----------
 

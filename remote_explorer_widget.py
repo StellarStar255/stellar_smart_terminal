@@ -99,6 +99,29 @@ class _RemoteTreeWidget(QTreeWidget):
 
     def keyPressEvent(self, event):
         key = event.key()
+        mods = event.modifiers()
+
+        # Delete 或 Cmd+Backspace（macOS Finder 风格）→ 批量删除选中项
+        # Qt 在 macOS 上把 Cmd 映射到 ControlModifier，跨平台都用 Control 判定。
+        is_delete = (key == Qt.Key.Key_Delete) or (
+            key == Qt.Key.Key_Backspace
+            and bool(mods & Qt.KeyboardModifier.ControlModifier)
+        )
+        if is_delete:
+            entries = []
+            seen = set()
+            for it in self.selectedItems():
+                e: RemoteEntry = it.data(0, _ROLE_ENTRY)
+                if e is None or e.path in seen:
+                    continue
+                seen.add(e.path)
+                entries.append((e, it))
+            if entries:
+                self._cancel_pending_rename()
+                self._panel._delete_entries(entries)
+                event.accept()
+                return
+
         if key in (Qt.Key.Key_Return, Qt.Key.Key_Enter, Qt.Key.Key_F2):
             item = self._editable_single_selection()
             if item is not None:
@@ -1288,8 +1311,10 @@ class RemoteExplorerPanel(QWidget):
         act_rename.triggered.connect(lambda: self._rename_entry(entry, item))
         menu.addAction(act_rename)
 
+        # 删除：右键项在选中里 → 批量删整批选中；否则只删该项
+        delete_targets = self._selection_entries_including(entry, item)
         act_delete = QAction(t("remote.delete"), self)
-        act_delete.triggered.connect(lambda: self._delete_entry(entry, item))
+        act_delete.triggered.connect(lambda targets=delete_targets: self._delete_entries(targets))
         menu.addAction(act_delete)
 
         if not entry.is_dir:
@@ -1848,24 +1873,64 @@ class RemoteExplorerPanel(QWidget):
         fut = sess.submit(sess.rename, entry.path, new_path)
         self._refresh_after(fut, item.parent(), parent_path)
 
+    def _selection_entries_including(self, anchor_entry: RemoteEntry,
+                                       anchor_item: QTreeWidgetItem) -> list[tuple]:
+        """右键菜单使用：若 anchor 在当前选中里，返回 [(entry, item), ...] 整批；
+        否则只返回 [(anchor_entry, anchor_item)]。"""
+        out: list[tuple] = []
+        seen = set()
+        anchor_in = False
+        for it in self._tree.selectedItems():
+            e: RemoteEntry = it.data(0, _ROLE_ENTRY)
+            if e is None or e.path in seen:
+                continue
+            seen.add(e.path)
+            out.append((e, it))
+            if e.path == anchor_entry.path:
+                anchor_in = True
+        if anchor_in and out:
+            return out
+        return [(anchor_entry, anchor_item)]
+
     def _delete_entry(self, entry: RemoteEntry, item: QTreeWidgetItem):
+        """单项删除（兼容老调用方），转发到批量删除"""
+        self._delete_entries([(entry, item)])
+
+    def _delete_entries(self, entries: list[tuple]):
+        """批量删除选中的远端文件/文件夹（一次确认 → 多个 SFTP 操作）。
+        entries: [(RemoteEntry, QTreeWidgetItem), ...]
+        """
+        if not entries:
+            return
+        sess = self._session
+        if sess is None:
+            return
+
+        if len(entries) == 1:
+            msg = t("remote.confirm_delete_msg", name=entries[0][0].name)
+        else:
+            msg = t("remote.confirm_delete_many_msg", count=len(entries))
+
         confirm = QMessageBox.question(
-            self, t("remote.confirm_delete_title"),
-            t("remote.confirm_delete_msg", name=entry.name),
+            self, t("remote.confirm_delete_title"), msg,
             QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No,
             QMessageBox.StandardButton.No,
         )
         if confirm != QMessageBox.StandardButton.Yes:
             return
-        sess = self._session
-        if sess is None:
-            return
-        if entry.is_dir:
-            fut = sess.submit(sess.remove_tree, entry.path)
-        else:
-            fut = sess.submit(sess.remove, entry.path)
-        parent_path = posixpath.dirname(entry.path.rstrip("/")) or "/"
-        self._refresh_after(fut, item.parent(), parent_path)
+
+        # 每个项独立 submit + 在自己的回调里刷新所在父目录；
+        # SSHSession 是单线程 executor，会串行执行这些 remove，不会撞车。
+        for entry, item in entries:
+            try:
+                if entry.is_dir:
+                    fut = sess.submit(sess.remove_tree, entry.path)
+                else:
+                    fut = sess.submit(sess.remove, entry.path)
+                parent_path = posixpath.dirname(entry.path.rstrip("/")) or "/"
+                self._refresh_after(fut, item.parent(), parent_path)
+            except Exception as e:
+                self._error_signal.emit(f"{entry.path}: {e}")
 
     def _download_to_local(self, entry: RemoteEntry):
         save_path, _ = QFileDialog.getSaveFileName(self, t("remote.download"), entry.name)
