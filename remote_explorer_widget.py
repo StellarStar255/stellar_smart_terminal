@@ -831,6 +831,11 @@ class RemoteExplorerPanel(QWidget):
                 items.append(item)
             if items:
                 self._tree.addTopLevelItems(items)
+            # 把这次 populate 的内容立即记成自动刷新的基线 —— 否则下一次 poll
+            # 会把 "manual populate 之后服务器又写了新文件" 错过去
+            self._auto_refresh_fingerprints[self._current_path] = (
+                self._entries_fingerprint(entries)
+            )
         except RuntimeError:
             return
         finally:
@@ -918,19 +923,21 @@ class RemoteExplorerPanel(QWidget):
         fut.add_done_callback(on_done)
 
     def _on_auto_refresh_result(self, path: str, entries):
-        """worker 线程 listdir 完成后回到 UI 线程：指纹对比 + 增量更新"""
+        """worker 线程 listdir 完成后回到 UI 线程：指纹对比 + 增量更新。
+
+        基线由 _apply_top_level / _apply_children 在 populate 时建立，所以
+        即使首次 poll，也能与"已经展示的内容"做差异比较 —— 不会再像之前
+        那样把"manual populate 之后但首次 poll 之前出现的新文件"白白吃掉。
+        """
         try:
             self._auto_refresh_pending = max(0, self._auto_refresh_pending - 1)
             if entries is None:
                 # 网络错误或目录不存在了：清掉指纹，下次会重新建基线
                 self._auto_refresh_fingerprints.pop(path, None)
                 return
-            fp = frozenset((e.name, bool(e.is_dir)) for e in entries)
+            fp = self._entries_fingerprint(entries)
             old_fp = self._auto_refresh_fingerprints.get(path)
             self._auto_refresh_fingerprints[path] = fp
-            if old_fp is None:
-                # 第一次见这个 path → 只记录基线，不动 UI（避免与手动刷新打架）
-                return
             if fp == old_fp:
                 return
             self._auto_refresh_apply(path, entries)
@@ -1134,6 +1141,12 @@ class RemoteExplorerPanel(QWidget):
                 children.append(child)
             if children:
                 parent_item.addChildren(children)
+            # 同 _apply_top_level：把这次 populate 立刻当作自动刷新基线
+            parent_entry: RemoteEntry = parent_item.data(0, _ROLE_ENTRY)
+            if parent_entry is not None:
+                self._auto_refresh_fingerprints[parent_entry.path] = (
+                    self._entries_fingerprint(entries)
+                )
         except RuntimeError:
             return
         finally:
@@ -1141,6 +1154,10 @@ class RemoteExplorerPanel(QWidget):
                 self._tree.setUpdatesEnabled(True)
             except RuntimeError:
                 pass
+
+    @staticmethod
+    def _entries_fingerprint(entries) -> frozenset:
+        return frozenset((e.name, bool(e.is_dir)) for e in entries)
 
     def _on_item_double_clicked(self, item: QTreeWidgetItem, _col: int):
         entry: RemoteEntry = item.data(0, _ROLE_ENTRY)
