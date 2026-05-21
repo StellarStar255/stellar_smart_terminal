@@ -21,13 +21,13 @@ from pathlib import Path
 from typing import Any, Callable, Optional
 
 import paramiko
+import paramiko.sftp_file  # noqa: F401 — 用于全局调高 SFTP prefetch 块大小
 from paramiko.config import SSHConfig
-import paramiko.sftp_file  # noqa: F401 — 用于全局调高 SFTP 块大小
 
-# paramiko 默认每个 SFTP 读请求只要 32KB，在跨网/高延迟链路上极其慢
-# （32KB × N 次往返）。把它推到 256KB —— 与 ssh2/OpenSSH 客户端的常用值看齐，
-# 在本地带宽足够时单次下载能快 5–10 倍。再大会撞到 SFTP 协议侧某些服务器
-# 的实现上限（如 OpenSSH 是 256KB），所以 256KB 是兼容性与速度的平衡点。
+# paramiko 默认每个 SFTP 读请求只要 32KB。这是 SFTP 协议层的客户端参数，
+# 不影响 SSH 握手 / channel 协商；只在 prefetch() 把文件切成多少个 read
+# 请求时被用到。把它推到 256KB —— 1.6MB 文件从 50 次往返降到 7 次，下载
+# 速度通常快 5–10 倍，且 OpenSSH/Dropbear/sftp-server 都支持 256KB。
 paramiko.sftp_file.SFTPFile.MAX_REQUEST_SIZE = 1024 * 256
 
 from PyQt6.QtCore import QObject, pyqtSignal
