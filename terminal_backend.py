@@ -603,6 +603,12 @@ else:
                 # 设置 PTY 大小
                 self._set_pty_size(slave_fd, cols, rows)
 
+                # 在 fork 之前抓取 Smart Terminal app 的 PID（python app.py）。
+                # 必须在这里取——fork 之后子进程里调用 os.getpid() 拿到的是
+                # 子进程（shell/Claude Code）的 PID，AppleScript 无法据此
+                # 激活到 GUI 窗口，会导致通知点击无响应。
+                smart_terminal_pid = os.getpid()
+
                 # Fork
                 self._child_pid = os.fork()
 
@@ -643,7 +649,7 @@ else:
                     # 通知 → 用 SMART_TERMINAL_PID 把对应那个 Smart Terminal
                     # 窗口（Python 进程）拉到前台。
                     env['SMART_TERMINAL'] = '1'
-                    env['SMART_TERMINAL_PID'] = str(os.getpid())
+                    env['SMART_TERMINAL_PID'] = str(smart_terminal_pid)
                     # 清除其他终端的标识，避免冲突的检测
                     for stale in ('LC_TERMINAL', 'LC_TERMINAL_VERSION'):
                         env.pop(stale, None)
