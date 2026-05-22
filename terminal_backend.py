@@ -358,6 +358,9 @@ if IS_WINDOWS:
                 env['FORCE_COLOR'] = '3'        # 强制 24-bit 颜色支持
                 env['TERM_PROGRAM'] = 'vscode'   # 标识为已知支持完整渲染的终端
                 env['TERM_PROGRAM_VERSION'] = '1.96.0'
+                # Smart Terminal 自身标识（与 macOS 通知点击跳转配合使用）
+                env['SMART_TERMINAL'] = '1'
+                env['SMART_TERMINAL_PID'] = str(os.getpid())
                 if 'WT_SESSION' not in env:
                     import uuid
                     env['WT_SESSION'] = str(uuid.uuid4())
@@ -634,6 +637,13 @@ else:
                     env['TERM_PROGRAM'] = 'vscode'
                     env['TERM_PROGRAM_VERSION'] = '1.96.0'
                     env['FORCE_COLOR'] = '3'  # 强制 24-bit 颜色支持
+                    # 用单独的变量标识 "运行在 Smart Terminal 里"。TERM_PROGRAM
+                    # 不能改（会破坏 TUI 渲染兼容），所以另起一个。
+                    # 配合 ~/.claude/scripts/claude-stop-notify.sh：用户点击
+                    # 通知 → 用 SMART_TERMINAL_PID 把对应那个 Smart Terminal
+                    # 窗口（Python 进程）拉到前台。
+                    env['SMART_TERMINAL'] = '1'
+                    env['SMART_TERMINAL_PID'] = str(os.getpid())
                     # 清除其他终端的标识，避免冲突的检测
                     for stale in ('LC_TERMINAL', 'LC_TERMINAL_VERSION'):
                         env.pop(stale, None)
