@@ -34,6 +34,10 @@ pip uninstall PyQt6 PyQt6-Qt6 PyQt6-sip -y
 pip install PyQt6==6.7.1 PyQt6-Qt6==6.7.1 --no-cache-dir
 ```
 
+## Guides / 指南
+
+- [Claude Code 通知点击跳转 / Click-to-focus notifications (macOS)](docs/claude-code-notifications.md) — Stop hook 配置，点击通知直接跳回对应 Smart Terminal 窗口
+
 ## License / 许可
 
 [MIT](LICENSE)
