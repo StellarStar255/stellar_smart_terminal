@@ -361,6 +361,11 @@ class RemoteExplorerPanel(QWidget):
         super().__init__(parent)
         self.theme = theme or {}
         self._session: Optional[SSHSession] = None
+        # 上一次成功连上的主机和当时的目录；socket 掉了 → 直接拿这两个一键重连
+        self._last_connected_host: Optional[HostConfig] = None
+        self._last_connected_cwd: Optional[str] = None
+        # 同一会话只弹一次重连框（多个并发 future 都 fail 时不刷屏）
+        self._reconnect_dialog_open: bool = False
         self._current_path: str = "/"
         self._hosts: list[HostConfig] = []
         # 主窗口可用 set_extra_hosts() 注入手工添加的主机
@@ -734,6 +739,9 @@ class RemoteExplorerPanel(QWidget):
         self._path_edit.setText(self._current_path)
         self._populate_tree_root()
         self._auto_refresh_timer.start()
+        # 记住最近连上的 host，供"断线后一键重连"使用
+        self._last_connected_host = sess.host_config
+        self._last_connected_cwd = self._current_path
         # 通知主窗口：可以开一个 SSH 终端 tab 进去
         self.host_connected.emit(sess.host_config)
 
@@ -2500,6 +2508,79 @@ class RemoteExplorerPanel(QWidget):
 
     # ---------- utils ----------
 
+    # paramiko / socket 断连时常见的错误片段。命中其中任一 → 提示一键重连
+    _DISCONNECT_HINTS = (
+        "socket is closed",
+        "connection lost",
+        "connection reset",
+        "connection aborted",
+        "connection refused",
+        "broken pipe",
+        "eof",
+        "server connection dropped",
+        "transport endpoint is not connected",
+        "no existing session",
+        "channel closed",
+    )
+
+    def _looks_like_disconnect(self, msg: str) -> bool:
+        if not msg:
+            return False
+        low = msg.lower()
+        return any(h in low for h in self._DISCONNECT_HINTS)
+
     def _toast_error(self, msg: str):
         self.error_occurred.emit(msg)
+        # 断线类错误 → 弹"重连/取消"对话框，而不是冷冰冰的 OK
+        if (self._looks_like_disconnect(msg)
+                and self._last_connected_host is not None
+                and not self._reconnect_dialog_open):
+            self._prompt_reconnect(msg)
+            return
         QMessageBox.warning(self, t("remote.op_failed_title"), msg)
+
+    def _prompt_reconnect(self, msg: str):
+        """断线提示 + 一键重连。同一时刻只允许一个对话框存活。"""
+        self._reconnect_dialog_open = True
+        host = self._last_connected_host
+        try:
+            box = QMessageBox(self)
+            box.setIcon(QMessageBox.Icon.Warning)
+            box.setWindowTitle(t("remote.disconnected_title"))
+            box.setText(t("remote.disconnected_msg",
+                          host=host.alias if host else "?", error=msg))
+            reconnect_btn = box.addButton(
+                t("remote.reconnect"), QMessageBox.ButtonRole.AcceptRole,
+            )
+            cancel_btn = box.addButton(
+                t("paste.btn_cancel"), QMessageBox.ButtonRole.RejectRole,
+            )
+            box.setDefaultButton(reconnect_btn)
+            box.exec()
+            clicked = box.clickedButton()
+        finally:
+            self._reconnect_dialog_open = False
+        if clicked is reconnect_btn and host is not None:
+            self._reconnect_to(host)
+
+    def _reconnect_to(self, host: HostConfig):
+        """复用 _connect_to，但断线前若停在某个子目录则尝试还原回去"""
+        saved_cwd = self._last_connected_cwd
+        self._connect_to(host)
+        # _connect_to 内部会在 _on_session_connected 跳到 home()；
+        # 这里挂一个 one-shot：等下次 connected 时把目录还原回旧位置。
+        if not saved_cwd:
+            return
+        sess = self._session
+        if sess is None:
+            return
+        def restore_once():
+            try:
+                sess.connected.disconnect(restore_once)
+            except Exception:
+                pass
+            if sess is self._session and saved_cwd:
+                self._current_path = saved_cwd
+                self._path_edit.setText(saved_cwd)
+                self._populate_tree_root()
+        sess.connected.connect(restore_once)
