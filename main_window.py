@@ -118,6 +118,22 @@ class CenteredComboBox(QComboBox):
     策略：让 Qt 样式先绘制无文本的 combo（边框、背景、下拉箭头等），
     再在整个可见按钮区域居中绘制当前文本，避免默认左对齐文本参与绘制。"""
 
+    def addItem(self, *args):
+        super().addItem(*args)
+        self._center_item(self.count() - 1)
+
+    def insertItem(self, index, *args):
+        super().insertItem(index, *args)
+        self._center_item(index)
+
+    def _center_item(self, index: int):
+        if index >= 0:
+            self.setItemData(
+                index,
+                Qt.AlignmentFlag.AlignCenter,
+                Qt.ItemDataRole.TextAlignmentRole,
+            )
+
     def paintEvent(self, event):
         opt = QStyleOptionComboBox()
         self.initStyleOption(opt)
@@ -3099,7 +3115,7 @@ class MainWindow(QMainWindow):
         self.preset_label.setStyleSheet("color: #888;")
         toolbar.addWidget(self.preset_label)
 
-        self.preset_combo = QComboBox()
+        self.preset_combo = CenteredComboBox()
         self.preset_combo.setMinimumWidth(200)
         self.preset_combo.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Fixed)
         self.preset_combo.setStyleSheet("""
@@ -3959,6 +3975,7 @@ class MainWindow(QMainWindow):
         self.dir_dropdown_btn.clicked.connect(lambda: self.working_dir_combo.showPopup())
         # 使用自定义 LineEdit，点击时自动全选
         select_all_edit = SelectAllLineEdit()
+        select_all_edit.setAlignment(Qt.AlignmentFlag.AlignCenter)
         self.working_dir_combo.setLineEdit(select_all_edit)
         self._populate_working_dirs()
         # 从下拉列表选择时自动切换目录
@@ -4011,6 +4028,11 @@ class MainWindow(QMainWindow):
         self.working_dir_combo.clear()
         for dir_path in self.working_dir_history:
             self.working_dir_combo.addItem(dir_path)
+            self.working_dir_combo.setItemData(
+                self.working_dir_combo.count() - 1,
+                Qt.AlignmentFlag.AlignCenter,
+                Qt.ItemDataRole.TextAlignmentRole,
+            )
         # 设置当前目录（使用窗口级别的工作目录）
         current_dir = self._window_cwd
         index = self.working_dir_combo.findText(current_dir)
