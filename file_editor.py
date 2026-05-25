@@ -601,10 +601,15 @@ class CodeEditor(QPlainTextEdit):
         self._line_number_area = _LineNumberArea(self)
         self._line_number_fg = QColor("#5c6370")
         self._line_number_bg = QColor("#21252b")
+        self._current_line_color = QColor("#2c313a")
+        # 由 _SearchBar 等外部组件注入的额外高亮；与当前行高亮一起合并显示
+        self._search_selections: list = []
 
         self.blockCountChanged.connect(lambda _=0: self._update_viewport_margin())
         self.updateRequest.connect(self._on_update_request)
+        self.cursorPositionChanged.connect(self._apply_extra_selections)
         self._update_viewport_margin()
+        self._apply_extra_selections()
 
     def line_number_area_width(self) -> int:
         digits = max(3, len(str(max(1, self.blockCount()))))
@@ -661,12 +666,62 @@ class CodeEditor(QPlainTextEdit):
         self._line_number_bg = QColor(bg)
         self._line_number_area.update()
 
+    def set_current_line_color(self, color: str):
+        self._current_line_color = QColor(color)
+        self._apply_extra_selections()
+
+    def set_search_selections(self, selections: list):
+        """供 _SearchBar 调用：注入搜索高亮，由 CodeEditor 与当前行一起合并"""
+        self._search_selections = list(selections or [])
+        self._apply_extra_selections()
+
+    def _apply_extra_selections(self):
+        """把当前行高亮 + 搜索高亮合并后写回 setExtraSelections。
+        当前行放最前，避免覆盖搜索的命中色。"""
+        selections = []
+        if not self.isReadOnly():
+            line_sel = QTextEdit.ExtraSelection()
+            fmt = QTextCharFormat()
+            fmt.setBackground(self._current_line_color)
+            fmt.setProperty(QTextCharFormat.Property.FullWidthSelection, True)
+            line_sel.format = fmt
+            cursor = self.textCursor()
+            cursor.clearSelection()
+            line_sel.cursor = cursor
+            selections.append(line_sel)
+        selections.extend(self._search_selections)
+        self.setExtraSelections(selections)
+
     # ---- Tab / Shift+Tab：4 空格缩进，支持多行选区 ----
     INDENT_UNIT = '    '
+    _AUTO_PAIRS = {'(': ')', '[': ']', '{': '}', '"': '"', "'": "'"}
 
     def keyPressEvent(self, event):
         key = event.key()
         mods = event.modifiers()
+        text = event.text()
+        plain_modifier = not (
+            mods & (Qt.KeyboardModifier.ControlModifier
+                    | Qt.KeyboardModifier.MetaModifier
+                    | Qt.KeyboardModifier.AltModifier)
+        )
+
+        # 自动配对：开括号 / 引号
+        if plain_modifier and text in self._AUTO_PAIRS:
+            if self._handle_open_pair(text):
+                return
+
+        # 自动跳过：右括号在已有右括号前则跳过（避免双写）
+        if plain_modifier and text in (')', ']', '}'):
+            if self._handle_skip_close(text):
+                return
+
+        # Backspace：删除紧邻的空配对（光标在 `(|)` 时一次删掉两边）
+        if key == Qt.Key.Key_Backspace and plain_modifier and not (
+            mods & Qt.KeyboardModifier.ShiftModifier
+        ):
+            if self._handle_pair_backspace():
+                return
 
         # Shift+Tab 在 Qt 中通常表现为 Key_Backtab
         if key == Qt.Key.Key_Backtab or (
@@ -759,6 +814,80 @@ class CodeEditor(QPlainTextEdit):
                 return i
             i += 1
         return -1
+
+    # ---- 括号 / 引号自动配对 ----
+    def _char_at(self, cursor, offset: int) -> str:
+        block = cursor.block()
+        col = cursor.positionInBlock() + offset
+        text = block.text()
+        if 0 <= col < len(text):
+            return text[col]
+        return ''
+
+    def _handle_open_pair(self, ch: str) -> bool:
+        pair = self._AUTO_PAIRS[ch]
+        cursor = self.textCursor()
+
+        if cursor.hasSelection():
+            # 用一对包裹选区，保留选区便于继续编辑
+            sel_start = cursor.selectionStart()
+            sel_end = cursor.selectionEnd()
+            sel_text = cursor.selectedText()
+            cursor.beginEditBlock()
+            try:
+                cursor.insertText(ch + sel_text + pair)
+            finally:
+                cursor.endEditBlock()
+            new_cursor = self.textCursor()
+            new_cursor.setPosition(sel_start + 1)
+            new_cursor.setPosition(sel_end + 1, QTextCursor.MoveMode.KeepAnchor)
+            self.setTextCursor(new_cursor)
+            return True
+
+        nxt = self._char_at(cursor, 0)
+        prv = self._char_at(cursor, -1)
+
+        if ch in ('"', "'"):
+            # 引号 1：已紧邻同款引号 → 跳过（避免双写）
+            if nxt == ch:
+                cursor.movePosition(QTextCursor.MoveOperation.Right)
+                self.setTextCursor(cursor)
+                return True
+            # 引号 2：与标识符相邻则不自动配（如 don't、前缀 f"…"）
+            ident = lambda c: c.isalnum() or c == '_'
+            if ident(prv) or ident(nxt):
+                return False
+
+        cursor.insertText(ch + pair)
+        cursor.movePosition(QTextCursor.MoveOperation.Left)
+        self.setTextCursor(cursor)
+        return True
+
+    def _handle_skip_close(self, ch: str) -> bool:
+        cursor = self.textCursor()
+        if cursor.hasSelection():
+            return False
+        if self._char_at(cursor, 0) != ch:
+            return False
+        cursor.movePosition(QTextCursor.MoveOperation.Right)
+        self.setTextCursor(cursor)
+        return True
+
+    def _handle_pair_backspace(self) -> bool:
+        cursor = self.textCursor()
+        if cursor.hasSelection():
+            return False
+        prv = self._char_at(cursor, -1)
+        nxt = self._char_at(cursor, 0)
+        if prv in self._AUTO_PAIRS and self._AUTO_PAIRS[prv] == nxt:
+            cursor.beginEditBlock()
+            try:
+                cursor.deletePreviousChar()
+                cursor.deleteChar()
+            finally:
+                cursor.endEditBlock()
+            return True
+        return False
 
     def _selection_spans_multiple_lines(self, cursor) -> bool:
         doc = self.document()
@@ -1111,7 +1240,7 @@ class _SearchBar(QFrame):
 
     def close_search(self):
         self.hide()
-        self.editor.setExtraSelections([])
+        self.editor.set_search_selections([])
         self.editor.setFocus()
 
     def _on_text_changed(self, _text):
@@ -1185,7 +1314,7 @@ class _SearchBar(QFrame):
             cur.setPosition(end, QTextCursor.MoveMode.KeepAnchor)
             sel.cursor = cur
             selections.append(sel)
-        self.editor.setExtraSelections(selections)
+        self.editor.set_search_selections(selections)
 
     def _scroll_to_current(self):
         if self._current < 0 or not self._matches:
@@ -1706,6 +1835,10 @@ class FileEditorWidget(QWidget):
             gutter_fg = "#888" if self.theme.get('is_light_theme') else "#5c6370"
         if isinstance(self.editor, CodeEditor):
             self.editor.set_line_number_colors(gutter_fg, gutter_bg)
+            current_line = self.theme.get('editor_current_line_bg')
+            if not current_line:
+                current_line = "#eaeaf2" if self.theme.get('is_light_theme') else "#2c313a"
+            self.editor.set_current_line_color(current_line)
 
     def apply_theme(self, theme: dict):
         """应用新主题"""
