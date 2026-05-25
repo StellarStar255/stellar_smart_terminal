@@ -635,6 +635,11 @@ class CodeEditor(QPlainTextEdit):
             QRect(cr.left(), cr.top(), self.line_number_area_width(), cr.height())
         )
 
+    def focusNextPrevChild(self, _next):
+        # 禁用 Tab / Shift+Tab 的焦点切换；否则 Backtab 在到达 keyPressEvent
+        # 之前就被 Qt 焦点遍历机制吃掉，导致 Shift+Tab 反缩进失效。
+        return False
+
     def line_number_area_paint_event(self, event):
         painter = QPainter(self._line_number_area)
         painter.fillRect(event.rect(), self._line_number_bg)
@@ -735,10 +740,10 @@ class CodeEditor(QPlainTextEdit):
                     | Qt.KeyboardModifier.AltModifier)
         ):
             cursor = self.textCursor()
-            if cursor.hasSelection() and self._selection_spans_multiple_lines(cursor):
+            # 有任何选区都按「整行缩进」处理，否则连按第二次会把整行替换成 4 个空格
+            if cursor.hasSelection():
                 self._indent_selection()
             else:
-                # 单行：用 4 空格替换选区/插入 4 空格
                 cursor.insertText(self.INDENT_UNIT)
             return
 
@@ -1174,7 +1179,11 @@ class _SearchBar(QFrame):
         self.replace_all_btn.setToolTip(t("editor.replace_all_tooltip"))
 
     def eventFilter(self, obj, event):
-        if obj in (self.input, self.replace_input) and event.type() == event.Type.KeyPress:
+        # 在 __init__ 期间 replace_input 还未创建就可能收到事件；用 getattr 保护
+        replace_input = getattr(self, 'replace_input', None)
+        if obj is not self.input and (replace_input is None or obj is not replace_input):
+            return super().eventFilter(obj, event)
+        if event.type() == event.Type.KeyPress:
             key = event.key()
             mods = event.modifiers()
             if key == Qt.Key.Key_Escape:
