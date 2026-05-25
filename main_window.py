@@ -3115,7 +3115,9 @@ class MainWindow(QMainWindow):
 
         # 添加切换预设按钮
         self.preset_switch_btn = QPushButton(t("toolbar.switch_preset"))
-        self.preset_switch_btn.setFixedSize(60, 32)
+        # 高度固定为 32，宽度只给最小值——英文 "Switch" 在 60 宽下会被裁成 "S..."
+        self.preset_switch_btn.setFixedHeight(32)
+        self.preset_switch_btn.setMinimumWidth(72)
         self.preset_switch_btn.setToolTip(t("toolbar.switch_preset_tooltip"))
         self.preset_switch_btn.setStyleSheet("""
             QPushButton {
@@ -3443,7 +3445,8 @@ class MainWindow(QMainWindow):
 
         # --- 语言选择 ---
         self.lang_combo = QComboBox()
-        self.lang_combo.setFixedWidth(70)
+        # "English" 文本本身约 50px，加上下拉箭头 18px+内边距，70 总宽显示不下
+        self.lang_combo.setMinimumWidth(92)
         self.lang_combo.addItem("中文", "zh")
         self.lang_combo.addItem("English", "en")
         # 设置当前语言
