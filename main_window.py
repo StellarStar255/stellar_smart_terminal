@@ -39,7 +39,7 @@ from PyQt6.QtWidgets import (
 from PyQt6 import sip  # 用于检查 C++ 对象是否已被删除
 from PyQt6.QtCore import Qt, QTimer, QEvent, QPoint, QMimeData, pyqtSignal, QObject
 from PyQt6.QtGui import QAction, QIcon, QFont, QColor, QPixmap, QPainter, QPen, QDrag, QCursor, QBrush, QPalette
-from PyQt6.QtWidgets import QWidgetAction
+from PyQt6.QtWidgets import QWidgetAction, QStylePainter, QStyleOptionComboBox
 
 from terminal_widget import TerminalWidget
 from session_manager import SessionManager
@@ -111,6 +111,29 @@ class SelectAllLineEdit(QLineEdit):
             # 使用延迟执行确保在鼠标释放事件之后执行全选
             # 这在 Linux 上尤其重要，因为鼠标事件可能会取消选择
             QTimer.singleShot(0, self.selectAll)
+
+
+class CenteredComboBox(QComboBox):
+    """显示文本居中的 QComboBox。
+    策略：让 Qt 样式先绘制无文本的 combo（边框、背景、下拉箭头等），
+    再在整个可见按钮区域居中绘制当前文本，避免默认左对齐文本参与绘制。"""
+
+    def paintEvent(self, event):
+        opt = QStyleOptionComboBox()
+        self.initStyleOption(opt)
+        text = opt.currentText
+        opt.currentText = ""
+
+        painter = QStylePainter(self)
+        painter.drawComplexControl(QStyle.ComplexControl.CC_ComboBox, opt)
+
+        painter.setPen(self.palette().color(QPalette.ColorRole.Text))
+        painter.setFont(self.font())
+        painter.drawText(
+            self.rect().adjusted(4, 0, -4, 0),
+            Qt.AlignmentFlag.AlignCenter,
+            text,
+        )
 
 
 class DetachableTabBar(QTabBar):
@@ -3444,11 +3467,17 @@ class MainWindow(QMainWindow):
         self.theme_combo.currentIndexChanged.connect(self._on_theme_changed)
 
         # --- 语言选择 ---
-        self.lang_combo = QComboBox()
+        # 用 CenteredComboBox 让显示文本在 edit-field 居中（不依赖 editable hack）
+        self.lang_combo = CenteredComboBox()
         # "English" 文本本身约 50px，加上下拉箭头 18px+内边距，70 总宽显示不下
         self.lang_combo.setMinimumWidth(92)
         self.lang_combo.addItem("中文", "zh")
         self.lang_combo.addItem("English", "en")
+        # 让下拉列表里的选项也居中
+        for i in range(self.lang_combo.count()):
+            self.lang_combo.setItemData(
+                i, Qt.AlignmentFlag.AlignCenter, Qt.ItemDataRole.TextAlignmentRole
+            )
         # 设置当前语言
         lang_idx = self.lang_combo.findData(get_language())
         if lang_idx >= 0:
@@ -3518,6 +3547,7 @@ class MainWindow(QMainWindow):
         self.gui_font_spin.setToolTip(t("toolbar.gui_font_tooltip"))
         self.gui_font_spin.setSuffix(" pt")
         self.gui_font_spin.setFixedWidth(90)
+        self.gui_font_spin.setAlignment(Qt.AlignmentFlag.AlignCenter)
         self.gui_font_spin.setFocusPolicy(Qt.FocusPolicy.StrongFocus)
         self.gui_font_spin.setStyleSheet("""
             QSpinBox {
@@ -3575,6 +3605,7 @@ class MainWindow(QMainWindow):
         self.opacity_spin.setSuffix("%")
         self.opacity_spin.setSingleStep(5)
         self.opacity_spin.setFixedWidth(80)
+        self.opacity_spin.setAlignment(Qt.AlignmentFlag.AlignCenter)
         self.opacity_spin.setFocusPolicy(Qt.FocusPolicy.StrongFocus)
         self.opacity_spin.setStyleSheet("""
             QSpinBox {
