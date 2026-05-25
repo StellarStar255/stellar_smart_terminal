@@ -4,6 +4,7 @@
 """
 import os
 import re
+import time
 from pathlib import Path
 
 from PyQt6.QtWidgets import (
@@ -12,7 +13,7 @@ from PyQt6.QtWidgets import (
     QSplitter, QLineEdit, QTextEdit, QStackedWidget, QScrollArea,
     QSizePolicy, QMenu, QFileDialog, QApplication,
 )
-from PyQt6.QtCore import Qt, pyqtSignal, QRect, QSize
+from PyQt6.QtCore import Qt, pyqtSignal, QRect, QSize, QFileSystemWatcher, QTimer
 from PyQt6.QtGui import (
     QFont, QColor, QTextCharFormat, QSyntaxHighlighter,
     QKeySequence, QPalette, QShortcut, QPainter, QTextCursor,
@@ -1455,6 +1456,15 @@ class FileEditorWidget(QWidget):
         self._in_image_mode = False  # 当前显示的是否是图片预览
         self._image_pixmap: QPixmap | None = None  # 原始未缩放的 QPixmap
 
+        # --- 外部文件变更检测 ---
+        self._file_watcher = QFileSystemWatcher(self)
+        self._file_watcher.fileChanged.connect(self._on_watched_file_changed)
+        self._known_mtime: float | None = None
+        # 自身 save 后短暂屏蔽 watcher 触发，避免「自己写自己的文件」也弹"重载"
+        self._suppress_external_until: float = 0.0
+        # 用于去抖：rename 类保存会先收到 deleted 再 created
+        self._external_change_timer: QTimer | None = None
+
         self._setup_ui()
         self._setup_shortcuts()
         self._apply_theme()
@@ -1928,6 +1938,9 @@ class FileEditorWidget(QWidget):
         # 更新标题
         self._update_title()
 
+        # 开始监听外部变更
+        self._start_watching(file_path)
+
         return True
 
     def _open_image_file(self, file_path: str) -> bool:
@@ -1976,6 +1989,8 @@ class FileEditorWidget(QWidget):
         self._stack.setCurrentIndex(1)
         self._apply_image_to_label()
         self._update_title()
+        # 图片模式也跟踪：被外部覆盖时可以重新加载
+        self._start_watching(file_path)
         return True
 
     def _apply_image_to_label(self):
@@ -2113,10 +2128,13 @@ class FileEditorWidget(QWidget):
 
         try:
             content = self.editor.toPlainText()
+            # 屏蔽 watcher：我们自己写文件不应弹"外部已改动"
+            self._suppress_external_until = time.time() + 1.5
             with open(self._current_file, 'w', encoding='utf-8') as f:
                 f.write(content)
             # 更新原始内容，这样 is_modified() 会返回 False
             self._original_content = content
+            self._refresh_known_mtime()
             self._update_title()
             self.file_saved.emit(self._current_file)
             return True
@@ -2163,6 +2181,127 @@ class FileEditorWidget(QWidget):
             return False  # 图片只读，不参与 modified 判定
         return self.editor.toPlainText() != self._original_content
 
+    # ---- 外部文件变更检测 ----
+    def _start_watching(self, path: str | None):
+        """开始监听 path；先移除之前监听的所有文件"""
+        self._stop_watching()
+        if not path:
+            return
+        try:
+            if os.path.isfile(path):
+                self._file_watcher.addPath(path)
+                self._known_mtime = os.path.getmtime(path)
+        except OSError:
+            self._known_mtime = None
+
+    def _stop_watching(self):
+        watched = self._file_watcher.files()
+        if watched:
+            self._file_watcher.removePaths(watched)
+        self._known_mtime = None
+
+    def _refresh_known_mtime(self):
+        """自己保存后调用：刷新已知 mtime 并把路径重新加入监听
+        （部分平台在文件被替换/重命名后会丢失监听）"""
+        if not self._current_file:
+            return
+        try:
+            self._known_mtime = os.path.getmtime(self._current_file)
+        except OSError:
+            self._known_mtime = None
+        if self._current_file not in self._file_watcher.files() and os.path.isfile(
+            self._current_file
+        ):
+            self._file_watcher.addPath(self._current_file)
+
+    def _on_watched_file_changed(self, path: str):
+        # 自己刚保存时屏蔽，避免我们自己写入触发 reload 提示
+        if time.time() < self._suppress_external_until:
+            self._refresh_known_mtime()
+            return
+        if path != self._current_file:
+            return
+        # 去抖：rename-保存模式可能短时间内多次触发，统一延后处理
+        if self._external_change_timer is None:
+            self._external_change_timer = QTimer(self)
+            self._external_change_timer.setSingleShot(True)
+            self._external_change_timer.timeout.connect(self._handle_external_change)
+        self._external_change_timer.start(150)
+
+    def _handle_external_change(self):
+        path = self._current_file
+        if not path or self._in_image_mode:
+            return
+
+        # 文件被删除：保留缓冲区，下次 save 会重建；不再重复弹
+        if not os.path.isfile(path):
+            QMessageBox.warning(
+                self,
+                t("editor.file_changed_title"),
+                t("editor.file_deleted_msg", name=os.path.basename(path)),
+            )
+            self._known_mtime = None
+            return
+
+        try:
+            new_mtime = os.path.getmtime(path)
+        except OSError:
+            return
+
+        # mtime 未变（仅触摸/属性变更）：仅重新挂监听
+        if self._known_mtime is not None and new_mtime == self._known_mtime:
+            if path not in self._file_watcher.files():
+                self._file_watcher.addPath(path)
+            return
+
+        try:
+            with open(path, 'r', encoding='utf-8') as f:
+                new_content = f.read()
+        except UnicodeDecodeError:
+            QMessageBox.warning(self, t("editor.binary_title"), t("editor.binary_msg"))
+            self._known_mtime = new_mtime
+            return
+        except Exception as e:
+            QMessageBox.warning(self, t("editor.error"), t("editor.read_error", error=e))
+            return
+
+        # 内容相同（不同进程写入了相同字节）：仅同步 mtime
+        if new_content == self.editor.toPlainText():
+            self._known_mtime = new_mtime
+            if path not in self._file_watcher.files():
+                self._file_watcher.addPath(path)
+            return
+
+        if self.is_modified():
+            reply = QMessageBox.question(
+                self,
+                t("editor.file_changed_title"),
+                t("editor.file_changed_with_local_msg", name=os.path.basename(path)),
+                QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No,
+                QMessageBox.StandardButton.No,
+            )
+            if reply != QMessageBox.StandardButton.Yes:
+                # 保留本地，吞掉本轮外部变更，不再反复弹（用户后续保存会覆盖外部）
+                self._known_mtime = new_mtime
+                if path not in self._file_watcher.files():
+                    self._file_watcher.addPath(path)
+                return
+
+        # 干净状态或用户同意丢弃：静默重载，并尽量保留光标位置
+        cursor_pos = self.editor.textCursor().position()
+        self.editor.setPlainText(new_content)
+        self._original_content = new_content
+        self._known_mtime = new_mtime
+        try:
+            cur = self.editor.textCursor()
+            cur.setPosition(min(cursor_pos, len(new_content)))
+            self.editor.setTextCursor(cur)
+        except Exception:
+            pass
+        self._update_title()
+        if path not in self._file_watcher.files():
+            self._file_watcher.addPath(path)
+
     def _close_editor(self):
         """关闭编辑器"""
         # 如果文件已修改，提示保存
@@ -2180,6 +2319,7 @@ class FileEditorWidget(QWidget):
             elif reply == QMessageBox.StandardButton.Cancel:
                 return
 
+        self._stop_watching()
         self._current_file = None
         self._original_content = ""
         self.editor.clear()

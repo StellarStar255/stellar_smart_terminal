@@ -342,6 +342,15 @@ TRANSLATIONS = {
     "editor.replace_one_tooltip": {"zh": "替换当前 (Enter)", "en": "Replace current (Enter)"},
     "editor.replace_all_label": {"zh": "全部替换", "en": "Replace All"},
     "editor.replace_all_tooltip": {"zh": "全部替换 (Cmd+Enter)", "en": "Replace all (Cmd+Enter)"},
+    "editor.file_changed_title": {"zh": "文件已被外部修改", "en": "File Changed on Disk"},
+    "editor.file_changed_with_local_msg": {
+        "zh": "{name} 在外部被修改，但你本地有未保存的更改。\n是否丢弃本地更改并重新加载？",
+        "en": "{name} was changed externally, but you have unsaved local changes.\nDiscard local changes and reload?",
+    },
+    "editor.file_deleted_msg": {
+        "zh": "{name} 在外部被删除。当前缓冲区已保留，下次保存会重新创建该文件。",
+        "en": "{name} was deleted on disk. The buffer is kept; next save will recreate the file.",
+    },
 
     # ===== Remote Explorer =====
     "remote.title": {"zh": "远程", "en": "Remote"},
