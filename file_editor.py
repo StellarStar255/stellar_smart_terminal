@@ -661,6 +661,126 @@ class CodeEditor(QPlainTextEdit):
         self._line_number_bg = QColor(bg)
         self._line_number_area.update()
 
+    # ---- Tab / Shift+Tab：4 空格缩进，支持多行选区 ----
+    INDENT_UNIT = '    '
+
+    def keyPressEvent(self, event):
+        key = event.key()
+        mods = event.modifiers()
+
+        # Shift+Tab 在 Qt 中通常表现为 Key_Backtab
+        if key == Qt.Key.Key_Backtab or (
+            key == Qt.Key.Key_Tab and mods & Qt.KeyboardModifier.ShiftModifier
+        ):
+            self._unindent_selection()
+            return
+
+        if key == Qt.Key.Key_Tab and not (
+            mods & (Qt.KeyboardModifier.ControlModifier | Qt.KeyboardModifier.MetaModifier
+                    | Qt.KeyboardModifier.AltModifier)
+        ):
+            cursor = self.textCursor()
+            if cursor.hasSelection() and self._selection_spans_multiple_lines(cursor):
+                self._indent_selection()
+            else:
+                # 单行：用 4 空格替换选区/插入 4 空格
+                cursor.insertText(self.INDENT_UNIT)
+            return
+
+        super().keyPressEvent(event)
+
+    def _selection_spans_multiple_lines(self, cursor) -> bool:
+        doc = self.document()
+        start_block = doc.findBlock(cursor.selectionStart())
+        end_block = doc.findBlock(cursor.selectionEnd())
+        return start_block.blockNumber() != end_block.blockNumber()
+
+    def _selection_block_range(self, cursor):
+        """返回 (start_block, end_block, had_selection)，end 在行首时回退一行"""
+        doc = self.document()
+        sel_start = cursor.selectionStart()
+        sel_end = cursor.selectionEnd()
+        had_selection = sel_start != sel_end
+        start_block = doc.findBlock(sel_start)
+        end_block = doc.findBlock(sel_end)
+        if had_selection and sel_end == end_block.position() and end_block != start_block:
+            end_block = end_block.previous()
+        return start_block, end_block, had_selection
+
+    def _restore_block_selection(self, start_blk_num, end_blk_num):
+        doc = self.document()
+        new_start = doc.findBlockByNumber(start_blk_num)
+        new_end = doc.findBlockByNumber(end_blk_num)
+        if not new_start.isValid() or not new_end.isValid():
+            return
+        new_cursor = self.textCursor()
+        new_cursor.setPosition(new_start.position())
+        end_pos = new_end.position() + max(0, new_end.length() - 1)
+        new_cursor.setPosition(end_pos, QTextCursor.MoveMode.KeepAnchor)
+        self.setTextCursor(new_cursor)
+
+    def _indent_selection(self):
+        cursor = self.textCursor()
+        start_block, end_block, _ = self._selection_block_range(cursor)
+        start_num = start_block.blockNumber()
+        end_num = end_block.blockNumber()
+        doc = self.document()
+
+        edit_cursor = QTextCursor(doc)
+        edit_cursor.beginEditBlock()
+        try:
+            for blk_num in range(end_num, start_num - 1, -1):
+                blk = doc.findBlockByNumber(blk_num)
+                if not blk.isValid():
+                    continue
+                edit_cursor.setPosition(blk.position())
+                edit_cursor.insertText(self.INDENT_UNIT)
+        finally:
+            edit_cursor.endEditBlock()
+
+        self._restore_block_selection(start_num, end_num)
+
+    def _unindent_selection(self):
+        cursor = self.textCursor()
+        start_block, end_block, had_selection = self._selection_block_range(cursor)
+        start_num = start_block.blockNumber()
+        end_num = end_block.blockNumber()
+        doc = self.document()
+
+        edit_cursor = QTextCursor(doc)
+        edit_cursor.beginEditBlock()
+        try:
+            for blk_num in range(end_num, start_num - 1, -1):
+                blk = doc.findBlockByNumber(blk_num)
+                if not blk.isValid():
+                    continue
+                text = blk.text()
+                if not text:
+                    continue
+                # 优先吃掉一个 Tab；否则最多吃掉 4 个前导空格
+                if text.startswith('\t'):
+                    remove_count = 1
+                else:
+                    remove_count = 0
+                    for i in range(min(len(self.INDENT_UNIT), len(text))):
+                        if text[i] == ' ':
+                            remove_count += 1
+                        else:
+                            break
+                if remove_count <= 0:
+                    continue
+                edit_cursor.setPosition(blk.position())
+                edit_cursor.setPosition(
+                    blk.position() + remove_count,
+                    QTextCursor.MoveMode.KeepAnchor,
+                )
+                edit_cursor.removeSelectedText()
+        finally:
+            edit_cursor.endEditBlock()
+
+        if had_selection:
+            self._restore_block_selection(start_num, end_num)
+
 
 class _SearchBar(QFrame):
     """文件编辑器顶部的查找栏（Cmd+F 唤出）
