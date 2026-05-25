@@ -244,6 +244,8 @@ TRANSLATIONS = {
     "explorer.open_in_vscode": {"zh": "在 VS Code 中打开", "en": "Open in VS Code"},
     "explorer.open_in_cursor": {"zh": "在 Cursor 中打开", "en": "Open in Cursor"},
     "explorer.refresh": {"zh": "刷新", "en": "Refresh"},
+    "explorer.copy_current_path": {"zh": "复制当前路径", "en": "Copy Current Path"},
+    "explorer.open_current_folder": {"zh": "打开当前文件夹", "en": "Open Current Folder"},
     "explorer.new_file_title": {"zh": "新建文件", "en": "New File"},
     "explorer.new_file_prompt": {"zh": "输入文件名:", "en": "Enter file name:"},
     "explorer.new_folder_title": {"zh": "新建文件夹", "en": "New Folder"},

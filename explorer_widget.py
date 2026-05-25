@@ -808,6 +808,18 @@ class ExplorerPanel(QWidget):
 
             menu.addSeparator()
 
+            copy_current_path_action = menu.addAction(t("explorer.copy_current_path"))
+            copy_current_path_action.triggered.connect(
+                lambda: self._copy_path(self._current_path)
+            )
+
+            open_folder_action = menu.addAction(t("explorer.open_current_folder"))
+            open_folder_action.triggered.connect(
+                lambda: self._open_folder(self._current_path)
+            )
+
+            menu.addSeparator()
+
             refresh_action = menu.addAction(t("explorer.refresh"))
             refresh_action.triggered.connect(self.refresh)
 
@@ -1197,6 +1209,17 @@ class ExplorerPanel(QWidget):
         """在文件管理器中显示（Linux）"""
         folder = file_path if os.path.isdir(file_path) else os.path.dirname(file_path)
         subprocess.run(['xdg-open', folder])
+
+    def _open_folder(self, folder_path: str):
+        """在系统文件管理器中打开文件夹（不是 reveal/select 在父级里）"""
+        if not os.path.isdir(folder_path):
+            folder_path = os.path.dirname(folder_path)
+        if sys.platform == 'darwin':
+            subprocess.run(['open', folder_path])
+        elif sys.platform == 'win32':
+            subprocess.run(['explorer', folder_path.replace('/', '\\')])
+        else:
+            subprocess.run(['xdg-open', folder_path])
 
     def _open_in_editor(self, file_path: str, editor: str):
         """在指定编辑器中打开"""
