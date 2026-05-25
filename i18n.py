@@ -336,6 +336,12 @@ TRANSLATIONS = {
     "editor.search_next_tooltip": {"zh": "下一个匹配", "en": "Next match"},
     "editor.search_close_tooltip": {"zh": "关闭查找 (Esc)", "en": "Close search (Esc)"},
     "editor.search_no_results": {"zh": "无匹配", "en": "No results"},
+    "editor.search_toggle_replace_tooltip": {"zh": "切换替换 (Cmd+H)", "en": "Toggle Replace (Cmd+H)"},
+    "editor.replace_placeholder": {"zh": "替换为…（正则支持 \\1）", "en": "Replace... (\\1 in regex)"},
+    "editor.replace_one_label": {"zh": "替换", "en": "Replace"},
+    "editor.replace_one_tooltip": {"zh": "替换当前 (Enter)", "en": "Replace current (Enter)"},
+    "editor.replace_all_label": {"zh": "全部替换", "en": "Replace All"},
+    "editor.replace_all_tooltip": {"zh": "全部替换 (Cmd+Enter)", "en": "Replace all (Cmd+Enter)"},
 
     # ===== Remote Explorer =====
     "remote.title": {"zh": "远程", "en": "Remote"},
