@@ -3453,9 +3453,10 @@ class MainWindow(QMainWindow):
         self.theme_label = QLabel(t("theme.label"))
         self.theme_label.setStyleSheet("color: #888; margin-left: 5px;")
 
-        self.theme_combo = QComboBox()
+        self.theme_combo = CenteredComboBox()
         self.theme_combo.setMinimumWidth(80)
         for theme_key in self.THEMES.keys():
+            # CenteredComboBox.addItem 已自动为新增项设置居中对齐
             self.theme_combo.addItem(t(f"theme.{theme_key}"), theme_key)
         self.theme_combo.setStyleSheet("""
             QComboBox {
