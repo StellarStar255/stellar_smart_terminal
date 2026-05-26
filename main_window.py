@@ -3513,6 +3513,7 @@ class MainWindow(QMainWindow):
                 padding: 4px 8px;
                 color: #eaeaea;
                 min-width: 70px;
+                margin-right: 6px;
             }
             QComboBox:hover {
                 border-color: #667eea;
