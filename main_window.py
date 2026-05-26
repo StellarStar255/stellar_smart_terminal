@@ -5227,8 +5227,15 @@ class MainWindow(QMainWindow):
         """打开快速启动路径管理对话框"""
         dialog = DirectoryHistoryDialog(self.working_dir_history, self)
         if dialog.exec() == QDialog.DialogCode.Accepted:
+            new_dirs = dialog.get_directories()
+            # 记录被显式删除的路径：保存时会与磁盘做并集，必须把这些路径剔除，
+            # 否则它们会被磁盘上的旧版本（或其它窗口）复活
+            removed = set(self.working_dir_history) - set(new_dirs)
+            if removed:
+                pending = getattr(self, '_dir_history_pending_removals', None) or set()
+                self._dir_history_pending_removals = pending | removed
             # 更新目录历史
-            self.working_dir_history = dialog.get_directories()
+            self.working_dir_history = new_dirs
             # 同步更新下拉框
             self._populate_working_dirs()
             # 保存到配置文件
@@ -8060,6 +8067,7 @@ class MainWindow(QMainWindow):
         self.image_save_local = True  # 图片是否保存到工作目录（默认开启，方便Gemini访问）
         self.working_dir_history = []  # 工作目录历史
         self._working_dir_freq = {}  # 工作目录使用频率 {path: count}
+        self._dir_history_pending_removals = set()  # 用户显式删除、待从共享配置剔除的路径
         self.last_working_dir = None  # 上次使用的工作目录
         self.toolbar_config = None  # 工具栏配置
         self.llm_configs = []  # LLM API 配置列表
@@ -8192,9 +8200,59 @@ class MainWindow(QMainWindow):
             ]
             self.default_llm_config = 0
 
+    def _merge_dir_history_for_save(self):
+        """写配置前，把磁盘上的目录历史并入本窗口，避免多窗口互相覆盖。
+
+        背景：所有窗口共享同一份配置文件，而 _save_config 会把整份配置（含
+        working_dir_history）原样写回。若直接用本窗口内存里的历史覆盖磁盘，
+        其它窗口新增的路径就会被冲掉 —— 表现为"只有最后退出的窗口的路径被
+        保存"。这里在写入前先与磁盘做并集，确保任意窗口新增的路径都不丢。
+
+        删除处理：用户在"管理路径"对话框里显式删除的路径会先记到
+        self._dir_history_pending_removals，并集时主动剔除，否则会被磁盘版本复活。
+        """
+        try:
+            saved_history, saved_freq = [], {}
+            if self.CONFIG_FILE.exists():
+                try:
+                    with open(self.CONFIG_FILE, 'r', encoding='utf-8') as f:
+                        cfg = json.load(f)
+                    saved_history = cfg.get('working_dir_history', []) or []
+                    saved_freq = cfg.get('working_dir_freq', {}) or {}
+                except Exception:
+                    saved_history, saved_freq = [], {}
+
+            removals = getattr(self, '_dir_history_pending_removals', None) or set()
+            mem_history = self.working_dir_history if hasattr(self, 'working_dir_history') else []
+            mem_freq = self._working_dir_freq if hasattr(self, '_working_dir_freq') else {}
+
+            merged_freq = {}
+            merged_history = []
+            seen = set()
+            # 并集：磁盘在前（保留其它窗口已落盘的路径），再补本窗口内存中的新路径
+            for p in list(saved_history) + list(mem_history):
+                if p in removals:
+                    continue
+                if p not in seen:
+                    seen.add(p)
+                    merged_history.append(p)
+                # 频率取磁盘与内存中的较大值，避免跨窗口计数被重置
+                merged_freq[p] = max(saved_freq.get(p, 0), mem_freq.get(p, 0), 1)
+
+            merged_history.sort(key=lambda p: merged_freq.get(p, 0), reverse=True)
+            self.working_dir_history = merged_history
+            self._working_dir_freq = merged_freq
+            # 删除意图已在本次写盘中落实，清空待删除集合
+            self._dir_history_pending_removals = set()
+        except Exception:
+            # 合并失败不应阻断保存：保持内存中的历史原样写出
+            pass
+
     def _save_config(self):
         """保存配置"""
         try:
+            # 先把磁盘上其它窗口新增的目录历史并入本窗口，避免后写覆盖先写
+            self._merge_dir_history_for_save()
             # 获取当前选中的预设索引
             current_index = self.preset_combo.currentIndex() if hasattr(self, 'preset_combo') else 0
             image_prefix = self.image_prefix_checkbox.isChecked() if hasattr(self, 'image_prefix_checkbox') else False
