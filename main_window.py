@@ -2171,7 +2171,14 @@ class DirectoryHistoryDialog(QDialog):
 class _ToolbarCheckBox(QCheckBox):
     """工具栏复选框：去掉 QCheckBox 固有的右侧空白，使其外框紧贴“指示器+文字”，
     与 QPushButton 一样填满自身外框。这样组与组之间的分隔线左右间距才会对称
-    （否则复选框尾随的空白会让其后的分隔线显得偏左）。"""
+    （否则复选框尾随的空白会让其后的分隔线显得偏左）。
+
+    在紧贴的基础上再追加一点固定尾随间距（trail_gap），让相邻的多个复选框之间
+    不至于挤在一起；默认 8px。"""
+
+    def __init__(self, *args, trail_gap=8, **kwargs):
+        super().__init__(*args, **kwargs)
+        self._trail_gap = trail_gap
 
     def sizeHint(self):
         s = super().sizeHint()
@@ -2181,10 +2188,11 @@ class _ToolbarCheckBox(QCheckBox):
         contents = self.style().subElementRect(
             QStyle.SubElement.SE_CheckBoxContents, opt, self)
         text_w = self.fontMetrics().horizontalAdvance(self.text())
-        # 文字实际宽度（horizontalAdvance 含右侧 bearing，故 -2 不会裁剪字形）
+        # 文字实际宽度（horizontalAdvance 含右侧 bearing，故 -2 不会裁剪字形），
+        # 再加上固定尾随间距，避免相邻复选框互相紧贴
         want = contents.x() + text_w - 2
-        if 0 < want < s.width():
-            s.setWidth(want)
+        if want > 0:
+            s.setWidth(want + self._trail_gap)
         return s
 
 
