@@ -2144,23 +2144,29 @@ class _ToolbarCheckBox(QCheckBox):
 
 
 class _FlowSeparator(QWidget):
-    """流式布局中的垂直虚线分隔符，匹配 QToolBar 原生分隔符"""
+    """流式布局中的垂直分隔符，外观与 QToolBar::separator 一致：
+    宽度 12px（线居中），配合 FlowLayout 的 h_spacing=5 形成左右各约 11px 的对称间距。
+    画一条 1px 实线，颜色随主题更新（见 set_line_color）。"""
 
-    def __init__(self, parent=None):
+    def __init__(self, parent=None, color="#3d3d5c"):
         super().__init__(parent)
         self.setObjectName("_flow_separator")
-        self.setFixedWidth(10)  # 包含两侧间距，匹配 QToolBar 原生分隔符总宽度
+        self.setFixedWidth(12)  # 线居中，两侧由 FlowLayout 的 h_spacing 提供对称间距
         self.setFixedHeight(22)
+        self._color = QColor(color)
+
+    def set_line_color(self, color):
+        self._color = QColor(color)
+        self.update()
 
     def paintEvent(self, event):
         p = QPainter(self)
         p.setRenderHint(QPainter.RenderHint.Antialiasing, False)
-        pen = QPen(QColor("#6a6a8e"))
-        pen.setStyle(Qt.PenStyle.DashLine)
+        pen = QPen(self._color)
         pen.setWidth(1)
         p.setPen(pen)
         x = self.width() // 2
-        p.drawLine(x, 2, x, self.height() - 2)
+        p.drawLine(x, 4, x, self.height() - 4)
         p.end()
 
 
@@ -4691,9 +4697,9 @@ class MainWindow(QMainWindow):
                     widget.setParent(None)
 
     def _create_flow_separator(self):
-        """创建流式布局中的垂直虚线分隔符，匹配 QToolBar 原生分隔符外观"""
-        sep = _FlowSeparator(self._pinned_flow_widget)
-        sep.show()
+        """创建流式布局中的垂直分隔符，颜色取当前主题，外观与 QToolBar::separator 一致"""
+        t = self.THEMES.get(self.current_theme, self.THEMES["深蓝"])
+        sep = _FlowSeparator(self._pinned_flow_widget, color=t['border'])
         sep.show()
         return sep
 
@@ -7565,12 +7571,13 @@ class MainWindow(QMainWindow):
                     background-color: {t['bg_dark']};
                 }}
             """)
-            # 更新分隔符颜色
+            # 更新分隔符颜色（_FlowSeparator 自绘，需调用 set_line_color）
             if self._flow_layout:
                 for i in range(self._flow_layout.count()):
                     item = self._flow_layout.itemAt(i)
-                    if item and item.widget() and item.widget().objectName() == "_flow_separator":
-                        item.widget().setStyleSheet(f"QFrame {{ color: {t['border']}; }}")
+                    w = item.widget() if item else None
+                    if w is not None and w.objectName() == "_flow_separator":
+                        w.set_line_color(t['border'])
 
         # 工作目录标签样式
         self.dir_label.setStyleSheet(f"color: {t['text_dim']}; font-size: 12px;")

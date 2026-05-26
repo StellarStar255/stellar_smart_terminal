@@ -78,9 +78,10 @@ class FlowLayout(QLayout):
                 continue
 
             item_size = self._effective_item_size(item)
-            # 分隔符不额外加间距，与 QToolBar 原生分隔符行为一致
-            is_sep = widget and widget.objectName() == "_flow_separator"
-            spacing = 0 if is_sep else self._h_spacing
+            # 所有项（含分隔符）都使用相同的 h_spacing。
+            # 间距只加在每项之后，若分隔符特殊处理为 0，则它前面有 5px、后面 0px，
+            # 会导致分隔线左右不对称（偏右）；统一用 h_spacing 才能左右对称。
+            spacing = self._h_spacing
             next_x = x + item_size.width() + spacing
 
             if x > effective.x() and next_x - spacing > effective.right():
