@@ -43,6 +43,54 @@ from main_window import MainWindow
 from i18n import t
 
 
+def install_global_excepthook():
+    """安装全局异常钩子，防止 Qt 回调中未捕获的 Python 异常导致进程闪退。
+
+    背景：PyQt6 在从 C++ 侧调用的槽函数 / 虚函数（如 QTimer 的 timeout、
+    eventFilter 等）里遇到未处理的 Python 异常时，默认行为是直接调用
+    qFatal() → abort() 把整个进程杀掉（崩溃报告里表现为 SIGABRT，
+    调用栈为 pyqt6_err_print → QMessageLogger::fatal → abort）。
+    典型触发场景：导航面板有多个窗口时强制关闭其中一个，刷新定时器 /
+    eventFilter 在窗口销毁的间隙访问到不稳定对象抛出异常 → 整个程序闪退。
+
+    只要安装了一个“非默认”的 sys.excepthook，PyQt6 就会改为调用我们的
+    钩子并让事件循环继续运行，而不会 abort。这里把异常完整记录到 stderr
+    和崩溃日志文件，便于后续定位真正的根因。
+    """
+    import traceback
+    from datetime import datetime
+
+    log_path = Path(__file__).parent / ".smart_terminal_crash.log"
+    default_hook = sys.excepthook
+
+    def _hook(exc_type, exc_value, exc_tb):
+        # 保留 Ctrl+C 的默认行为（允许正常中断退出）
+        if issubclass(exc_type, KeyboardInterrupt):
+            default_hook(exc_type, exc_value, exc_tb)
+            return
+        try:
+            tb_text = "".join(
+                traceback.format_exception(exc_type, exc_value, exc_tb)
+            )
+        except Exception:
+            tb_text = f"{exc_type.__name__}: {exc_value}\n"
+        # 输出到 stderr（保持与默认行为一致的可见性）
+        try:
+            sys.stderr.write(tb_text)
+            sys.stderr.flush()
+        except Exception:
+            pass
+        # 追加写入崩溃日志，方便复盘真正抛异常的位置
+        try:
+            with open(log_path, "a", encoding="utf-8") as f:
+                f.write(f"\n===== {datetime.now().isoformat()} =====\n")
+                f.write(tb_text)
+        except Exception:
+            pass
+
+    sys.excepthook = _hook
+
+
 def setup_app_style(app: QApplication):
     """设置应用程序样式"""
     # 深色主题
@@ -92,6 +140,10 @@ StartupWMClass=smart-terminal
 
 def main():
     """主函数"""
+    # 尽早安装全局异常钩子：把 Qt 回调中的未捕获异常从“闪退(abort)”降级为
+    # “记录日志并继续运行”，必须在创建 QApplication / 进入事件循环之前完成。
+    install_global_excepthook()
+
     # Windows: 设置 AppUserModelID 以便任务栏显示自定义图标而非 Python 图标
     if sys.platform == "win32":
         import ctypes

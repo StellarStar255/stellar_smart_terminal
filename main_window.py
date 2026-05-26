@@ -655,7 +655,7 @@ class WindowNavigatorPanel(QWidget):
             try:
                 if isinstance(w, MainWindow) and not sip.isdeleted(w) and w.isVisible():
                     current_windows.append(w)
-            except RuntimeError:
+            except Exception:
                 continue
         current_count = len(current_windows)
         cached_count = len(self._cached_windows)
@@ -672,15 +672,15 @@ class WindowNavigatorPanel(QWidget):
                     # 有窗口关闭了，需要刷新
                     self._refresh_window_list()
                     return
-            except RuntimeError:
-                # 窗口已被删除
+            except Exception:
+                # 窗口已被删除（或其它读取异常）
                 self._refresh_window_list()
                 return
 
         # 检查窗口标题或颜色是否变化
         try:
             current_info = [(w.windowTitle(), w.get_window_color()) for w in current_windows]
-        except RuntimeError:
+        except Exception:
             # 窗口在遍历过程中被删除
             self._refresh_window_list()
             return
@@ -747,8 +747,8 @@ class WindowNavigatorPanel(QWidget):
                 if not w.isVisible():
                     continue
                 windows.append(w)
-            except RuntimeError:
-                continue  # 窗口已被删除，跳过
+            except Exception:
+                continue  # 窗口已被删除/不稳定，跳过
 
         # 根据排序模式排序（包一层 try：window 可能在 sort key 取值时被销毁）
         try:
@@ -760,7 +760,7 @@ class WindowNavigatorPanel(QWidget):
                 # 手动排序：按保存的顺序排列，新窗口放到末尾
                 order_map = {wid: idx for idx, wid in enumerate(self._manual_order)}
                 windows.sort(key=lambda w: order_map.get(id(w), 9999))
-        except RuntimeError:
+        except Exception:
             # 排序过程中有窗口被删除，重置缓存并下次再刷
             self._last_window_info = []
             return
@@ -768,7 +768,7 @@ class WindowNavigatorPanel(QWidget):
         # 检查是否有变化（标题或颜色）
         try:
             current_info = [(w.windowTitle(), w.get_window_color()) for w in windows]
-        except RuntimeError:
+        except Exception:
             # 窗口在遍历过程中被删除，重新刷新
             self._last_window_info = []
             return
@@ -806,8 +806,8 @@ class WindowNavigatorPanel(QWidget):
                 new_refs[wid] = _weakref.ref(window)
                 item.setForeground(QColor(color))
                 self.window_list.addItem(item)
-            except RuntimeError:
-                continue  # 窗口在处理过程中被删除，跳过
+            except Exception:
+                continue  # 窗口在处理过程中被删除/不稳定，跳过
         self._window_refs = new_refs
 
         self.window_list.blockSignals(False)
@@ -867,10 +867,18 @@ class WindowNavigatorPanel(QWidget):
         self._update_all_item_colors()
 
     def eventFilter(self, obj, event):
-        """事件过滤器，处理鼠标离开列表"""
-        if obj == self.window_list.viewport() and event.type() == QEvent.Type.Leave:
-            self._hovered_item = None
-            self._update_all_item_colors()
+        """事件过滤器，处理鼠标离开列表
+
+        注意：eventFilter 由 Qt 从 C++ 侧直接调用，一旦抛出未捕获异常，
+        PyQt6 会调用 qFatal() abort 整个进程（闪退）。所以这里整体兜底，
+        颜色刷新失败绝不能让事件过滤器抛出异常。
+        """
+        try:
+            if obj == self.window_list.viewport() and event.type() == QEvent.Type.Leave:
+                self._hovered_item = None
+                self._update_all_item_colors()
+        except Exception:
+            pass
         return super().eventFilter(obj, event)
 
     def _update_item_colors(self, selected_item):
@@ -909,8 +917,11 @@ class WindowNavigatorPanel(QWidget):
                     # 只在有背景时清除
                     if item.background().style() != Qt.BrushStyle.NoBrush:
                         item.setBackground(no_brush)
-            except RuntimeError:
-                continue  # 窗口已被删除，跳过
+            except Exception:
+                # 窗口已被删除或处于不稳定状态（不止 RuntimeError）——
+                # 这是非关键的 UI 刷新，任何异常都直接跳过该项，
+                # 绝不能让它逃逸到 Qt 回调外触发 abort 闪退
+                continue
 
     def _on_item_double_clicked(self, item):
         """双击切换窗口"""
@@ -1050,7 +1061,8 @@ class WindowNavigatorPanel(QWidget):
                 if nav is not None and not sip.isdeleted(nav):
                     try:
                         nav._refresh_window_list()
-                    except RuntimeError:
+                    except Exception:
+                        # 由 QTimer 回调，异常绝不能逃逸（否则 PyQt6 abort 闪退）
                         pass
             QTimer.singleShot(200, safe_refresh)
 
