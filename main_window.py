@@ -102,7 +102,7 @@ class SelectAllLineEdit(QLineEdit):
 
     def __init__(self, parent=None, popup_owner=None):
         super().__init__(parent)
-        self._first_click = True
+        self._pending_selectall = False  # 因聚焦安排的延迟全选，可被空白点击取消
         # 关联的 QComboBox：点击空白处时用它来弹出选项列表
         self._popup_owner = popup_owner
         self._open_on_release = False   # 本次按下是否应在松开时弹出列表
@@ -144,11 +144,27 @@ class SelectAllLineEdit(QLineEdit):
     def _recently_hidden(self) -> bool:
         return (time.monotonic() - self._popup_hidden_at) < self._POPUP_REOPEN_GUARD
 
+    def _apply_pending_selectall(self):
+        if self._pending_selectall:
+            self._pending_selectall = False
+            self.selectAll()
+
     def focusInEvent(self, event):
         super().focusInEvent(event)
-        self._first_click = True
-        # Linux 上需要延迟执行全选，确保在所有事件处理完成后执行
-        QTimer.singleShot(0, self.selectAll)
+        reason = event.reason()
+        # 只有“真正想编辑”的获得焦点才自动全选：鼠标点击、键盘 Tab / 快捷键切入。
+        # 而“弹窗关闭后焦点返回、窗口重新激活”等原因绝不全选——否则会在关闭下拉
+        # 列表时把刚清空的选区又选回来，造成选中内容闪一下再消失。
+        # 注意：鼠标点击时这里先“安排”全选并延迟执行；若随后的 mousePressEvent
+        # 判定点的是空白区（意图开下拉而非编辑），会把它取消掉。
+        if reason in (
+            Qt.FocusReason.MouseFocusReason,
+            Qt.FocusReason.TabFocusReason,
+            Qt.FocusReason.BacktabFocusReason,
+            Qt.FocusReason.ShortcutFocusReason,
+        ):
+            self._pending_selectall = True
+            QTimer.singleShot(0, self._apply_pending_selectall)
 
     def _click_in_blank_area(self, x: float) -> bool:
         """判断点击横坐标是否落在文字右侧的空白区域。
@@ -168,6 +184,8 @@ class SelectAllLineEdit(QLineEdit):
         if (self._popup_owner is not None
                 and event.button() == Qt.MouseButton.LeftButton
                 and self._click_in_blank_area(event.position().x())):
+            # 点的是空白区：取消因聚焦安排的全选（意图是开下拉，不该全选/不该闪烁）
+            self._pending_selectall = False
             self._install_popup_filter()
             # 按下这一刻：若列表正显示（或刚被这一下点击关闭），本次点击的语义是
             # “关闭”，松开时绝不能再次弹出；否则才安排弹出。
@@ -177,12 +195,9 @@ class SelectAllLineEdit(QLineEdit):
             event.accept()
             return
         self._open_on_release = False
+        # 点在文字区域：交给基类处理（定位光标/起始选择），首次聚焦时的全选由
+        # focusInEvent 安排的延迟全选负责，覆盖掉基类的光标定位。
         super().mousePressEvent(event)
-        if self._first_click:
-            self._first_click = False
-            # 使用延迟执行确保在鼠标释放事件之后执行全选
-            # 这在 Linux 上尤其重要，因为鼠标事件可能会取消选择
-            QTimer.singleShot(0, self.selectAll)
 
     def mouseReleaseEvent(self, event):
         if (self._popup_owner is not None
