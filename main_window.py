@@ -4412,6 +4412,10 @@ class MainWindow(QMainWindow):
             for widget in app.topLevelWidgets():
                 if isinstance(widget, MainWindow):
                     widget.setWindowOpacity(opacity)
+                    for terminals in getattr(widget, 'tab_terminals', {}).values():
+                        for terminal in terminals:
+                            if hasattr(terminal, '_invalidate_render_cache'):
+                                terminal._invalidate_render_cache()
                     # 同步其他窗口的 opacity_spin 值（避免信号循环）
                     if widget is not self and hasattr(widget, 'opacity_spin'):
                         widget.opacity_spin.blockSignals(True)

@@ -573,10 +573,7 @@ class TerminalWidget(QWidget):
     def _conditional_update(self):
         """条件刷新 - 只在内容变化时重绘"""
         if self._content_dirty:
-            self._content_dirty = False
-            self._cache_valid = False  # 内容变化时使缓存失效
-            self._display_info['valid'] = False  # 显示信息也需要更新
-            self.update()
+            self._invalidate_render_cache()
 
     def _get_display_info(self) -> tuple:
         """获取显示信息（带缓存），返回 (history_count, total_lines, display_start)
@@ -609,6 +606,13 @@ class TerminalWidget(QWidget):
     def _invalidate_display_info(self):
         """使显示信息缓存失效"""
         self._display_info['valid'] = False
+
+    def _invalidate_render_cache(self):
+        """使终端渲染缓存失效并安排重绘。"""
+        self._content_dirty = False
+        self._cache_valid = False
+        self._invalidate_display_info()
+        self.update()
 
     def _update_terminal_size(self):
         """根据窗口大小更新终端尺寸"""
@@ -664,9 +668,7 @@ class TerminalWidget(QWidget):
             # 也不会出现空白终端。少数 TUI 应用使用 CUF 增量重绘可能短暂出现"重影"，
             # 但这种情况极少且很快被新重绘覆盖，远好于内容完全消失。
 
-            self._cache_valid = False
-            self._display_info['valid'] = False
-            self.update()
+            self._invalidate_render_cache()
             print(f"[Terminal] Size: {old_cols}x{old_rows} -> {new_cols}x{new_rows} (widget: {self.width()}x{self.height()}, char_w: {self.char_width:.1f})")
 
     def _update_pty_size(self):
@@ -1238,10 +1240,13 @@ class TerminalWidget(QWidget):
         if need_rebuild:
             self._rebuild_cache()
 
-        # 先填充背景确保完全不透明（防止其他 tab/widget 内容透出）
-        painter.fillRect(self.rect(), self.bg_color)
-        # 使用 Source 合成模式：完全替换像素，不做 alpha 混合
+        opaque_bg = QColor(self.bg_color)
+        opaque_bg.setAlpha(255)
+
+        # 使用 Source 合成模式：完全替换像素，不做 alpha 混合。
+        # 先填充背景确保终端区域自身完全不透明（防止父/兄弟 widget 内容透出）。
         painter.setCompositionMode(QPainter.CompositionMode.CompositionMode_Source)
+        painter.fillRect(self.rect(), opaque_bg)
         if self._cache_pixmap and not self._cache_pixmap.isNull():
             painter.drawPixmap(0, 0, self._cache_pixmap)
         painter.setCompositionMode(QPainter.CompositionMode.CompositionMode_SourceOver)
@@ -1380,7 +1385,9 @@ class TerminalWidget(QWidget):
                 return
             self._cache_pixmap.setDevicePixelRatio(dpr)
 
-        self._cache_pixmap.fill(self.bg_color)
+        opaque_bg = QColor(self.bg_color)
+        opaque_bg.setAlpha(255)
+        self._cache_pixmap.fill(opaque_bg)
 
         painter = QPainter(self._cache_pixmap)
         if not painter.isActive():
@@ -1426,7 +1433,7 @@ class TerminalWidget(QWidget):
         num_cols = min(self.term_cols, max_visible_cols)
         char_width = self.char_width
         char_height = self.char_height
-        bg_default = self.bg_color
+        bg_default = opaque_bg
         last_fg_color = None  # 缓存上一个前景色，减少 setPen 调用
         padding = self.PADDING  # 局部变量加速
         for display_row, buffer_line in enumerate(display_lines):
@@ -1769,26 +1776,22 @@ class TerminalWidget(QWidget):
             history_lines = self._get_history_count()
             if key == Qt.Key.Key_PageUp:
                 self.scroll_offset = min(self.scroll_offset + self.term_rows, history_lines)
-                self._content_dirty = True
-                self.update()
+                self._invalidate_render_cache()
                 event.accept()
                 return
             elif key == Qt.Key.Key_PageDown:
                 self.scroll_offset = max(self.scroll_offset - self.term_rows, 0)
-                self._content_dirty = True
-                self.update()
+                self._invalidate_render_cache()
                 event.accept()
                 return
             elif key == Qt.Key.Key_Home:
                 self.scroll_offset = history_lines
-                self._content_dirty = True
-                self.update()
+                self._invalidate_render_cache()
                 event.accept()
                 return
             elif key == Qt.Key.Key_End:
                 self.scroll_offset = 0
-                self._content_dirty = True
-                self.update()
+                self._invalidate_render_cache()
                 event.accept()
                 return
 
@@ -2041,16 +2044,14 @@ class TerminalWidget(QWidget):
 
         # 只有在滚动位置实际改变时才更新
         if old_offset != self.scroll_offset:
-            self._cache_valid = False  # 直接使缓存失效，避免等待定时器
-            self.update()
+            self._invalidate_render_cache()
         event.accept()
 
     def scroll_to_bottom(self):
         """滚动到底部（最新内容）"""
         if self.scroll_offset != 0:
             self.scroll_offset = 0
-            self._cache_valid = False  # 直接使缓存失效
-            self.update()
+            self._invalidate_render_cache()
 
     def _auto_scroll_tick(self):
         """自动滚动定时器回调 - 支持拖动选择时跨页
@@ -2076,20 +2077,18 @@ class TerminalWidget(QWidget):
             # 向上滚动（查看历史）
             if self.scroll_offset < max_scroll:
                 self.scroll_offset = min(self.scroll_offset + step, max_scroll)
-                self._cache_valid = False  # 直接使缓存失效
                 # 更新选择终点（扩展到新滚动位置的顶部）
                 if self._last_mouse_pos:
                     self._selection_end = self._pos_to_absolute_cell(self._last_mouse_pos)
-                self.update()
+                self._invalidate_render_cache()
         else:
             # 向下滚动（回到最新）
             if self.scroll_offset > 0:
                 self.scroll_offset = max(self.scroll_offset - step, 0)
-                self._cache_valid = False  # 直接使缓存失效
                 # 更新选择终点（扩展到新滚动位置的底部）
                 if self._last_mouse_pos:
                     self._selection_end = self._pos_to_absolute_cell(self._last_mouse_pos)
-                self.update()
+                self._invalidate_render_cache()
 
     def _pos_to_cell(self, pos: QPoint) -> tuple:
         """将鼠标位置转换为终端单元格坐标 (row, col) - 返回显示区域内的相对行号"""
@@ -2938,7 +2937,7 @@ class TerminalWidget(QWidget):
     def clear_screen(self):
         """清屏"""
         self.screen.reset()
-        self.update()
+        self._invalidate_render_cache()
 
     def is_running(self) -> bool:
         """检查是否有进程在运行"""
@@ -3497,6 +3496,7 @@ if (hasFileURL) {{
         """滚动到当前匹配位置"""
         if not self._search_matches or self._current_match_index < 0:
             return
+        old_offset = self.scroll_offset
         row, col, length = self._search_matches[self._current_match_index]
         history_count = self._get_history_count()
         total_lines = history_count + self.term_rows
@@ -3506,6 +3506,8 @@ if (hasFileURL) {{
             self.scroll_offset = history_count - row
         else:
             self.scroll_offset = 0
+        if old_offset != self.scroll_offset:
+            self._invalidate_render_cache()
 
     def _update_match_label(self):
         """更新匹配计数标签"""
@@ -3522,7 +3524,7 @@ if (hasFileURL) {{
             self.term_font.setPointSize(current_size + 1)
             self._calculate_char_size()
             self._update_terminal_size()
-            self.update()
+            self._invalidate_render_cache()
 
     def _zoom_out(self):
         """缩小字体"""
@@ -3531,7 +3533,7 @@ if (hasFileURL) {{
             self.term_font.setPointSize(current_size - 1)
             self._calculate_char_size()
             self._update_terminal_size()
-            self.update()
+            self._invalidate_render_cache()
 
     # ==================== 双击选词、三击选行 ====================
 
