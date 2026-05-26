@@ -129,15 +129,24 @@ def install_sigint_handler(app: QApplication):
         # 兜底：无论保存/关闭是否成功，都确保事件循环退出
         QTimer.singleShot(300, app.quit)
 
+    def _notify(text: str):
+        # 写到 stderr：和 Ctrl+C 回显的 ^C 在同一处，默认无缓冲，确保立即可见
+        try:
+            sys.stderr.write(text)
+            sys.stderr.flush()
+        except Exception:
+            pass
+
     def _handler(signum, frame):
         if state["armed"]:
-            print("\n正在退出 Smart Terminal…", flush=True)
+            _notify("\n\033[1;32m正在退出 Smart Terminal…\033[0m\n")
             _graceful_quit()
         else:
             state["armed"] = True
-            print(
-                "\n⚠️  再按一次 Ctrl+C 退出程序  (Press Ctrl+C again to quit)",
-                flush=True,
+            # 醒目的黄色高亮提醒（终端不支持 ANSI 颜色时也能读出文字）
+            _notify(
+                "\n\033[1;33m⚠️  再按一次 Ctrl+C 退出程序 "
+                "(Press Ctrl+C again to quit)\033[0m\n"
             )
             # 一段时间内没有再次按下则重置，避免之后误触退出
             QTimer.singleShot(4000, _disarm)
