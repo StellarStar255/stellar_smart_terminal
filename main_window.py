@@ -107,7 +107,7 @@ class SelectAllLineEdit(QLineEdit):
         self._popup_owner = popup_owner
         self._open_on_release = False   # 本次按下是否应在松开时弹出列表
         self._popup_hidden_at = 0.0     # 列表最近一次关闭的时间戳
-        self._popup_filter_target = None  # 已安装事件过滤器的弹窗对象
+        self._filtered_view = None      # 已安装事件过滤器的 view
         if popup_owner is not None:
             self._install_popup_filter()
 
@@ -116,21 +116,21 @@ class SelectAllLineEdit(QLineEdit):
         self._install_popup_filter()
 
     def _install_popup_filter(self):
-        """在下拉弹窗上安装事件过滤器，用于记录它的关闭时间。"""
+        """在下拉框的 view 上安装事件过滤器，用于记录列表的关闭时间。
+        关键：装在 view（QListView，从一开始就存在、对象稳定）而不是装在
+        惰性创建的弹窗容器上——经验证关闭时 view 一定会收到 Hide 事件，
+        这样无论列表是被本控件、🕘 按钮还是键盘打开，都能可靠捕获关闭。"""
         owner = self._popup_owner
         if owner is None:
             return
         view = owner.view()
-        if view is None:
+        if view is None or view is self._filtered_view:
             return
-        target = view.window() or view
-        if target is self._popup_filter_target:
-            return
-        target.installEventFilter(self)
-        self._popup_filter_target = target
+        view.installEventFilter(self)
+        self._filtered_view = view
 
     def eventFilter(self, obj, event):
-        if obj is self._popup_filter_target and event.type() == QEvent.Type.Hide:
+        if obj is self._filtered_view and event.type() == QEvent.Type.Hide:
             self._popup_hidden_at = time.monotonic()
         return super().eventFilter(obj, event)
 
@@ -163,14 +163,17 @@ class SelectAllLineEdit(QLineEdit):
         return x > text_right + 6
 
     def mousePressEvent(self, event):
-        # 点击右侧空白区域：只在“松开”时弹出列表，避免按下时的隐式鼠标抓取与
-        # 弹窗抓取冲突导致疯狂闪烁。这里只决定“是否要在松开时弹出”。
+        # 点击右侧空白区域：切换下拉列表，且全部延迟到“松开”后再做，避免按下时
+        # 的隐式鼠标抓取与弹窗抓取冲突导致疯狂闪烁。
         if (self._popup_owner is not None
                 and event.button() == Qt.MouseButton.LeftButton
                 and self._click_in_blank_area(event.position().x())):
-            self._install_popup_filter()  # 弹窗 view 可能此时才创建
-            # 仅当列表当前未显示、且不是刚被这一下点击关闭时，才安排弹出
-            self._open_on_release = not self._popup_visible() and not self._recently_hidden()
+            self._install_popup_filter()
+            # 按下这一刻：若列表正显示（或刚被这一下点击关闭），本次点击的语义是
+            # “关闭”，松开时绝不能再次弹出；否则才安排弹出。
+            self._open_on_release = (
+                not self._popup_visible() and not self._recently_hidden()
+            )
             event.accept()
             return
         self._open_on_release = False
@@ -182,18 +185,30 @@ class SelectAllLineEdit(QLineEdit):
             QTimer.singleShot(0, self.selectAll)
 
     def mouseReleaseEvent(self, event):
-        if self._open_on_release:
-            self._open_on_release = False
+        if (self._popup_owner is not None
+                and event.button() == Qt.MouseButton.LeftButton
+                and self._click_in_blank_area(event.position().x())):
             event.accept()
-            # 此刻按键已松开，隐式抓取即将释放，再次确认列表未显示/未刚关闭后弹出
-            if (self._popup_owner is not None
-                    and not self._popup_visible()
-                    and not self._recently_hidden()):
-                self._popup_owner.showPopup()
-                # 弹窗容器是首次 showPopup 时才创建的，此刻才能把过滤器装到真正
-                # 的容器上，确保后续能捕获到它的关闭时间
-                self._install_popup_filter()
+            should_open = self._open_on_release
+            self._open_on_release = False
+            if not should_open:
+                # 本次点击是为了关闭：若列表还开着就收起；并记录关闭时间，
+                # 让紧随其后的任何“弹出”请求在防抖窗口内被忽略
+                if self._popup_visible():
+                    self._popup_owner.hidePopup()
+                self._popup_hidden_at = time.monotonic()
+                return
+            # 本次点击是为了打开：延迟到事件循环空闲再弹（此时按下的隐式抓取
+            # 已彻底释放），并再次确认列表未显示/未刚关闭，彻底杜绝重入闪烁
+            def _open():
+                if (self._popup_owner is not None
+                        and not self._popup_visible()
+                        and not self._recently_hidden()):
+                    self._popup_owner.showPopup()
+                    self._install_popup_filter()
+            QTimer.singleShot(0, _open)
             return
+        self._open_on_release = False
         super().mouseReleaseEvent(event)
 
 
