@@ -8658,6 +8658,50 @@ class MainWindow(QMainWindow):
 
         event.accept()
 
+        # 兜底退出判定：正常点 X 关闭最后一个窗口时 Qt 会自动退出（lastWindowClosed
+        # → quitOnLastWindowClosed）。但强制关闭走的是 force_close_with_save 里的
+        # hide() → close()，Qt 对"已隐藏后再关闭"的窗口不会发 lastWindowClosed
+        # （该信号只在关闭一个可见窗口时触发），于是当这是最后一个 MainWindow 时
+        # 应用不会退出，只剩置顶的导航面板(Tool 窗口)挂在后台 → 进程不结束。
+        # 这里在已无其它存活主窗口时显式退出。
+        self._quit_if_last_main_window()
+
+    def _quit_if_last_main_window(self):
+        """若已无其它存活的 MainWindow，则关闭导航面板并显式退出应用。
+
+        参见 closeEvent 末尾的说明：force_close 的 hide()→close() 不会触发 Qt 的
+        自动退出，需要这里兜底，否则关掉最后一个窗口后进程仍在运行。
+        """
+        try:
+            app = QApplication.instance()
+            if app is None:
+                return
+            for w in app.topLevelWidgets():
+                if w is self or not isinstance(w, MainWindow):
+                    continue
+                if sip.isdeleted(w):
+                    continue
+                # 正在关闭/强制关闭中的窗口视为即将消失，不计入存活窗口
+                if getattr(w, '_closing_in_progress', False):
+                    continue
+                if getattr(w, '_force_closing', False):
+                    continue
+                # 仍有存活的主窗口，无需退出
+                return
+            # 已无其它主窗口：先保存并关闭导航面板，再退出事件循环
+            nav = MainWindow._global_window_navigator
+            if nav is not None and not sip.isdeleted(nav):
+                try:
+                    nav._save_navigator_config()
+                    nav.close()
+                except Exception:
+                    pass
+            # 推迟一拍退出，避免在 closeEvent / native 事件链内同步退出
+            QTimer.singleShot(0, app.quit)
+        except Exception as e:
+            # closeEvent 内异常绝不能逃逸到 Qt C++ 侧（否则可能 abort）
+            print(f"[Close] quit-if-last check failed: {e}")
+
     # ================== OpenAI API 服务器相关方法 ==================
 
     def _show_tab_context_menu(self, pos):
