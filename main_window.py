@@ -3497,8 +3497,8 @@ class MainWindow(QMainWindow):
 
         # --- 主题组 ---
         self.theme_label = QLabel(t("theme.label"))
-        # margin-left 负值抵消 QLabel 文字固有的左侧偏移，使“主题:”前的分隔线左右对称
-        self.theme_label.setStyleSheet("color: #888; margin-left: -3px;")
+        # 不加左边距：负值会把首字母“T”挤出控件左边界被裁掉（macOS 字体文字本就贴边）
+        self.theme_label.setStyleSheet("color: #888; margin-left: 0px;")
 
         self.theme_combo = CenteredComboBox()
         self.theme_combo.setMinimumWidth(80)
