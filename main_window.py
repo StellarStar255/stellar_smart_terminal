@@ -34,7 +34,7 @@ from PyQt6.QtWidgets import (
     QListWidgetItem, QPlainTextEdit, QDialogButtonBox,
     QFormLayout, QGroupBox, QCheckBox, QTabWidget, QTabBar,
     QApplication, QInputDialog, QMenu, QStyledItemDelegate, QStyle,
-    QStyleOptionViewItem, QSpinBox, QSizePolicy
+    QStyleOptionViewItem, QStyleOptionButton, QSpinBox, QSizePolicy
 )
 from PyQt6 import sip  # 用于检查 C++ 对象是否已被删除
 from PyQt6.QtCore import Qt, QTimer, QEvent, QPoint, QMimeData, pyqtSignal, QObject
@@ -2123,6 +2123,26 @@ class DirectoryHistoryDialog(QDialog):
         super().reject()
 
 
+class _ToolbarCheckBox(QCheckBox):
+    """工具栏复选框：去掉 QCheckBox 固有的右侧空白，使其外框紧贴“指示器+文字”，
+    与 QPushButton 一样填满自身外框。这样组与组之间的分隔线左右间距才会对称
+    （否则复选框尾随的空白会让其后的分隔线显得偏左）。"""
+
+    def sizeHint(self):
+        s = super().sizeHint()
+        opt = QStyleOptionButton()
+        self.initStyleOption(opt)
+        # 样式给出的文字区域起点（指示器 + 间距之后）
+        contents = self.style().subElementRect(
+            QStyle.SubElement.SE_CheckBoxContents, opt, self)
+        text_w = self.fontMetrics().horizontalAdvance(self.text())
+        # 文字实际宽度（horizontalAdvance 含右侧 bearing，故 -2 不会裁剪字形）
+        want = contents.x() + text_w - 2
+        if 0 < want < s.width():
+            s.setWidth(want)
+        return s
+
+
 class _FlowSeparator(QWidget):
     """流式布局中的垂直虚线分隔符，匹配 QToolBar 原生分隔符"""
 
@@ -3252,7 +3272,7 @@ class MainWindow(QMainWindow):
         # ===== 创建所有分组按钮（不添加到工具栏）=====
 
         # --- 选项组 ---
-        self.image_prefix_checkbox = QCheckBox(t("toolbar.image_prefix"))
+        self.image_prefix_checkbox = _ToolbarCheckBox(t("toolbar.image_prefix"))
         self.image_prefix_checkbox.setToolTip(t("toolbar.image_prefix_tooltip"))
         self.image_prefix_checkbox.setStyleSheet("""
             QCheckBox {
@@ -3277,7 +3297,7 @@ class MainWindow(QMainWindow):
         self.image_prefix_checkbox.setChecked(self.image_prefix_enabled)
         self.image_prefix_checkbox.stateChanged.connect(self._on_image_prefix_changed)
 
-        self.image_local_checkbox = QCheckBox(t("toolbar.image_local"))
+        self.image_local_checkbox = _ToolbarCheckBox(t("toolbar.image_local"))
         self.image_local_checkbox.setToolTip(t("toolbar.image_local_tooltip"))
         self.image_local_checkbox.setStyleSheet("""
             QCheckBox {
@@ -3302,7 +3322,7 @@ class MainWindow(QMainWindow):
         self.image_local_checkbox.setChecked(self.image_save_local)
         self.image_local_checkbox.stateChanged.connect(self._on_image_local_changed)
 
-        self.window_nav_checkbox = QCheckBox(t("toolbar.window_nav"))
+        self.window_nav_checkbox = _ToolbarCheckBox(t("toolbar.window_nav"))
         self.window_nav_checkbox.setToolTip(t("toolbar.window_nav_tooltip"))
         self.window_nav_checkbox.setStyleSheet("""
             QCheckBox {
@@ -3471,7 +3491,8 @@ class MainWindow(QMainWindow):
 
         # --- 主题组 ---
         self.theme_label = QLabel(t("theme.label"))
-        self.theme_label.setStyleSheet("color: #888; margin-left: 5px;")
+        # margin-left 负值抵消 QLabel 文字固有的左侧偏移，使“主题:”前的分隔线左右对称
+        self.theme_label.setStyleSheet("color: #888; margin-left: -3px;")
 
         self.theme_combo = CenteredComboBox()
         self.theme_combo.setMinimumWidth(80)
@@ -3543,7 +3564,7 @@ class MainWindow(QMainWindow):
         """)
         self.lang_combo.currentIndexChanged.connect(self._on_language_changed)
 
-        self.icon_tint_checkbox = QCheckBox(t("toolbar.icon_tint"))
+        self.icon_tint_checkbox = _ToolbarCheckBox(t("toolbar.icon_tint"))
         self.icon_tint_checkbox.setToolTip(t("toolbar.icon_tint_tooltip"))
         self.icon_tint_checkbox.setChecked(self._use_icon_tint)
         self.icon_tint_checkbox.stateChanged.connect(self._on_icon_tint_changed)
