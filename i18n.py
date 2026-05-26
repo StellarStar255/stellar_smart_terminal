@@ -128,6 +128,7 @@ TRANSLATIONS = {
     "toolbar.opacity_label": {"zh": "透明度:", "en": "Opacity:"},
     "toolbar.opacity_tooltip": {"zh": "窗口透明度（10%-100%），对所有窗口生效", "en": "Window opacity (10%-100%), applies to all windows"},
     "toolbar.gui_font_label": {"zh": "GUI字号:", "en": "GUI Font:"},
+    "toolbar.lang_label": {"zh": "语言:", "en": "Language:"},
     "toolbar.gui_font_auto": {"zh": "自动", "en": "Auto"},
     "toolbar.gui_font_tooltip": {"zh": "GUI 面板字体大小（0=跟随全局缩放）", "en": "GUI panel font size (0=follow global zoom)"},
     "toolbar.pin_row2": {"zh": "固定", "en": "Pin"},

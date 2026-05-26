@@ -3571,6 +3571,16 @@ class MainWindow(QMainWindow):
         """)
         self.lang_combo.currentIndexChanged.connect(self._on_language_changed)
 
+        # 语言容器：标签 "Language:" + 下拉框（与 GUI 字号/透明度一致）
+        self.lang_container = QWidget()
+        lang_layout = QHBoxLayout(self.lang_container)
+        lang_layout.setContentsMargins(4, 0, 0, 0)
+        lang_layout.setSpacing(4)
+        self.lang_label = QLabel(t("toolbar.lang_label"))
+        self.lang_label.setStyleSheet("color: #888;")
+        lang_layout.addWidget(self.lang_label)
+        lang_layout.addWidget(self.lang_combo)
+
         self.icon_tint_checkbox = _ToolbarCheckBox(t("toolbar.icon_tint"))
         self.icon_tint_checkbox.setToolTip(t("toolbar.icon_tint_tooltip"))
         self.icon_tint_checkbox.setChecked(self._use_icon_tint)
@@ -3777,7 +3787,7 @@ class MainWindow(QMainWindow):
             },
             "设置": {
                 "llm_config_btn": self.llm_config_btn,
-                "lang_combo": self.lang_combo,
+                "lang_combo": self.lang_container,
                 "gui_font_spin": self.gui_font_container,
                 "opacity_spin": self.opacity_container,
             },
@@ -3888,7 +3898,7 @@ class MainWindow(QMainWindow):
             "theme_combo": self.theme_combo,
             "icon_tint_checkbox": self.icon_tint_checkbox,
             "llm_config_btn": self.llm_config_btn,
-            "lang_combo": self.lang_combo,
+            "lang_combo": self.lang_container,
             "gui_font_spin": self.gui_font_container,
             "opacity_spin": self.opacity_container,
         }
@@ -7290,6 +7300,10 @@ class MainWindow(QMainWindow):
         if hasattr(self, 'gui_font_spin'):
             self.gui_font_spin.setSpecialValueText(t("toolbar.gui_font_auto"))
             self.gui_font_spin.setToolTip(t("toolbar.gui_font_tooltip"))
+
+        # 语言
+        if hasattr(self, 'lang_label'):
+            self.lang_label.setText(t("toolbar.lang_label"))
 
         # 窗口透明度
         if hasattr(self, 'opacity_label'):
