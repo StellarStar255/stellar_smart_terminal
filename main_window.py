@@ -3347,6 +3347,7 @@ class MainWindow(QMainWindow):
             QCheckBox {
                 color: #aaa;
                 font-size: 11px;
+                spacing: 8px;
             }
             QCheckBox::indicator {
                 width: 16px;
@@ -3372,6 +3373,7 @@ class MainWindow(QMainWindow):
             QCheckBox {
                 color: #aaa;
                 font-size: 11px;
+                spacing: 8px;
             }
             QCheckBox::indicator {
                 width: 16px;
@@ -3397,6 +3399,7 @@ class MainWindow(QMainWindow):
             QCheckBox {
                 color: #aaa;
                 font-size: 11px;
+                spacing: 8px;
             }
             QCheckBox::indicator {
                 width: 16px;
