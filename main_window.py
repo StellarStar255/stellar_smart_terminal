@@ -118,6 +118,51 @@ class CenteredComboBox(QComboBox):
     策略：让 Qt 样式先绘制无文本的 combo（边框、背景、下拉箭头等），
     再在整个可见按钮区域居中绘制当前文本，避免默认左对齐文本参与绘制。"""
 
+    def __init__(self, parent=None):
+        super().__init__(parent)
+        # 强制使用 Qt 可定制的下拉弹窗：否则 macOS 会用原生 NSMenu，
+        # 带勾选标记、定位偏移且无法被 stylesheet 美化（弹窗显得错位、难看）。
+        self.setItemDelegate(QStyledItemDelegate(self))
+        self.view().setTextElideMode(Qt.TextElideMode.ElideNone)
+        self.view().setHorizontalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAlwaysOff)
+        self._minimum_popup_width = 0
+
+    def setMinimumPopupWidth(self, width: int):
+        self._minimum_popup_width = max(0, width)
+
+    def _popup_width(self) -> int:
+        view = self.view()
+        content_width = view.sizeHintForColumn(0) if view is not None else 0
+        # The list view needs room for the combo frame, delegate padding and the
+        # current-item marker area. Without this, short popups elide "English".
+        return max(self.width(), self.minimumWidth(), self._minimum_popup_width, content_width + 36)
+
+    def showPopup(self):
+        popup_width = self._popup_width()
+        view = self.view()
+        if view is not None:
+            view.setMinimumWidth(popup_width)
+            view.setTextElideMode(Qt.TextElideMode.ElideNone)
+
+        super().showPopup()
+        # 修正弹窗水平位置：当 combo 不在其父容器最左侧时（例如前面有 "Language:" 标签），
+        # Qt 会把弹窗对齐到容器左边而非 combo 左边，导致弹窗向左错位。
+        # 这里把弹窗左边强制对齐到 combo 左边，并做屏幕边界钳制。
+        view = self.view()
+        container = view.parentWidget() if view is not None else None
+        if container is None:
+            return
+        container.resize(max(container.width(), popup_width), container.height())
+        combo_left = self.mapToGlobal(QPoint(0, 0)).x()
+        screen = self.screen() or QApplication.primaryScreen()
+        if screen is not None:
+            avail = screen.availableGeometry()
+            combo_left = min(combo_left, avail.right() - container.width() + 1)
+            combo_left = max(combo_left, avail.left())
+        geo = container.geometry()
+        if geo.x() != combo_left:
+            container.move(combo_left, geo.y())
+
     def addItem(self, *args):
         super().addItem(*args)
         self._center_item(self.count() - 1)
@@ -3173,6 +3218,7 @@ class MainWindow(QMainWindow):
                 padding-right: 36px;
                 color: #eaeaea;
                 font-size: 12px;
+                combobox-popup: 0;
             }
             QComboBox:focus {
                 border-color: #667eea;
@@ -3194,7 +3240,16 @@ class MainWindow(QMainWindow):
                 background-color: #16213e;
                 color: #eaeaea;
                 selection-background-color: #667eea;
+                selection-color: #ffffff;
                 border: 1px solid #3d3d5c;
+                border-radius: 4px;
+                outline: none;
+                padding: 4px;
+            }
+            QComboBox QAbstractItemView::item {
+                min-height: 28px;
+                padding: 0px 6px;
+                border-radius: 4px;
             }
         """)
 
@@ -3514,6 +3569,7 @@ class MainWindow(QMainWindow):
                 color: #eaeaea;
                 min-width: 70px;
                 margin-right: 6px;
+                combobox-popup: 0;
             }
             QComboBox:hover {
                 border-color: #667eea;
@@ -3526,7 +3582,16 @@ class MainWindow(QMainWindow):
                 background-color: #16213e;
                 color: #eaeaea;
                 selection-background-color: #667eea;
+                selection-color: #ffffff;
                 border: 1px solid #3d3d5c;
+                border-radius: 4px;
+                outline: none;
+                padding: 4px;
+            }
+            QComboBox QAbstractItemView::item {
+                min-height: 28px;
+                padding: 0px 6px;
+                border-radius: 4px;
             }
         """)
         self.theme_combo.currentIndexChanged.connect(self._on_theme_changed)
@@ -3534,8 +3599,10 @@ class MainWindow(QMainWindow):
         # --- 语言选择 ---
         # 用 CenteredComboBox 让显示文本在 edit-field 居中（不依赖 editable hack）
         self.lang_combo = CenteredComboBox()
-        # "English" 文本本身约 50px，加上下拉箭头 18px+内边距，70 总宽显示不下
-        self.lang_combo.setMinimumWidth(92)
+        self.lang_combo.setFixedWidth(104)
+        self.lang_combo.setMinimumPopupWidth(112)
+        self.lang_combo.setSizeAdjustPolicy(QComboBox.SizeAdjustPolicy.AdjustToMinimumContentsLengthWithIcon)
+        self.lang_combo.setMinimumContentsLength(7)
         self.lang_combo.addItem("中文", "zh")
         self.lang_combo.addItem("English", "en")
         # 让下拉列表里的选项也居中
@@ -3552,21 +3619,42 @@ class MainWindow(QMainWindow):
                 background-color: #16213e;
                 border: 1px solid #3d3d5c;
                 border-radius: 4px;
-                padding: 2px 4px;
+                padding: 4px 24px 4px 10px;
                 color: #eaeaea;
+                combobox-popup: 0;
             }
             QComboBox:hover {
                 border-color: #667eea;
             }
             QComboBox::drop-down {
                 border: none;
-                width: 18px;
+                width: 22px;
+                subcontrol-origin: padding;
+                subcontrol-position: top right;
+            }
+            QComboBox::down-arrow {
+                image: none;
+                width: 0px;
+                height: 0px;
+                border-left: 4px solid transparent;
+                border-right: 4px solid transparent;
+                border-top: 5px solid #cfd6ff;
+                margin-right: 8px;
             }
             QComboBox QAbstractItemView {
                 background-color: #16213e;
                 color: #eaeaea;
                 selection-background-color: #667eea;
+                selection-color: #ffffff;
                 border: 1px solid #3d3d5c;
+                border-radius: 4px;
+                outline: none;
+                padding: 5px;
+            }
+            QComboBox QAbstractItemView::item {
+                min-height: 30px;
+                padding: 0px 12px;
+                border-radius: 4px;
             }
         """)
         self.lang_combo.currentIndexChanged.connect(self._on_language_changed)
@@ -3580,6 +3668,7 @@ class MainWindow(QMainWindow):
         self.lang_label.setStyleSheet("color: #888;")
         lang_layout.addWidget(self.lang_label)
         lang_layout.addWidget(self.lang_combo)
+        self.lang_container.setSizePolicy(QSizePolicy.Policy.Fixed, QSizePolicy.Policy.Preferred)
 
         self.icon_tint_checkbox = _ToolbarCheckBox(t("toolbar.icon_tint"))
         self.icon_tint_checkbox.setToolTip(t("toolbar.icon_tint_tooltip"))
