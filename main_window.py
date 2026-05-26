@@ -6,6 +6,7 @@ import os
 import re
 import json
 import sys
+import time
 from pathlib import Path
 from datetime import datetime
 
@@ -93,10 +94,55 @@ def get_default_shell():
 
 
 class SelectAllLineEdit(QLineEdit):
-    """点击时自动全选的输入框"""
-    def __init__(self, parent=None):
+    """点击文字附近时自动全选的输入框；若关联了下拉框（popup_owner），
+    点击文字右侧的空白区域则弹出下拉选项列表（而非全选/定位光标）。"""
+    # 弹窗刚关闭后的“防抖窗口”：在此时间内不重新弹出，避免“点击关闭”这一下
+    # 又把列表重新打开造成疯狂闪烁（单位：秒）
+    _POPUP_REOPEN_GUARD = 0.30
+
+    def __init__(self, parent=None, popup_owner=None):
         super().__init__(parent)
         self._first_click = True
+        # 关联的 QComboBox：点击空白处时用它来弹出选项列表
+        self._popup_owner = popup_owner
+        self._open_on_release = False   # 本次按下是否应在松开时弹出列表
+        self._popup_hidden_at = 0.0     # 列表最近一次关闭的时间戳
+        self._popup_filter_target = None  # 已安装事件过滤器的弹窗对象
+        if popup_owner is not None:
+            self._install_popup_filter()
+
+    def set_popup_owner(self, combo):
+        self._popup_owner = combo
+        self._install_popup_filter()
+
+    def _install_popup_filter(self):
+        """在下拉弹窗上安装事件过滤器，用于记录它的关闭时间。"""
+        owner = self._popup_owner
+        if owner is None:
+            return
+        view = owner.view()
+        if view is None:
+            return
+        target = view.window() or view
+        if target is self._popup_filter_target:
+            return
+        target.installEventFilter(self)
+        self._popup_filter_target = target
+
+    def eventFilter(self, obj, event):
+        if obj is self._popup_filter_target and event.type() == QEvent.Type.Hide:
+            self._popup_hidden_at = time.monotonic()
+        return super().eventFilter(obj, event)
+
+    def _popup_visible(self) -> bool:
+        owner = self._popup_owner
+        if owner is None:
+            return False
+        view = owner.view()
+        return view is not None and view.isVisible()
+
+    def _recently_hidden(self) -> bool:
+        return (time.monotonic() - self._popup_hidden_at) < self._POPUP_REOPEN_GUARD
 
     def focusInEvent(self, event):
         super().focusInEvent(event)
@@ -104,13 +150,51 @@ class SelectAllLineEdit(QLineEdit):
         # Linux 上需要延迟执行全选，确保在所有事件处理完成后执行
         QTimer.singleShot(0, self.selectAll)
 
+    def _click_in_blank_area(self, x: float) -> bool:
+        """判断点击横坐标是否落在文字右侧的空白区域。
+        空文本时整行都视为“文字区”，避免一进来就误弹列表。"""
+        text = self.text()
+        if not text:
+            return False
+        # 文字左起点：内容区左边距 + Qt 内部水平边距(约 2px)
+        left = self.contentsRect().left() + 2
+        text_right = left + self.fontMetrics().horizontalAdvance(text)
+        # 留一点容差，靠近文字尾部仍按“选中”处理
+        return x > text_right + 6
+
     def mousePressEvent(self, event):
+        # 点击右侧空白区域：只在“松开”时弹出列表，避免按下时的隐式鼠标抓取与
+        # 弹窗抓取冲突导致疯狂闪烁。这里只决定“是否要在松开时弹出”。
+        if (self._popup_owner is not None
+                and event.button() == Qt.MouseButton.LeftButton
+                and self._click_in_blank_area(event.position().x())):
+            self._install_popup_filter()  # 弹窗 view 可能此时才创建
+            # 仅当列表当前未显示、且不是刚被这一下点击关闭时，才安排弹出
+            self._open_on_release = not self._popup_visible() and not self._recently_hidden()
+            event.accept()
+            return
+        self._open_on_release = False
         super().mousePressEvent(event)
         if self._first_click:
             self._first_click = False
             # 使用延迟执行确保在鼠标释放事件之后执行全选
             # 这在 Linux 上尤其重要，因为鼠标事件可能会取消选择
             QTimer.singleShot(0, self.selectAll)
+
+    def mouseReleaseEvent(self, event):
+        if self._open_on_release:
+            self._open_on_release = False
+            event.accept()
+            # 此刻按键已松开，隐式抓取即将释放，再次确认列表未显示/未刚关闭后弹出
+            if (self._popup_owner is not None
+                    and not self._popup_visible()
+                    and not self._recently_hidden()):
+                self._popup_owner.showPopup()
+                # 弹窗容器是首次 showPopup 时才创建的，此刻才能把过滤器装到真正
+                # 的容器上，确保后续能捕获到它的关闭时间
+                self._install_popup_filter()
+            return
+        super().mouseReleaseEvent(event)
 
 
 class CenteredComboBox(QComboBox):
@@ -4153,8 +4237,8 @@ class MainWindow(QMainWindow):
             }
         """)
         self.dir_dropdown_btn.clicked.connect(lambda: self.working_dir_combo.showPopup())
-        # 使用自定义 LineEdit，点击时自动全选
-        select_all_edit = SelectAllLineEdit()
+        # 使用自定义 LineEdit：点击文字附近全选，点击右侧空白处弹出历史列表
+        select_all_edit = SelectAllLineEdit(popup_owner=self.working_dir_combo)
         select_all_edit.setAlignment(Qt.AlignmentFlag.AlignLeft | Qt.AlignmentFlag.AlignVCenter)
         self.working_dir_combo.setLineEdit(select_all_edit)
         self._populate_working_dirs()
