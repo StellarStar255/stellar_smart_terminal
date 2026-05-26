@@ -2151,7 +2151,7 @@ class _FlowSeparator(QWidget):
     def __init__(self, parent=None, color="#3d3d5c"):
         super().__init__(parent)
         self.setObjectName("_flow_separator")
-        self.setFixedWidth(12)  # 线居中，两侧由 FlowLayout 的 h_spacing 提供对称间距
+        self.setFixedWidth(6)  # 线居中，两侧由 FlowLayout 的 h_spacing 提供对称间距
         self.setFixedHeight(22)
         self._color = QColor(color)
 
@@ -2728,8 +2728,8 @@ class MainWindow(QMainWindow):
             QToolBar::separator {
                 background-color: #3d3d5c;
                 width: 1px;
-                margin-left: 5px;
-                margin-right: 5px;
+                margin-left: 2px;
+                margin-right: 2px;
                 margin-top: 6px;
                 margin-bottom: 6px;
             }
@@ -7401,8 +7401,8 @@ class MainWindow(QMainWindow):
             QToolBar::separator {{
                 background-color: {t['border']};
                 width: 1px;
-                margin-left: 5px;
-                margin-right: 5px;
+                margin-left: 2px;
+                margin-right: 2px;
                 margin-top: 6px;
                 margin-bottom: 6px;
             }}
@@ -7548,8 +7548,8 @@ class MainWindow(QMainWindow):
             QToolBar::separator {{
                 background-color: {t['border']};
                 width: 1px;
-                margin-left: 5px;
-                margin-right: 5px;
+                margin-left: 2px;
+                margin-right: 2px;
                 margin-top: 5px;
                 margin-bottom: 5px;
             }}
