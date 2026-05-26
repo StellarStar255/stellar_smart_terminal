@@ -100,19 +100,38 @@ def install_sigint_handler(app: QApplication):
     QTimer 回调里抛出 KeyboardInterrupt，既杀不掉事件循环，又在终端里刷一堆
     traceback（正是用户遇到的现象）。
 
-    解决办法两点：
-    1. 用 signal.signal 注册自己的 SIGINT 处理器（注册后 Python 不再抛
+    实现要点（都很关键，否则会出现“按了没反应 / 提示只剩半行”的现象）：
+    1. 用 signal.signal 注册 SIGINT 处理器（注册后 Python 不再抛
        KeyboardInterrupt，而是调用我们的函数）；
-    2. 起一个空转的 QTimer 定期把控制权交回解释器，确保信号能在 ~200ms 内
-       被处理。
+    2. 信号处理器里【只做最小动作】——累加一个计数。绝不在信号上下文里写
+       sys.stderr：缓冲流是带锁的，在信号上下文里写极易被截断（就是之前“只
+       打印出一个 ⚠、后面文字全没了”的根因）；
+    3. 真正的提示文本 / 退出逻辑放进一个常驻 QTimer 回调，在正常事件循环上
+       下文中执行；这个定时器同时承担“周期性唤醒解释器让信号被及时处理”的
+       职责（Qt 事件循环在 C++ 层，不轮询就收不到信号）；
+    4. 输出用底层无缓冲的 os.write(fd=2)，绕开 TextIOWrapper 的缓冲与锁，
+       保证整行一次性、完整地打到终端。
     """
     import signal
+    import time
     from PyQt6.QtCore import QTimer
 
-    state = {"armed": False}
+    # 信号处理器与定时器都在主线程、字节码边界执行，二者天然互斥，无需加锁
+    pending = {"count": 0}
+    state = {"armed": False, "disarm_at": 0.0}
 
-    def _disarm():
-        state["armed"] = False
+    def _handler(signum, frame):
+        # 只记录“收到一次 Ctrl+C”，其余一概不做
+        pending["count"] += 1
+
+    signal.signal(signal.SIGINT, _handler)
+
+    def _notify(text: str):
+        # 底层无缓冲写 stderr(fd=2)：和 ^C 回显同处，且不受缓冲/编码包装影响
+        try:
+            os.write(2, text.encode("utf-8", "replace"))
+        except Exception:
+            pass
 
     def _graceful_quit():
         # 优先走带“保存会话+配置”的强制关闭；任何异常都不能阻断退出
@@ -129,35 +148,33 @@ def install_sigint_handler(app: QApplication):
         # 兜底：无论保存/关闭是否成功，都确保事件循环退出
         QTimer.singleShot(300, app.quit)
 
-    def _notify(text: str):
-        # 写到 stderr：和 Ctrl+C 回显的 ^C 在同一处，默认无缓冲，确保立即可见
-        try:
-            sys.stderr.write(text)
-            sys.stderr.flush()
-        except Exception:
-            pass
-
-    def _handler(signum, frame):
+    def _on_sigint():
         if state["armed"]:
             _notify("\n\033[1;32m正在退出 Smart Terminal…\033[0m\n")
             _graceful_quit()
         else:
             state["armed"] = True
+            state["disarm_at"] = time.monotonic() + 4.0
             # 醒目的黄色高亮提醒（终端不支持 ANSI 颜色时也能读出文字）
             _notify(
-                "\n\033[1;33m⚠️  再按一次 Ctrl+C 退出程序 "
+                "\n\033[1;33m⚠  再按一次 Ctrl+C 退出程序 "
                 "(Press Ctrl+C again to quit)\033[0m\n"
             )
-            # 一段时间内没有再次按下则重置，避免之后误触退出
-            QTimer.singleShot(4000, _disarm)
 
-    signal.signal(signal.SIGINT, _handler)
+    def _tick():
+        # 1) 处理累计到的 Ctrl+C（多次合并为一次处理即可）
+        if pending["count"] > 0:
+            pending["count"] = 0
+            _on_sigint()
+        # 2) 超过时间窗仍未再次按下 → 复位，避免之后误触退出
+        if state["armed"] and time.monotonic() >= state["disarm_at"]:
+            state["armed"] = False
 
-    # 空转定时器：周期性唤醒解释器，让 SIGINT 处理器能被及时调用。
+    # 常驻定时器：既负责唤醒解释器及时收信号，又在正常上下文里处理提示/退出。
     # 用属性持有引用，防止被垃圾回收。
-    app._sigint_keepalive_timer = QTimer()
-    app._sigint_keepalive_timer.timeout.connect(lambda: None)
-    app._sigint_keepalive_timer.start(200)
+    app._sigint_timer = QTimer()
+    app._sigint_timer.timeout.connect(_tick)
+    app._sigint_timer.start(120)
 
 
 def setup_app_style(app: QApplication):
