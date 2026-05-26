@@ -3683,6 +3683,27 @@ class MainWindow(QMainWindow):
 
         self.icon_tint_checkbox = _ToolbarCheckBox(t("toolbar.icon_tint"))
         self.icon_tint_checkbox.setToolTip(t("toolbar.icon_tint_tooltip"))
+        self.icon_tint_checkbox.setStyleSheet("""
+            QCheckBox {
+                color: #aaa;
+                font-size: 11px;
+                spacing: 8px;
+            }
+            QCheckBox::indicator {
+                width: 16px;
+                height: 16px;
+            }
+            QCheckBox::indicator:unchecked {
+                border: 2px solid #3d3d5c;
+                border-radius: 3px;
+                background-color: #16213e;
+            }
+            QCheckBox::indicator:checked {
+                border: 2px solid #667eea;
+                border-radius: 3px;
+                background-color: #667eea;
+            }
+        """)
         self.icon_tint_checkbox.setChecked(self._use_icon_tint)
         self.icon_tint_checkbox.stateChanged.connect(self._on_icon_tint_changed)
 
