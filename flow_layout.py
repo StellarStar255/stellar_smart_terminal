@@ -55,11 +55,14 @@ class FlowLayout(QLayout):
     def _effective_item_size(self, item):
         """获取布局项的有效尺寸，匹配 QToolBar 的行为：
         使用 sizeHint 与 minimumSizeHint 的较大值，
-        确保自定义样式控件（如带 stylesheet 的 QCheckBox）获得正确尺寸"""
+        确保自定义样式控件（如带 stylesheet 的 QCheckBox）获得正确尺寸；
+        但不超过控件的 maximumSize（如 setFixedSize 的按钮），否则
+        minimumSizeHint 大于固定宽度时会在控件后预留多余空白。"""
         size = item.sizeHint()
         widget = item.widget()
         if widget:
             size = size.expandedTo(widget.minimumSizeHint())
+            size = size.boundedTo(widget.maximumSize())
         return size
 
     def _do_layout(self, rect, test_only):
