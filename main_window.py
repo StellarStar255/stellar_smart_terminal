@@ -3850,7 +3850,7 @@ class MainWindow(QMainWindow):
             QCheckBox {
                 color: #eaeaea;
                 font-size: 11px;
-                spacing: 4px;
+                spacing: 8px;
             }
             QCheckBox:hover {
                 color: #667eea;
