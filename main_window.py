@@ -2699,6 +2699,14 @@ class MainWindow(QMainWindow):
                 padding: 8px;
                 spacing: 8px;
             }
+            QToolBar::separator {
+                background-color: #3d3d5c;
+                width: 1px;
+                margin-left: 5px;
+                margin-right: 5px;
+                margin-top: 6px;
+                margin-bottom: 6px;
+            }
             QPushButton {
                 background-color: #3d3d5c;
                 border: none;
@@ -7363,6 +7371,14 @@ class MainWindow(QMainWindow):
                 spacing: 5px;
                 padding: 5px;
             }}
+            QToolBar::separator {{
+                background-color: {t['border']};
+                width: 1px;
+                margin-left: 5px;
+                margin-right: 5px;
+                margin-top: 6px;
+                margin-bottom: 6px;
+            }}
             QToolBar QPushButton {{
                 background-color: {t['bg_lighter']};
                 color: {t['text']};
@@ -7501,6 +7517,14 @@ class MainWindow(QMainWindow):
                 border: none;
                 padding: 4px 8px;
                 spacing: 6px;
+            }}
+            QToolBar::separator {{
+                background-color: {t['border']};
+                width: 1px;
+                margin-left: 5px;
+                margin-right: 5px;
+                margin-top: 5px;
+                margin-bottom: 5px;
             }}
         """)
 
