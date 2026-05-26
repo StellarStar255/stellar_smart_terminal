@@ -38,7 +38,7 @@ from PyQt6.QtWidgets import (
     QStyleOptionViewItem, QStyleOptionButton, QSpinBox, QSizePolicy
 )
 from PyQt6 import sip  # 用于检查 C++ 对象是否已被删除
-from PyQt6.QtCore import Qt, QTimer, QEvent, QPoint, QMimeData, pyqtSignal, QObject
+from PyQt6.QtCore import Qt, QTimer, QEvent, QPoint, QMimeData, pyqtSignal, QObject, QModelIndex
 from PyQt6.QtGui import QAction, QIcon, QFont, QColor, QPixmap, QPainter, QPen, QDrag, QCursor, QBrush, QPalette
 from PyQt6.QtWidgets import QWidgetAction, QStylePainter, QStyleOptionComboBox
 
@@ -105,8 +105,8 @@ class SelectAllLineEdit(QLineEdit):
         self._pending_selectall = False  # 因聚焦安排的延迟全选，可被空白点击取消
         # 关联的 QComboBox：点击空白处时用它来弹出选项列表
         self._popup_owner = popup_owner
-        self._open_on_release = False   # 本次按下是否应在松开时弹出列表
         self._popup_hidden_at = 0.0     # 列表最近一次关闭的时间戳
+        self._popup_is_visible = False  # view 的显示状态；用于覆盖 macOS popup 抓取下的焦点事件乱序
         self._filtered_view = None      # 已安装事件过滤器的 view
         if popup_owner is not None:
             self._install_popup_filter()
@@ -130,8 +130,14 @@ class SelectAllLineEdit(QLineEdit):
         self._filtered_view = view
 
     def eventFilter(self, obj, event):
-        if obj is self._filtered_view and event.type() == QEvent.Type.Hide:
-            self._popup_hidden_at = time.monotonic()
+        if obj is self._filtered_view:
+            if event.type() == QEvent.Type.Show:
+                self._popup_is_visible = True
+            elif event.type() == QEvent.Type.Hide:
+                self._popup_is_visible = False
+                self._popup_hidden_at = time.monotonic()
+                self._pending_selectall = False
+                self.deselect()
         return super().eventFilter(obj, event)
 
     def _popup_visible(self) -> bool:
@@ -139,7 +145,7 @@ class SelectAllLineEdit(QLineEdit):
         if owner is None:
             return False
         view = owner.view()
-        return view is not None and view.isVisible()
+        return self._popup_is_visible or (view is not None and view.isVisible())
 
     def _recently_hidden(self) -> bool:
         return (time.monotonic() - self._popup_hidden_at) < self._POPUP_REOPEN_GUARD
@@ -151,6 +157,10 @@ class SelectAllLineEdit(QLineEdit):
 
     def focusInEvent(self, event):
         super().focusInEvent(event)
+        if self._popup_owner is not None and (self._popup_visible() or self._recently_hidden()):
+            self._pending_selectall = False
+            self.deselect()
+            return
         reason = event.reason()
         # 只有“真正想编辑”的获得焦点才自动全选：鼠标点击、键盘 Tab / 快捷键切入。
         # 而“弹窗关闭后焦点返回、窗口重新激活”等原因绝不全选——否则会在关闭下拉
@@ -178,53 +188,73 @@ class SelectAllLineEdit(QLineEdit):
         # 留一点容差，靠近文字尾部仍按“选中”处理
         return x > text_right + 6
 
-    def mousePressEvent(self, event):
-        # 点击右侧空白区域：切换下拉列表，且全部延迟到“松开”后再做，避免按下时
-        # 的隐式鼠标抓取与弹窗抓取冲突导致疯狂闪烁。
-        if (self._popup_owner is not None
+    def _is_blank_click(self, event) -> bool:
+        return (self._popup_owner is not None
                 and event.button() == Qt.MouseButton.LeftButton
-                and self._click_in_blank_area(event.position().x())):
-            # 点的是空白区：取消因聚焦安排的全选（意图是开下拉，不该全选/不该闪烁）
-            self._pending_selectall = False
-            self._install_popup_filter()
-            # 按下这一刻：若列表正显示（或刚被这一下点击关闭），本次点击的语义是
-            # “关闭”，松开时绝不能再次弹出；否则才安排弹出。
-            self._open_on_release = (
-                not self._popup_visible() and not self._recently_hidden()
-            )
+                and self._click_in_blank_area(event.position().x()))
+
+    def mousePressEvent(self, event):
+        # 点击右侧空白区域：仅吞掉按下事件、取消聚焦全选；真正的开/关全部推迟到
+        # 松开后再做。绝不在 press 里读状态来决定开/关——macOS 上弹窗的鼠标抓取
+        # 可能在事件送达本控件前就把列表关掉，导致 press 期的判断不可靠。
+        if self._is_blank_click(event):
+            self._pending_selectall = False  # 意图是开下拉，不该全选/不该闪烁
             event.accept()
             return
-        self._open_on_release = False
         # 点在文字区域：交给基类处理（定位光标/起始选择），首次聚焦时的全选由
         # focusInEvent 安排的延迟全选负责，覆盖掉基类的光标定位。
         super().mousePressEvent(event)
 
     def mouseReleaseEvent(self, event):
-        if (self._popup_owner is not None
-                and event.button() == Qt.MouseButton.LeftButton
-                and self._click_in_blank_area(event.position().x())):
+        if self._is_blank_click(event):
             event.accept()
-            should_open = self._open_on_release
-            self._open_on_release = False
-            if not should_open:
-                # 本次点击是为了关闭：若列表还开着就收起；并记录关闭时间，
-                # 让紧随其后的任何“弹出”请求在防抖窗口内被忽略
+            # 推迟到事件循环空闲再切换：此时按下的隐式抓取已释放、弹窗抓取若要关闭
+            # 列表也已完成，弹窗可见性此刻是稳定且可信的。据此做“恰好一次”开或关：
+            #   - 列表仍显示 → 关闭它
+            #   - 列表未显示且不在刚关闭的防抖窗口内 → 打开它
+            #   - 列表未显示但刚被这次点击（或其抓取）关掉 → 什么都不做，避免反弹重开
+            def _toggle():
+                owner = self._popup_owner
+                if owner is None:
+                    return
                 if self._popup_visible():
-                    self._popup_owner.hidePopup()
-                self._popup_hidden_at = time.monotonic()
-                return
-            # 本次点击是为了打开：延迟到事件循环空闲再弹（此时按下的隐式抓取
-            # 已彻底释放），并再次确认列表未显示/未刚关闭，彻底杜绝重入闪烁
-            def _open():
-                if (self._popup_owner is not None
-                        and not self._popup_visible()
-                        and not self._recently_hidden()):
-                    self._popup_owner.showPopup()
+                    owner.hidePopup()
+                elif not self._recently_hidden():
                     self._install_popup_filter()
-            QTimer.singleShot(0, _open)
+                    owner.showPopup()
+            QTimer.singleShot(0, _toggle)
             return
-        self._open_on_release = False
         super().mouseReleaseEvent(event)
+
+
+class QuietPopupComboBox(QComboBox):
+    """关闭 popup 时不让列表当前项做最后一次高亮重绘。"""
+
+    def _restore_view_updates(self, view):
+        if view is not None and not sip.isdeleted(view):
+            view.setUpdatesEnabled(True)
+
+    def _suppress_popup_highlight_repaint(self):
+        view = self.view()
+        if view is None:
+            return None
+        view.setUpdatesEnabled(False)
+        selection = view.selectionModel()
+        if selection is not None:
+            selection.clear()
+        view.setCurrentIndex(QModelIndex())
+        return view
+
+    def showPopup(self):
+        view = self.view()
+        if view is not None:
+            view.setUpdatesEnabled(True)
+        super().showPopup()
+
+    def hidePopup(self):
+        view = self._suppress_popup_highlight_repaint()
+        super().hidePopup()
+        QTimer.singleShot(0, lambda v=view: self._restore_view_updates(v))
 
 
 class CenteredComboBox(QComboBox):
@@ -4208,7 +4238,7 @@ class MainWindow(QMainWindow):
         self.dir_toolbar.addWidget(self.dir_label)
 
         # 工作目录下拉框（可编辑）
-        self.working_dir_combo = QComboBox()
+        self.working_dir_combo = QuietPopupComboBox()
         self.working_dir_combo.setEditable(True)
         self.working_dir_combo.setMinimumWidth(400)
         self.working_dir_combo.setStyleSheet("""
