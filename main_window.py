@@ -4134,7 +4134,7 @@ class MainWindow(QMainWindow):
         self.dir_dropdown_btn.clicked.connect(lambda: self.working_dir_combo.showPopup())
         # 使用自定义 LineEdit，点击时自动全选
         select_all_edit = SelectAllLineEdit()
-        select_all_edit.setAlignment(Qt.AlignmentFlag.AlignCenter)
+        select_all_edit.setAlignment(Qt.AlignmentFlag.AlignLeft | Qt.AlignmentFlag.AlignVCenter)
         self.working_dir_combo.setLineEdit(select_all_edit)
         self._populate_working_dirs()
         # 从下拉列表选择时自动切换目录
@@ -4189,7 +4189,7 @@ class MainWindow(QMainWindow):
             self.working_dir_combo.addItem(dir_path)
             self.working_dir_combo.setItemData(
                 self.working_dir_combo.count() - 1,
-                Qt.AlignmentFlag.AlignCenter,
+                Qt.AlignmentFlag.AlignLeft | Qt.AlignmentFlag.AlignVCenter,
                 Qt.ItemDataRole.TextAlignmentRole,
             )
         # 设置当前目录（使用窗口级别的工作目录）
