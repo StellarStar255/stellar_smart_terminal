@@ -91,6 +91,66 @@ def install_global_excepthook():
     sys.excepthook = _hook
 
 
+def install_sigint_handler(app: QApplication):
+    """让在终端里运行时按 Ctrl+C (SIGINT) 能“两步退出”：
+    第一次只提示，短时间内再按第二次才真正保存并退出。
+
+    背景：Qt 的事件循环（app.exec()）运行在 C++ 层，不会回到 Python 解释器，
+    所以 Python 的信号处理器平时根本得不到执行——Ctrl+C 只能偶尔在某个
+    QTimer 回调里抛出 KeyboardInterrupt，既杀不掉事件循环，又在终端里刷一堆
+    traceback（正是用户遇到的现象）。
+
+    解决办法两点：
+    1. 用 signal.signal 注册自己的 SIGINT 处理器（注册后 Python 不再抛
+       KeyboardInterrupt，而是调用我们的函数）；
+    2. 起一个空转的 QTimer 定期把控制权交回解释器，确保信号能在 ~200ms 内
+       被处理。
+    """
+    import signal
+    from PyQt6.QtCore import QTimer
+
+    state = {"armed": False}
+
+    def _disarm():
+        state["armed"] = False
+
+    def _graceful_quit():
+        # 优先走带“保存会话+配置”的强制关闭；任何异常都不能阻断退出
+        try:
+            from main_window import MainWindow
+            for w in list(app.topLevelWidgets()):
+                if isinstance(w, MainWindow):
+                    try:
+                        w.force_close_with_save()
+                    except Exception:
+                        pass
+        except Exception:
+            pass
+        # 兜底：无论保存/关闭是否成功，都确保事件循环退出
+        QTimer.singleShot(300, app.quit)
+
+    def _handler(signum, frame):
+        if state["armed"]:
+            print("\n正在退出 Smart Terminal…", flush=True)
+            _graceful_quit()
+        else:
+            state["armed"] = True
+            print(
+                "\n⚠️  再按一次 Ctrl+C 退出程序  (Press Ctrl+C again to quit)",
+                flush=True,
+            )
+            # 一段时间内没有再次按下则重置，避免之后误触退出
+            QTimer.singleShot(4000, _disarm)
+
+    signal.signal(signal.SIGINT, _handler)
+
+    # 空转定时器：周期性唤醒解释器，让 SIGINT 处理器能被及时调用。
+    # 用属性持有引用，防止被垃圾回收。
+    app._sigint_keepalive_timer = QTimer()
+    app._sigint_keepalive_timer.timeout.connect(lambda: None)
+    app._sigint_keepalive_timer.start(200)
+
+
 def setup_app_style(app: QApplication):
     """设置应用程序样式"""
     # 深色主题
@@ -206,6 +266,9 @@ def main():
     # 创建主窗口
     window = MainWindow()
     window.show()
+
+    # 安装 Ctrl+C (SIGINT) 处理器：在终端里按两次 Ctrl+C 可保存并退出
+    install_sigint_handler(app)
 
     # 运行
     sys.exit(app.exec())
