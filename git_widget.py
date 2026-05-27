@@ -953,10 +953,12 @@ class GitDiffView(QWidget):
 
         self.apply_theme(self.theme)
 
-    def _make_edit(self) -> QTextEdit:
-        e = QTextEdit()
+    def _make_edit(self) -> QPlainTextEdit:
+        # 用 QPlainTextEdit：竖直滚动以「行」为单位，两栏行数相同时按值同步 = 逐行精确对齐，
+        # 不会像 QTextEdit 那样因像素高度细微差异（如横向滚动条）导致错位。
+        e = QPlainTextEdit()
         e.setReadOnly(True)
-        e.setLineWrapMode(QTextEdit.LineWrapMode.NoWrap)
+        e.setLineWrapMode(QPlainTextEdit.LineWrapMode.NoWrap)
         e.setFont(QFont("Menlo", 12))
         return e
 
@@ -1079,7 +1081,7 @@ class GitDiffView(QWidget):
     def apply_theme(self, theme: dict):
         self.theme = theme
         edit_css = f"""
-            QTextEdit {{
+            QPlainTextEdit {{
                 background-color: {theme.get('bg_dark', '#1a1a2e')};
                 color: {theme.get('text', '#eaeaea')};
                 border: none;
