@@ -38,7 +38,7 @@ from PyQt6.QtWidgets import (
     QStyleOptionViewItem, QStyleOptionButton, QSpinBox, QSizePolicy
 )
 from PyQt6 import sip  # 用于检查 C++ 对象是否已被删除
-from PyQt6.QtCore import Qt, QTimer, QEvent, QPoint, QMimeData, pyqtSignal, QObject, QModelIndex
+from PyQt6.QtCore import Qt, QTimer, QEvent, QPoint, QMimeData, pyqtSignal, QObject
 from PyQt6.QtGui import QAction, QIcon, QFont, QColor, QPixmap, QPainter, QPen, QDrag, QCursor, QBrush, QPalette
 from PyQt6.QtWidgets import QWidgetAction, QStylePainter, QStyleOptionComboBox
 
@@ -228,22 +228,17 @@ class SelectAllLineEdit(QLineEdit):
 
 
 class QuietPopupComboBox(QComboBox):
-    """关闭 popup 时不让列表当前项做最后一次高亮重绘。"""
+    """关闭 popup 时不让列表当前项做最后一次高亮重绘。
+
+    实现：仅在隐藏期间冻结列表 view 的重绘（setUpdatesEnabled(False)），
+    隐藏完成后再恢复。绝不能在 hidePopup 里清空 view 的当前项/选区——鼠标
+    点选某一项时，Qt 的弹窗容器正是在 hidePopup 过程中读取 view 的当前项来
+    提交选择；若提前清空，combo 会以无效索引提交（currentIndex 变 -1），
+    导致选中的路径丢失、输入框被清空。"""
 
     def _restore_view_updates(self, view):
         if view is not None and not sip.isdeleted(view):
             view.setUpdatesEnabled(True)
-
-    def _suppress_popup_highlight_repaint(self):
-        view = self.view()
-        if view is None:
-            return None
-        view.setUpdatesEnabled(False)
-        selection = view.selectionModel()
-        if selection is not None:
-            selection.clear()
-        view.setCurrentIndex(QModelIndex())
-        return view
 
     def showPopup(self):
         view = self.view()
@@ -252,7 +247,9 @@ class QuietPopupComboBox(QComboBox):
         super().showPopup()
 
     def hidePopup(self):
-        view = self._suppress_popup_highlight_repaint()
+        view = self.view()
+        if view is not None:
+            view.setUpdatesEnabled(False)
         super().hidePopup()
         QTimer.singleShot(0, lambda v=view: self._restore_view_updates(v))
 
