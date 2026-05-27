@@ -534,6 +534,11 @@ class GitCommitWidget(QFrame):
     def __init__(self, theme: dict = None, parent=None):
         super().__init__(parent)
         self.theme = theme or {}
+        # 领先/落后远程的提交数，以及 push/pull 是否进行中（决定按钮文案）
+        self._ahead = 0
+        self._behind = 0
+        self._push_busy = False
+        self._pull_busy = False
         self._setup_ui()
 
     def _setup_ui(self):
@@ -677,11 +682,29 @@ class GitCommitWidget(QFrame):
     def set_busy(self, kind: str, busy: bool):
         """push/pull 进行中：禁用相关按钮并显示忙碌文案，避免重复点击。"""
         if kind == 'push':
+            self._push_busy = busy
             self.push_btn.setEnabled(not busy)
-            self.push_btn.setText("↑ Pushing…" if busy else "↑ Push")
         elif kind == 'pull':
+            self._pull_busy = busy
             self.pull_btn.setEnabled(not busy)
-            self.pull_btn.setText("↓ Pulling…" if busy else "↓ Pull")
+        self._update_sync_button_text()
+
+    def set_ahead_behind(self, ahead: int, behind: int):
+        """更新领先/落后远程的提交数，反映到 Push/Pull 按钮文案上。"""
+        self._ahead = max(0, int(ahead))
+        self._behind = max(0, int(behind))
+        self._update_sync_button_text()
+
+    def _update_sync_button_text(self):
+        """按当前 ahead/behind 与忙碌状态刷新 Push/Pull 按钮文字。"""
+        if self._push_busy:
+            self.push_btn.setText("↑ Pushing…")
+        else:
+            self.push_btn.setText(f"↑ Push ({self._ahead})" if self._ahead else "↑ Push")
+        if self._pull_busy:
+            self.pull_btn.setText("↓ Pulling…")
+        else:
+            self.pull_btn.setText(f"↓ Pull ({self._behind})" if self._behind else "↓ Pull")
 
     @staticmethod
     def _generate_btn_style(theme: dict) -> str:
@@ -1172,6 +1195,9 @@ class GitPanel(QWidget):
         """刷新文件状态"""
         staged, unstaged = self._git_manager.get_status()
         self.changes_widget.update_files(staged, unstaged)
+        # 同步本地领先/落后远程的提交数到 Push/Pull 按钮（纯本地比较，不联网）
+        ahead, behind = self._git_manager.get_ahead_behind()
+        self.commit_widget.set_ahead_behind(ahead, behind)
 
     def _refresh_branches(self):
         """刷新分支列表"""
@@ -1229,6 +1255,7 @@ class GitPanel(QWidget):
             return
         if kind == 'push':
             QMessageBox.information(self, t("git.push_success_title"), t("git.push_success_msg"))
+            self._refresh_status()  # push 后 ahead 归零，刷新按钮计数
         else:
             QMessageBox.information(self, t("git.pull_success_title"), t("git.pull_success_msg"))
             self._refresh_status()
