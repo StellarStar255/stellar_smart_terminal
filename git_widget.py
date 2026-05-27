@@ -1091,6 +1091,94 @@ class GitDiffView(QWidget):
         self.back_btn.setText(t("git.diff_back"))
 
 
+class GitOutputView(QWidget):
+    """单栏只读输出视图：展示 push/pull 的完整 git 输出（进度、fast-forward、文件统计）。
+
+    内嵌在主内容区（不弹窗），带返回按钮回到终端。
+    """
+    closed = pyqtSignal()
+
+    def __init__(self, theme: dict = None, parent=None):
+        super().__init__(parent)
+        self.theme = theme or {}
+        self._setup_ui()
+
+    def _setup_ui(self):
+        layout = QVBoxLayout(self)
+        layout.setContentsMargins(0, 0, 0, 0)
+        layout.setSpacing(0)
+
+        self._header = QFrame()
+        h = QHBoxLayout(self._header)
+        h.setContentsMargins(8, 6, 8, 6)
+        h.setSpacing(8)
+        self.back_btn = QPushButton(t("git.diff_back"))
+        self.back_btn.clicked.connect(self.closed.emit)
+        self.title_label = QLabel("")
+        h.addWidget(self.back_btn)
+        h.addWidget(self.title_label, 1)
+        layout.addWidget(self._header)
+
+        self.output_edit = QTextEdit()
+        self.output_edit.setReadOnly(True)
+        self.output_edit.setLineWrapMode(QTextEdit.LineWrapMode.NoWrap)
+        self.output_edit.setFont(QFont("Menlo", 12))
+        layout.addWidget(self.output_edit, 1)
+
+        self.apply_theme(self.theme)
+
+    def set_output(self, title: str, text: str):
+        self.title_label.setText(title)
+        # 对 diffstat 里的 +/- 做点轻量着色，其余按普通文本
+        fg = self.theme.get('text', '#eaeaea')
+        lines = []
+        for line in (text or '').splitlines():
+            etext = line.replace('&', '&amp;').replace('<', '&lt;').replace('>', '&gt;')
+            c = fg
+            stripped = line.strip()
+            if stripped.startswith('remote:') or stripped.startswith('来自') or '->' in stripped:
+                c = '#61afef'
+            elif 'Fast-forward' in line or 'Updating' in line or '更新' in line:
+                c = '#98c379'
+            lines.append(f'<span style="color:{c};">{etext or "&nbsp;"}</span>')
+        self.output_edit.setHtml('<pre style="margin:0; padding:6px;">' + '\n'.join(lines) + '</pre>')
+        self.output_edit.verticalScrollBar().setValue(0)
+
+    def apply_theme(self, theme: dict):
+        self.theme = theme
+        self.output_edit.setStyleSheet(f"""
+            QTextEdit {{
+                background-color: {theme.get('bg_dark', '#1a1a2e')};
+                color: {theme.get('text', '#eaeaea')};
+                border: none;
+            }}
+        """)
+        self._header.setStyleSheet(f"""
+            QFrame {{
+                background-color: {theme.get('bg_medium', '#16213e')};
+                border-bottom: 1px solid {theme.get('border', '#3d3d5c')};
+            }}
+        """)
+        self.title_label.setStyleSheet(
+            f"color: {theme.get('text', '#eaeaea')}; font-weight: bold;"
+        )
+        self.back_btn.setStyleSheet(f"""
+            QPushButton {{
+                background-color: {theme.get('bg_lighter', '#3d3d5c')};
+                color: {theme.get('text', '#eaeaea')};
+                border: none;
+                border-radius: 4px;
+                padding: 4px 12px;
+            }}
+            QPushButton:hover {{
+                background-color: {theme.get('bg_hover', '#4d4d6c')};
+            }}
+        """)
+
+    def apply_language(self):
+        self.back_btn.setText(t("git.diff_back"))
+
+
 class GitHeaderWidget(QFrame):
     """Git 面板头部"""
 
@@ -1249,6 +1337,8 @@ class GitPanel(QWidget):
     commit_height_changed = pyqtSignal(int)
     # 双击文件请求查看 diff，交给主窗口在右侧大空间显示 (title, diff_content)
     diff_requested = pyqtSignal(str, str)
+    # pull 等操作完成后，把 git 输出交给主窗口在右侧大空间显示 (title, output)
+    output_requested = pyqtSignal(str, str)
 
     def __init__(self, theme: dict = None, parent=None):
         super().__init__(parent)
@@ -1363,6 +1453,7 @@ class GitPanel(QWidget):
         # Git 管理器信号
         self._git_manager.status_changed.connect(self._refresh_status)
         self._git_manager.error_occurred.connect(self._show_error)
+        self._git_manager.op_output.connect(self._on_op_output)
 
         # 头部信号
         self.header.branch_changed.connect(self._on_branch_changed)
@@ -1605,6 +1696,11 @@ class GitPanel(QWidget):
         diff_content = self._git_manager.get_diff(path, staged)
         title = path + (" (staged)" if staged else "")
         self.diff_requested.emit(title, diff_content)
+
+    def _on_op_output(self, kind: str, output: str):
+        """pull 等操作的 git 输出 → 交给主窗口在右侧大空间展示（不弹窗）"""
+        if kind == 'pull':
+            self.output_requested.emit(t("git.pull_output_title"), output)
 
     def _show_error(self, message: str):
         """显示错误消息"""

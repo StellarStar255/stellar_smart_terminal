@@ -48,7 +48,7 @@ from session_manager import SessionManager
 from exporter import export_session
 from history_dialog import HistoryDialog
 from openai_server import OpenAIServerManager
-from git_widget import GitPanel, GitDiffView
+from git_widget import GitPanel, GitDiffView, GitOutputView
 from remote_explorer_widget import RemoteExplorerPanel
 from explorer_widget import ExplorerPanel
 from toolbar_manager import ToolbarManagerDialog
@@ -3169,6 +3169,9 @@ class MainWindow(QMainWindow):
         self.git_diff_view = GitDiffView(theme=_diff_theme)
         self.git_diff_view.closed.connect(self._hide_git_diff)
         self._main_content_stack.addWidget(self.git_diff_view)  # index 1: diff
+        self.git_output_view = GitOutputView(theme=_diff_theme)
+        self.git_output_view.closed.connect(self._hide_git_diff)
+        self._main_content_stack.addWidget(self.git_output_view)  # index 2: pull 输出
         self.main_splitter.addWidget(self._main_content_stack)
 
         # 原始输出日志面板
@@ -7013,6 +7016,8 @@ class MainWindow(QMainWindow):
 
         # 双击文件查看 diff → 在右侧大空间显示左右并排对比（不挤在左面板里）
         self.git_panel.diff_requested.connect(self._show_git_diff)
+        # pull 完成 → 在右侧大空间显示 git 输出（进度 / fast-forward / 文件统计）
+        self.git_panel.output_requested.connect(self._show_git_output)
 
     def _on_git_commit_height_changed(self, height: int):
         """记住用户拖拽出的 Git 提交区高度（关闭时随配置一起落盘）。"""
@@ -7024,8 +7029,13 @@ class MainWindow(QMainWindow):
         self.git_diff_view.set_diff(title, diff_content)
         self._main_content_stack.setCurrentWidget(self.git_diff_view)
 
+    def _show_git_output(self, title: str, output: str):
+        """在主内容区显示 pull 的 git 输出（进度 / fast-forward / 文件统计）。"""
+        self.git_output_view.set_output(title, output)
+        self._main_content_stack.setCurrentWidget(self.git_output_view)
+
     def _hide_git_diff(self):
-        """关闭 diff，回到终端。"""
+        """关闭 diff / 输出视图，回到终端。"""
         self._main_content_stack.setCurrentWidget(self.tab_widget)
 
     def _toggle_git_panel(self):
@@ -8168,6 +8178,8 @@ class MainWindow(QMainWindow):
             self.git_panel.apply_theme(t)
         if hasattr(self, 'git_diff_view'):
             self.git_diff_view.apply_theme(t)
+        if hasattr(self, 'git_output_view'):
+            self.git_output_view.apply_theme(t)
 
         # Git 面板容器标题栏样式（直接使用保存的引用，避免 findChildren 搜索）
         if hasattr(self, '_git_header'):

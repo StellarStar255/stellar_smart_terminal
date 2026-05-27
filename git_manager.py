@@ -56,6 +56,7 @@ class GitManager(QObject):
     # 信号
     status_changed = pyqtSignal()       # 状态变更信号
     error_occurred = pyqtSignal(str)    # 错误发生信号
+    op_output = pyqtSignal(str, str)    # 操作输出信号 (kind, 合并后的 stdout+stderr)
 
     def __init__(self, parent=None):
         super().__init__(parent)
@@ -560,6 +561,32 @@ class GitManager(QObject):
             return False
         return True
 
+    def _run_git_verbose(self, *args, timeout: int = 120) -> Tuple[bool, str]:
+        """跑 git 命令并返回 (成功, 合并输出)。
+
+        push/pull 的有用信息分散在 stdout（合并摘要/diffstat）和 stderr
+        （远程进度、来自 URL、ref 更新），这里把两者合起来按自然顺序返回，
+        便于直接展示给用户。
+        """
+        if not self._repo_path:
+            return False, t("git_mgr.no_repo_path")
+        env = dict(os.environ)
+        env['GIT_TERMINAL_PROMPT'] = '0'
+        try:
+            result = subprocess.run(
+                ['git'] + list(args),
+                cwd=self._repo_path, capture_output=True, text=True,
+                timeout=timeout, env=env,
+            )
+            err = (result.stderr or '').strip()
+            out = (result.stdout or '').strip()
+            combined = "\n".join(p for p in (err, out) if p)
+            return result.returncode == 0, combined
+        except subprocess.TimeoutExpired:
+            return False, t("git_mgr.timeout")
+        except Exception as e:
+            return False, str(e)
+
     def fetch(self, remote: str = "origin") -> bool:
         """从远程抓取最新 refs（更新 origin/*），用于计算"落后多少条可 pull"。
 
@@ -586,10 +613,12 @@ class GitManager(QObject):
         if branch is None:
             branch = self.get_current_branch()
 
-        success, output = self._run_git('pull', remote, branch, timeout=120)
+        success, output = self._run_git_verbose('pull', remote, branch, timeout=120)
         if not success:
             self.error_occurred.emit(t("git_mgr.pull_failed", error=output))
             return False
+        # 把 pull 的完整输出（进度 + fast-forward + 文件统计）抛给 UI 展示
+        self.op_output.emit('pull', output)
         self.status_changed.emit()
         return True
 
