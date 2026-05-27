@@ -8,7 +8,7 @@ from PyQt6.QtWidgets import (
     QListWidgetItem, QPlainTextEdit, QSizePolicy,
     QAbstractItemView, QMessageBox, QDialog, QTextEdit, QSplitter
 )
-from PyQt6.QtCore import Qt, pyqtSignal, QSize, QThread
+from PyQt6.QtCore import Qt, pyqtSignal, QSize, QThread, QTimer
 from PyQt6.QtGui import QFont, QColor
 
 from git_manager import GitManager, GitFile, FileStatus
@@ -993,9 +993,13 @@ class GitHeaderWidget(QFrame):
 class GitPanel(QWidget):
     """Git 管理面板"""
 
+    # 用户拖拽分隔条改变提交区高度时发出（主窗口据此持久化）
+    commit_height_changed = pyqtSignal(int)
+
     def __init__(self, theme: dict = None, parent=None):
         super().__init__(parent)
         self.theme = theme or {}
+        self._desired_commit_height = 0  # 记忆的提交区高度（0=未设置，用默认）
         self._git_manager = GitManager(self)
 
         self._setup_ui()
@@ -1027,6 +1031,8 @@ class GitPanel(QWidget):
         self.body_splitter.setStretchFactor(0, 1)
         self.body_splitter.setStretchFactor(1, 0)
         self.body_splitter.setSizes([320, 180])
+        # 记忆用户拖拽过的提交区高度
+        self.body_splitter.splitterMoved.connect(self._on_splitter_moved)
 
         layout.addWidget(self.body_splitter, 1)
 
@@ -1060,6 +1066,34 @@ class GitPanel(QWidget):
                 background-color: {self.theme.get('accent', '#667eea')};
             }}
         """)
+
+    def _on_splitter_moved(self, *_):
+        """用户拖动分隔条 → 记住提交区高度并通知外部持久化。"""
+        sizes = self.body_splitter.sizes()
+        if len(sizes) == 2 and sizes[0] > 0 and sizes[1] > 0:
+            self._desired_commit_height = sizes[1]
+            self.commit_height_changed.emit(sizes[1])
+
+    def apply_commit_height(self, height: int):
+        """由主窗口在加载配置后调用：设定要恢复的提交区高度。"""
+        if isinstance(height, int) and height > 0:
+            self._desired_commit_height = height
+            self._apply_commit_height()
+
+    def _apply_commit_height(self, _attempts: int = 0):
+        """把记忆的提交区高度套用到分隔器；布局还没就绪时稍后重试。"""
+        height = self._desired_commit_height
+        if height <= 0:
+            return
+        total = self.body_splitter.height()
+        if total <= 1:
+            # 面板还没排好版，等一下再试
+            if _attempts < 40:
+                QTimer.singleShot(50, lambda: self._apply_commit_height(_attempts + 1))
+            return
+        commit = max(80, min(height, total - 80))
+        # setSizes 不会触发 splitterMoved，不会回写循环
+        self.body_splitter.setSizes([max(1, total - commit), commit])
 
     def _connect_signals(self):
         """连接信号"""
@@ -1096,6 +1130,8 @@ class GitPanel(QWidget):
             self.commit_widget.show()
             self._refresh_status()
             self._refresh_branches()
+            # 面板每次显示时，恢复用户记忆的提交区高度
+            self._apply_commit_height()
         else:
             self.no_repo_label.show()
             self.header.hide()

@@ -41,5 +41,3 @@ pip install PyQt6==6.7.1 PyQt6-Qt6==6.7.1 --no-cache-dir
 ## License / 许可
 
 [MIT](LICENSE)
-
-你好

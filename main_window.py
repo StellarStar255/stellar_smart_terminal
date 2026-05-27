@@ -6996,6 +6996,16 @@ class MainWindow(QMainWindow):
         self.git_panel = GitPanel(theme=current_theme)
         layout.addWidget(self.git_panel)
 
+        # 持久化提交区高度：拖拽时记下，加载配置时恢复
+        self.git_panel.commit_height_changed.connect(self._on_git_commit_height_changed)
+        if isinstance(self._saved_git_commit_height, int) and self._saved_git_commit_height > 0:
+            self.git_panel.apply_commit_height(self._saved_git_commit_height)
+
+    def _on_git_commit_height_changed(self, height: int):
+        """记住用户拖拽出的 Git 提交区高度（关闭时随配置一起落盘）。"""
+        if isinstance(height, int) and height > 0:
+            self._saved_git_commit_height = height
+
     def _toggle_git_panel(self):
         """切换 Git 面板显示"""
         self.git_panel_visible = not self.git_panel_visible
@@ -8411,6 +8421,7 @@ class MainWindow(QMainWindow):
         self._saved_explorer_main_sizes = None  # main_splitter 4 项尺寸（左右分屏）
         self._saved_explorer_internal_sizes = None  # explorer_splitter 2 项尺寸（上下分屏）
         self._saved_left_panel_width = None  # 仅左面板可见时的宽度（无编辑器场景）
+        self._saved_git_commit_height = None  # Git 面板提交区高度（拖拽记忆）
         try:
             if self.CONFIG_FILE.exists():
                 with open(self.CONFIG_FILE, 'r', encoding='utf-8') as f:
@@ -8469,6 +8480,9 @@ class MainWindow(QMainWindow):
                     left_width = config.get('left_panel_width', None)
                     if isinstance(left_width, int) and left_width > 0:
                         self._saved_left_panel_width = left_width
+                    git_commit_h = config.get('git_commit_height', None)
+                    if isinstance(git_commit_h, int) and git_commit_h > 0:
+                        self._saved_git_commit_height = git_commit_h
         except Exception:
             self.presets = []
 
@@ -8632,6 +8646,7 @@ class MainWindow(QMainWindow):
                 'explorer_main_splitter_sizes': getattr(self, '_saved_explorer_main_sizes', None),
                 'explorer_internal_splitter_sizes': getattr(self, '_saved_explorer_internal_sizes', None),
                 'left_panel_width': getattr(self, '_saved_left_panel_width', None),
+                'git_commit_height': getattr(self, '_saved_git_commit_height', None),
             }
             # 保存窗口导航面板设置
             nav = MainWindow._global_window_navigator
