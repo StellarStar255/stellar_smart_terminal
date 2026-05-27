@@ -195,12 +195,13 @@ class GitManager(QObject):
         """发出状态变更信号"""
         self.status_changed.emit()
 
-    def _run_git(self, *args, check: bool = True) -> Tuple[bool, str]:
+    def _run_git(self, *args, check: bool = True, timeout: int = 30) -> Tuple[bool, str]:
         """执行 git 命令
 
         Args:
             *args: git 命令参数
             check: 是否检查返回码
+            timeout: 超时秒数（push/pull 等网络操作需要更长）
 
         Returns:
             (成功与否, 输出内容)
@@ -208,13 +209,19 @@ class GitManager(QObject):
         if not self._repo_path:
             return False, t("git_mgr.no_repo_path")
 
+        # 在无终端的 GUI 进程里禁用交互式提示，否则 git 会卡住等账号密码/口令
+        # 直到超时；禁用后会立刻返回明确的鉴权错误，便于提示用户。
+        env = dict(os.environ)
+        env['GIT_TERMINAL_PROMPT'] = '0'
+
         try:
             result = subprocess.run(
                 ['git'] + list(args),
                 cwd=self._repo_path,
                 capture_output=True,
                 text=True,
-                timeout=30
+                timeout=timeout,
+                env=env,
             )
 
             if check and result.returncode != 0:
@@ -547,7 +554,7 @@ class GitManager(QObject):
         if branch is None:
             branch = self.get_current_branch()
 
-        success, output = self._run_git('push', remote, branch)
+        success, output = self._run_git('push', remote, branch, timeout=120)
         if not success:
             self.error_occurred.emit(t("git_mgr.push_failed", error=output))
             return False
@@ -570,7 +577,7 @@ class GitManager(QObject):
         if branch is None:
             branch = self.get_current_branch()
 
-        success, output = self._run_git('pull', remote, branch)
+        success, output = self._run_git('pull', remote, branch, timeout=120)
         if not success:
             self.error_occurred.emit(t("git_mgr.pull_failed", error=output))
             return False

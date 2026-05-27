@@ -501,6 +501,27 @@ class _CommitMessageWorker(QThread):
         return text
 
 
+class _GitOpWorker(QThread):
+    """后台执行 push/pull 等网络操作，避免阻塞 UI 线程（否则会卡死）。
+
+    GitManager 内部通过 Qt 信号回报错误/状态，跨线程会自动排队到 UI 线程，
+    所以在工作线程里直接调用是安全的。
+    """
+    done = pyqtSignal(bool, str)  # (success, kind)
+
+    def __init__(self, fn, kind: str, parent=None):
+        super().__init__(parent)
+        self._fn = fn
+        self._kind = kind
+
+    def run(self):
+        try:
+            ok = bool(self._fn())
+        except Exception:
+            ok = False
+        self.done.emit(ok, self._kind)
+
+
 class GitCommitWidget(QFrame):
     """Git 提交区组件"""
 
@@ -652,6 +673,15 @@ class GitCommitWidget(QFrame):
         """把生成的提交信息填进输入框。"""
         self.message_input.setPlainText(text)
         self.message_input.setFocus()
+
+    def set_busy(self, kind: str, busy: bool):
+        """push/pull 进行中：禁用相关按钮并显示忙碌文案，避免重复点击。"""
+        if kind == 'push':
+            self.push_btn.setEnabled(not busy)
+            self.push_btn.setText("↑ Pushing…" if busy else "↑ Push")
+        elif kind == 'pull':
+            self.pull_btn.setEnabled(not busy)
+            self.pull_btn.setText("↓ Pulling…" if busy else "↓ Pull")
 
     @staticmethod
     def _generate_btn_style(theme: dict) -> str:
@@ -1174,13 +1204,32 @@ class GitPanel(QWidget):
             self._refresh_status()
 
     def _on_push(self):
-        """推送处理"""
-        if self._git_manager.push():
-            QMessageBox.information(self, t("git.push_success_title"), t("git.push_success_msg"))
+        """推送处理（后台线程，避免网络阻塞卡死 UI）"""
+        self._run_git_op_async('push')
 
     def _on_pull(self):
-        """拉取处理"""
-        if self._git_manager.pull():
+        """拉取处理（后台线程，避免网络阻塞卡死 UI）"""
+        self._run_git_op_async('pull')
+
+    def _run_git_op_async(self, kind: str):
+        worker = getattr(self, '_git_op_worker', None)
+        if worker is not None and worker.isRunning():
+            return  # 已有 push/pull 在跑，忽略重复点击
+        self.commit_widget.set_busy(kind, True)
+        fn = self._git_manager.push if kind == 'push' else self._git_manager.pull
+        worker = _GitOpWorker(fn, kind, self)
+        self._git_op_worker = worker  # 持有引用防 GC
+        worker.done.connect(self._on_git_op_done)
+        worker.start()
+
+    def _on_git_op_done(self, ok: bool, kind: str):
+        self.commit_widget.set_busy(kind, False)
+        if not ok:
+            # 失败信息已由 GitManager.error_occurred 弹出
+            return
+        if kind == 'push':
+            QMessageBox.information(self, t("git.push_success_title"), t("git.push_success_msg"))
+        else:
             QMessageBox.information(self, t("git.pull_success_title"), t("git.pull_success_msg"))
             self._refresh_status()
 
