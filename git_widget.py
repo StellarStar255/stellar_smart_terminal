@@ -8,11 +8,11 @@ from PyQt6.QtWidgets import (
     QListWidgetItem, QPlainTextEdit, QSizePolicy,
     QAbstractItemView, QMessageBox, QDialog, QTextEdit
 )
-from PyQt6.QtCore import Qt, pyqtSignal, QSize
+from PyQt6.QtCore import Qt, pyqtSignal, QSize, QThread
 from PyQt6.QtGui import QFont, QColor
 
 from git_manager import GitManager, GitFile, FileStatus
-from i18n import t
+from i18n import t, get_language
 
 
 # 文件状态颜色
@@ -391,6 +391,105 @@ class GitChangesWidget(QScrollArea):
         self.stage_all_btn.setToolTip(t("git.stage_all_tooltip"))
 
 
+class _CommitMessageWorker(QThread):
+    """后台线程：调用 OpenAI 兼容的 /chat/completions，根据 diff 生成提交信息。
+
+    放到独立线程里跑，避免网络请求阻塞 UI。结果通过信号回到 UI 线程。
+    """
+    succeeded = pyqtSignal(str)
+    failed = pyqtSignal(str)
+
+    def __init__(self, config: dict, diff: str, lang: str, parent=None):
+        super().__init__(parent)
+        self._config = config or {}
+        self._diff = diff
+        self._lang = lang
+
+    def run(self):
+        try:
+            import requests
+        except Exception as e:  # pragma: no cover - requests 是已有依赖
+            self.failed.emit(str(e))
+            return
+
+        cfg = self._config
+        base = (cfg.get('api_base') or 'https://api.openai.com/v1').rstrip('/')
+        url = base + '/chat/completions'
+
+        headers = {'Content-Type': 'application/json'}
+        key = (cfg.get('api_key') or '').strip()
+        if key:
+            headers['Authorization'] = f'Bearer {key}'
+
+        lang_line = ('请用简体中文写提交信息。' if self._lang == 'zh'
+                     else 'Write the commit message in English.')
+        system = (
+            "You are an expert software engineer writing a git commit message. "
+            "Follow the Conventional Commits style (feat:, fix:, refactor:, docs:, "
+            "style:, test:, chore:). Keep the subject line under 72 characters. "
+            "If the change is non-trivial, add a blank line then a short body with "
+            "bullet points describing what changed and why. " + lang_line +
+            " Respond with ONLY the commit message text — no markdown code fences, "
+            "no preamble, no quotes, no explanations."
+        )
+        user = ("Here are the repository changes. Write a single commit message "
+                "for them:\n\n" + self._diff)
+
+        payload = {
+            'model': cfg.get('model') or 'gpt-4',
+            'messages': [
+                {'role': 'system', 'content': system},
+                {'role': 'user', 'content': user},
+            ],
+            'temperature': 0.3,
+            'stream': False,
+        }
+        mt = cfg.get('max_tokens')
+        if isinstance(mt, int) and mt > 0:
+            payload['max_tokens'] = min(mt, 1024)  # 提交信息不需要太长
+
+        proxies = None
+        proxy = (cfg.get('proxy') or '').strip()
+        if proxy:
+            proxies = {'http': proxy, 'https': proxy}
+
+        timeout = cfg.get('timeout') or 30
+
+        try:
+            resp = requests.post(url, json=payload, headers=headers,
+                                 timeout=timeout, proxies=proxies)
+        except Exception as e:
+            self.failed.emit(str(e))
+            return
+
+        if resp.status_code != 200:
+            snippet = (resp.text or '')[:300]
+            self.failed.emit(f"HTTP {resp.status_code}: {snippet}")
+            return
+
+        try:
+            data = resp.json()
+            content = data['choices'][0]['message']['content']
+        except Exception as e:
+            self.failed.emit(f"unexpected response: {e}")
+            return
+
+        self.succeeded.emit(self._clean(content))
+
+    @staticmethod
+    def _clean(text: str) -> str:
+        """去掉模型偶尔加上的 ``` 代码围栏和首尾空白。"""
+        text = (text or '').strip()
+        if text.startswith('```'):
+            lines = text.splitlines()
+            if lines and lines[0].startswith('```'):
+                lines = lines[1:]
+            if lines and lines[-1].strip().startswith('```'):
+                lines = lines[:-1]
+            text = '\n'.join(lines).strip()
+        return text
+
+
 class GitCommitWidget(QFrame):
     """Git 提交区组件"""
 
@@ -398,6 +497,7 @@ class GitCommitWidget(QFrame):
     commit_requested = pyqtSignal(str)
     push_requested = pyqtSignal()
     pull_requested = pyqtSignal()
+    generate_requested = pyqtSignal()
 
     def __init__(self, theme: dict = None, parent=None):
         super().__init__(parent)
@@ -428,6 +528,13 @@ class GitCommitWidget(QFrame):
             }}
         """)
         layout.addWidget(self.message_input)
+
+        # ✨ 用大模型生成提交信息
+        self.generate_btn = QPushButton(t("git.generate_msg"))
+        self.generate_btn.setToolTip(t("git.generate_msg_tooltip"))
+        self.generate_btn.setStyleSheet(self._generate_btn_style(self.theme))
+        self.generate_btn.clicked.connect(self._on_generate)
+        layout.addWidget(self.generate_btn)
 
         # 提交按钮
         self.commit_btn = QPushButton("Commit")
@@ -518,6 +625,44 @@ class GitCommitWidget(QFrame):
             self.commit_requested.emit(message)
             self.message_input.clear()
 
+    def _on_generate(self):
+        """生成提交信息按钮点击 —— 由 GitPanel 接管（它持有 GitManager 和 LLM 配置）"""
+        self.generate_requested.emit()
+
+    def set_generating(self, generating: bool):
+        """切换生成中状态：禁用按钮并改文案，避免重复点击。"""
+        self.generate_btn.setEnabled(not generating)
+        self.generate_btn.setText(t("git.generating") if generating else t("git.generate_msg"))
+
+    def set_message(self, text: str):
+        """把生成的提交信息填进输入框。"""
+        self.message_input.setPlainText(text)
+        self.message_input.setFocus()
+
+    @staticmethod
+    def _generate_btn_style(theme: dict) -> str:
+        return f"""
+            QPushButton {{
+                background-color: #7c3aed;
+                color: white;
+                border: none;
+                border-radius: 4px;
+                padding: 8px 16px;
+                font-size: 13px;
+                font-weight: bold;
+            }}
+            QPushButton:hover {{
+                background-color: #8b5cf6;
+            }}
+            QPushButton:pressed {{
+                background-color: #6d28d9;
+            }}
+            QPushButton:disabled {{
+                background-color: {theme.get('bg_lighter', '#3d3d5c')};
+                color: {theme.get('text_dim', '#888')};
+            }}
+        """
+
     def apply_theme(self, theme: dict):
         """应用主题"""
         self.theme = theme
@@ -588,11 +733,15 @@ class GitCommitWidget(QFrame):
             }}
         """)
 
+        self.generate_btn.setStyleSheet(self._generate_btn_style(theme))
+
     def apply_language(self):
         """更新语言相关的 UI 文本"""
         self.message_input.setPlaceholderText(t("git.commit_placeholder"))
         self.pull_btn.setToolTip(t("git.pull_tooltip"))
         self.push_btn.setToolTip(t("git.push_tooltip"))
+        self.generate_btn.setText(t("git.generate_msg"))
+        self.generate_btn.setToolTip(t("git.generate_msg_tooltip"))
 
 
 class GitDiffDialog(QDialog):
@@ -901,6 +1050,7 @@ class GitPanel(QWidget):
         self.commit_widget.commit_requested.connect(self._on_commit)
         self.commit_widget.push_requested.connect(self._on_push)
         self.commit_widget.pull_requested.connect(self._on_pull)
+        self.commit_widget.generate_requested.connect(self._on_generate_message)
 
     def set_repository(self, path: str):
         """设置仓库路径"""
@@ -964,6 +1114,81 @@ class GitPanel(QWidget):
         if self._git_manager.pull():
             QMessageBox.information(self, t("git.pull_success_title"), t("git.pull_success_msg"))
             self._refresh_status()
+
+    # ---------- ✨ 用大模型生成提交信息 ----------
+
+    def _on_generate_message(self):
+        """根据当前改动调用大模型生成提交信息，填进输入框。"""
+        diff = self._collect_diff_for_message()
+        if not diff.strip():
+            QMessageBox.information(
+                self, t("git.generate_no_changes_title"),
+                t("git.generate_no_changes_msg")
+            )
+            return
+
+        main_window = self._find_main_window()
+        config = main_window.get_llm_config() if main_window is not None else None
+        if not config or not config.get('api_base') or not config.get('model'):
+            QMessageBox.warning(
+                self, t("git.generate_no_config_title"),
+                t("git.generate_no_config_msg")
+            )
+            return
+
+        self.commit_widget.set_generating(True)
+        worker = _CommitMessageWorker(config, diff, get_language(), self)
+        self._commit_msg_worker = worker  # 持有引用，防止被 GC 提前回收
+        worker.succeeded.connect(self._on_generate_done)
+        worker.failed.connect(self._on_generate_failed)
+        worker.finished.connect(lambda: self.commit_widget.set_generating(False))
+        worker.start()
+
+    def _on_generate_done(self, message: str):
+        if message:
+            self.commit_widget.set_message(message)
+
+    def _on_generate_failed(self, error: str):
+        QMessageBox.warning(
+            self, t("git.generate_failed_title"),
+            t("git.generate_failed_msg", error=error)
+        )
+
+    def _collect_diff_for_message(self, max_chars: int = 16000) -> str:
+        """收集要喂给模型的改动：优先暂存区 diff，没有就用工作区 diff，
+        并附上 `git status --short` 摘要（这样新增/未跟踪文件也能体现）。"""
+        gm = self._git_manager
+        ok, staged = gm._run_git('diff', '--cached')
+        body = staged if (ok and staged.strip()) else ''
+        if not body.strip():
+            ok2, unstaged = gm._run_git('diff')
+            if ok2 and unstaged.strip():
+                body = unstaged
+
+        ok3, status = gm._run_git('status', '--short')
+        status = status.strip() if ok3 else ''
+
+        sections = []
+        if status:
+            sections.append("# Changed files (git status --short)\n" + status)
+        if body.strip():
+            sections.append("# Diff\n" + body)
+        text = "\n\n".join(sections)
+        if len(text) > max_chars:
+            text = text[:max_chars] + "\n...[truncated]..."
+        return text
+
+    def _find_main_window(self):
+        """向上找到持有 LLM 配置的主窗口（get_llm_config）。"""
+        w = self.parent()
+        while w is not None:
+            if hasattr(w, 'get_llm_config'):
+                return w
+            w = w.parent()
+        win = self.window()
+        if win is not None and hasattr(win, 'get_llm_config'):
+            return win
+        return None
 
     def _show_diff(self, path: str, staged: bool):
         """显示 diff 对话框"""

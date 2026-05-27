@@ -292,6 +292,15 @@ TRANSLATIONS = {
     "git.pull_success_msg": {"zh": "已成功从远程仓库拉取更新", "en": "Successfully pulled from remote"},
     "git.error_title": {"zh": "Git 错误", "en": "Git Error"},
     "git.close": {"zh": "关闭", "en": "Close"},
+    "git.generate_msg": {"zh": "✨ 生成提交信息", "en": "✨ Generate message"},
+    "git.generate_msg_tooltip": {"zh": "用已配置的大模型根据改动自动生成提交信息", "en": "Use the configured LLM to write a commit message from your changes"},
+    "git.generating": {"zh": "✨ 生成中…", "en": "✨ Generating…"},
+    "git.generate_no_config_title": {"zh": "未配置大模型", "en": "No LLM configured"},
+    "git.generate_no_config_msg": {"zh": "请先点击工具栏的 ✨ 按钮配置大模型 API（API URL、Key、模型）。", "en": "Click the ✨ button in the toolbar to configure an LLM API (URL, key, model) first."},
+    "git.generate_no_changes_title": {"zh": "没有可总结的改动", "en": "No changes to summarize"},
+    "git.generate_no_changes_msg": {"zh": "当前没有检测到代码改动（diff 为空）。", "en": "No code changes detected (the diff is empty)."},
+    "git.generate_failed_title": {"zh": "生成失败", "en": "Generation Failed"},
+    "git.generate_failed_msg": {"zh": "调用大模型失败: {error}", "en": "LLM request failed: {error}"},
 
     # ===== Git Manager 错误消息 =====
     "git_mgr.no_repo_path": {"zh": "未设置仓库路径", "en": "Repository path not set"},
