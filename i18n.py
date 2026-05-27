@@ -491,6 +491,7 @@ TRANSLATIONS = {
     "ctx.no_local_commands": {"zh": "(无本地命令)", "en": "(No local commands)"},
     "ctx.manage_local_presets": {"zh": "管理本地预设...", "en": "Manage Local Presets..."},
     "ctx.open_current_dir": {"zh": "打开当前目录", "en": "Open Current Directory"},
+    "ctx.copy_current_dir": {"zh": "复制当前路径", "en": "Copy Current Path"},
     "ctx.select_all": {"zh": "全选", "en": "Select All"},
     "ctx.clear_selection": {"zh": "清除选择", "en": "Clear Selection"},
     "ctx.split_horizontal": {"zh": "左右分屏", "en": "Split Horizontal"},

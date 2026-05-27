@@ -2484,6 +2484,11 @@ class TerminalWidget(QWidget):
         open_dir_action.triggered.connect(self._open_current_directory)
         menu.addAction(open_dir_action)
 
+        # 复制当前路径
+        copy_dir_action = QAction(t("ctx.copy_current_dir"), self)
+        copy_dir_action.triggered.connect(self._copy_current_directory)
+        menu.addAction(copy_dir_action)
+
         menu.addSeparator()
 
         # 全选
@@ -3707,6 +3712,15 @@ if (hasFileURL) {{
             cwd = self._working_dir
         if cwd and os.path.isdir(cwd):
             QDesktopServices.openUrl(QUrl.fromLocalFile(cwd))
+
+    def _copy_current_directory(self):
+        """复制终端当前工作目录路径到剪贴板"""
+        cwd = self.get_cwd()
+        if not cwd or not os.path.isdir(cwd):
+            cwd = self._working_dir
+        if cwd:
+            clipboard = QApplication.clipboard()
+            clipboard.setText(cwd)
 
     def _get_default_shell(self) -> str:
         """获取系统默认 shell"""
