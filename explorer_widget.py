@@ -15,7 +15,7 @@ import explorer_clipboard
 
 from PyQt6.QtWidgets import (
     QWidget, QVBoxLayout, QHBoxLayout, QFrame, QLabel,
-    QPushButton, QTreeView, QMenu, QInputDialog, QMessageBox,
+    QPushButton, QTreeView, QMenu, QLineEdit, QMessageBox,
     QAbstractItemView, QFileDialog, QApplication, QProgressDialog
 )
 from PyQt6.QtCore import Qt, QDir, QModelIndex, QPersistentModelIndex, pyqtSignal, QTimer, QEventLoop
@@ -826,32 +826,73 @@ class ExplorerPanel(QWidget):
         menu.exec(QCursor.pos())
 
     def _new_file(self, target_dir: str):
-        """创建新文件"""
-        name, ok = QInputDialog.getText(
-            self, t("explorer.new_file_title"), t("explorer.new_file_prompt"),
-            text="untitled.txt"
-        )
-        if ok and name:
-            file_path = os.path.join(target_dir, name)
-            try:
-                Path(file_path).touch()
-                self.refresh()
-            except Exception as e:
-                QMessageBox.warning(self, t("explorer.error"), t("explorer.create_file_failed", error=e))
+        """创建新文件并直接在文件树里原地重命名（不弹窗）"""
+        file_path = self._unique_new_path(target_dir, "untitled", ".txt")
+        try:
+            Path(file_path).touch()
+        except Exception as e:
+            QMessageBox.warning(self, t("explorer.error"), t("explorer.create_file_failed", error=e))
+            return
+        self._begin_inline_edit_for_new(target_dir, file_path)
 
     def _new_folder(self, target_dir: str):
-        """创建新文件夹"""
-        name, ok = QInputDialog.getText(
-            self, t("explorer.new_folder_title"), t("explorer.new_folder_prompt"),
-            text=t("explorer.default_folder_name")
-        )
-        if ok and name:
-            folder_path = os.path.join(target_dir, name)
-            try:
-                os.makedirs(folder_path, exist_ok=True)
-                self.refresh()
-            except Exception as e:
-                QMessageBox.warning(self, t("explorer.error"), t("explorer.create_folder_failed", error=e))
+        """创建新文件夹并直接在文件树里原地重命名（不弹窗）"""
+        folder_path = self._unique_new_path(target_dir, t("explorer.default_folder_name"), "")
+        try:
+            os.makedirs(folder_path, exist_ok=False)
+        except Exception as e:
+            QMessageBox.warning(self, t("explorer.error"), t("explorer.create_folder_failed", error=e))
+            return
+        self._begin_inline_edit_for_new(target_dir, folder_path)
+
+    @staticmethod
+    def _unique_new_path(target_dir: str, base: str, ext: str) -> str:
+        """在 target_dir 里生成一个不冲突的路径：base+ext，已存在则 base2/base3…+ext"""
+        candidate = os.path.join(target_dir, base + ext)
+        if not os.path.exists(candidate):
+            return candidate
+        i = 2
+        while True:
+            candidate = os.path.join(target_dir, f"{base}{i}{ext}")
+            if not os.path.exists(candidate):
+                return candidate
+            i += 1
+
+    def _begin_inline_edit_for_new(self, target_dir: str, new_path: str, _attempts: int = 0):
+        """新建后进入原地重命名。QFileSystemModel 装载目录是异步的，所以这里轮询
+        直到新条目在视图里排好版、编辑框真的打开为止。"""
+        # 在子目录里新建 → 先展开父目录，新条目才会出现在视图里
+        if os.path.normpath(target_dir) != os.path.normpath(self._current_path):
+            parent_idx = self.model.index(target_dir)
+            if parent_idx.isValid():
+                self.tree_view.expand(parent_idx)
+        idx = self.model.index(new_path)
+        if idx.isValid():
+            self.tree_view.setCurrentIndex(idx)
+            self.tree_view.scrollTo(idx)
+            # 仅当条目已在视图里排好版（visualRect 非空）才调用 edit，
+            # 否则 edit 会失败并打日志，留给下一轮重试
+            if not self.tree_view.visualRect(idx).isEmpty():
+                self.tree_view.edit(idx)
+                if self.tree_view.state() == QAbstractItemView.State.EditingState:
+                    self._select_basename_in_editor()
+                    return
+        if _attempts < 60:
+            QTimer.singleShot(
+                25, lambda: self._begin_inline_edit_for_new(target_dir, new_path, _attempts + 1)
+            )
+
+    def _select_basename_in_editor(self):
+        """编辑框打开后，文件选中主名（不含扩展名），文件夹/无扩展名则全选 —— 仿 Finder。"""
+        editor = QApplication.focusWidget()
+        if not isinstance(editor, QLineEdit):
+            return
+        name = editor.text()
+        base, ext = os.path.splitext(name)
+        if ext and base:
+            editor.setSelection(0, len(base))
+        else:
+            editor.selectAll()
 
     def _rename_item(self, file_path: str):
         """在文件树中原地重命名文件/文件夹（不弹窗）"""

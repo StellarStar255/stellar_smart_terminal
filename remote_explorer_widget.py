@@ -373,6 +373,8 @@ class RemoteExplorerPanel(QWidget):
         # 维护已下载的临时文件 -> (host_alias, remote_path) 映射，
         # 便于编辑器保存时调度上传
         self._open_temp_map: dict[str, tuple[str, str]] = {}
+        # 新建文件/文件夹后，等刷新把它装进树里再原地重命名（不弹窗）
+        self._pending_edit_path: Optional[str] = None
 
         self._setup_ui()
         self._apply_theme()
@@ -851,6 +853,8 @@ class RemoteExplorerPanel(QWidget):
                 self._tree.setUpdatesEnabled(True)
             except RuntimeError:
                 pass
+        # 刚新建的条目若已进树 → 直接进入原地重命名
+        self._maybe_start_pending_edit()
 
     def _on_item_expanded(self, item: QTreeWidgetItem):
         if item.data(0, _ROLE_LOADED):
@@ -1162,6 +1166,8 @@ class RemoteExplorerPanel(QWidget):
                 self._tree.setUpdatesEnabled(True)
             except RuntimeError:
                 pass
+        # 刚新建的条目若已进树 → 直接进入原地重命名
+        self._maybe_start_pending_edit()
 
     @staticmethod
     def _entries_fingerprint(entries) -> frozenset:
@@ -1980,26 +1986,85 @@ class RemoteExplorerPanel(QWidget):
         fut.add_done_callback(on_done)
 
     def _new_file_at(self, parent_path: str, parent_item: Optional[QTreeWidgetItem]):
-        name, ok = QInputDialog.getText(self, t("remote.new_file"), t("remote.prompt_new_name"))
-        if not ok or not name.strip():
-            return
-        path = posixpath.join(parent_path, name.strip())
+        """新建文件：用不冲突的默认名建好，刷新后直接进入原地重命名（不弹窗）"""
         sess = self._session
         if sess is None:
             return
+        name = self._unique_new_name(parent_item, "untitled", ".txt")
+        path = posixpath.join(parent_path, name)
+        self._pending_edit_path = path
         fut = sess.submit(sess.write_file, path, b"")
         self._refresh_after(fut, parent_item, parent_path)
+        self._clear_pending_on_error(fut, path)
 
     def _new_folder_at(self, parent_path: str, parent_item: Optional[QTreeWidgetItem]):
-        name, ok = QInputDialog.getText(self, t("remote.new_folder"), t("remote.prompt_new_name"))
-        if not ok or not name.strip():
-            return
-        path = posixpath.join(parent_path, name.strip())
+        """新建文件夹：用不冲突的默认名建好，刷新后直接进入原地重命名（不弹窗）"""
         sess = self._session
         if sess is None:
             return
+        name = self._unique_new_name(parent_item, t("explorer.default_folder_name"), "")
+        path = posixpath.join(parent_path, name)
+        self._pending_edit_path = path
         fut = sess.submit(sess.mkdir, path)
         self._refresh_after(fut, parent_item, parent_path)
+        self._clear_pending_on_error(fut, path)
+
+    def _unique_new_name(self, parent_item: Optional[QTreeWidgetItem],
+                         base: str, ext: str) -> str:
+        """基于树里当前显示的同级条目生成一个不冲突的名字：base+ext，已存在则
+        base2/base3…+ext。parent_item 为 None 时看顶层条目。"""
+        existing: set[str] = set()
+        if parent_item is None:
+            items = [self._tree.topLevelItem(i)
+                     for i in range(self._tree.topLevelItemCount())]
+        else:
+            items = [parent_item.child(i) for i in range(parent_item.childCount())]
+        for it in items:
+            e: Optional[RemoteEntry] = it.data(0, _ROLE_ENTRY)
+            if e is not None:
+                existing.add(e.name)
+        if base + ext not in existing:
+            return base + ext
+        i = 2
+        while f"{base}{i}{ext}" in existing:
+            i += 1
+        return f"{base}{i}{ext}"
+
+    def _clear_pending_on_error(self, fut, path: str):
+        """新建失败时清掉待编辑标记，避免后续无关刷新误触发重命名。"""
+        def on_done(f):
+            try:
+                f.result()
+            except Exception:
+                if self._pending_edit_path == path:
+                    self._pending_edit_path = None
+        fut.add_done_callback(on_done)
+
+    def _maybe_start_pending_edit(self):
+        """populate（_apply_top_level / _apply_children）之后调用：若刚新建的条目
+        已经进树，则选中并打开原地重命名编辑框。"""
+        path = self._pending_edit_path
+        if not path:
+            return
+        item = self._find_item_by_path(path)
+        if item is None:
+            return  # 还没进树（或新建失败）→ 等下一次 populate 或保持不动
+        self._pending_edit_path = None
+
+        def go():
+            try:
+                # 确保祖先都展开，条目才可见、可编辑
+                parent = item.parent()
+                while parent is not None:
+                    self._tree.expandItem(parent)
+                    parent = parent.parent()
+                self._tree.setCurrentItem(item)
+                self._tree.scrollToItem(item)
+                self._tree.editItem(item, 0)
+            except RuntimeError:
+                pass
+
+        QTimer.singleShot(0, go)
 
     def _new_file_under(self, parent_entry: RemoteEntry, parent_item: QTreeWidgetItem):
         self._new_file_at(parent_entry.path, parent_item)
