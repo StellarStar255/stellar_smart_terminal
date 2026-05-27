@@ -6,8 +6,7 @@ from PyQt6.QtWidgets import (
     QWidget, QVBoxLayout, QHBoxLayout, QFrame, QLabel,
     QPushButton, QComboBox, QScrollArea, QListWidget,
     QListWidgetItem, QPlainTextEdit, QSizePolicy,
-    QAbstractItemView, QMessageBox, QDialog, QTextEdit, QSplitter,
-    QStackedWidget
+    QAbstractItemView, QMessageBox, QDialog, QTextEdit, QSplitter
 )
 from PyQt6.QtCore import Qt, pyqtSignal, QSize, QThread, QTimer
 from PyQt6.QtGui import QFont, QColor
@@ -1248,6 +1247,8 @@ class GitPanel(QWidget):
 
     # 用户拖拽分隔条改变提交区高度时发出（主窗口据此持久化）
     commit_height_changed = pyqtSignal(int)
+    # 双击文件请求查看 diff，交给主窗口在右侧大空间显示 (title, diff_content)
+    diff_requested = pyqtSignal(str, str)
 
     def __init__(self, theme: dict = None, parent=None):
         super().__init__(parent)
@@ -1283,14 +1284,8 @@ class GitPanel(QWidget):
         self.body_splitter.setChildrenCollapsible(False)
         self.body_splitter.setHandleWidth(6)
 
-        # 上半部分用堆叠：第 0 页是变更列表，第 1 页是左右并排的 diff 视图
         self.changes_widget = GitChangesWidget(self.theme)
-        self.diff_view = GitDiffView(self.theme)
-        self.diff_view.closed.connect(self._hide_diff)
-        self._top_stack = QStackedWidget()
-        self._top_stack.addWidget(self.changes_widget)  # index 0
-        self._top_stack.addWidget(self.diff_view)        # index 1
-        self.body_splitter.addWidget(self._top_stack)
+        self.body_splitter.addWidget(self.changes_widget)
 
         self.commit_widget = GitCommitWidget(self.theme)
         self.body_splitter.addWidget(self.commit_widget)
@@ -1394,8 +1389,7 @@ class GitPanel(QWidget):
         if is_repo:
             self.no_repo_label.hide()
             self.header.show()
-            self._top_stack.show()
-            self._top_stack.setCurrentWidget(self.changes_widget)  # 回到列表页
+            self.changes_widget.show()
             self.commit_widget.show()
             self._refresh_status()
             self._refresh_branches()
@@ -1406,7 +1400,7 @@ class GitPanel(QWidget):
         else:
             self.no_repo_label.show()
             self.header.hide()
-            self._top_stack.hide()
+            self.changes_widget.hide()
             self.commit_widget.hide()
 
     def _refresh_status(self):
@@ -1607,15 +1601,10 @@ class GitPanel(QWidget):
         return None
 
     def _show_diff(self, path: str, staged: bool):
-        """在面板内以左右并排的方式显示 diff（不弹窗）"""
+        """双击文件 → 交给主窗口在右侧大空间以左右并排方式显示 diff（不弹窗）"""
         diff_content = self._git_manager.get_diff(path, staged)
         title = path + (" (staged)" if staged else "")
-        self.diff_view.set_diff(title, diff_content)
-        self._top_stack.setCurrentWidget(self.diff_view)
-
-    def _hide_diff(self):
-        """关闭 diff 视图，回到变更列表"""
-        self._top_stack.setCurrentWidget(self.changes_widget)
+        self.diff_requested.emit(title, diff_content)
 
     def _show_error(self, message: str):
         """显示错误消息"""
@@ -1628,7 +1617,6 @@ class GitPanel(QWidget):
         self.header.apply_theme(theme)
         self.changes_widget.apply_theme(theme)
         self.commit_widget.apply_theme(theme)
-        self.diff_view.apply_theme(theme)
 
         self.no_repo_label.setStyleSheet(f"""
             QLabel {{
@@ -1643,7 +1631,6 @@ class GitPanel(QWidget):
         self.header.apply_language()
         self.changes_widget.apply_language()
         self.commit_widget.apply_language()
-        self.diff_view.apply_language()
         self.no_repo_label.setText(t("git.no_repo"))
 
     def refresh(self):

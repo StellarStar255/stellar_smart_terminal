@@ -35,7 +35,8 @@ from PyQt6.QtWidgets import (
     QListWidgetItem, QPlainTextEdit, QDialogButtonBox,
     QFormLayout, QGroupBox, QCheckBox, QTabWidget, QTabBar,
     QApplication, QInputDialog, QMenu, QStyledItemDelegate, QStyle,
-    QStyleOptionViewItem, QStyleOptionButton, QSpinBox, QSizePolicy
+    QStyleOptionViewItem, QStyleOptionButton, QSpinBox, QSizePolicy,
+    QStackedWidget
 )
 from PyQt6 import sip  # 用于检查 C++ 对象是否已被删除
 from PyQt6.QtCore import Qt, QTimer, QEvent, QPoint, QMimeData, pyqtSignal, QObject
@@ -47,7 +48,7 @@ from session_manager import SessionManager
 from exporter import export_session
 from history_dialog import HistoryDialog
 from openai_server import OpenAIServerManager
-from git_widget import GitPanel
+from git_widget import GitPanel, GitDiffView
 from remote_explorer_widget import RemoteExplorerPanel
 from explorer_widget import ExplorerPanel
 from toolbar_manager import ToolbarManagerDialog
@@ -3160,7 +3161,15 @@ class MainWindow(QMainWindow):
         self.main_splitter.addWidget(self.left_panel_container)
         self.left_panel_container.hide()  # 默认隐藏
 
-        self.main_splitter.addWidget(self.tab_widget)
+        # 主内容区用堆叠：第 0 页是终端，第 1 页是 Git 的左右并排 diff
+        # （双击文件查看 diff 时切到第 1 页，占用整块右侧大空间，返回时切回终端）
+        self._main_content_stack = QStackedWidget()
+        self._main_content_stack.addWidget(self.tab_widget)  # index 0: 终端
+        _diff_theme = self.THEMES.get(self.current_theme, next(iter(self.THEMES.values())))
+        self.git_diff_view = GitDiffView(theme=_diff_theme)
+        self.git_diff_view.closed.connect(self._hide_git_diff)
+        self._main_content_stack.addWidget(self.git_diff_view)  # index 1: diff
+        self.main_splitter.addWidget(self._main_content_stack)
 
         # 原始输出日志面板
         self.log_panel_container = QWidget()
@@ -6902,6 +6911,7 @@ class MainWindow(QMainWindow):
             self.git_panel_visible = False
             self.git_toggle_btn.setChecked(False)
             self.git_panel_container.hide()
+            self._hide_git_diff()  # 切到 Explorer 时若在看 diff，回到终端
             # 隐藏 Remote 面板
             if getattr(self, 'remote_panel_visible', False):
                 self.remote_panel_visible = False
@@ -7001,10 +7011,22 @@ class MainWindow(QMainWindow):
         if isinstance(self._saved_git_commit_height, int) and self._saved_git_commit_height > 0:
             self.git_panel.apply_commit_height(self._saved_git_commit_height)
 
+        # 双击文件查看 diff → 在右侧大空间显示左右并排对比（不挤在左面板里）
+        self.git_panel.diff_requested.connect(self._show_git_diff)
+
     def _on_git_commit_height_changed(self, height: int):
         """记住用户拖拽出的 Git 提交区高度（关闭时随配置一起落盘）。"""
         if isinstance(height, int) and height > 0:
             self._saved_git_commit_height = height
+
+    def _show_git_diff(self, title: str, diff_content: str):
+        """在主内容区（右侧大空间）显示左右并排 diff，暂时盖住终端。"""
+        self.git_diff_view.set_diff(title, diff_content)
+        self._main_content_stack.setCurrentWidget(self.git_diff_view)
+
+    def _hide_git_diff(self):
+        """关闭 diff，回到终端。"""
+        self._main_content_stack.setCurrentWidget(self.tab_widget)
 
     def _toggle_git_panel(self):
         """切换 Git 面板显示"""
@@ -7041,6 +7063,8 @@ class MainWindow(QMainWindow):
                 self.remote_panel_container.hide()
         else:
             self.git_panel_container.hide()
+            # 关 Git 面板时若正显示 diff，回到终端，别把终端盖住
+            self._hide_git_diff()
             # 如果其他面板也隐藏，则隐藏整个左侧容器
             if not self.explorer_panel_visible and not getattr(self, 'remote_panel_visible', False):
                 self.left_panel_container.hide()
@@ -7111,6 +7135,7 @@ class MainWindow(QMainWindow):
                 self.git_panel_visible = False
                 self.git_toggle_btn.setChecked(False)
                 self.git_panel_container.hide()
+                self._hide_git_diff()  # 切到 Remote 时若在看 diff，回到终端
 
             # 编辑器若停在 main_splitter，归位
             if hasattr(self, 'file_editor'):
@@ -8141,6 +8166,8 @@ class MainWindow(QMainWindow):
         # Git 面板样式
         if hasattr(self, 'git_panel'):
             self.git_panel.apply_theme(t)
+        if hasattr(self, 'git_diff_view'):
+            self.git_diff_view.apply_theme(t)
 
         # Git 面板容器标题栏样式（直接使用保存的引用，避免 findChildren 搜索）
         if hasattr(self, '_git_header'):
