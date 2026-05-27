@@ -6,7 +6,7 @@ from PyQt6.QtWidgets import (
     QWidget, QVBoxLayout, QHBoxLayout, QFrame, QLabel,
     QPushButton, QComboBox, QScrollArea, QListWidget,
     QListWidgetItem, QPlainTextEdit, QSizePolicy,
-    QAbstractItemView, QMessageBox, QDialog, QTextEdit
+    QAbstractItemView, QMessageBox, QDialog, QTextEdit, QSplitter
 )
 from PyQt6.QtCore import Qt, pyqtSignal, QSize, QThread
 from PyQt6.QtGui import QFont, QColor
@@ -521,10 +521,13 @@ class GitCommitWidget(QFrame):
         layout.setContentsMargins(8, 8, 8, 8)
         layout.setSpacing(8)
 
-        # 提交信息输入框
+        # 提交信息输入框（高度可随上方分隔条拖拽变化）
         self.message_input = QPlainTextEdit()
         self.message_input.setPlaceholderText(t("git.commit_placeholder"))
-        self.message_input.setMaximumHeight(80)
+        self.message_input.setMinimumHeight(70)
+        self.message_input.setSizePolicy(
+            QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Expanding
+        )
         self.message_input.setStyleSheet(f"""
             QPlainTextEdit {{
                 background-color: {self.theme.get('bg_medium', '#16213e')};
@@ -1008,13 +1011,24 @@ class GitPanel(QWidget):
         self.header = GitHeaderWidget(self.theme)
         layout.addWidget(self.header)
 
-        # 变更列表
-        self.changes_widget = GitChangesWidget(self.theme)
-        layout.addWidget(self.changes_widget, 1)
+        # 变更列表 + 提交区放进一个竖直分隔器：拖拽中间的分隔条即可上下调整
+        # 二者高度（把提交信息框拉大/拉小）。
+        self.body_splitter = QSplitter(Qt.Orientation.Vertical)
+        self.body_splitter.setChildrenCollapsible(False)
+        self.body_splitter.setHandleWidth(6)
 
-        # 提交区
+        self.changes_widget = GitChangesWidget(self.theme)
+        self.body_splitter.addWidget(self.changes_widget)
+
         self.commit_widget = GitCommitWidget(self.theme)
-        layout.addWidget(self.commit_widget)
+        self.body_splitter.addWidget(self.commit_widget)
+
+        # 变更列表吃掉多余空间，提交区默认停在它的自然高度
+        self.body_splitter.setStretchFactor(0, 1)
+        self.body_splitter.setStretchFactor(1, 0)
+        self.body_splitter.setSizes([320, 180])
+
+        layout.addWidget(self.body_splitter, 1)
 
         # 无仓库提示
         self.no_repo_label = QLabel(t("git.no_repo"))
@@ -1036,6 +1050,14 @@ class GitPanel(QWidget):
         self.setStyleSheet(f"""
             QWidget {{
                 background-color: {self.theme.get('bg_dark', '#1a1a2e')};
+            }}
+            QSplitter::handle:vertical {{
+                background-color: {self.theme.get('border', '#3d3d5c')};
+                margin: 0 8px;
+                border-radius: 2px;
+            }}
+            QSplitter::handle:vertical:hover {{
+                background-color: {self.theme.get('accent', '#667eea')};
             }}
         """)
 
