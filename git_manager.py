@@ -640,6 +640,49 @@ class GitManager(QObject):
                 pass
         return (0, 0)
 
+    def get_log(self, limit: int = 150, all_branches: bool = True) -> List[dict]:
+        """获取提交历史（含父提交，用于画 graph）。
+
+        返回 [{hash, short, parents:[...], author, subject, refs:[...]}, ...]，
+        按 --date-order 排列（新→旧）。
+        """
+        if not self._repo_path:
+            return []
+        sep = '\x1f'
+        fmt = sep.join(['%H', '%P', '%an', '%s', '%D'])
+        args = ['log', '--date-order', f'--pretty=format:{fmt}', f'-n{limit}']
+        if all_branches:
+            args.insert(1, '--all')
+        ok, out = self._run_git(*args, check=False)
+        if not ok:
+            return []
+        commits: List[dict] = []
+        for line in out.splitlines():
+            if not line.strip():
+                continue
+            parts = line.split(sep)
+            if len(parts) < 5:
+                continue
+            h, parents, author, subject, refs = parts[:5]
+            commits.append({
+                'hash': h,
+                'short': h[:7],
+                'parents': parents.split() if parents.strip() else [],
+                'author': author,
+                'subject': subject,
+                'refs': [r.strip() for r in refs.split(',') if r.strip()],
+            })
+        return commits
+
+    def get_commit_show(self, commit_hash: str) -> str:
+        """获取某次提交的详情（摘要 + 改动），用于点击 graph 时展示。"""
+        ok, out = self._run_git(
+            'show', commit_hash, '--stat', '--patch',
+            '--format=commit %H%nAuthor: %an <%ae>%nDate:   %ad%n%n    %s%n%n%b',
+            check=False,
+        )
+        return out if ok else out
+
     def refresh(self):
         """手动刷新状态"""
         self.status_changed.emit()

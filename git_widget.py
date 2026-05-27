@@ -8,10 +8,10 @@ from PyQt6.QtWidgets import (
     QListWidgetItem, QPlainTextEdit, QSizePolicy,
     QAbstractItemView, QMessageBox, QDialog, QTextEdit, QSplitter
 )
-from PyQt6.QtCore import Qt, pyqtSignal, QSize, QThread, QTimer
+from PyQt6.QtCore import Qt, pyqtSignal, QSize, QThread, QTimer, QPoint, QRect
 from PyQt6.QtGui import (
     QFont, QColor, QBrush, QTextCursor, QTextCharFormat, QTextBlockFormat,
-    QFontMetrics
+    QFontMetrics, QPainter, QPen
 )
 
 from git_manager import GitManager, GitFile, FileStatus
@@ -1165,14 +1165,22 @@ class GitOutputView(QWidget):
 
     def set_output(self, title: str, text: str):
         self.title_label.setText(title)
-        # 对 diffstat 里的 +/- 做点轻量着色，其余按普通文本
+        # 轻量着色：diff 增删行红绿、远程/合并信息蓝绿、其余普通
         fg = self.theme.get('text', '#eaeaea')
         lines = []
         for line in (text or '').splitlines():
             etext = line.replace('&', '&amp;').replace('<', '&lt;').replace('>', '&gt;')
             c = fg
             stripped = line.strip()
-            if stripped.startswith('remote:') or stripped.startswith('来自') or '->' in stripped:
+            if line.startswith('+') and not line.startswith('+++'):
+                c = '#98c379'   # 新增行 绿
+            elif line.startswith('-') and not line.startswith('---'):
+                c = '#e06c75'   # 删除行 红
+            elif line.startswith('@@'):
+                c = '#61afef'
+            elif line.startswith('commit ') or line.startswith('Author:') or line.startswith('Date:'):
+                c = '#e5c07b'   # 提交头 黄
+            elif stripped.startswith('remote:') or stripped.startswith('来自') or '->' in stripped:
                 c = '#61afef'
             elif 'Fast-forward' in line or 'Updating' in line or '更新' in line:
                 c = '#98c379'
@@ -1213,6 +1221,234 @@ class GitOutputView(QWidget):
 
     def apply_language(self):
         self.back_btn.setText(t("git.diff_back"))
+
+
+class _GraphCanvas(QWidget):
+    """提交历史 graph 画布：左侧 lane 点线（仿 VS Code），右侧 引用徽标 + 标题 + 作者。"""
+
+    commit_clicked = pyqtSignal(str)  # 提交 hash
+
+    LANE_COLORS = ['#e06c75', '#61afef', '#98c379', '#c678dd',
+                   '#e5c07b', '#56b6c2', '#d19a66', '#abb2bf']
+
+    def __init__(self, theme: dict = None, parent=None):
+        super().__init__(parent)
+        self.theme = theme or {}
+        self._rows = []          # 每行 lane 布局
+        self._max_cols = 1
+        self._row_h = 24
+        self._lane_w = 14
+        self._dot_r = 4
+        self._left_pad = 8
+        self._hover = -1
+        self._font = QFont("Menlo", 12)
+        self.setMouseTracking(True)
+        self.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Expanding)
+
+    def set_commits(self, commits: list):
+        self._rows = self._compute_lanes(commits)
+        self._max_cols = max((r['width'] for r in self._rows), default=1)
+        self.setMinimumHeight(len(self._rows) * self._row_h)
+        self.updateGeometry()
+        self.update()
+
+    @staticmethod
+    def _compute_lanes(commits: list) -> list:
+        """把提交序列排成 lane：返回每行 {commit, above, my, below, parents, width}。
+        above/below 是该行上/下边的活动 lane（hash 列表），my 是该提交的 dot 所在列。"""
+        rows = []
+        above = []  # 进入当前行的 lane（= 上一行的 below）
+        for c in commits:
+            h, parents = c['hash'], c['parents']
+            my = above.index(h) if h in above else len(above)
+            below_src = list(above)
+            while len(below_src) <= my:
+                below_src.append(None)
+            if parents:
+                below_src[my] = parents[0]
+                for p in parents[1:]:
+                    if p not in below_src:
+                        for j in range(len(below_src)):
+                            if below_src[j] is None:
+                                below_src[j] = p
+                                break
+                        else:
+                            below_src.append(p)
+            else:
+                below_src[my] = None
+            # 压缩：去掉 None 和重复（lane 合并）
+            below, seen = [], set()
+            for hh in below_src:
+                if hh is None or hh in seen:
+                    continue
+                seen.add(hh)
+                below.append(hh)
+            width = max(len(above), len(below), my + 1)
+            rows.append({'commit': c, 'above': list(above), 'my': my,
+                         'below': below, 'parents': parents, 'width': width})
+            above = below
+        return rows
+
+    def _lane_color(self, col: int) -> str:
+        return self.LANE_COLORS[col % len(self.LANE_COLORS)]
+
+    def _row_at(self, y: int) -> int:
+        idx = y // self._row_h
+        return idx if 0 <= idx < len(self._rows) else -1
+
+    def mouseMoveEvent(self, event):
+        idx = self._row_at(int(event.position().y()))
+        if idx != self._hover:
+            self._hover = idx
+            self.update()
+
+    def leaveEvent(self, event):
+        if self._hover != -1:
+            self._hover = -1
+            self.update()
+
+    def mousePressEvent(self, event):
+        idx = self._row_at(int(event.position().y()))
+        if idx >= 0:
+            self.commit_clicked.emit(self._rows[idx]['commit']['hash'])
+
+    def paintEvent(self, event):
+        painter = QPainter(self)
+        painter.setRenderHint(QPainter.RenderHint.Antialiasing)
+        painter.setFont(self._font)
+        fm = QFontMetrics(self._font)
+        w = self.width()
+        row_h, lane_w, r = self._row_h, self._lane_w, self._dot_r
+
+        def col_x(c):
+            return self._left_pad + c * lane_w + lane_w // 2
+
+        rect = event.rect()
+        first = max(0, rect.top() // row_h - 1)
+        last = min(len(self._rows) - 1, rect.bottom() // row_h + 1)
+        text_color = QColor(self.theme.get('text', '#eaeaea'))
+        dim_color = QColor(self.theme.get('text_dim', '#888'))
+
+        for i in range(first, last + 1):
+            row = self._rows[i]
+            y_top = i * row_h
+            y_mid = y_top + row_h // 2
+            y_bot = y_top + row_h
+            above, below, my = row['above'], row['below'], row['my']
+            h = row['commit']['hash']
+
+            if i == self._hover:
+                painter.fillRect(0, y_top, w, row_h,
+                                 QColor(self.theme.get('bg_hover', '#2d2d44')))
+
+            # 上半：来自上方的 lane（合并进 dot 或穿过到下方）
+            for a_idx, ah in enumerate(above):
+                painter.setPen(QPen(QColor(self._lane_color(a_idx)), 2))
+                if ah == h:
+                    painter.drawLine(col_x(a_idx), y_top, col_x(my), y_mid)
+                else:
+                    bcol = below.index(ah) if ah in below else a_idx
+                    painter.drawLine(col_x(a_idx), y_top, col_x(bcol), y_bot)
+
+            # 下半：dot 连向各父提交
+            for p in row['parents']:
+                if p in below:
+                    bcol = below.index(p)
+                    painter.setPen(QPen(QColor(self._lane_color(bcol)), 2))
+                    painter.drawLine(col_x(my), y_mid, col_x(bcol), y_bot)
+
+            # dot
+            dot = QColor(self._lane_color(my))
+            painter.setBrush(QBrush(dot))
+            painter.setPen(QPen(dot, 1))
+            painter.drawEllipse(QPoint(col_x(my), y_mid), r, r)
+
+            # 文本起点
+            tx = self._left_pad + self._max_cols * lane_w + 8
+            # 引用徽标（branch / HEAD / tag）
+            for ref in row['commit']['refs']:
+                label = ref.replace('HEAD -> ', '')
+                is_head = ref.startswith('HEAD')
+                is_remote = label.startswith('origin/') or '/' in label
+                badge_bg = QColor(self.theme.get('accent', '#667eea')) if is_head \
+                    else (QColor('#4b5263') if is_remote else QColor('#3a7a3a'))
+                bw = fm.horizontalAdvance(label) + 12
+                if tx + bw > w - 8:
+                    break
+                painter.setBrush(QBrush(badge_bg))
+                painter.setPen(Qt.PenStyle.NoPen)
+                painter.drawRoundedRect(QRect(tx, y_mid - fm.height() // 2 - 1,
+                                              bw, fm.height() + 2), 4, 4)
+                painter.setPen(QColor('#ffffff'))
+                painter.drawText(QRect(tx, y_top, bw, row_h),
+                                 Qt.AlignmentFlag.AlignCenter, label)
+                tx += bw + 4
+
+            # 标题 + 作者（作者右对齐、暗色）
+            author = row['commit']['author']
+            aw = fm.horizontalAdvance(author) + 12
+            subj_w = max(20, w - tx - aw - 12)
+            painter.setPen(text_color)
+            subj = fm.elidedText(row['commit']['subject'],
+                                 Qt.TextElideMode.ElideRight, subj_w)
+            painter.drawText(QRect(tx, y_top, subj_w, row_h),
+                             Qt.AlignmentFlag.AlignVCenter, subj)
+            painter.setPen(dim_color)
+            painter.drawText(QRect(w - aw - 8, y_top, aw, row_h),
+                             Qt.AlignmentFlag.AlignVCenter | Qt.AlignmentFlag.AlignRight,
+                             author)
+        painter.end()
+
+
+class GitGraphWidget(QWidget):
+    """提交历史 graph 面板：顶部 "GRAPH" 标题 + 可滚动的 graph 画布。"""
+
+    commit_clicked = pyqtSignal(str)
+
+    def __init__(self, theme: dict = None, parent=None):
+        super().__init__(parent)
+        self.theme = theme or {}
+        self._setup_ui()
+
+    def _setup_ui(self):
+        layout = QVBoxLayout(self)
+        layout.setContentsMargins(0, 0, 0, 0)
+        layout.setSpacing(0)
+
+        self._title = QLabel(t("git.graph_title"))
+        layout.addWidget(self._title)
+
+        self._scroll = QScrollArea()
+        self._scroll.setWidgetResizable(True)
+        self._scroll.setHorizontalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAlwaysOff)
+        self._canvas = _GraphCanvas(self.theme)
+        self._canvas.commit_clicked.connect(self.commit_clicked.emit)
+        self._scroll.setWidget(self._canvas)
+        layout.addWidget(self._scroll, 1)
+
+        self.apply_theme(self.theme)
+
+    def set_commits(self, commits: list):
+        self._canvas.set_commits(commits)
+
+    def apply_theme(self, theme: dict):
+        self.theme = theme
+        self._canvas.theme = theme
+        self._title.setStyleSheet(f"""
+            QLabel {{
+                color: {theme.get('text_dim', '#888')};
+                background-color: {theme.get('bg_medium', '#16213e')};
+                font-size: 11px; font-weight: bold;
+                padding: 4px 10px;
+                border-bottom: 1px solid {theme.get('border', '#3d3d5c')};
+            }}
+        """)
+        self._scroll.setStyleSheet(f"background-color: {theme.get('bg_dark', '#1a1a2e')}; border: none;")
+        self._canvas.setStyleSheet(f"background-color: {theme.get('bg_dark', '#1a1a2e')};")
+        self._canvas.update()
+
+    def apply_language(self):
+        self._title.setText(t("git.graph_title"))
 
 
 class GitHeaderWidget(QFrame):
@@ -1413,13 +1649,19 @@ class GitPanel(QWidget):
         self.changes_widget = GitChangesWidget(self.theme)
         self.body_splitter.addWidget(self.changes_widget)
 
+        # 提交历史 graph（仿 VS Code），可拖拽分隔条调整高度
+        self.graph_widget = GitGraphWidget(self.theme)
+        self.graph_widget.commit_clicked.connect(self._on_commit_clicked)
+        self.body_splitter.addWidget(self.graph_widget)
+
         self.commit_widget = GitCommitWidget(self.theme)
         self.body_splitter.addWidget(self.commit_widget)
 
-        # 变更列表吃掉多余空间，提交区默认停在它的自然高度
+        # 变更列表 + graph 吃掉多余空间，提交区默认停在它的自然高度
         self.body_splitter.setStretchFactor(0, 1)
-        self.body_splitter.setStretchFactor(1, 0)
-        self.body_splitter.setSizes([320, 180])
+        self.body_splitter.setStretchFactor(1, 2)
+        self.body_splitter.setStretchFactor(2, 0)
+        self.body_splitter.setSizes([200, 360, 180])
         # 记忆用户拖拽过的提交区高度
         self.body_splitter.splitterMoved.connect(self._on_splitter_moved)
 
@@ -1457,11 +1699,11 @@ class GitPanel(QWidget):
         """)
 
     def _on_splitter_moved(self, *_):
-        """用户拖动分隔条 → 记住提交区高度并通知外部持久化。"""
+        """用户拖动分隔条 → 记住提交区（最后一栏）高度并通知外部持久化。"""
         sizes = self.body_splitter.sizes()
-        if len(sizes) == 2 and sizes[0] > 0 and sizes[1] > 0:
-            self._desired_commit_height = sizes[1]
-            self.commit_height_changed.emit(sizes[1])
+        if sizes and sizes[-1] > 0 and any(s > 0 for s in sizes[:-1]):
+            self._desired_commit_height = sizes[-1]
+            self.commit_height_changed.emit(sizes[-1])
 
     def apply_commit_height(self, height: int):
         """由主窗口在加载配置后调用：设定要恢复的提交区高度。"""
@@ -1470,7 +1712,8 @@ class GitPanel(QWidget):
             self._apply_commit_height()
 
     def _apply_commit_height(self, _attempts: int = 0):
-        """把记忆的提交区高度套用到分隔器；布局还没就绪时稍后重试。"""
+        """把记忆的提交区高度套用到分隔器（提交区是最后一栏，其余按原比例分剩余空间）；
+        布局还没就绪时稍后重试。"""
         height = self._desired_commit_height
         if height <= 0:
             return
@@ -1480,9 +1723,16 @@ class GitPanel(QWidget):
             if _attempts < 40:
                 QTimer.singleShot(50, lambda: self._apply_commit_height(_attempts + 1))
             return
-        commit = max(80, min(height, total - 80))
+        sizes = self.body_splitter.sizes()
+        n = len(sizes)
+        commit = max(80, min(height, total - 120))
+        rest = max(1, total - commit)
+        top_sizes = sizes[:-1]
+        top_total = sum(top_sizes) or 1
+        # 其余栏按当前比例分摊剩余空间
+        new_sizes = [max(1, int(rest * s / top_total)) for s in top_sizes] + [commit]
         # setSizes 不会触发 splitterMoved，不会回写循环
-        self.body_splitter.setSizes([max(1, total - commit), commit])
+        self.body_splitter.setSizes(new_sizes)
 
     def _connect_signals(self):
         """连接信号"""
@@ -1517,9 +1767,11 @@ class GitPanel(QWidget):
             self.no_repo_label.hide()
             self.header.show()
             self.changes_widget.show()
+            self.graph_widget.show()
             self.commit_widget.show()
             self._refresh_status()
             self._refresh_branches()
+            self._refresh_graph()
             # 面板每次显示时，恢复用户记忆的提交区高度
             self._apply_commit_height()
             # 后台抓一次远程，刷新"可 pull 条数"
@@ -1528,7 +1780,20 @@ class GitPanel(QWidget):
             self.no_repo_label.show()
             self.header.hide()
             self.changes_widget.hide()
+            self.graph_widget.hide()
             self.commit_widget.hide()
+
+    def _refresh_graph(self):
+        """刷新提交历史 graph（commit/pull/fetch/切分支后调用）。"""
+        commits = self._git_manager.get_log(limit=150, all_branches=True)
+        self.graph_widget.set_commits(commits)
+
+    def _on_commit_clicked(self, commit_hash: str):
+        """点击 graph 上的提交 → 在右侧大空间展示该提交详情（git show）。"""
+        text = self._git_manager.get_commit_show(commit_hash)
+        self.output_requested.emit(
+            t("git.commit_show_title", short=commit_hash[:7]), text
+        )
 
     def _refresh_status(self):
         """刷新文件状态"""
@@ -1548,6 +1813,7 @@ class GitPanel(QWidget):
         """点击 ↻：刷新状态 + 强制抓取一次远程（更新可 pull 条数）"""
         self._refresh_status()
         self._refresh_branches()
+        self._refresh_graph()
         self._fetch_async(force=True)
 
     def _tick_fetch(self):
@@ -1577,9 +1843,10 @@ class GitPanel(QWidget):
         self._fetch_running = False
 
     def _on_fetch_done(self, ok: bool, _kind: str):
-        # 抓取成功后远程跟踪分支已更新 → 重算 ahead/behind，刷新 Pull 计数
+        # 抓取成功后远程跟踪分支已更新 → 重算 ahead/behind，刷新 Pull 计数 + graph
         if ok:
             self._refresh_status()
+            self._refresh_graph()
 
     def _register_worker(self, worker):
         """登记后台线程：跑完自动从集合移除并 deleteLater；关闭时统一等待。"""
@@ -1609,6 +1876,7 @@ class GitPanel(QWidget):
         if branch_name != current:
             self._git_manager.checkout_branch(branch_name)
             self._refresh_branches()
+            self._refresh_graph()
 
     def _on_discard_file(self, path: str):
         """放弃更改确认"""
@@ -1626,6 +1894,7 @@ class GitPanel(QWidget):
         """提交处理"""
         if self._git_manager.commit(message):
             self._refresh_status()
+            self._refresh_graph()
 
     def _on_push(self):
         """推送处理（后台线程，避免网络阻塞卡死 UI）"""
@@ -1651,6 +1920,7 @@ class GitPanel(QWidget):
             return
         # 成功不再弹窗打扰：push 后 ahead 计数归零、pull 后列表刷新，按钮本身就是反馈
         self._refresh_status()
+        self._refresh_graph()
 
     # ---------- ✨ 用大模型生成提交信息 ----------
 
@@ -1748,6 +2018,7 @@ class GitPanel(QWidget):
         self._update_style()
         self.header.apply_theme(theme)
         self.changes_widget.apply_theme(theme)
+        self.graph_widget.apply_theme(theme)
         self.commit_widget.apply_theme(theme)
 
         self.no_repo_label.setStyleSheet(f"""
@@ -1762,6 +2033,7 @@ class GitPanel(QWidget):
         """更新语言相关的 UI 文本"""
         self.header.apply_language()
         self.changes_widget.apply_language()
+        self.graph_widget.apply_language()
         self.commit_widget.apply_language()
         self.no_repo_label.setText(t("git.no_repo"))
 
