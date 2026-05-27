@@ -478,8 +478,19 @@ class _CommitMessageWorker(QThread):
 
     @staticmethod
     def _clean(text: str) -> str:
-        """去掉模型偶尔加上的 ``` 代码围栏和首尾空白。"""
-        text = (text or '').strip()
+        """清洗模型输出：去掉推理模型的 <think>/<thinking> 块、``` 代码围栏和首尾空白。"""
+        import re
+        text = text or ''
+        # 1) 去掉成对的推理块（DeepSeek/Qwen 等推理模型会内联在 content 里）
+        text = re.sub(r'(?is)<think(?:ing)?>.*?</think(?:ing)?>', '', text)
+        # 2) 有时只回传了闭合标签（推理在前、答案在后）→ 取最后一个闭合标签之后的内容
+        for tag in ('</think>', '</thinking>'):
+            if tag in text:
+                text = text.rsplit(tag, 1)[-1]
+        # 3) 残留的未闭合开标签
+        text = re.sub(r'(?is)<think(?:ing)?>', '', text)
+        text = text.strip()
+        # 4) 去掉 ``` 代码围栏
         if text.startswith('```'):
             lines = text.splitlines()
             if lines and lines[0].startswith('```'):
