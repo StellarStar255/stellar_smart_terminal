@@ -9,7 +9,9 @@ from PyQt6.QtWidgets import (
     QAbstractItemView, QMessageBox, QDialog, QTextEdit, QSplitter
 )
 from PyQt6.QtCore import Qt, pyqtSignal, QSize, QThread, QTimer
-from PyQt6.QtGui import QFont, QColor
+from PyQt6.QtGui import (
+    QFont, QColor, QBrush, QTextCursor, QTextCharFormat, QTextBlockFormat
+)
 
 from git_manager import GitManager, GitFile, FileStatus
 from i18n import t, get_language
@@ -976,12 +978,52 @@ class GitDiffView(QWidget):
         self.title_label.setText(title)
         left_rows, right_rows = self._parse(diff_content or "")
         if not left_rows and not right_rows:
-            placeholder = [(None, t("git.diff_no_content"), 'ctx')]
-            left_rows, right_rows = placeholder, [(None, '', 'pad')]
-        self.left_edit.setHtml(self._rows_to_html(left_rows))
-        self.right_edit.setHtml(self._rows_to_html(right_rows))
+            left_rows = [(None, t("git.diff_no_content"), 'ctx')]
+            right_rows = [(None, '', 'ctx')]
+        self._fill_edit(self.left_edit, left_rows)
+        self._fill_edit(self.right_edit, right_rows)
         self.left_edit.verticalScrollBar().setValue(0)
         self.right_edit.verticalScrollBar().setValue(0)
+
+    def _line_bg_brush(self, kind: str):
+        """整行背景：删除=半透明红、新增=半透明绿、对齐占位=半透明斜条纹、
+        hunk 头=淡蓝；上下文无背景。"""
+        if kind == 'del':
+            return QBrush(QColor(229, 83, 75, 60))      # 红 ~0.23
+        if kind == 'add':
+            return QBrush(QColor(63, 185, 80, 60))       # 绿 ~0.23
+        if kind == 'hunk':
+            return QBrush(QColor(97, 175, 239, 38))      # 淡蓝
+        if kind == 'pad':
+            # 斜条纹半透明背景，标记"另一边有增/删"，方便对齐
+            return QBrush(QColor(140, 140, 140, 70), Qt.BrushStyle.BDiagPattern)
+        return None  # ctx：透明
+
+    def _fill_edit(self, edit: QTextEdit, rows):
+        """用 QTextBlockFormat 逐行写入：整行背景填满（不是只染文字），
+        行号灰色，代码用主题前景色。"""
+        edit.clear()
+        num_color = QColor('#6a6a7a')
+        text_color = QColor(self.theme.get('text', '#eaeaea'))
+        cursor = QTextCursor(edit.document())
+        cursor.beginEditBlock()
+        first = True
+        for (ln, text, kind) in rows:
+            if not first:
+                cursor.insertBlock()
+            first = False
+            block_fmt = QTextBlockFormat()
+            brush = self._line_bg_brush(kind)
+            if brush is not None:
+                block_fmt.setBackground(brush)
+            cursor.setBlockFormat(block_fmt)
+            num_fmt = QTextCharFormat()
+            num_fmt.setForeground(num_color)
+            cursor.insertText((f'{ln:>5} ' if ln else '      '), num_fmt)
+            txt_fmt = QTextCharFormat()
+            txt_fmt.setForeground(text_color)
+            cursor.insertText(text or '', txt_fmt)
+        cursor.endEditBlock()
 
     def _parse(self, diff_content: str):
         """把统一 diff 解析成左右两列对齐的行列表。
@@ -1033,26 +1075,6 @@ class GitDiffView(QWidget):
                 break
         flush()
         return left, right
-
-    def _rows_to_html(self, rows) -> str:
-        fg = self.theme.get('text', '#eaeaea')
-        color = {
-            'del': '#e06c75',   # 红
-            'add': '#98c379',   # 绿
-            'hunk': '#61afef',  # 蓝
-            'pad': '#444',
-            'ctx': fg,
-        }
-        lines = []
-        for (ln, text, kind) in rows:
-            etext = (text or '').replace('&', '&amp;').replace('<', '&lt;').replace('>', '&gt;')
-            num = f'{ln:>5}' if ln else '     '
-            c = color.get(kind, fg)
-            lines.append(
-                f'<span style="color:#666;">{num}</span> '
-                f'<span style="color:{c};">{etext}</span>'
-            )
-        return '<pre style="margin:0; padding:4px;">' + '\n'.join(lines) + '</pre>'
 
     def apply_theme(self, theme: dict):
         self.theme = theme
