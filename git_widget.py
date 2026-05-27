@@ -1054,9 +1054,16 @@ class GitPanel(QWidget):
         self.theme = theme or {}
         self._desired_commit_height = 0  # 记忆的提交区高度（0=未设置，用默认）
         self._git_manager = GitManager(self)
+        self._last_fetch_ts = 0.0  # 上次后台 fetch 的时间（节流用）
 
         self._setup_ui()
         self._connect_signals()
+
+        # 定时后台 fetch：刷新远程跟踪分支，让"可 pull 条数"保持最新（仅面板可见时）
+        self._fetch_timer = QTimer(self)
+        self._fetch_timer.setInterval(180_000)  # 3 分钟
+        self._fetch_timer.timeout.connect(self._tick_fetch)
+        self._fetch_timer.start()
 
     def _setup_ui(self):
         """设置 UI"""
@@ -1156,7 +1163,7 @@ class GitPanel(QWidget):
 
         # 头部信号
         self.header.branch_changed.connect(self._on_branch_changed)
-        self.header.refresh_clicked.connect(self._refresh_status)
+        self.header.refresh_clicked.connect(self._on_refresh_clicked)
 
         # 变更列表信号
         self.changes_widget.stage_file.connect(self._git_manager.stage_file)
@@ -1185,6 +1192,8 @@ class GitPanel(QWidget):
             self._refresh_branches()
             # 面板每次显示时，恢复用户记忆的提交区高度
             self._apply_commit_height()
+            # 后台抓一次远程，刷新"可 pull 条数"
+            self._fetch_async()
         else:
             self.no_repo_label.show()
             self.header.hide()
@@ -1204,6 +1213,39 @@ class GitPanel(QWidget):
         branches = self._git_manager.get_branches()
         current = self._git_manager.get_current_branch()
         self.header.update_branches(branches, current)
+
+    def _on_refresh_clicked(self):
+        """点击 ↻：刷新状态 + 强制抓取一次远程（更新可 pull 条数）"""
+        self._refresh_status()
+        self._refresh_branches()
+        self._fetch_async(force=True)
+
+    def _tick_fetch(self):
+        """定时器：仅在面板可见时后台 fetch，更新可 pull 条数。"""
+        if self.isVisible():
+            self._fetch_async()
+
+    def _fetch_async(self, force: bool = False):
+        """后台 git fetch（不阻塞 UI、不弹窗）。默认 60s 内只抓一次，避免频繁联网。"""
+        import time
+        if self._git_manager._repo_path is None:
+            return
+        now = time.monotonic()
+        if not force and (now - self._last_fetch_ts) < 60:
+            return
+        worker = getattr(self, '_fetch_worker', None)
+        if worker is not None and worker.isRunning():
+            return
+        self._last_fetch_ts = now
+        worker = _GitOpWorker(self._git_manager.fetch, 'fetch', self)
+        self._fetch_worker = worker
+        worker.done.connect(self._on_fetch_done)
+        worker.start()
+
+    def _on_fetch_done(self, ok: bool, _kind: str):
+        # 抓取成功后远程跟踪分支已更新 → 重算 ahead/behind，刷新 Pull 计数
+        if ok:
+            self._refresh_status()
 
     def _on_branch_changed(self, branch_name: str):
         """分支切换处理"""

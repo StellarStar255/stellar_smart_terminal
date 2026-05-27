@@ -560,6 +560,15 @@ class GitManager(QObject):
             return False
         return True
 
+    def fetch(self, remote: str = "origin") -> bool:
+        """从远程抓取最新 refs（更新 origin/*），用于计算"落后多少条可 pull"。
+
+        只更新远程跟踪分支，不改动工作区。后台静默调用：失败（如离线）时不报错，
+        保留上次的计数即可。
+        """
+        success, _ = self._run_git('fetch', remote, '--quiet', timeout=120)
+        return success
+
     def pull(self, remote: str = "origin", branch: str = None) -> bool:
         """从远程仓库拉取
 
