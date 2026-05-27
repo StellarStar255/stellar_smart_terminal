@@ -166,8 +166,12 @@ class GitFileItem(QWidget):
 
     def mouseDoubleClickEvent(self, event):
         """双击查看 diff"""
-        self.diff_clicked.emit(self.git_file.path, self.is_staged)
-        super().mouseDoubleClickEvent(event)
+        try:
+            self.diff_clicked.emit(self.git_file.path, self.is_staged)
+            super().mouseDoubleClickEvent(event)
+        except RuntimeError:
+            # 条目可能在刷新中已被销毁，忽略本次事件即可
+            pass
 
 
 class CollapsibleSection(QWidget):
@@ -343,6 +347,16 @@ class GitChangesWidget(QScrollArea):
 
     def update_files(self, staged: list, unstaged: list):
         """更新文件列表"""
+        # 列表没变就不重建：避免每次刷新（5s 定时 / fetch 后）都销毁重建条目，
+        # 否则用户正在双击的条目可能在事件处理途中被删 → RuntimeError。
+        fp = (
+            tuple((f.path, getattr(f.status, 'value', f.status)) for f in staged),
+            tuple((f.path, getattr(f.status, 'value', f.status)) for f in unstaged),
+        )
+        if fp == getattr(self, '_files_fingerprint', None):
+            return
+        self._files_fingerprint = fp
+
         # 清空现有列表
         self._clear_layout(self.staged_layout)
         self._clear_layout(self.unstaged_layout)
@@ -1241,6 +1255,8 @@ class GitPanel(QWidget):
         self._desired_commit_height = 0  # 记忆的提交区高度（0=未设置，用默认）
         self._git_manager = GitManager(self)
         self._last_fetch_ts = 0.0  # 上次后台 fetch 的时间（节流用）
+        self._active_workers = set()  # 在跑的后台线程，关闭时统一等待，避免被销毁时 abort
+        self._fetch_running = False
 
         self._setup_ui()
         self._connect_signals()
@@ -1423,22 +1439,48 @@ class GitPanel(QWidget):
         import time
         if self._git_manager._repo_path is None:
             return
+        if self._fetch_running:
+            return
         now = time.monotonic()
         if not force and (now - self._last_fetch_ts) < 60:
             return
-        worker = getattr(self, '_fetch_worker', None)
-        if worker is not None and worker.isRunning():
-            return
         self._last_fetch_ts = now
+        self._fetch_running = True
         worker = _GitOpWorker(self._git_manager.fetch, 'fetch', self)
-        self._fetch_worker = worker
         worker.done.connect(self._on_fetch_done)
+        worker.finished.connect(self._on_fetch_finished)
+        self._register_worker(worker)
         worker.start()
+
+    def _on_fetch_finished(self):
+        self._fetch_running = False
 
     def _on_fetch_done(self, ok: bool, _kind: str):
         # 抓取成功后远程跟踪分支已更新 → 重算 ahead/behind，刷新 Pull 计数
         if ok:
             self._refresh_status()
+
+    def _register_worker(self, worker):
+        """登记后台线程：跑完自动从集合移除并 deleteLater；关闭时统一等待。"""
+        self._active_workers.add(worker)
+        worker.finished.connect(lambda w=worker: self._active_workers.discard(w))
+        worker.finished.connect(worker.deleteLater)
+
+    def shutdown(self):
+        """关闭前调用：停掉定时器并等待在跑的后台线程，避免线程仍在运行时被销毁导致 abort。"""
+        try:
+            self._fetch_timer.stop()
+        except RuntimeError:
+            pass
+        for worker in list(self._active_workers):
+            try:
+                if worker.isRunning():
+                    if not worker.wait(3000):
+                        worker.terminate()
+                        worker.wait(1000)
+            except RuntimeError:
+                pass
+        self._active_workers.clear()
 
     def _on_branch_changed(self, branch_name: str):
         """分支切换处理"""
@@ -1473,14 +1515,12 @@ class GitPanel(QWidget):
         self._run_git_op_async('pull')
 
     def _run_git_op_async(self, kind: str):
-        worker = getattr(self, '_git_op_worker', None)
-        if worker is not None and worker.isRunning():
-            return  # 已有 push/pull 在跑，忽略重复点击
+        # 操作期间对应按钮已被 set_busy 禁用，足以防重复点击
         self.commit_widget.set_busy(kind, True)
         fn = self._git_manager.push if kind == 'push' else self._git_manager.pull
         worker = _GitOpWorker(fn, kind, self)
-        self._git_op_worker = worker  # 持有引用防 GC
         worker.done.connect(self._on_git_op_done)
+        self._register_worker(worker)
         worker.start()
 
     def _on_git_op_done(self, ok: bool, kind: str):
@@ -1514,10 +1554,10 @@ class GitPanel(QWidget):
 
         self.commit_widget.set_generating(True)
         worker = _CommitMessageWorker(config, diff, get_language(), self)
-        self._commit_msg_worker = worker  # 持有引用，防止被 GC 提前回收
         worker.succeeded.connect(self._on_generate_done)
         worker.failed.connect(self._on_generate_failed)
         worker.finished.connect(lambda: self.commit_widget.set_generating(False))
+        self._register_worker(worker)
         worker.start()
 
     def _on_generate_done(self, message: str):

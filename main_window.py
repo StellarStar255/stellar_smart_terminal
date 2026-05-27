@@ -9024,6 +9024,14 @@ class MainWindow(QMainWindow):
         except Exception:
             pass
 
+        # 等待 Git 面板的后台线程（fetch/push/pull/生成提交信息）跑完，
+        # 否则线程仍在运行时被销毁会触发 QThread abort
+        try:
+            if hasattr(self, 'git_panel') and self.git_panel is not None:
+                self.git_panel.shutdown()
+        except Exception as e:
+            print(f"[Close] git panel shutdown failed: {e}")
+
         # 完整清理所有终端资源
         # 注意：terminal.cleanup() 内部会 join 后端 reader thread (最长 2s)，
         # 这是阻塞 GUI 线程的同步操作。逐个 try 包住，避免一个终端清理失败
