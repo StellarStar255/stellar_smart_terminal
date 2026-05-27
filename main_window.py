@@ -3852,14 +3852,15 @@ class MainWindow(QMainWindow):
         self.llm_config_btn = QPushButton("✨")
         self.llm_config_btn.setObjectName("llmConfigBtn")
         self.llm_config_btn.setToolTip(t("toolbar.llm_config_tooltip"))
-        self.llm_config_btn.setFixedSize(42, 32)
+        # 只固定宽度，高度交给布局（沿用全局 QPushButton 的 padding/font-size），
+        # 这样它的高度始终和其它工具栏按钮一致，GUI 字号缩放时也同步变化。
+        self.llm_config_btn.setFixedWidth(42)
         self.llm_config_btn.setStyleSheet("""
             QPushButton {
                 background-color: #7c3aed;
                 color: white;
                 border: none;
-                border-radius: 4px;
-                font-size: 20px;
+                border-radius: 6px;
             }
             QPushButton:hover {
                 background-color: #8b5cf6;
