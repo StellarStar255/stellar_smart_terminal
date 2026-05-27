@@ -1253,12 +1253,8 @@ class GitPanel(QWidget):
         if not ok:
             # 失败信息已由 GitManager.error_occurred 弹出
             return
-        if kind == 'push':
-            QMessageBox.information(self, t("git.push_success_title"), t("git.push_success_msg"))
-            self._refresh_status()  # push 后 ahead 归零，刷新按钮计数
-        else:
-            QMessageBox.information(self, t("git.pull_success_title"), t("git.pull_success_msg"))
-            self._refresh_status()
+        # 成功不再弹窗打扰：push 后 ahead 计数归零、pull 后列表刷新，按钮本身就是反馈
+        self._refresh_status()
 
     # ---------- ✨ 用大模型生成提交信息 ----------
 
