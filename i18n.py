@@ -292,6 +292,8 @@ TRANSLATIONS = {
     "git.pull_success_msg": {"zh": "已成功从远程仓库拉取更新", "en": "Successfully pulled from remote"},
     "git.error_title": {"zh": "Git 错误", "en": "Git Error"},
     "git.close": {"zh": "关闭", "en": "Close"},
+    "git.diff_back": {"zh": "← 返回", "en": "← Back"},
+    "git.diff_no_content": {"zh": "（无差异内容，可能是未跟踪文件或无改动）", "en": "(No diff — untracked file or no changes)"},
     "git.generate_msg": {"zh": "✨ 生成提交信息", "en": "✨ Generate message"},
     "git.generate_msg_tooltip": {"zh": "用已配置的大模型根据改动自动生成提交信息", "en": "Use the configured LLM to write a commit message from your changes"},
     "git.generating": {"zh": "✨ 生成中…", "en": "✨ Generating…"},

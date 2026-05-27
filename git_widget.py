@@ -6,7 +6,8 @@ from PyQt6.QtWidgets import (
     QWidget, QVBoxLayout, QHBoxLayout, QFrame, QLabel,
     QPushButton, QComboBox, QScrollArea, QListWidget,
     QListWidgetItem, QPlainTextEdit, QSizePolicy,
-    QAbstractItemView, QMessageBox, QDialog, QTextEdit, QSplitter
+    QAbstractItemView, QMessageBox, QDialog, QTextEdit, QSplitter,
+    QStackedWidget
 )
 from PyQt6.QtCore import Qt, pyqtSignal, QSize, QThread, QTimer
 from PyQt6.QtGui import QFont, QColor
@@ -892,6 +893,191 @@ class GitDiffDialog(QDialog):
         self.diff_text.setHtml('<pre style="margin: 8px;">' + '<br>'.join(html_lines) + '</pre>')
 
 
+class GitDiffView(QWidget):
+    """左右并排的 diff 视图：左栏=旧/删除行，右栏=新/增加行，竖直滚动联动。
+
+    内嵌在 Git 面板里（不弹窗）。把 `git diff` 的统一格式解析成两栏对齐显示。
+    """
+    closed = pyqtSignal()
+
+    def __init__(self, theme: dict = None, parent=None):
+        super().__init__(parent)
+        self.theme = theme or {}
+        self._syncing = False
+        self._setup_ui()
+
+    def _setup_ui(self):
+        layout = QVBoxLayout(self)
+        layout.setContentsMargins(0, 0, 0, 0)
+        layout.setSpacing(0)
+
+        # 顶部：返回 + 文件名
+        self._header = QFrame()
+        h = QHBoxLayout(self._header)
+        h.setContentsMargins(8, 6, 8, 6)
+        h.setSpacing(8)
+        self.back_btn = QPushButton(t("git.diff_back"))
+        self.back_btn.clicked.connect(self.closed.emit)
+        self.title_label = QLabel("")
+        h.addWidget(self.back_btn)
+        h.addWidget(self.title_label, 1)
+        layout.addWidget(self._header)
+
+        # 两栏并排
+        self._split = QSplitter(Qt.Orientation.Horizontal)
+        self.left_edit = self._make_edit()
+        self.right_edit = self._make_edit()
+        self._split.addWidget(self.left_edit)
+        self._split.addWidget(self.right_edit)
+        self._split.setSizes([500, 500])
+        layout.addWidget(self._split, 1)
+
+        # 竖直滚动联动
+        self.left_edit.verticalScrollBar().valueChanged.connect(self._sync_from_left)
+        self.right_edit.verticalScrollBar().valueChanged.connect(self._sync_from_right)
+
+        self.apply_theme(self.theme)
+
+    def _make_edit(self) -> QTextEdit:
+        e = QTextEdit()
+        e.setReadOnly(True)
+        e.setLineWrapMode(QTextEdit.LineWrapMode.NoWrap)
+        e.setFont(QFont("Menlo", 12))
+        return e
+
+    def _sync_from_left(self, value: int):
+        if self._syncing:
+            return
+        self._syncing = True
+        self.right_edit.verticalScrollBar().setValue(value)
+        self._syncing = False
+
+    def _sync_from_right(self, value: int):
+        if self._syncing:
+            return
+        self._syncing = True
+        self.left_edit.verticalScrollBar().setValue(value)
+        self._syncing = False
+
+    def set_diff(self, title: str, diff_content: str):
+        self.title_label.setText(title)
+        left_rows, right_rows = self._parse(diff_content or "")
+        if not left_rows and not right_rows:
+            placeholder = [(None, t("git.diff_no_content"), 'ctx')]
+            left_rows, right_rows = placeholder, [(None, '', 'pad')]
+        self.left_edit.setHtml(self._rows_to_html(left_rows))
+        self.right_edit.setHtml(self._rows_to_html(right_rows))
+        self.left_edit.verticalScrollBar().setValue(0)
+        self.right_edit.verticalScrollBar().setValue(0)
+
+    def _parse(self, diff_content: str):
+        """把统一 diff 解析成左右两列对齐的行列表。
+
+        每行是 (lineno, text, kind)，kind ∈ {ctx, del, add, hunk, pad}。
+        删除/新增成对时左右对齐，数量不等时短的一侧补 pad 空行。
+        """
+        import re
+        left, right = [], []
+        old_ln = new_ln = 0
+        pend_del, pend_add = [], []
+        MAX_ROWS = 6000
+
+        def flush():
+            n = max(len(pend_del), len(pend_add))
+            for k in range(n):
+                left.append(pend_del[k] if k < len(pend_del) else (None, '', 'pad'))
+                right.append(pend_add[k] if k < len(pend_add) else (None, '', 'pad'))
+            pend_del.clear()
+            pend_add.clear()
+
+        skip_prefixes = ('diff ', 'index ', '--- ', '+++ ', 'new file', 'deleted file',
+                         'old mode', 'new mode', 'similarity ', 'rename ', '\\ No newline')
+        for line in diff_content.splitlines():
+            if line.startswith(skip_prefixes):
+                continue
+            if line.startswith('@@'):
+                flush()
+                m = re.search(r'@@ -(\d+)(?:,\d+)? \+(\d+)(?:,\d+)? @@', line)
+                if m:
+                    old_ln, new_ln = int(m.group(1)), int(m.group(2))
+                left.append((None, line, 'hunk'))
+                right.append((None, line, 'hunk'))
+                continue
+            if line.startswith('-'):
+                pend_del.append((old_ln, line[1:], 'del'))
+                old_ln += 1
+            elif line.startswith('+'):
+                pend_add.append((new_ln, line[1:], 'add'))
+                new_ln += 1
+            else:
+                flush()
+                text = line[1:] if line.startswith(' ') else line
+                left.append((old_ln, text, 'ctx'))
+                right.append((new_ln, text, 'ctx'))
+                old_ln += 1
+                new_ln += 1
+            if len(left) > MAX_ROWS:
+                break
+        flush()
+        return left, right
+
+    def _rows_to_html(self, rows) -> str:
+        fg = self.theme.get('text', '#eaeaea')
+        color = {
+            'del': '#e06c75',   # 红
+            'add': '#98c379',   # 绿
+            'hunk': '#61afef',  # 蓝
+            'pad': '#444',
+            'ctx': fg,
+        }
+        lines = []
+        for (ln, text, kind) in rows:
+            etext = (text or '').replace('&', '&amp;').replace('<', '&lt;').replace('>', '&gt;')
+            num = f'{ln:>5}' if ln else '     '
+            c = color.get(kind, fg)
+            lines.append(
+                f'<span style="color:#666;">{num}</span> '
+                f'<span style="color:{c};">{etext}</span>'
+            )
+        return '<pre style="margin:0; padding:4px;">' + '\n'.join(lines) + '</pre>'
+
+    def apply_theme(self, theme: dict):
+        self.theme = theme
+        edit_css = f"""
+            QTextEdit {{
+                background-color: {theme.get('bg_dark', '#1a1a2e')};
+                color: {theme.get('text', '#eaeaea')};
+                border: none;
+            }}
+        """
+        self.left_edit.setStyleSheet(edit_css)
+        self.right_edit.setStyleSheet(edit_css)
+        self._header.setStyleSheet(f"""
+            QFrame {{
+                background-color: {theme.get('bg_medium', '#16213e')};
+                border-bottom: 1px solid {theme.get('border', '#3d3d5c')};
+            }}
+        """)
+        self.title_label.setStyleSheet(
+            f"color: {theme.get('text', '#eaeaea')}; font-weight: bold;"
+        )
+        self.back_btn.setStyleSheet(f"""
+            QPushButton {{
+                background-color: {theme.get('bg_lighter', '#3d3d5c')};
+                color: {theme.get('text', '#eaeaea')};
+                border: none;
+                border-radius: 4px;
+                padding: 4px 12px;
+            }}
+            QPushButton:hover {{
+                background-color: {theme.get('bg_hover', '#4d4d6c')};
+            }}
+        """)
+
+    def apply_language(self):
+        self.back_btn.setText(t("git.diff_back"))
+
+
 class GitHeaderWidget(QFrame):
     """Git 面板头部"""
 
@@ -1081,8 +1267,14 @@ class GitPanel(QWidget):
         self.body_splitter.setChildrenCollapsible(False)
         self.body_splitter.setHandleWidth(6)
 
+        # 上半部分用堆叠：第 0 页是变更列表，第 1 页是左右并排的 diff 视图
         self.changes_widget = GitChangesWidget(self.theme)
-        self.body_splitter.addWidget(self.changes_widget)
+        self.diff_view = GitDiffView(self.theme)
+        self.diff_view.closed.connect(self._hide_diff)
+        self._top_stack = QStackedWidget()
+        self._top_stack.addWidget(self.changes_widget)  # index 0
+        self._top_stack.addWidget(self.diff_view)        # index 1
+        self.body_splitter.addWidget(self._top_stack)
 
         self.commit_widget = GitCommitWidget(self.theme)
         self.body_splitter.addWidget(self.commit_widget)
@@ -1186,7 +1378,8 @@ class GitPanel(QWidget):
         if is_repo:
             self.no_repo_label.hide()
             self.header.show()
-            self.changes_widget.show()
+            self._top_stack.show()
+            self._top_stack.setCurrentWidget(self.changes_widget)  # 回到列表页
             self.commit_widget.show()
             self._refresh_status()
             self._refresh_branches()
@@ -1197,7 +1390,7 @@ class GitPanel(QWidget):
         else:
             self.no_repo_label.show()
             self.header.hide()
-            self.changes_widget.hide()
+            self._top_stack.hide()
             self.commit_widget.hide()
 
     def _refresh_status(self):
@@ -1374,11 +1567,15 @@ class GitPanel(QWidget):
         return None
 
     def _show_diff(self, path: str, staged: bool):
-        """显示 diff 对话框"""
+        """在面板内以左右并排的方式显示 diff（不弹窗）"""
         diff_content = self._git_manager.get_diff(path, staged)
-        title = f"Diff: {path}" + (" (staged)" if staged else "")
-        dialog = GitDiffDialog(title, diff_content, self.theme, self)
-        dialog.exec()
+        title = path + (" (staged)" if staged else "")
+        self.diff_view.set_diff(title, diff_content)
+        self._top_stack.setCurrentWidget(self.diff_view)
+
+    def _hide_diff(self):
+        """关闭 diff 视图，回到变更列表"""
+        self._top_stack.setCurrentWidget(self.changes_widget)
 
     def _show_error(self, message: str):
         """显示错误消息"""
@@ -1391,6 +1588,7 @@ class GitPanel(QWidget):
         self.header.apply_theme(theme)
         self.changes_widget.apply_theme(theme)
         self.commit_widget.apply_theme(theme)
+        self.diff_view.apply_theme(theme)
 
         self.no_repo_label.setStyleSheet(f"""
             QLabel {{
@@ -1405,6 +1603,7 @@ class GitPanel(QWidget):
         self.header.apply_language()
         self.changes_widget.apply_language()
         self.commit_widget.apply_language()
+        self.diff_view.apply_language()
         self.no_repo_label.setText(t("git.no_repo"))
 
     def refresh(self):
