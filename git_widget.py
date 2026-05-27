@@ -10,7 +10,8 @@ from PyQt6.QtWidgets import (
 )
 from PyQt6.QtCore import Qt, pyqtSignal, QSize, QThread, QTimer
 from PyQt6.QtGui import (
-    QFont, QColor, QBrush, QTextCursor, QTextCharFormat, QTextBlockFormat
+    QFont, QColor, QBrush, QTextCursor, QTextCharFormat, QTextBlockFormat,
+    QFontMetrics
 )
 
 from git_manager import GitManager, GitFile, FileStatus
@@ -942,6 +943,8 @@ class GitDiffView(QWidget):
         self._split = QSplitter(Qt.Orientation.Horizontal)
         self.left_edit = self._make_edit()
         self.right_edit = self._make_edit()
+        # 统一固定行高（代码字体行距 + 余量，容纳 CJK 回退字体），两栏每行严格等高
+        self._fixed_line_height = QFontMetrics(self.left_edit.font()).height() + 4
         self._split.addWidget(self.left_edit)
         self._split.addWidget(self.right_edit)
         self._split.setSizes([500, 500])
@@ -1001,12 +1004,18 @@ class GitDiffView(QWidget):
             return QBrush(QColor(140, 140, 140, 70), Qt.BrushStyle.BDiagPattern)
         return None  # ctx：透明
 
-    def _fill_edit(self, edit: QTextEdit, rows):
+    def _fill_edit(self, edit, rows):
         """用 QTextBlockFormat 逐行写入：整行背景填满（不是只染文字），
-        行号灰色，代码用主题前景色。"""
+        行号灰色，代码用主题前景色。
+
+        关键：给每一行设固定行高。否则含中文/emoji 的行会因回退字体更高而变高，
+        两栏逐行累积错位。固定行高让两栏每行严格等高、精确对齐。
+        """
         edit.clear()
         num_color = QColor('#6a6a7a')
         text_color = QColor(self.theme.get('text', '#eaeaea'))
+        # 行高取代码字体行距 + 余量，足以容纳 CJK 回退字体，避免裁切
+        line_h = self._fixed_line_height
         cursor = QTextCursor(edit.document())
         cursor.beginEditBlock()
         first = True
@@ -1015,6 +1024,9 @@ class GitDiffView(QWidget):
                 cursor.insertBlock()
             first = False
             block_fmt = QTextBlockFormat()
+            block_fmt.setLineHeight(
+                line_h, QTextBlockFormat.LineHeightTypes.FixedHeight.value
+            )
             brush = self._line_bg_brush(kind)
             if brush is not None:
                 block_fmt.setBackground(brush)
