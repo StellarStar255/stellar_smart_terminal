@@ -1463,6 +1463,7 @@ class GitHeaderWidget(QFrame):
     ref_changed = pyqtSignal(str, str)            # (kind, name)；kind ∈ {'local','remote','tag'}
     refresh_clicked = pyqtSignal()
     settings_clicked = pyqtSignal()
+    create_branch_clicked = pyqtSignal()
 
     def __init__(self, theme: dict = None, parent=None):
         super().__init__(parent)
@@ -1533,6 +1534,26 @@ class GitHeaderWidget(QFrame):
         """)
         self.refresh_btn.clicked.connect(self.refresh_clicked.emit)
         layout.addWidget(self.refresh_btn)
+
+        # 新建分支按钮
+        self.create_branch_btn = QPushButton("+")
+        self.create_branch_btn.setToolTip(t("git.create_branch_tooltip"))
+        self.create_branch_btn.setFixedSize(28, 28)
+        self.create_branch_btn.setStyleSheet(f"""
+            QPushButton {{
+                background-color: {self.theme.get('bg_lighter', '#3d3d5c')};
+                color: {self.theme.get('text', '#eaeaea')};
+                border: none;
+                border-radius: 4px;
+                font-size: 18px;
+                font-weight: bold;
+            }}
+            QPushButton:hover {{
+                background-color: {self.theme.get('bg_hover', '#4d4d6c')};
+            }}
+        """)
+        self.create_branch_btn.clicked.connect(self.create_branch_clicked.emit)
+        layout.addWidget(self.create_branch_btn)
 
         # 设置按钮（齿轮）→ 打开 Git 代理等设置
         self.settings_btn = QPushButton("⚙")
@@ -1675,12 +1696,26 @@ class GitHeaderWidget(QFrame):
         """
         self.refresh_btn.setStyleSheet(btn_style)
         self.settings_btn.setStyleSheet(btn_style)
+        self.create_branch_btn.setStyleSheet(f"""
+            QPushButton {{
+                background-color: {theme.get('bg_lighter', '#3d3d5c')};
+                color: {theme.get('text', '#eaeaea')};
+                border: none;
+                border-radius: 4px;
+                font-size: 18px;
+                font-weight: bold;
+            }}
+            QPushButton:hover {{
+                background-color: {theme.get('bg_hover', '#4d4d6c')};
+            }}
+        """)
 
     def apply_language(self):
         """更新语言相关的 UI 文本"""
         self.title_label.setText(t("git.source_control"))
         self.refresh_btn.setToolTip(t("git.refresh_tooltip"))
         self.settings_btn.setToolTip(t("git.settings_tooltip"))
+        self.create_branch_btn.setToolTip(t("git.create_branch_tooltip"))
 
 
 class GitPanel(QWidget):
@@ -1870,6 +1905,7 @@ class GitPanel(QWidget):
         self.header.ref_changed.connect(self._on_ref_changed)
         self.header.refresh_clicked.connect(self._on_refresh_clicked)
         self.header.settings_clicked.connect(self._on_settings_clicked)
+        self.header.create_branch_clicked.connect(self._on_create_branch)
 
         # 变更列表信号
         self.changes_widget.stage_file.connect(self._git_manager.stage_file)
@@ -1945,6 +1981,25 @@ class GitPanel(QWidget):
         self._refresh_branches()
         self._refresh_graph()
         self._fetch_async(force=True)
+
+    def _on_create_branch(self):
+        """点击 +：从当前 HEAD 创建新分支并切换过去。"""
+        text, ok = QInputDialog.getText(
+            self,
+            t("git.create_branch_title"),
+            t("git.create_branch_prompt"),
+            QLineEdit.EchoMode.Normal,
+            "",
+        )
+        if not ok:
+            return
+        name = (text or '').strip()
+        if not name:
+            return
+        if self._git_manager.create_branch(name):
+            self._refresh_status()
+            self._refresh_branches()
+            self._refresh_graph()
 
     # ---------- Git 设置（代理等） ----------
 

@@ -613,6 +613,34 @@ class GitManager(QObject):
         self.status_changed.emit()
         return True
 
+    def create_branch(self, name: str, start_point: Optional[str] = None, checkout: bool = True) -> bool:
+        """创建新分支（默认从当前 HEAD 创建并切换过去）。
+
+        Args:
+            name: 新分支名
+            start_point: 起点引用（默认 = 当前 HEAD）
+            checkout: True 时使用 'checkout -b'（创建+切换），False 时只用 'branch' 创建
+
+        Returns:
+            是否成功
+        """
+        name = (name or '').strip()
+        if not name:
+            self.error_occurred.emit(t("git_mgr.create_branch_failed", error=t("git_mgr.branch_name_empty")))
+            return False
+        if checkout:
+            args = ['checkout', '-b', name]
+        else:
+            args = ['branch', name]
+        if start_point:
+            args.append(start_point)
+        success, output = self._run_git(*args)
+        if not success:
+            self.error_occurred.emit(t("git_mgr.create_branch_failed", error=output))
+            return False
+        self.status_changed.emit()
+        return True
+
     def checkout_ref(self, kind: str, name: str) -> bool:
         """切换到指定引用（本地分支 / 远程分支 / tag）
 

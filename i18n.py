@@ -319,6 +319,9 @@ TRANSLATIONS = {
     "git.proxy_manage_title": {"zh": "管理 Git 代理", "en": "Manage Git Proxies"},
     "git.proxy_remove_btn": {"zh": "删除", "en": "Remove"},
     "git.proxy_close_btn": {"zh": "关闭", "en": "Close"},
+    "git.create_branch_tooltip": {"zh": "创建新分支（从当前 HEAD）", "en": "Create New Branch (from current HEAD)"},
+    "git.create_branch_title": {"zh": "创建新分支", "en": "Create New Branch"},
+    "git.create_branch_prompt": {"zh": "新分支名（将基于当前 HEAD 创建并切换过去）", "en": "New branch name (created from current HEAD and switched to)"},
 
     # ===== Git Manager 错误消息 =====
     "git_mgr.no_repo_path": {"zh": "未设置仓库路径", "en": "Repository path not set"},
@@ -334,6 +337,8 @@ TRANSLATIONS = {
     "git_mgr.commit_failed": {"zh": "提交失败: {error}", "en": "Commit failed: {error}"},
     "git_mgr.diff_failed": {"zh": "获取 diff 失败: {error}", "en": "Failed to get diff: {error}"},
     "git_mgr.checkout_failed": {"zh": "切换分支失败: {error}", "en": "Branch checkout failed: {error}"},
+    "git_mgr.create_branch_failed": {"zh": "创建分支失败: {error}", "en": "Create branch failed: {error}"},
+    "git_mgr.branch_name_empty": {"zh": "分支名不能为空", "en": "Branch name cannot be empty"},
     "git_mgr.push_failed": {"zh": "推送失败: {error}", "en": "Push failed: {error}"},
     "git_mgr.pull_failed": {"zh": "拉取失败: {error}", "en": "Pull failed: {error}"},
 
