@@ -455,6 +455,28 @@ class GitManager(QObject):
         success, output = self._run_git('rev-parse', '--abbrev-ref', 'HEAD')
         return success and output.strip() == "HEAD"
 
+    def get_head_ref(self) -> Tuple[str, str]:
+        """获取 HEAD 当前指向的引用
+
+        Returns:
+            (kind, name)
+            - ('local',    branch_name)  HEAD 指向本地分支
+            - ('tag',      tag_name)     detached 且 HEAD 正好等于某个 tag
+            - ('detached', short_hash)   detached 且不匹配任何 tag
+            - ('unknown',  '')           查询失败
+        """
+        success, output = self._run_git('symbolic-ref', '--quiet', '--short', 'HEAD')
+        if success and output.strip():
+            return ('local', output.strip())
+        # detached：先看是否正好落在某个 tag 上
+        ok, tag = self._run_git('describe', '--tags', '--exact-match', 'HEAD')
+        if ok and tag.strip():
+            return ('tag', tag.strip())
+        ok, short = self._run_git('rev-parse', '--short', 'HEAD')
+        if ok:
+            return ('detached', short.strip())
+        return ('unknown', '')
+
     def get_branches(self) -> List[GitBranch]:
         """获取所有分支
 

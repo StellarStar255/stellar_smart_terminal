@@ -1540,20 +1540,28 @@ class GitHeaderWidget(QFrame):
             }}
         """)
 
-    def update_branches(self, branches: list, current_branch: str, tags: list = None):
+    def update_branches(self, branches: list, head_ref, tags: list = None):
         """更新分支/Tag 列表
 
         Args:
             branches: GitBranch 列表（本地 + 远程）
-            current_branch: 当前 HEAD 显示名（本地分支名 / detached 标记）
+            head_ref: 当前 HEAD 引用 (kind, name)；亦可传入 str 表示本地分支名（兼容旧调用）
             tags: tag 名列表
         """
         tags = tags or []
+        if isinstance(head_ref, str):
+            head_ref = ('local', head_ref)
+        head_kind, head_name = head_ref
+
         self.branch_combo.blockSignals(True)
         self.branch_combo.clear()
 
         locals_ = [b for b in branches if not b.is_remote]
         remotes = [b for b in branches if b.is_remote]
+
+        # detached 且不在 tag 上：插入一个占位项指示当前状态
+        if head_kind == 'detached':
+            self.branch_combo.addItem(f"(detached {head_name})", ('detached', head_name))
 
         # 本地分支
         for b in locals_:
@@ -1573,10 +1581,10 @@ class GitHeaderWidget(QFrame):
             for tag in tags:
                 self.branch_combo.addItem(f"tag: {tag}", ('tag', tag))
 
-        # 选中当前引用：优先匹配本地分支
+        # 按 HEAD 引用类型精确选中对应项
         for i in range(self.branch_combo.count()):
             data = self.branch_combo.itemData(i)
-            if data and data[0] == 'local' and data[1] == current_branch:
+            if data and data[0] == head_kind and data[1] == head_name:
                 self.branch_combo.setCurrentIndex(i)
                 break
 
@@ -1890,8 +1898,8 @@ class GitPanel(QWidget):
         """刷新分支/Tag 列表"""
         branches = self._git_manager.get_branches()
         tags = self._git_manager.get_tags()
-        current = self._git_manager.get_current_branch()
-        self.header.update_branches(branches, current, tags)
+        head_ref = self._git_manager.get_head_ref()
+        self.header.update_branches(branches, head_ref, tags)
 
     def _on_refresh_clicked(self):
         """点击 ↻：刷新状态 + 强制抓取一次远程（更新可 pull 条数）"""
@@ -1956,9 +1964,12 @@ class GitPanel(QWidget):
 
     def _on_ref_changed(self, kind: str, name: str):
         """引用切换处理（本地/远程分支或 tag）"""
-        current = self._git_manager.get_current_branch()
-        # 当前已经在该本地分支上，无需切换
-        if kind == 'local' and name == current:
+        # detached 占位项仅用于显示，不触发任何操作
+        if kind == 'detached':
+            return
+        head_kind, head_name = self._git_manager.get_head_ref()
+        # 已经在目标引用上，无需切换
+        if (kind, name) == (head_kind, head_name):
             return
         if self._git_manager.checkout_ref(kind, name):
             self._refresh_status()
