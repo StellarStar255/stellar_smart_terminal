@@ -167,7 +167,7 @@ class CommandPalette(QWidget):
         """Cmd+K 入口：聚焦并选中已有文本。"""
         self.line_edit.setFocus(Qt.FocusReason.ShortcutFocusReason)
         self.line_edit.selectAll()
-        self._refresh_popup()
+        self._refresh_popup(force_show=True)
 
     def set_placeholder(self, text: str):
         self.line_edit.setPlaceholderText(text)
@@ -177,10 +177,13 @@ class CommandPalette(QWidget):
 
     # ---------- internals ----------
 
-    def _refresh_popup(self):
+    def _refresh_popup(self, force_show: bool = False):
         query = self.line_edit.text()
-        # 当输入为空且未聚焦时，不显示弹层；聚焦但空 → 显示所有命令
-        if not self.line_edit.hasFocus():
+        # 当输入为空且未聚焦时，不显示弹层；聚焦但空 → 显示所有命令。
+        # force_show 用于鼠标点击/快捷键路径 —— 这些时机调用本函数时，
+        # 焦点可能还没切到 line_edit（MousePress 早于 FocusIn），不能拿
+        # hasFocus 作为门槛，否则会错误地把刚要弹的层隐藏掉。
+        if not force_show and not self.line_edit.hasFocus():
             self.popup.hide()
             return
 
@@ -206,7 +209,12 @@ class CommandPalette(QWidget):
 
         # 定位弹层在输入框正下方
         self._position_popup()
+        # macOS 上 Qt::Popup 被外部点击关闭后，内部 visible 标志和窗口实际状态
+        # 容易脱钩 —— 再 show() 时表现为"逻辑已显示但渲染不出"，导致用户点击
+        # 输入框毫无反应。先 hide 再 show 强制走一次完整的隐藏→显示流程。
+        self.popup.hide()
         self.popup.show()
+        self.popup.raise_()
 
     def _position_popup(self):
         le = self.line_edit
@@ -288,8 +296,11 @@ class CommandPalette(QWidget):
                     self.popup.hide()
                     return True
             elif ev.type() == QEvent.Type.MouseButtonPress:
-                # popup 经外部点击关闭后，line_edit 可能仍持有焦点，
-                # 此时再点输入框不会触发 FocusIn，仅靠 FocusIn 重开弹层会失效。
-                # 这里在鼠标按下时直接重开一次，保证总能弹出。
-                self._refresh_popup()
+                # 三种"点了没反应"的情形都靠这里兜底：
+                # 1) popup 经外部点击关闭后 line_edit 仍持有焦点 → 无 FocusIn
+                # 2) macOS 上 Qt::Popup 关闭后焦点状态紊乱 → FocusIn 不可靠
+                # 3) MousePress 早于 FocusIn → 此刻 hasFocus()=False
+                # 主动 setFocus 把焦点拿回来，force_show 跳过 hasFocus 检查。
+                self.line_edit.setFocus(Qt.FocusReason.MouseFocusReason)
+                self._refresh_popup(force_show=True)
         return super().eventFilter(obj, ev)
