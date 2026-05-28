@@ -1455,7 +1455,8 @@ class GitHeaderWidget(QFrame):
     """Git 面板头部"""
 
     # 信号
-    branch_changed = pyqtSignal(str)
+    branch_changed = pyqtSignal(str)              # 兼容保留：仅本地分支切换时触发
+    ref_changed = pyqtSignal(str, str)            # (kind, name)；kind ∈ {'local','remote','tag'}
     refresh_clicked = pyqtSignal()
 
     def __init__(self, theme: dict = None, parent=None):
@@ -1506,7 +1507,7 @@ class GitHeaderWidget(QFrame):
                 border: 1px solid {self.theme.get('border', '#3d3d5c')};
             }}
         """)
-        self.branch_combo.currentTextChanged.connect(self.branch_changed.emit)
+        self.branch_combo.currentIndexChanged.connect(self._on_combo_changed)
         layout.addWidget(self.branch_combo)
 
         # 刷新按钮
@@ -1539,21 +1540,59 @@ class GitHeaderWidget(QFrame):
             }}
         """)
 
-    def update_branches(self, branches: list, current_branch: str):
-        """更新分支列表"""
+    def update_branches(self, branches: list, current_branch: str, tags: list = None):
+        """更新分支/Tag 列表
+
+        Args:
+            branches: GitBranch 列表（本地 + 远程）
+            current_branch: 当前 HEAD 显示名（本地分支名 / detached 标记）
+            tags: tag 名列表
+        """
+        tags = tags or []
         self.branch_combo.blockSignals(True)
         self.branch_combo.clear()
 
-        for branch in branches:
-            if not branch.is_remote:
-                self.branch_combo.addItem(branch.name)
+        locals_ = [b for b in branches if not b.is_remote]
+        remotes = [b for b in branches if b.is_remote]
 
-        # 选中当前分支
-        index = self.branch_combo.findText(current_branch)
-        if index >= 0:
-            self.branch_combo.setCurrentIndex(index)
+        # 本地分支
+        for b in locals_:
+            self.branch_combo.addItem(b.name, ('local', b.name))
+
+        # 远程分支
+        if remotes:
+            if self.branch_combo.count() > 0:
+                self.branch_combo.insertSeparator(self.branch_combo.count())
+            for b in remotes:
+                self.branch_combo.addItem(b.name, ('remote', b.name))
+
+        # Tags
+        if tags:
+            if self.branch_combo.count() > 0:
+                self.branch_combo.insertSeparator(self.branch_combo.count())
+            for tag in tags:
+                self.branch_combo.addItem(f"tag: {tag}", ('tag', tag))
+
+        # 选中当前引用：优先匹配本地分支
+        for i in range(self.branch_combo.count()):
+            data = self.branch_combo.itemData(i)
+            if data and data[0] == 'local' and data[1] == current_branch:
+                self.branch_combo.setCurrentIndex(i)
+                break
 
         self.branch_combo.blockSignals(False)
+
+    def _on_combo_changed(self, index: int):
+        """combo 选择变更 → 派发 ref_changed / branch_changed"""
+        if index < 0:
+            return
+        data = self.branch_combo.itemData(index)
+        if not data:
+            return
+        kind, name = data
+        self.ref_changed.emit(kind, name)
+        if kind == 'local':
+            self.branch_changed.emit(name)
 
     def apply_theme(self, theme: dict):
         """应用主题"""
@@ -1783,7 +1822,7 @@ class GitPanel(QWidget):
         self._git_manager.op_output.connect(self._on_op_output)
 
         # 头部信号
-        self.header.branch_changed.connect(self._on_branch_changed)
+        self.header.ref_changed.connect(self._on_ref_changed)
         self.header.refresh_clicked.connect(self._on_refresh_clicked)
 
         # 变更列表信号
@@ -1848,10 +1887,11 @@ class GitPanel(QWidget):
         self.commit_widget.set_ahead_behind(ahead, behind)
 
     def _refresh_branches(self):
-        """刷新分支列表"""
+        """刷新分支/Tag 列表"""
         branches = self._git_manager.get_branches()
+        tags = self._git_manager.get_tags()
         current = self._git_manager.get_current_branch()
-        self.header.update_branches(branches, current)
+        self.header.update_branches(branches, current, tags)
 
     def _on_refresh_clicked(self):
         """点击 ↻：刷新状态 + 强制抓取一次远程（更新可 pull 条数）"""
@@ -1914,13 +1954,17 @@ class GitPanel(QWidget):
                 pass
         self._active_workers.clear()
 
-    def _on_branch_changed(self, branch_name: str):
-        """分支切换处理"""
+    def _on_ref_changed(self, kind: str, name: str):
+        """引用切换处理（本地/远程分支或 tag）"""
         current = self._git_manager.get_current_branch()
-        if branch_name != current:
-            self._git_manager.checkout_branch(branch_name)
-            self._refresh_branches()
-            self._refresh_graph()
+        # 当前已经在该本地分支上，无需切换
+        if kind == 'local' and name == current:
+            return
+        if self._git_manager.checkout_ref(kind, name):
+            self._refresh_status()
+        # 不论成功失败都刷新一次，以同步 UI 选中态
+        self._refresh_branches()
+        self._refresh_graph()
 
     def _on_discard_file(self, path: str):
         """放弃更改确认"""

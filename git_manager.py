@@ -469,7 +469,8 @@ class GitManager(QObject):
             for line in output.splitlines():
                 is_current = line.startswith('*')
                 name = line[2:].strip()
-                if name:
+                # 跳过 detached HEAD 占位行，如 "(HEAD detached at abc1234)"
+                if name and not name.startswith('('):
                     branches.append(GitBranch(name=name, is_current=is_current, is_remote=False))
 
         # 获取远程分支
@@ -482,6 +483,17 @@ class GitManager(QObject):
 
         return branches
 
+    def get_tags(self) -> List[str]:
+        """获取所有 tag 名
+
+        Returns:
+            tag 名列表（按 creatordate 倒序）
+        """
+        success, output = self._run_git('tag', '--list', '--sort=-creatordate')
+        if not success:
+            return []
+        return [line.strip() for line in output.splitlines() if line.strip()]
+
     def checkout_branch(self, name: str) -> bool:
         """切换分支
 
@@ -492,6 +504,41 @@ class GitManager(QObject):
             是否成功
         """
         success, output = self._run_git('checkout', name)
+        if not success:
+            self.error_occurred.emit(t("git_mgr.checkout_failed", error=output))
+            return False
+        self.status_changed.emit()
+        return True
+
+    def checkout_ref(self, kind: str, name: str) -> bool:
+        """切换到指定引用（本地分支 / 远程分支 / tag）
+
+        Args:
+            kind: 'local' | 'remote' | 'tag'
+            name: 引用名（远程分支形如 'origin/feat'；tag 为 tag 名）
+
+        Returns:
+            是否成功
+        """
+        if kind == 'local':
+            args = (name,)
+        elif kind == 'remote':
+            # origin/feat → 优先用 dwim 在本地建立跟踪分支；若已存在则直接切换
+            local_name = name.split('/', 1)[1] if '/' in name else name
+            success, output = self._run_git('checkout', local_name)
+            if success:
+                self.status_changed.emit()
+                return True
+            # 兜底：直接 checkout 远程引用（detached）
+            args = (name,)
+        elif kind == 'tag':
+            # checkout tag 会进入 detached HEAD，使用 refs/tags/ 路径避免与同名分支歧义
+            args = (f'refs/tags/{name}',)
+        else:
+            self.error_occurred.emit(t("git_mgr.checkout_failed", error=f"unknown ref kind: {kind}"))
+            return False
+
+        success, output = self._run_git('checkout', *args)
         if not success:
             self.error_occurred.emit(t("git_mgr.checkout_failed", error=output))
             return False
