@@ -20,6 +20,7 @@ from PyQt6.QtGui import (
 
 from git_manager import GitManager, GitFile, FileStatus
 from i18n import t, get_language
+from utils import read_config_json, atomic_write_json
 
 
 # 文件状态颜色
@@ -2124,28 +2125,24 @@ class GitPanel(QWidget):
         return Path(__file__).parent / ".smart_terminal_config.json"
 
     def _load_config(self) -> dict:
-        try:
-            p = self._config_file_path()
-            if p.exists():
-                with open(p, 'r', encoding='utf-8') as f:
-                    return json.load(f) or {}
-        except Exception:
-            pass
-        return {}
+        cfg, _ok = read_config_json(self._config_file_path())
+        return cfg
 
     def _save_config(self, patch: dict):
+        """把 patch 合并写回主配置文件。
+
+        多窗口共享同一份配置，需特别小心：
+        - 文件存在但解析失败时（另一个进程正在写入半截 JSON），放弃本次写入，
+          否则会把对方刚保存的 presets / git_proxy 等字段清空。
+        - 用原子写（先写临时文件再 rename），避免本次写入也产生半截文件。
+        """
         try:
             p = self._config_file_path()
-            cfg = {}
-            if p.exists():
-                with open(p, 'r', encoding='utf-8') as f:
-                    try:
-                        cfg = json.load(f) or {}
-                    except Exception:
-                        cfg = {}
+            cfg, ok = read_config_json(p)
+            if not ok:
+                return
             cfg.update(patch)
-            with open(p, 'w', encoding='utf-8') as f:
-                json.dump(cfg, f, ensure_ascii=False, indent=2)
+            atomic_write_json(p, cfg)
         except Exception:
             pass
 

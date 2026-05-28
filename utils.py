@@ -1,8 +1,10 @@
 """
 工具函数模块
 """
+import json
 import re
 import shutil
+import tempfile
 from datetime import datetime
 from pathlib import Path
 from typing import List, Set
@@ -159,3 +161,59 @@ def format_file_size(size_bytes: int) -> str:
         if size_bytes < 1024:
             return f"{size_bytes:.1f} {unit}"
     return f"{size_bytes:.1f} TB"
+
+
+def read_config_json(file_path: Path):
+    """读取共享 JSON 配置：返回 (data_dict, ok)。
+
+    - 文件不存在：返回 ({}, True)（视为新装环境，调用方可放心写入）。
+    - 文件存在但解析失败 / 读取出错：返回 ({}, False)。
+      调用方拿到 ok=False 时应当 **放弃本次保存**，避免把别的进程刚写到一半的
+      配置当作"已损坏"全部丢弃 —— 这正是多窗口下 git_proxy / presets 莫名
+      被清空的根因。
+    """
+    try:
+        if not file_path.exists():
+            return {}, True
+        with open(file_path, 'r', encoding='utf-8') as f:
+            data = json.load(f)
+        return (data or {}), True
+    except (OSError, json.JSONDecodeError, ValueError):
+        return {}, False
+
+
+def atomic_write_json(file_path: Path, data) -> bool:
+    """原子写入 JSON 配置文件。
+
+    背景：多个 Smart Terminal 窗口（多进程）共用同一份配置文件。直接
+    `with open(... 'w')` 会先 truncate 再逐步写入，期间另一个进程读到的就是
+    被截断的半截 JSON → 解析失败 → 该进程把它当作"文件损坏"，进而以自己
+    内存里残缺的配置覆盖回磁盘，造成 git_proxy / git_proxies 等"由其它组件
+    维护、本进程不感知"的字段被清空。
+
+    用 tempfile.mkstemp + Path.replace 的"先写临时文件，再原子改名"，
+    其它进程在任意时刻读到的要么是旧的完整文件、要么是新的完整文件，
+    不存在半截窗口。
+    """
+    try:
+        directory = file_path.parent
+        directory.mkdir(parents=True, exist_ok=True)
+        fd, tmp_path = tempfile.mkstemp(
+            dir=str(directory), suffix='.tmp', prefix='.config_'
+        )
+        try:
+            with open(fd, 'w', encoding='utf-8') as f:
+                json.dump(data, f, ensure_ascii=False, indent=2)
+            Path(tmp_path).replace(file_path)
+        except BaseException:
+            Path(tmp_path).unlink(missing_ok=True)
+            raise
+        return True
+    except OSError:
+        # 临时文件创建/重命名失败时回退到直写，至少保证当前进程的设置能落盘
+        try:
+            with open(file_path, 'w', encoding='utf-8') as f:
+                json.dump(data, f, ensure_ascii=False, indent=2)
+            return True
+        except OSError:
+            return False

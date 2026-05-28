@@ -56,6 +56,7 @@ from command_palette import CommandPalette
 from file_editor import FileEditorWidget
 from i18n import t, set_language, get_language
 from flow_layout import FlowLayout
+from utils import read_config_json, atomic_write_json
 import shutil
 import subprocess
 
@@ -1287,15 +1288,15 @@ class WindowNavigatorPanel(QWidget):
         """保存导航面板设置到主配置文件"""
         try:
             config_file = Path(__file__).parent / ".smart_terminal_config.json"
-            config = {}
-            if config_file.exists():
-                with open(config_file, 'r', encoding='utf-8') as f:
-                    config = json.load(f)
-            config['navigator_geometry'] = [self.x(), self.y(), self.width(), self.height()]
-            config['navigator_font_size'] = self._font_size
-            config['navigator_quick_close'] = bool(self._quick_close)
-            with open(config_file, 'w', encoding='utf-8') as f:
-                json.dump(config, f, ensure_ascii=False, indent=2)
+            existing, ok = read_config_json(config_file)
+            # 文件存在但解析失败：可能正被别的进程写到一半，放弃本次保存，
+            # 否则会把对方的更改（如 git_proxy）当作"已损坏"全部覆盖掉。
+            if not ok:
+                return
+            existing['navigator_geometry'] = [self.x(), self.y(), self.width(), self.height()]
+            existing['navigator_font_size'] = self._font_size
+            existing['navigator_quick_close'] = bool(self._quick_close)
+            atomic_write_json(config_file, existing)
         except Exception:
             pass
 
@@ -8726,6 +8727,18 @@ class MainWindow(QMainWindow):
         try:
             # 先把磁盘上其它窗口新增的目录历史并入本窗口，避免后写覆盖先写
             self._merge_dir_history_for_save()
+            # 一次性读取磁盘上的现有配置：既用于"未修改预设时回退到磁盘版本"，
+            # 又用于把本函数没列出的字段（如 git_widget 写入的 git_proxy /
+            # git_proxies）原样保留下来。两段逻辑共用同一次读取，避免重复 I/O
+            # 也减少与其它进程的写入交错窗口。
+            existing_config, read_ok = read_config_json(self.CONFIG_FILE)
+            # 文件存在但解析失败：很可能是另一个 Smart Terminal 进程正在写到
+            # 一半（多窗口共用同一份配置文件）。此时若强行用内存里"没有
+            # git_proxy"的配置覆盖，对方刚保存的代理 / 预设就会被清空。放弃
+            # 本次保存让对方的写入留下来，等下次稳定状态再保存即可。
+            if not read_ok:
+                return
+
             # 获取当前选中的预设索引
             current_index = self.preset_combo.currentIndex() if hasattr(self, 'preset_combo') else 0
             image_prefix = self.image_prefix_checkbox.isChecked() if hasattr(self, 'image_prefix_checkbox') else False
@@ -8737,16 +8750,10 @@ class MainWindow(QMainWindow):
 
             # 防止多窗口覆盖：如果本窗口没有修改预设，从磁盘加载最新的预设
             # 这样关闭窗口时不会覆盖其他窗口保存的预设
-            presets_to_save = self.presets
-            if not getattr(self, '_presets_modified', False):
-                try:
-                    if self.CONFIG_FILE.exists():
-                        with open(self.CONFIG_FILE, 'r', encoding='utf-8') as f:
-                            existing_config = json.load(f)
-                        if 'presets' in existing_config:
-                            presets_to_save = existing_config['presets']
-                except Exception:
-                    pass  # 读取失败时使用内存中的预设
+            if getattr(self, '_presets_modified', False):
+                presets_to_save = self.presets
+            else:
+                presets_to_save = existing_config.get('presets', self.presets)
 
             config = {
                 'presets': presets_to_save,
@@ -8784,30 +8791,21 @@ class MainWindow(QMainWindow):
                 config['navigator_geometry'] = [nav.x(), nav.y(), nav.width(), nav.height()]
                 config['navigator_font_size'] = nav._font_size
             else:
-                # 导航面板已关闭，保留之前保存的设置
-                try:
-                    if self.CONFIG_FILE.exists():
-                        with open(self.CONFIG_FILE, 'r', encoding='utf-8') as f2:
-                            old = json.load(f2)
-                        if 'navigator_geometry' in old:
-                            config['navigator_geometry'] = old['navigator_geometry']
-                        if 'navigator_font_size' in old:
-                            config['navigator_font_size'] = old['navigator_font_size']
-                except Exception:
-                    pass
+                # 导航面板已关闭，保留之前已落盘的几何 / 字号
+                if 'navigator_geometry' in existing_config:
+                    config['navigator_geometry'] = existing_config['navigator_geometry']
+                if 'navigator_font_size' in existing_config:
+                    config['navigator_font_size'] = existing_config['navigator_font_size']
             # 合并写入：保留由其它组件维护、本函数未列出的字段（如 git_widget
             # 写入的 git_proxy / git_proxies）。直接整体覆盖会把这些键清空，
             # 导致退出后再次打开时丢失代理等设置。
-            merged = {}
-            try:
-                if self.CONFIG_FILE.exists():
-                    with open(self.CONFIG_FILE, 'r', encoding='utf-8') as f:
-                        merged = json.load(f) or {}
-            except Exception:
-                merged = {}
+            merged = dict(existing_config)
             merged.update(config)
-            with open(self.CONFIG_FILE, 'w', encoding='utf-8') as f:
-                json.dump(merged, f, ensure_ascii=False, indent=2)
+            # 原子写：先写临时文件再 rename，避免多进程并发写入时另一个进程
+            # 读到半截 JSON。直接 `open(...'w')` 会先 truncate，期间另一个进程
+            # 解析失败 → 按"已损坏"处理 → 反过来覆盖掉本次刚写的内容，造成
+            # git_proxy 等字段莫名清零。
+            atomic_write_json(self.CONFIG_FILE, merged)
         except Exception:
             pass
 
