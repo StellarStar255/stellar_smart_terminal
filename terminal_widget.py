@@ -1189,6 +1189,11 @@ class TerminalWidget(QWidget):
     @staticmethod
     def _need_boundary_space(last_char: str, first_char: str) -> bool:
         """判断应用层软换行拼接时是否需要在边界处插入空格"""
+        if not last_char or not first_char:
+            return False
+        # 边界已经有空白（前一行尾部空格或后一行首部空格），不再额外补空格
+        if last_char.isspace() or first_char.isspace():
+            return False
         last_wide = unicodedata.east_asian_width(last_char) in ('F', 'W')
         first_wide = unicodedata.east_asian_width(first_char) in ('F', 'W')
         if last_wide and first_wide:
@@ -2606,7 +2611,11 @@ class TerminalWidget(QWidget):
         total_lines = history_count + self.term_rows
         term_cols = self.term_cols
 
-        selected_lines = []
+        # 每行收集: (line_text, is_soft, last_content_col, leading_space_count, can_heuristic)
+        # last_content_col: 整行最后一个非空格字符的列结尾位置（用于判断行是否"填满到行尾"）
+        # leading_space_count: 整行起首的空格数（用于判断下一行是否是续行缩进）
+        # can_heuristic: 是否允许对该行启用应用层软换行启发式（仅当选择覆盖整行宽度时）
+        rows = []
 
         # 直接使用绝对行号遍历
         for abs_row in range(start_row, end_row + 1):
@@ -2659,38 +2668,60 @@ class TerminalWidget(QWidget):
                 # 宽字符占用两列，如果选择范围包含第二列也应该包含该字符
                 elif col < col_start and self._is_wide_char(char_data) and col + 1 >= col_start:
                     selected_chars.append(char_data)
-            # 检测换行类型：0=硬换行, 1=终端软换行(pyte), 2=应用层软换行(启发式)
-            wrap_type = 0
-            if abs_row < end_row:
-                if self.screen.is_soft_wrapped(buffer_line):
-                    wrap_type = 1
-                else:
-                    # 启发式：检查行内容是否填满到行尾附近
-                    # （捕捉应用层文字排版换行，如 Claude Code 的 markdown 渲染器）
-                    # 阈值：内容占用超过约 85% 的行宽，或距行尾 ≤5 列
-                    is_full_line = (col_start == 0 and col_end == term_cols - 1)
-                    if is_full_line:
-                        wrap_threshold = max(term_cols - 5, int(term_cols * 0.85))
-                        for rev_col, rev_char in reversed(chars):
-                            if rev_char != ' ':
-                                effective_end = rev_col + (1 if self._is_wide_char(rev_char) else 0)
-                                if effective_end >= wrap_threshold:
-                                    wrap_type = 2
-                                break
 
-            if wrap_type == 1:
+            # 行级元数据（基于整行而非选区，用于换行类型判断）
+            last_content_col = -1
+            leading_space_count = 0
+            seen_non_space = False
+            for c_col, c_ch in chars:
+                if c_ch == ' ':
+                    if not seen_non_space:
+                        leading_space_count += 1
+                else:
+                    seen_non_space = True
+                    last_content_col = c_col + (1 if self._is_wide_char(c_ch) else 0)
+
+            is_soft = self.screen.is_soft_wrapped(buffer_line)
+            can_heuristic = (col_start == 0 and col_end == term_cols - 1)
+
+            if is_soft:
                 # 终端软换行：保留所有字符（包括尾部空格，它们是真实内容）
                 line_text = ''.join(selected_chars)
             else:
                 line_text = ''.join(selected_chars).rstrip()
 
-            selected_lines.append((line_text, wrap_type))
+            rows.append((line_text, is_soft, last_content_col, leading_space_count, can_heuristic))
+
+        # 用 look-ahead 决定每行的换行类型：0=硬换行, 1=终端软换行, 2=应用层软换行
+        threshold_high = max(int(term_cols * 0.85), term_cols - 6)
+        threshold_low = max(8, int(term_cols * 0.40))
+        n = len(rows)
+        resolved = []
+        for i, (text, is_soft, last_col, _, can_h) in enumerate(rows):
+            if i == n - 1:
+                resolved.append((text, 0))
+                continue
+            if is_soft:
+                resolved.append((text, 1))
+                continue
+            wrap_type = 0
+            if can_h and last_col >= 0:
+                next_leading = rows[i + 1][3]
+                next_has_content = bool(rows[i + 1][0].strip())
+                if last_col >= threshold_high:
+                    # 高置信度：行内容直接占满到行尾附近 → 应用层 wrap
+                    wrap_type = 2
+                elif last_col >= threshold_low and next_leading >= 1 and next_has_content:
+                    # 中等置信度：行占用过半且下一行带续行缩进 → 应用层 wrap
+                    # 命中如 Claude Code 等渲染器按自己目标宽度（远小于终端列数）wrap 的场景
+                    wrap_type = 2
+            resolved.append((text, wrap_type))
 
         # 组合结果
         result = []
-        for i, (line_text, wrap_type) in enumerate(selected_lines):
+        for i, (line_text, wrap_type) in enumerate(resolved):
             if i > 0:
-                prev_text, prev_wrap = selected_lines[i - 1]
+                prev_text, prev_wrap = resolved[i - 1]
                 if prev_wrap == 1:
                     # 终端软换行：直接拼接（无需处理缩进）
                     pass
@@ -2752,8 +2783,8 @@ class TerminalWidget(QWidget):
         screen = self.screen
 
         def extract_line(buffer_line):
-            """提取行内容，返回 (text, wrap_type)
-            wrap_type: 0=硬换行, 1=终端软换行, 2=应用层软换行
+            """提取行内容，返回 (text, is_soft, last_content_col, leading_space_count)
+            最终换行类型在后续 look-ahead 阶段决定。
             """
             chars_with_col = []  # (col, char_data)
             char_list = []
@@ -2777,26 +2808,25 @@ class TerminalWidget(QWidget):
                 except (KeyError, IndexError, TypeError):
                     col += 1
 
-            # 确定换行类型
-            wrap_type = 0
-            if screen.is_soft_wrapped(buffer_line):
-                wrap_type = 1
-            else:
-                # 启发式：检查行是否填满到行尾附近（应用层换行）
-                wrap_threshold = max(columns - 5, int(columns * 0.85))
-                for rev_col, rev_char in reversed(chars_with_col):
-                    if rev_char != ' ':
-                        effective_end = rev_col + (1 if is_wide(rev_char) else 0)
-                        if effective_end >= wrap_threshold:
-                            wrap_type = 2
-                        break
+            # 行级元数据
+            last_content_col = -1
+            leading_space_count = 0
+            seen_non_space = False
+            for c_col, c_ch in chars_with_col:
+                if c_ch == ' ':
+                    if not seen_non_space:
+                        leading_space_count += 1
+                else:
+                    seen_non_space = True
+                    last_content_col = c_col + (1 if is_wide(c_ch) else 0)
 
-            if wrap_type == 1:
+            is_soft = screen.is_soft_wrapped(buffer_line)
+            if is_soft:
                 text = ''.join(char_list)  # 终端软换行：保留尾部空格
             else:
                 text = ''.join(char_list).rstrip()
 
-            return text, wrap_type
+            return text, is_soft, last_content_col, leading_space_count
 
         # 收集所有行
         line_data = []
@@ -2813,12 +2843,35 @@ class TerminalWidget(QWidget):
         while line_data and not line_data[-1][0]:
             line_data.pop()
 
+        # 用 look-ahead 决定换行类型：0=硬换行, 1=终端软换行, 2=应用层软换行
+        threshold_high = max(int(columns * 0.85), columns - 6)
+        threshold_low = max(8, int(columns * 0.40))
+        n = len(line_data)
+        resolved = []
+        for i, (text, is_soft, last_col, _) in enumerate(line_data):
+            if i == n - 1:
+                resolved.append((text, 0))
+                continue
+            if is_soft:
+                resolved.append((text, 1))
+                continue
+            wrap_type = 0
+            if last_col >= 0:
+                next_leading = line_data[i + 1][3]
+                next_has_content = bool(line_data[i + 1][0].strip())
+                if last_col >= threshold_high:
+                    wrap_type = 2  # 高置信度：行内容直接占满到行尾附近
+                elif last_col >= threshold_low and next_leading >= 1 and next_has_content:
+                    # 中等置信度：行占用过半且下一行带续行缩进 → 应用层 wrap
+                    wrap_type = 2
+            resolved.append((text, wrap_type))
+
         # 组合结果
         need_space = self._need_boundary_space
         result = []
-        for i, (text, wrap_type) in enumerate(line_data):
+        for i, (text, wrap_type) in enumerate(resolved):
             if i > 0:
-                prev_text, prev_wrap = line_data[i - 1]
+                prev_text, prev_wrap = resolved[i - 1]
                 if prev_wrap == 1:
                     pass  # 终端软换行：直接拼接
                 elif prev_wrap == 2:
