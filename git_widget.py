@@ -1954,10 +1954,20 @@ class GitPanel(QWidget):
         worker.finished.connect(worker.deleteLater)
 
     def shutdown(self):
-        """关闭前调用：停掉定时器并等待在跑的后台线程，避免线程仍在运行时被销毁导致 abort。"""
+        """关闭前调用：停掉定时器并等待在跑的后台线程，避免线程仍在运行时被销毁导致 abort。
+
+        关键：先 kill 正在跑的 git 子进程，否则 push/pull 卡在网络上时
+        worker 一直阻塞在 subprocess.communicate()，QThread.terminate() 对
+        阻塞在 C 库里的 Python 线程不可靠，会导致整个程序无法退出。
+        """
         try:
             self._fetch_timer.stop()
         except RuntimeError:
+            pass
+        # 先放掉子进程，worker 线程随即从 communicate() 返回，wait() 几乎瞬间完成
+        try:
+            self._git_manager.cancel_running()
+        except Exception:
             pass
         for worker in list(self._active_workers):
             try:

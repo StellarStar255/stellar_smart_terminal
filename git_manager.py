@@ -3,7 +3,9 @@ Git 管理器后端
 提供 Git 仓库操作的核心功能
 """
 import os
+import signal
 import subprocess
+import threading
 from enum import Enum
 from dataclasses import dataclass
 from typing import List, Tuple, Optional
@@ -73,6 +75,12 @@ class GitManager(QObject):
         self._debounce_timer.setSingleShot(True)
         self._debounce_timer.setInterval(300)
         self._debounce_timer.timeout.connect(self._emit_status_changed)
+
+        # 跟踪在跑的 git 子进程，便于关闭程序或用户取消时一次性 kill
+        # （subprocess.run 是阻塞调用，worker 线程在 push/pull hang 住时只能
+        # 通过 kill 子进程来让 communicate() 立刻返回。）
+        self._active_procs: set = set()
+        self._proc_lock = threading.Lock()
 
     def set_repository(self, path: str) -> bool:
         """设置仓库路径
@@ -196,6 +204,57 @@ class GitManager(QObject):
         """发出状态变更信号"""
         self.status_changed.emit()
 
+    def _spawn_git(self, args: list):
+        """启动一个 git 子进程并登记到 _active_procs。
+
+        使用 start_new_session=True 让 git 及其子进程（ssh / credential helper）
+        进入独立进程组，便于在取消时通过 killpg 一次性结束整棵进程树。
+        """
+        env = dict(os.environ)
+        env['GIT_TERMINAL_PROMPT'] = '0'
+        proc = subprocess.Popen(
+            ['git'] + list(args),
+            cwd=self._repo_path,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
+            text=True,
+            env=env,
+            start_new_session=True,
+        )
+        with self._proc_lock:
+            self._active_procs.add(proc)
+        return proc
+
+    def _kill_proc(self, proc: subprocess.Popen):
+        """SIGTERM 整个进程组；失败回落到 proc.terminate()。"""
+        try:
+            os.killpg(os.getpgid(proc.pid), signal.SIGTERM)
+        except Exception:
+            try:
+                proc.terminate()
+            except Exception:
+                pass
+
+    def _release_proc(self, proc: subprocess.Popen):
+        with self._proc_lock:
+            self._active_procs.discard(proc)
+
+    def cancel_running(self):
+        """终止所有正在运行的 git 子进程（关闭程序或用户取消时调用）。"""
+        with self._proc_lock:
+            procs = list(self._active_procs)
+        for p in procs:
+            self._kill_proc(p)
+        # 简短等待让进程真正退出；不长等，因为调用者通常急着关窗口
+        for p in procs:
+            try:
+                p.wait(timeout=2)
+            except Exception:
+                try:
+                    p.kill()
+                except Exception:
+                    pass
+
     def _run_git(self, *args, check: bool = True, timeout: int = 30) -> Tuple[bool, str]:
         """执行 git 命令
 
@@ -210,29 +269,27 @@ class GitManager(QObject):
         if not self._repo_path:
             return False, t("git_mgr.no_repo_path")
 
-        # 在无终端的 GUI 进程里禁用交互式提示，否则 git 会卡住等账号密码/口令
-        # 直到超时；禁用后会立刻返回明确的鉴权错误，便于提示用户。
-        env = dict(os.environ)
-        env['GIT_TERMINAL_PROMPT'] = '0'
-
+        proc = None
         try:
-            result = subprocess.run(
-                ['git'] + list(args),
-                cwd=self._repo_path,
-                capture_output=True,
-                text=True,
-                timeout=timeout,
-                env=env,
-            )
+            proc = self._spawn_git(list(args))
+            try:
+                stdout, stderr = proc.communicate(timeout=timeout)
+            except subprocess.TimeoutExpired:
+                self._kill_proc(proc)
+                try:
+                    proc.communicate(timeout=3)
+                except Exception:
+                    pass
+                return False, t("git_mgr.timeout")
 
-            if check and result.returncode != 0:
-                return False, result.stderr.strip() or result.stdout.strip()
-
-            return True, result.stdout
-        except subprocess.TimeoutExpired:
-            return False, t("git_mgr.timeout")
+            if check and proc.returncode != 0:
+                return False, (stderr or '').strip() or (stdout or '').strip()
+            return True, stdout
         except Exception as e:
             return False, str(e)
+        finally:
+            if proc is not None:
+                self._release_proc(proc)
 
     def get_status(self) -> Tuple[List[GitFile], List[GitFile]]:
         """获取文件状态
@@ -639,22 +696,27 @@ class GitManager(QObject):
         """
         if not self._repo_path:
             return False, t("git_mgr.no_repo_path")
-        env = dict(os.environ)
-        env['GIT_TERMINAL_PROMPT'] = '0'
+        proc = None
         try:
-            result = subprocess.run(
-                ['git'] + list(args),
-                cwd=self._repo_path, capture_output=True, text=True,
-                timeout=timeout, env=env,
-            )
-            err = (result.stderr or '').strip()
-            out = (result.stdout or '').strip()
+            proc = self._spawn_git(list(args))
+            try:
+                stdout, stderr = proc.communicate(timeout=timeout)
+            except subprocess.TimeoutExpired:
+                self._kill_proc(proc)
+                try:
+                    proc.communicate(timeout=3)
+                except Exception:
+                    pass
+                return False, t("git_mgr.timeout")
+            err = (stderr or '').strip()
+            out = (stdout or '').strip()
             combined = "\n".join(p for p in (err, out) if p)
-            return result.returncode == 0, combined
-        except subprocess.TimeoutExpired:
-            return False, t("git_mgr.timeout")
+            return proc.returncode == 0, combined
         except Exception as e:
             return False, str(e)
+        finally:
+            if proc is not None:
+                self._release_proc(proc)
 
     def fetch(self, remote: str = "origin") -> bool:
         """从远程抓取最新 refs（更新 origin/*），用于计算"落后多少条可 pull"。
