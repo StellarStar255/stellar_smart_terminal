@@ -1607,6 +1607,8 @@ class GitPanel(QWidget):
 
     # 用户拖拽分隔条改变提交区高度时发出（主窗口据此持久化）
     commit_height_changed = pyqtSignal(int)
+    # 用户拖拽分隔条改变 body 各栏高度时发出完整 sizes（主窗口据此持久化）
+    body_sizes_changed = pyqtSignal(list)
     # 双击文件请求查看 diff，交给主窗口在右侧大空间显示 (title, diff_content)
     diff_requested = pyqtSignal(str, str)
     # pull 等操作完成后，把 git 输出交给主窗口在右侧大空间显示 (title, output)
@@ -1616,6 +1618,7 @@ class GitPanel(QWidget):
         super().__init__(parent)
         self.theme = theme or {}
         self._desired_commit_height = 0  # 记忆的提交区高度（0=未设置，用默认）
+        self._desired_body_sizes = None   # 记忆的 body splitter 各栏高度（None=未设置）
         self._git_manager = GitManager(self)
         self._last_fetch_ts = 0.0  # 上次后台 fetch 的时间（节流用）
         self._active_workers = set()  # 在跑的后台线程，关闭时统一等待，避免被销毁时 abort
@@ -1699,22 +1702,52 @@ class GitPanel(QWidget):
         """)
 
     def _on_splitter_moved(self, *_):
-        """用户拖动分隔条 → 记住提交区高度并通知外部持久化。"""
+        """用户拖动分隔条 → 记住 body 各栏高度并通知外部持久化。"""
         sizes = self.body_splitter.sizes()
-        idx = self.body_splitter.indexOf(self.commit_widget)
-        if idx < 0 or idx >= len(sizes):
+        if not sizes or not all(s >= 0 for s in sizes) or not any(s > 0 for s in sizes):
             return
-        commit_h = sizes[idx]
-        others = [s for i, s in enumerate(sizes) if i != idx]
-        if commit_h > 0 and any(s > 0 for s in others):
-            self._desired_commit_height = commit_h
-            self.commit_height_changed.emit(commit_h)
+        self._desired_body_sizes = list(sizes)
+        self.body_sizes_changed.emit(list(sizes))
+        # 兼容旧持久化字段：单独再记一次提交区高度
+        idx = self.body_splitter.indexOf(self.commit_widget)
+        if 0 <= idx < len(sizes) and sizes[idx] > 0:
+            self._desired_commit_height = sizes[idx]
+            self.commit_height_changed.emit(sizes[idx])
 
     def apply_commit_height(self, height: int):
         """由主窗口在加载配置后调用：设定要恢复的提交区高度。"""
         if isinstance(height, int) and height > 0:
             self._desired_commit_height = height
             self._apply_commit_height()
+
+    def apply_body_sizes(self, sizes):
+        """由主窗口在加载配置后调用：设定要恢复的 body 各栏高度。"""
+        if isinstance(sizes, list) and sizes and all(isinstance(s, int) and s >= 0 for s in sizes):
+            self._desired_body_sizes = list(sizes)
+            self._apply_body_sizes()
+
+    def _apply_body_sizes(self, _attempts: int = 0):
+        """把记忆的 body 各栏高度套用到分隔器；栏数变化时按比例缩放再回填。"""
+        sizes = self._desired_body_sizes
+        if not sizes:
+            return
+        total = self.body_splitter.height()
+        if total <= 1:
+            if _attempts < 40:
+                QTimer.singleShot(50, lambda: self._apply_body_sizes(_attempts + 1))
+            return
+        cur = self.body_splitter.sizes()
+        n = len(cur)
+        if n == 0:
+            return
+        # 栏数对得上就直接用；对不上则按比例填充到当前栏数
+        if len(sizes) == n:
+            src = list(sizes)
+        else:
+            src = (list(sizes) + [max(1, sum(sizes) // max(1, len(sizes)))] * n)[:n]
+        s_total = sum(src) or 1
+        new_sizes = [max(1, int(total * s / s_total)) for s in src]
+        self.body_splitter.setSizes(new_sizes)
 
     def _apply_commit_height(self, _attempts: int = 0):
         """把记忆的提交区高度套用到分隔器（提交区在 splitter 中的实际索引），
@@ -1780,8 +1813,11 @@ class GitPanel(QWidget):
             self._refresh_status()
             self._refresh_branches()
             self._refresh_graph()
-            # 面板每次显示时，恢复用户记忆的提交区高度
-            self._apply_commit_height()
+            # 面板每次显示时，恢复用户记忆的各栏高度
+            if self._desired_body_sizes:
+                self._apply_body_sizes()
+            else:
+                self._apply_commit_height()
             # 后台抓一次远程，刷新"可 pull 条数"
             self._fetch_async()
         else:

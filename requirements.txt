@@ -1,3 +1,4 @@
 PyQt6>=6.5.0
 pyte>=0.8.0
 paramiko>=3.0.0  # Remote Explorer (SSH/SFTP)
+requests>=2.28.0  # LLM 调用（Generate commit message）

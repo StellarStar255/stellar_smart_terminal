@@ -7009,9 +7009,12 @@ class MainWindow(QMainWindow):
         self.git_panel = GitPanel(theme=current_theme)
         layout.addWidget(self.git_panel)
 
-        # 持久化提交区高度：拖拽时记下，加载配置时恢复
+        # 持久化提交区高度 + body 各栏尺寸：拖拽时记下，加载配置时恢复
         self.git_panel.commit_height_changed.connect(self._on_git_commit_height_changed)
-        if isinstance(self._saved_git_commit_height, int) and self._saved_git_commit_height > 0:
+        self.git_panel.body_sizes_changed.connect(self._on_git_body_sizes_changed)
+        if isinstance(self._saved_git_body_sizes, list) and self._saved_git_body_sizes:
+            self.git_panel.apply_body_sizes(self._saved_git_body_sizes)
+        elif isinstance(self._saved_git_commit_height, int) and self._saved_git_commit_height > 0:
             self.git_panel.apply_commit_height(self._saved_git_commit_height)
 
         # 双击文件查看 diff → 在右侧大空间显示左右并排对比（不挤在左面板里）
@@ -7023,6 +7026,11 @@ class MainWindow(QMainWindow):
         """记住用户拖拽出的 Git 提交区高度（关闭时随配置一起落盘）。"""
         if isinstance(height, int) and height > 0:
             self._saved_git_commit_height = height
+
+    def _on_git_body_sizes_changed(self, sizes: list):
+        """记住用户拖拽出的 Git body 各栏高度（关闭时随配置一起落盘）。"""
+        if isinstance(sizes, list) and sizes and all(isinstance(s, int) and s >= 0 for s in sizes):
+            self._saved_git_body_sizes = list(sizes)
 
     def _show_git_diff(self, title: str, diff_content: str):
         """在主内容区（右侧大空间）显示左右并排 diff，暂时盖住终端。"""
@@ -8460,7 +8468,8 @@ class MainWindow(QMainWindow):
         self._saved_explorer_main_sizes = None  # main_splitter 4 项尺寸（左右分屏）
         self._saved_explorer_internal_sizes = None  # explorer_splitter 2 项尺寸（上下分屏）
         self._saved_left_panel_width = None  # 仅左面板可见时的宽度（无编辑器场景）
-        self._saved_git_commit_height = None  # Git 面板提交区高度（拖拽记忆）
+        self._saved_git_commit_height = None  # Git 面板提交区高度（拖拽记忆，兼容旧版）
+        self._saved_git_body_sizes = None     # Git 面板 body splitter 各栏尺寸（拖拽记忆）
         try:
             if self.CONFIG_FILE.exists():
                 with open(self.CONFIG_FILE, 'r', encoding='utf-8') as f:
@@ -8522,6 +8531,9 @@ class MainWindow(QMainWindow):
                     git_commit_h = config.get('git_commit_height', None)
                     if isinstance(git_commit_h, int) and git_commit_h > 0:
                         self._saved_git_commit_height = git_commit_h
+                    git_body_sizes = config.get('git_body_splitter_sizes', None)
+                    if isinstance(git_body_sizes, list) and git_body_sizes and all(isinstance(s, int) and s >= 0 for s in git_body_sizes):
+                        self._saved_git_body_sizes = git_body_sizes
         except Exception:
             self.presets = []
 
@@ -8686,6 +8698,7 @@ class MainWindow(QMainWindow):
                 'explorer_internal_splitter_sizes': getattr(self, '_saved_explorer_internal_sizes', None),
                 'left_panel_width': getattr(self, '_saved_left_panel_width', None),
                 'git_commit_height': getattr(self, '_saved_git_commit_height', None),
+                'git_body_splitter_sizes': getattr(self, '_saved_git_body_sizes', None),
             }
             # 保存窗口导航面板设置
             nav = MainWindow._global_window_navigator
