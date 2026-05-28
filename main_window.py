@@ -2788,6 +2788,22 @@ class MainWindow(QMainWindow):
                     self._setup_macos_window()
             QTimer.singleShot(100, setup_macos)
 
+        # __init__ 里基于 main_splitter.width() 计算左面板宽度时，窗口几何刚
+        # 通过 setGeometry 设上但布局还没把真实宽度传到 main_splitter；此时
+        # setSizes 等同设比例，等窗口最终铺到目标宽度，左面板会按比例放大。
+        # show 之后宽度已稳定，这里再 apply 一次记忆值。仅做一次。
+        if not getattr(self, '_splitter_sizes_restored_on_show', False):
+            self._splitter_sizes_restored_on_show = True
+            def _reapply():
+                if sip.isdeleted(self):
+                    return
+                if (getattr(self, 'explorer_panel_visible', False)
+                        or getattr(self, 'git_panel_visible', False)
+                        or getattr(self, 'remote_panel_visible', False)
+                        or getattr(self, 'log_panel_visible', False)):
+                    self._update_splitter_sizes()
+            QTimer.singleShot(0, _reapply)
+
         # 立即刷新窗口导航（新窗口建立时）
         if MainWindow._global_window_navigator is not None:
             MainWindow._global_window_navigator._refresh_window_list()
