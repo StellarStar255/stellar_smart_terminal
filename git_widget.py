@@ -1559,6 +1559,13 @@ class GitHeaderWidget(QFrame):
         locals_ = [b for b in branches if not b.is_remote]
         remotes = [b for b in branches if b.is_remote]
 
+        # 过滤掉"和本地同名"的远程项：点了等于切回本地，没有独立价值
+        local_names = {b.name for b in locals_}
+        remotes = [
+            b for b in remotes
+            if (b.name.split('/', 1)[1] if '/' in b.name else b.name) not in local_names
+        ]
+
         # detached 且不在 tag 上：插入一个占位项指示当前状态
         if head_kind == 'detached':
             self.branch_combo.addItem(f"(detached {head_name})", ('detached', head_name))
@@ -1567,7 +1574,7 @@ class GitHeaderWidget(QFrame):
         for b in locals_:
             self.branch_combo.addItem(b.name, ('local', b.name))
 
-        # 远程分支
+        # 远程独有分支
         if remotes:
             if self.branch_combo.count() > 0:
                 self.branch_combo.insertSeparator(self.branch_combo.count())
