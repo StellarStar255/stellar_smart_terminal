@@ -2037,14 +2037,25 @@ class GitPanel(QWidget):
         """启动时从配置文件读取 git_proxy 并应用到 GitManager。
 
         历史列表保存在 git_proxies（list[str]），当前激活的在 git_proxy（str）。
-        若当前激活不在历史里，自动补进历史，避免下次菜单看不到。
+        - 启动时把历史 / 激活值统一归一化（旧版可能存了不带 http:// 的裸地址）。
+        - 若当前激活不在历史里，自动补进历史。
         """
         cfg = self._load_config()
-        active = (cfg.get('git_proxy') or '').strip()
-        history = self._sanitize_proxy_history(cfg.get('git_proxies') or [])
+        active = self._normalize_proxy(cfg.get('git_proxy') or '')
+        history_raw = cfg.get('git_proxies') or []
+        history = self._sanitize_proxy_history(
+            [self._normalize_proxy(x) for x in history_raw]
+        )
+        patch = {}
         if active and active not in history:
             history.append(active)
-            self._save_config({'git_proxies': history})
+        # 仅在归一化后真正变化时写回，避免无谓的文件写
+        if active != (cfg.get('git_proxy') or '').strip():
+            patch['git_proxy'] = active
+        if history != history_raw:
+            patch['git_proxies'] = history
+        if patch:
+            self._save_config(patch)
         self._git_manager.set_proxy(active)
 
     @staticmethod
@@ -2064,9 +2075,25 @@ class GitPanel(QWidget):
     def _get_proxy_history(self) -> list:
         return self._sanitize_proxy_history(self._load_config().get('git_proxies') or [])
 
-    def _apply_proxy_choice(self, url: str):
-        """切换激活代理：写 GitManager + 持久化"""
+    @staticmethod
+    def _normalize_proxy(url: str) -> str:
+        """补全 proxy URL：缺 scheme 时自动加 http://。
+
+        - 'http://127.0.0.1:7897'      → 不变
+        - '127.0.0.1:7897'             → 'http://127.0.0.1:7897'
+        - 'socks5://127.0.0.1:1080'    → 不变（其它 scheme 不动）
+        - 空串                          → 空串
+        """
         url = (url or '').strip()
+        if not url:
+            return ''
+        if '://' in url:
+            return url
+        return 'http://' + url
+
+    def _apply_proxy_choice(self, url: str):
+        """切换激活代理：写 GitManager + 持久化（输入会被归一化）。"""
+        url = self._normalize_proxy(url)
         self._git_manager.set_proxy(url)
         patch = {'git_proxy': url}
         if url:
@@ -2147,10 +2174,15 @@ class GitPanel(QWidget):
         self._apply_proxy_choice(url)
 
     def _manage_proxies(self):
-        """管理代理历史：列表 + 删除按钮。删除当前激活会同时清空激活值。"""
+        """管理代理历史：列表 + 编辑/删除按钮。
+
+        - 编辑：弹输入框预填当前 URL；保存时归一化、保持原顺序、并同步当前激活。
+        - 删除：从历史移除；若是当前激活则切到 (No proxy)。
+        - 双击列表项 = 快捷编辑。
+        """
         dlg = QDialog(self)
         dlg.setWindowTitle(t("git.proxy_manage_title"))
-        dlg.setMinimumWidth(380)
+        dlg.setMinimumWidth(420)
         v = QVBoxLayout(dlg)
 
         list_widget = QListWidget(dlg)
@@ -2159,12 +2191,25 @@ class GitPanel(QWidget):
         v.addWidget(list_widget)
 
         btns = QHBoxLayout()
+        edit_btn = QPushButton(t("git.proxy_edit_btn"))
         remove_btn = QPushButton(t("git.proxy_remove_btn"))
         close_btn = QPushButton(t("git.proxy_close_btn"))
+        btns.addWidget(edit_btn)
         btns.addWidget(remove_btn)
         btns.addStretch()
         btns.addWidget(close_btn)
         v.addLayout(btns)
+
+        def _persist_from_list(old_url: str = '', new_url: str = ''):
+            """从列表当前内容回写配置；如果 old→new 是当前激活的修改，同步激活值。"""
+            history = [list_widget.item(i).text() for i in range(list_widget.count())]
+            patch = {'git_proxies': history}
+            active = self._git_manager.get_proxy()
+            if old_url and old_url == active:
+                # 当前激活被改名/删除
+                self._git_manager.set_proxy(new_url)
+                patch['git_proxy'] = new_url
+            self._save_config(patch)
 
         def do_remove():
             item = list_widget.currentItem()
@@ -2173,16 +2218,39 @@ class GitPanel(QWidget):
             url = item.text()
             row = list_widget.row(item)
             list_widget.takeItem(row)
-            history = [list_widget.item(i).text() for i in range(list_widget.count())]
-            patch = {'git_proxies': history}
-            # 如果删除的是当前激活，自动切到 (No proxy)
-            if self._git_manager.get_proxy() == url:
-                self._git_manager.set_proxy('')
-                patch['git_proxy'] = ''
-            self._save_config(patch)
+            _persist_from_list(old_url=url, new_url='')
 
+        def do_edit():
+            item = list_widget.currentItem()
+            if not item:
+                return
+            old = item.text()
+            text, ok = QInputDialog.getText(
+                dlg,
+                t("git.proxy_edit_title"),
+                t("git.proxy_add_prompt"),
+                QLineEdit.EchoMode.Normal,
+                old,
+            )
+            if not ok:
+                return
+            new = self._normalize_proxy(text)
+            if not new or new == old:
+                return
+            # 去重：若新值已存在于其他行，删除原行并选中已存在那行
+            for i in range(list_widget.count()):
+                if i != list_widget.row(item) and list_widget.item(i).text() == new:
+                    list_widget.takeItem(list_widget.row(item))
+                    list_widget.setCurrentRow(i if i < list_widget.row(item) else i - 1)
+                    _persist_from_list(old_url=old, new_url=new)
+                    return
+            item.setText(new)
+            _persist_from_list(old_url=old, new_url=new)
+
+        edit_btn.clicked.connect(do_edit)
         remove_btn.clicked.connect(do_remove)
         close_btn.clicked.connect(dlg.accept)
+        list_widget.itemDoubleClicked.connect(lambda _it: do_edit())
         dlg.exec()
 
     def _tick_fetch(self):
