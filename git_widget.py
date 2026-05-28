@@ -10,12 +10,12 @@ from PyQt6.QtWidgets import (
     QPushButton, QComboBox, QScrollArea, QListWidget,
     QListWidgetItem, QPlainTextEdit, QSizePolicy,
     QAbstractItemView, QMessageBox, QDialog, QTextEdit, QSplitter,
-    QLineEdit, QDialogButtonBox
+    QLineEdit, QDialogButtonBox, QMenu, QInputDialog
 )
 from PyQt6.QtCore import Qt, pyqtSignal, QSize, QThread, QTimer, QPoint, QRect
 from PyQt6.QtGui import (
     QFont, QColor, QBrush, QTextCursor, QTextCharFormat, QTextBlockFormat,
-    QFontMetrics, QPainter, QPen
+    QFontMetrics, QPainter, QPen, QAction
 )
 
 from git_manager import GitManager, GitFile, FileStatus
@@ -1979,42 +1979,156 @@ class GitPanel(QWidget):
             pass
 
     def _apply_persisted_git_proxy(self):
-        """启动时从配置文件读取 git_proxy 并应用到 GitManager。"""
+        """启动时从配置文件读取 git_proxy 并应用到 GitManager。
+
+        历史列表保存在 git_proxies（list[str]），当前激活的在 git_proxy（str）。
+        若当前激活不在历史里，自动补进历史，避免下次菜单看不到。
+        """
         cfg = self._load_config()
-        proxy = (cfg.get('git_proxy') or '').strip()
-        self._git_manager.set_proxy(proxy)
+        active = (cfg.get('git_proxy') or '').strip()
+        history = self._sanitize_proxy_history(cfg.get('git_proxies') or [])
+        if active and active not in history:
+            history.append(active)
+            self._save_config({'git_proxies': history})
+        self._git_manager.set_proxy(active)
+
+    @staticmethod
+    def _sanitize_proxy_history(items) -> list:
+        """去重 + 去空白 + 保持原顺序。"""
+        if not isinstance(items, list):
+            return []
+        out = []
+        seen = set()
+        for x in items:
+            s = str(x or '').strip()
+            if s and s not in seen:
+                out.append(s)
+                seen.add(s)
+        return out
+
+    def _get_proxy_history(self) -> list:
+        return self._sanitize_proxy_history(self._load_config().get('git_proxies') or [])
+
+    def _apply_proxy_choice(self, url: str):
+        """切换激活代理：写 GitManager + 持久化"""
+        url = (url or '').strip()
+        self._git_manager.set_proxy(url)
+        patch = {'git_proxy': url}
+        if url:
+            history = self._get_proxy_history()
+            if url not in history:
+                history.append(url)
+                patch['git_proxies'] = history
+        self._save_config(patch)
 
     def _on_settings_clicked(self):
-        """齿轮按钮 → 弹出 Git 代理设置对话框。"""
-        current = self._git_manager.get_proxy()
-        dlg = QDialog(self)
-        dlg.setWindowTitle(t("git.proxy_dialog_title"))
-        layout = QVBoxLayout(dlg)
+        """齿轮按钮 → 弹出快速切换菜单。"""
+        active = self._git_manager.get_proxy()
+        history = self._get_proxy_history()
 
-        label = QLabel(t("git.proxy_label"))
-        layout.addWidget(label)
+        menu = QMenu(self)
+        menu.setStyleSheet(f"""
+            QMenu {{
+                background-color: {self.theme.get('bg_medium', '#16213e')};
+                color: {self.theme.get('text', '#eaeaea')};
+                border: 1px solid {self.theme.get('border', '#3d3d5c')};
+                padding: 4px;
+            }}
+            QMenu::item {{
+                padding: 6px 24px;
+            }}
+            QMenu::item:selected {{
+                background-color: {self.theme.get('accent', '#667eea')};
+            }}
+        """)
 
-        edit = QLineEdit(current)
-        edit.setPlaceholderText(t("git.proxy_placeholder"))
-        edit.setMinimumWidth(360)
-        layout.addWidget(edit)
+        # (No proxy) 项
+        act_none = QAction(t("git.proxy_none"), self)
+        act_none.setCheckable(True)
+        act_none.setChecked(active == '')
+        act_none.triggered.connect(lambda: self._apply_proxy_choice(''))
+        menu.addAction(act_none)
 
-        help_label = QLabel(t("git.proxy_help"))
-        help_label.setWordWrap(True)
-        help_label.setStyleSheet(f"color: {self.theme.get('text_muted', '#a0a0b0')}; font-size: 11px;")
-        layout.addWidget(help_label)
+        # 历史代理
+        if history:
+            menu.addSeparator()
+            for url in history:
+                act = QAction(url, self)
+                act.setCheckable(True)
+                act.setChecked(url == active)
+                act.triggered.connect(lambda _checked, u=url: self._apply_proxy_choice(u))
+                menu.addAction(act)
 
-        buttons = QDialogButtonBox(
-            QDialogButtonBox.StandardButton.Ok | QDialogButtonBox.StandardButton.Cancel
+        # 添加 / 管理
+        menu.addSeparator()
+        act_add = QAction(t("git.proxy_add_new"), self)
+        act_add.triggered.connect(self._add_new_proxy)
+        menu.addAction(act_add)
+
+        if history:
+            act_manage = QAction(t("git.proxy_manage"), self)
+            act_manage.triggered.connect(self._manage_proxies)
+            menu.addAction(act_manage)
+
+        # 紧贴齿轮按钮下方弹出
+        btn = self.header.settings_btn
+        pos = btn.mapToGlobal(QPoint(0, btn.height()))
+        menu.exec(pos)
+
+    def _add_new_proxy(self):
+        """弹出输入框添加新代理，加入历史并激活。"""
+        text, ok = QInputDialog.getText(
+            self,
+            t("git.proxy_add_title"),
+            t("git.proxy_add_prompt"),
+            QLineEdit.EchoMode.Normal,
+            "",
         )
-        buttons.accepted.connect(dlg.accept)
-        buttons.rejected.connect(dlg.reject)
-        layout.addWidget(buttons)
+        if not ok:
+            return
+        url = (text or '').strip()
+        if not url:
+            return
+        self._apply_proxy_choice(url)
 
-        if dlg.exec() == QDialog.DialogCode.Accepted:
-            new_proxy = edit.text().strip()
-            self._git_manager.set_proxy(new_proxy)
-            self._save_config({'git_proxy': new_proxy})
+    def _manage_proxies(self):
+        """管理代理历史：列表 + 删除按钮。删除当前激活会同时清空激活值。"""
+        dlg = QDialog(self)
+        dlg.setWindowTitle(t("git.proxy_manage_title"))
+        dlg.setMinimumWidth(380)
+        v = QVBoxLayout(dlg)
+
+        list_widget = QListWidget(dlg)
+        for url in self._get_proxy_history():
+            QListWidgetItem(url, list_widget)
+        v.addWidget(list_widget)
+
+        btns = QHBoxLayout()
+        remove_btn = QPushButton(t("git.proxy_remove_btn"))
+        close_btn = QPushButton(t("git.proxy_close_btn"))
+        btns.addWidget(remove_btn)
+        btns.addStretch()
+        btns.addWidget(close_btn)
+        v.addLayout(btns)
+
+        def do_remove():
+            item = list_widget.currentItem()
+            if not item:
+                return
+            url = item.text()
+            row = list_widget.row(item)
+            list_widget.takeItem(row)
+            history = [list_widget.item(i).text() for i in range(list_widget.count())]
+            patch = {'git_proxies': history}
+            # 如果删除的是当前激活，自动切到 (No proxy)
+            if self._git_manager.get_proxy() == url:
+                self._git_manager.set_proxy('')
+                patch['git_proxy'] = ''
+            self._save_config(patch)
+
+        remove_btn.clicked.connect(do_remove)
+        close_btn.clicked.connect(dlg.accept)
+        dlg.exec()
 
     def _tick_fetch(self):
         """定时器：仅在面板可见时后台 fetch，更新可 pull 条数。"""

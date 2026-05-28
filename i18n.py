@@ -311,6 +311,14 @@ TRANSLATIONS = {
     "git.proxy_label": {"zh": "代理 URL:", "en": "Proxy URL:"},
     "git.proxy_placeholder": {"zh": "http://127.0.0.1:7897 (留空 = 不使用代理)", "en": "http://127.0.0.1:7897 (empty = no proxy)"},
     "git.proxy_help": {"zh": "应用到本程序内的所有 Git HTTPS 操作（push/pull/fetch/clone 等）。\n仅影响本程序，不修改全局 git config。\n注意：SSH 协议（git@host:...）的远端不受 HTTP 代理影响，请在 ~/.ssh/config 配置。", "en": "Applies to all Git HTTPS operations inside this app (push/pull/fetch/clone, etc.).\nIn-app only — does not modify global git config.\nNote: SSH remotes (git@host:...) are not affected by HTTP proxy; configure them via ~/.ssh/config."},
+    "git.proxy_none": {"zh": "(不使用代理)", "en": "(No proxy)"},
+    "git.proxy_add_new": {"zh": "添加新代理…", "en": "Add new proxy…"},
+    "git.proxy_manage": {"zh": "管理代理列表…", "en": "Manage proxies…"},
+    "git.proxy_add_title": {"zh": "添加 Git 代理", "en": "Add Git Proxy"},
+    "git.proxy_add_prompt": {"zh": "代理 URL（例如 http://127.0.0.1:7897）", "en": "Proxy URL (e.g. http://127.0.0.1:7897)"},
+    "git.proxy_manage_title": {"zh": "管理 Git 代理", "en": "Manage Git Proxies"},
+    "git.proxy_remove_btn": {"zh": "删除", "en": "Remove"},
+    "git.proxy_close_btn": {"zh": "关闭", "en": "Close"},
 
     # ===== Git Manager 错误消息 =====
     "git_mgr.no_repo_path": {"zh": "未设置仓库路径", "en": "Repository path not set"},
