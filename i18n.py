@@ -125,6 +125,8 @@ TRANSLATIONS = {
     "toolbar.llm_config": {"zh": "LLM配置", "en": "LLM Config"},
     "toolbar.llm_config_tooltip": {"zh": "LLM API 配置", "en": "LLM API Configuration"},
     "toolbar.settings_tooltip": {"zh": "工具栏设置", "en": "Toolbar Settings"},
+    "palette.placeholder": {"zh": "搜索命令…（⌘K）", "en": "Search commands… (⌘K)"},
+    "palette.no_results": {"zh": "没有匹配的命令", "en": "No matching commands"},
     "toolbar.opacity_label": {"zh": "透明度:", "en": "Opacity:"},
     "toolbar.opacity_tooltip": {"zh": "窗口透明度（10%-100%），对所有窗口生效", "en": "Window opacity (10%-100%), applies to all windows"},
     "toolbar.gui_font_label": {"zh": "GUI字号:", "en": "GUI Font:"},

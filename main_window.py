@@ -40,7 +40,7 @@ from PyQt6.QtWidgets import (
 )
 from PyQt6 import sip  # 用于检查 C++ 对象是否已被删除
 from PyQt6.QtCore import Qt, QTimer, QEvent, QPoint, QMimeData, pyqtSignal, QObject
-from PyQt6.QtGui import QAction, QIcon, QFont, QColor, QPixmap, QPainter, QPen, QDrag, QCursor, QBrush, QPalette
+from PyQt6.QtGui import QAction, QIcon, QFont, QColor, QPixmap, QPainter, QPen, QDrag, QCursor, QBrush, QPalette, QShortcut, QKeySequence
 from PyQt6.QtWidgets import QWidgetAction, QStylePainter, QStyleOptionComboBox
 
 from terminal_widget import TerminalWidget
@@ -52,6 +52,7 @@ from git_widget import GitPanel, GitDiffView, GitOutputView
 from remote_explorer_widget import RemoteExplorerPanel
 from explorer_widget import ExplorerPanel
 from toolbar_manager import ToolbarManagerDialog
+from command_palette import CommandPalette
 from file_editor import FileEditorWidget
 from i18n import t, set_language, get_language
 from flow_layout import FlowLayout
@@ -3481,6 +3482,14 @@ class MainWindow(QMainWindow):
 
         toolbar.addSeparator()
 
+        # 命令搜索框（Cmd+K 聚焦）
+        self.command_palette = CommandPalette(t("palette.placeholder"))
+        self.command_palette.set_empty_text(t("palette.no_results"))
+        self.command_palette.line_edit.setMinimumWidth(240)
+        toolbar.addWidget(self.command_palette)
+
+        toolbar.addSeparator()
+
         # 启动按钮
         self.start_btn = QPushButton(t("toolbar.start"))
         self.start_btn.setObjectName("startBtn")
@@ -3502,6 +3511,8 @@ class MainWindow(QMainWindow):
             self._preset_combo_container,
             self.preset_switch_btn,
             self.manage_preset_btn,
+            None,  # separator
+            self.command_palette,
             None,  # separator
             self.start_btn,
             self.stop_btn,
@@ -4372,6 +4383,50 @@ class MainWindow(QMainWindow):
         self.current_dir_label.setStyleSheet("color: #667eea; font-size: 11px;")
         self.current_dir_label.setToolTip(self._window_cwd)
         self.dir_toolbar.addWidget(self.current_dir_label)
+
+        # 工具栏所有按钮已就绪 → 注册到命令面板
+        self._register_palette_commands()
+
+        # ⌘K / Ctrl+K 聚焦搜索框
+        sc = QShortcut(QKeySequence("Ctrl+K"), self)
+        sc.activated.connect(self.command_palette.focus_search)
+
+    def _register_palette_commands(self):
+        """把工具栏可点击的控件注册成可搜索命令。"""
+        palette = self.command_palette
+        palette.clear()
+
+        def _label_for(w, fallback: str = '') -> str:
+            """按钮显示文本：纯符号/emoji 时退回 tooltip，避免命令列里出现裸图标。"""
+            txt = ''
+            if hasattr(w, 'text') and callable(w.text):
+                txt = (w.text() or '').strip()
+            # 文本太短或不含字母数字 → 用 tooltip
+            if not txt or not any(c.isalnum() for c in txt):
+                tip = (w.toolTip() if hasattr(w, 'toolTip') else '') or ''
+                if tip:
+                    return tip.splitlines()[0].strip()
+            return txt or fallback
+
+        # 核心动作（不在 _group_button_dicts 里）
+        core = [
+            (self.preset_switch_btn, "Preset"),
+            (self.manage_preset_btn, "Preset"),
+            (self.start_btn, "Session"),
+            (self.stop_btn, "Session"),
+        ]
+        for btn, group in core:
+            label = _label_for(btn, fallback=btn.objectName())
+            palette.register(label, btn.click, group=group, tooltip=btn.toolTip() or None)
+
+        # 分组里的按钮 / 复选框
+        for group_name, btns in self._group_button_dicts.items():
+            for btn_name, w in btns.items():
+                if w is None or not hasattr(w, 'click'):
+                    continue
+                label = _label_for(w, fallback=btn_name)
+                tooltip = (w.toolTip() if hasattr(w, 'toolTip') else '') or None
+                palette.register(label, w.click, group=group_name, tooltip=tooltip)
 
     def _populate_working_dirs(self):
         """填充工作目录历史到下拉框"""
