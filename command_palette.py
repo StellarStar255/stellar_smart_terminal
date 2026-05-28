@@ -233,9 +233,17 @@ class CommandPalette(QWidget):
         cmd: Command = item.data(Qt.ItemDataRole.UserRole)
         if cmd is None:
             return
-        self.popup.hide()
-        self.line_edit.clear()
+        # 顺序很关键：必须先把 textChanged 信号屏蔽，再 clear() ——
+        # 否则 clear() 触发 _refresh_popup，而此刻 line_edit 仍然 hasFocus()，
+        # 会把刚 hide 的 popup 立刻 show 回来，导致后续 cmd.run() 切焦点时
+        # popup 进入"逻辑可见但视觉不可见"的死状态，下次再点输入框就没反应。
+        self.line_edit.blockSignals(True)
+        try:
+            self.line_edit.clear()
+        finally:
+            self.line_edit.blockSignals(False)
         self.line_edit.clearFocus()
+        self.popup.hide()
         try:
             cmd.run()
         except Exception as e:
@@ -271,8 +279,17 @@ class CommandPalette(QWidget):
                         self._on_item_activated(item)
                     return True
                 if key == Qt.Key.Key_Escape:
-                    self.popup.hide()
+                    self.line_edit.blockSignals(True)
+                    try:
+                        self.line_edit.clear()
+                    finally:
+                        self.line_edit.blockSignals(False)
                     self.line_edit.clearFocus()
-                    self.line_edit.clear()
+                    self.popup.hide()
                     return True
+            elif ev.type() == QEvent.Type.MouseButtonPress:
+                # popup 经外部点击关闭后，line_edit 可能仍持有焦点，
+                # 此时再点输入框不会触发 FocusIn，仅靠 FocusIn 重开弹层会失效。
+                # 这里在鼠标按下时直接重开一次，保证总能弹出。
+                self._refresh_popup()
         return super().eventFilter(obj, ev)
