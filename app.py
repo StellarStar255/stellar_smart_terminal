@@ -157,7 +157,7 @@ def install_sigint_handler(app: QApplication):
             state["disarm_at"] = time.monotonic() + 4.0
             # 醒目的黄色高亮提醒（终端不支持 ANSI 颜色时也能读出文字）
             _notify(
-                "\n\033[1;33m⚠  再按一次 Ctrl+C 退出程序 "
+                "\n\033[1;33m[!] 再按一次 Ctrl+C 退出程序 "
                 "(Press Ctrl+C again to quit)\033[0m\n"
             )
 
