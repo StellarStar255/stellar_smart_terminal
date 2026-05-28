@@ -82,6 +82,22 @@ class GitManager(QObject):
         self._active_procs: set = set()
         self._proc_lock = threading.Lock()
 
+        # 应用级 git 代理：通过 HTTPS_PROXY / HTTP_PROXY / ALL_PROXY 注入子进程
+        # 环境，覆盖 push/pull/fetch/clone/ls-remote 等所有走 HTTPS 的 git 操作。
+        # 注意：对 SSH 协议的远端（git@host:repo.git）不生效；那种需要 ~/.ssh/config 配置。
+        self._proxy: str = ''
+
+    def set_proxy(self, url: str):
+        """设置应用内 git 代理（仅影响本程序里的 git 子进程，不改全局 git config）。
+
+        Args:
+            url: 形如 'http://127.0.0.1:7897'，传空字符串表示不使用代理。
+        """
+        self._proxy = (url or '').strip()
+
+    def get_proxy(self) -> str:
+        return self._proxy
+
     def set_repository(self, path: str) -> bool:
         """设置仓库路径
 
@@ -212,6 +228,14 @@ class GitManager(QObject):
         """
         env = dict(os.environ)
         env['GIT_TERMINAL_PROMPT'] = '0'
+        if self._proxy:
+            env['HTTPS_PROXY'] = self._proxy
+            env['HTTP_PROXY'] = self._proxy
+            env['ALL_PROXY'] = self._proxy
+            # 小写变体：部分库（如 libcurl）也会读
+            env['https_proxy'] = self._proxy
+            env['http_proxy'] = self._proxy
+            env['all_proxy'] = self._proxy
         proc = subprocess.Popen(
             ['git'] + list(args),
             cwd=self._repo_path,

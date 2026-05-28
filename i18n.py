@@ -306,6 +306,11 @@ TRANSLATIONS = {
     "git.generate_no_changes_msg": {"zh": "当前没有检测到代码改动（diff 为空）。", "en": "No code changes detected (the diff is empty)."},
     "git.generate_failed_title": {"zh": "生成失败", "en": "Generation Failed"},
     "git.generate_failed_msg": {"zh": "调用大模型失败: {error}", "en": "LLM request failed: {error}"},
+    "git.settings_tooltip": {"zh": "Git 设置", "en": "Git Settings"},
+    "git.proxy_dialog_title": {"zh": "Git 代理设置", "en": "Git Proxy Settings"},
+    "git.proxy_label": {"zh": "代理 URL:", "en": "Proxy URL:"},
+    "git.proxy_placeholder": {"zh": "http://127.0.0.1:7897 (留空 = 不使用代理)", "en": "http://127.0.0.1:7897 (empty = no proxy)"},
+    "git.proxy_help": {"zh": "应用到本程序内的所有 Git HTTPS 操作（push/pull/fetch/clone 等）。\n仅影响本程序，不修改全局 git config。\n注意：SSH 协议（git@host:...）的远端不受 HTTP 代理影响，请在 ~/.ssh/config 配置。", "en": "Applies to all Git HTTPS operations inside this app (push/pull/fetch/clone, etc.).\nIn-app only — does not modify global git config.\nNote: SSH remotes (git@host:...) are not affected by HTTP proxy; configure them via ~/.ssh/config."},
 
     # ===== Git Manager 错误消息 =====
     "git_mgr.no_repo_path": {"zh": "未设置仓库路径", "en": "Repository path not set"},

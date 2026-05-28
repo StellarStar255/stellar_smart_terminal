@@ -2,11 +2,15 @@
 Git 面板 UI 组件
 提供类似 Cursor IDE 的 Git 管理界面
 """
+import json
+from pathlib import Path
+
 from PyQt6.QtWidgets import (
     QWidget, QVBoxLayout, QHBoxLayout, QFrame, QLabel,
     QPushButton, QComboBox, QScrollArea, QListWidget,
     QListWidgetItem, QPlainTextEdit, QSizePolicy,
-    QAbstractItemView, QMessageBox, QDialog, QTextEdit, QSplitter
+    QAbstractItemView, QMessageBox, QDialog, QTextEdit, QSplitter,
+    QLineEdit, QDialogButtonBox
 )
 from PyQt6.QtCore import Qt, pyqtSignal, QSize, QThread, QTimer, QPoint, QRect
 from PyQt6.QtGui import (
@@ -1458,6 +1462,7 @@ class GitHeaderWidget(QFrame):
     branch_changed = pyqtSignal(str)              # 兼容保留：仅本地分支切换时触发
     ref_changed = pyqtSignal(str, str)            # (kind, name)；kind ∈ {'local','remote','tag'}
     refresh_clicked = pyqtSignal()
+    settings_clicked = pyqtSignal()
 
     def __init__(self, theme: dict = None, parent=None):
         super().__init__(parent)
@@ -1528,6 +1533,25 @@ class GitHeaderWidget(QFrame):
         """)
         self.refresh_btn.clicked.connect(self.refresh_clicked.emit)
         layout.addWidget(self.refresh_btn)
+
+        # 设置按钮（齿轮）→ 打开 Git 代理等设置
+        self.settings_btn = QPushButton("⚙")
+        self.settings_btn.setToolTip(t("git.settings_tooltip"))
+        self.settings_btn.setFixedSize(28, 28)
+        self.settings_btn.setStyleSheet(f"""
+            QPushButton {{
+                background-color: {self.theme.get('bg_lighter', '#3d3d5c')};
+                color: {self.theme.get('text', '#eaeaea')};
+                border: none;
+                border-radius: 4px;
+                font-size: 16px;
+            }}
+            QPushButton:hover {{
+                background-color: {self.theme.get('bg_hover', '#4d4d6c')};
+            }}
+        """)
+        self.settings_btn.clicked.connect(self.settings_clicked.emit)
+        layout.addWidget(self.settings_btn)
 
         self._update_style()
 
@@ -1637,7 +1661,7 @@ class GitHeaderWidget(QFrame):
             }}
         """)
 
-        self.refresh_btn.setStyleSheet(f"""
+        btn_style = f"""
             QPushButton {{
                 background-color: {theme.get('bg_lighter', '#3d3d5c')};
                 color: {theme.get('text', '#eaeaea')};
@@ -1648,12 +1672,15 @@ class GitHeaderWidget(QFrame):
             QPushButton:hover {{
                 background-color: {theme.get('bg_hover', '#4d4d6c')};
             }}
-        """)
+        """
+        self.refresh_btn.setStyleSheet(btn_style)
+        self.settings_btn.setStyleSheet(btn_style)
 
     def apply_language(self):
         """更新语言相关的 UI 文本"""
         self.title_label.setText(t("git.source_control"))
         self.refresh_btn.setToolTip(t("git.refresh_tooltip"))
+        self.settings_btn.setToolTip(t("git.settings_tooltip"))
 
 
 class GitPanel(QWidget):
@@ -1680,6 +1707,9 @@ class GitPanel(QWidget):
 
         self._setup_ui()
         self._connect_signals()
+
+        # 从配置文件恢复用户设置的 git 代理（如果有）
+        self._apply_persisted_git_proxy()
 
         # 定时后台 fetch：刷新远程跟踪分支，让"可 pull 条数"保持最新（仅面板可见时）
         self._fetch_timer = QTimer(self)
@@ -1839,6 +1869,7 @@ class GitPanel(QWidget):
         # 头部信号
         self.header.ref_changed.connect(self._on_ref_changed)
         self.header.refresh_clicked.connect(self._on_refresh_clicked)
+        self.header.settings_clicked.connect(self._on_settings_clicked)
 
         # 变更列表信号
         self.changes_widget.stage_file.connect(self._git_manager.stage_file)
@@ -1914,6 +1945,76 @@ class GitPanel(QWidget):
         self._refresh_branches()
         self._refresh_graph()
         self._fetch_async(force=True)
+
+    # ---------- Git 设置（代理等） ----------
+
+    def _config_file_path(self) -> Path:
+        """主配置文件位置（与 main_window 共用 .smart_terminal_config.json）。"""
+        return Path(__file__).parent / ".smart_terminal_config.json"
+
+    def _load_config(self) -> dict:
+        try:
+            p = self._config_file_path()
+            if p.exists():
+                with open(p, 'r', encoding='utf-8') as f:
+                    return json.load(f) or {}
+        except Exception:
+            pass
+        return {}
+
+    def _save_config(self, patch: dict):
+        try:
+            p = self._config_file_path()
+            cfg = {}
+            if p.exists():
+                with open(p, 'r', encoding='utf-8') as f:
+                    try:
+                        cfg = json.load(f) or {}
+                    except Exception:
+                        cfg = {}
+            cfg.update(patch)
+            with open(p, 'w', encoding='utf-8') as f:
+                json.dump(cfg, f, ensure_ascii=False, indent=2)
+        except Exception:
+            pass
+
+    def _apply_persisted_git_proxy(self):
+        """启动时从配置文件读取 git_proxy 并应用到 GitManager。"""
+        cfg = self._load_config()
+        proxy = (cfg.get('git_proxy') or '').strip()
+        self._git_manager.set_proxy(proxy)
+
+    def _on_settings_clicked(self):
+        """齿轮按钮 → 弹出 Git 代理设置对话框。"""
+        current = self._git_manager.get_proxy()
+        dlg = QDialog(self)
+        dlg.setWindowTitle(t("git.proxy_dialog_title"))
+        layout = QVBoxLayout(dlg)
+
+        label = QLabel(t("git.proxy_label"))
+        layout.addWidget(label)
+
+        edit = QLineEdit(current)
+        edit.setPlaceholderText(t("git.proxy_placeholder"))
+        edit.setMinimumWidth(360)
+        layout.addWidget(edit)
+
+        help_label = QLabel(t("git.proxy_help"))
+        help_label.setWordWrap(True)
+        help_label.setStyleSheet(f"color: {self.theme.get('text_muted', '#a0a0b0')}; font-size: 11px;")
+        layout.addWidget(help_label)
+
+        buttons = QDialogButtonBox(
+            QDialogButtonBox.StandardButton.Ok | QDialogButtonBox.StandardButton.Cancel
+        )
+        buttons.accepted.connect(dlg.accept)
+        buttons.rejected.connect(dlg.reject)
+        layout.addWidget(buttons)
+
+        if dlg.exec() == QDialog.DialogCode.Accepted:
+            new_proxy = edit.text().strip()
+            self._git_manager.set_proxy(new_proxy)
+            self._save_config({'git_proxy': new_proxy})
 
     def _tick_fetch(self):
         """定时器：仅在面板可见时后台 fetch，更新可 pull 条数。"""
