@@ -1464,6 +1464,7 @@ class GitHeaderWidget(QFrame):
     refresh_clicked = pyqtSignal()
     settings_clicked = pyqtSignal()
     create_branch_clicked = pyqtSignal()
+    delete_branch_requested = pyqtSignal(str)     # 用户右键菜单确认删除本地分支
 
     def __init__(self, theme: dict = None, parent=None):
         super().__init__(parent)
@@ -1514,6 +1515,10 @@ class GitHeaderWidget(QFrame):
             }}
         """)
         self.branch_combo.currentIndexChanged.connect(self._on_combo_changed)
+        # 右键菜单：在下拉列表里右击本地分支可删除（远程/tag/当前分支不显示删除项）
+        view = self.branch_combo.view()
+        view.setContextMenuPolicy(Qt.ContextMenuPolicy.CustomContextMenu)
+        view.customContextMenuRequested.connect(self._on_branch_combo_context_menu)
         layout.addWidget(self.branch_combo)
 
         # 刷新按钮
@@ -1653,6 +1658,55 @@ class GitHeaderWidget(QFrame):
         self.ref_changed.emit(kind, name)
         if kind == 'local':
             self.branch_changed.emit(name)
+
+    def _on_branch_combo_context_menu(self, pos):
+        """下拉列表右键菜单：仅本地分支可删除（当前分支自身除外）。
+
+        - 远程分支：删除是 push --delete，破坏性强，留给终端处理
+        - tag：留给终端处理
+        - 当前 HEAD 指向的本地分支：git 拒绝删除，直接不显示菜单项
+        """
+        view = self.branch_combo.view()
+        index = view.indexAt(pos)
+        if not index.isValid():
+            return
+        row = index.row()
+        data = self.branch_combo.itemData(row)
+        if not data:
+            return
+        kind, name = data
+        if kind != 'local':
+            return
+        # 当前分支自身不允许删除
+        cur_data = self.branch_combo.currentData()
+        if cur_data and cur_data[0] == 'local' and cur_data[1] == name:
+            return
+
+        menu = QMenu(view)
+        menu.setStyleSheet(f"""
+            QMenu {{
+                background-color: {self.theme.get('bg_medium', '#16213e')};
+                color: {self.theme.get('text', '#eaeaea')};
+                border: 1px solid {self.theme.get('border', '#3d3d5c')};
+                padding: 4px;
+            }}
+            QMenu::item {{
+                padding: 6px 24px;
+            }}
+            QMenu::item:selected {{
+                background-color: {self.theme.get('accent', '#667eea')};
+            }}
+        """)
+        act_del = QAction(t("git.delete_branch_menu", name=name), self)
+
+        def _trigger():
+            # 先收起下拉，避免删除确认对话框被它遮挡 / 抢焦点
+            self.branch_combo.hidePopup()
+            self.delete_branch_requested.emit(name)
+
+        act_del.triggered.connect(_trigger)
+        menu.addAction(act_del)
+        menu.exec(view.viewport().mapToGlobal(pos))
 
     def apply_theme(self, theme: dict):
         """应用主题"""
@@ -1906,6 +1960,7 @@ class GitPanel(QWidget):
         self.header.refresh_clicked.connect(self._on_refresh_clicked)
         self.header.settings_clicked.connect(self._on_settings_clicked)
         self.header.create_branch_clicked.connect(self._on_create_branch)
+        self.header.delete_branch_requested.connect(self._on_delete_branch)
 
         # 变更列表信号
         self.changes_widget.stage_file.connect(self._git_manager.stage_file)
@@ -2000,6 +2055,67 @@ class GitPanel(QWidget):
             self._refresh_status()
             self._refresh_branches()
             self._refresh_graph()
+
+    def _on_delete_branch(self, name: str):
+        """右键菜单确认删除本地分支。
+
+        流程：
+        1. 与当前 HEAD 同名时直接拒绝（双保险，header 也已过滤）。
+        2. 先弹一次性确认。
+        3. 用 `git branch -d` 安全删除；若 git 报 "not fully merged"，
+           再弹一次"强制删除"二次确认，改用 `-D`。
+        """
+        name = (name or '').strip()
+        if not name:
+            return
+        # 双保险：拒绝删除当前分支
+        cur = self._git_manager.get_current_branch()
+        if cur and cur == name:
+            QMessageBox.warning(
+                self,
+                t("git.delete_branch_title"),
+                t("git.delete_branch_current_msg", name=name),
+            )
+            return
+
+        reply = QMessageBox.question(
+            self,
+            t("git.delete_branch_title"),
+            t("git.delete_branch_confirm_msg", name=name),
+            QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No,
+            QMessageBox.StandardButton.No,
+        )
+        if reply != QMessageBox.StandardButton.Yes:
+            return
+
+        ok, output = self._git_manager.delete_branch(name, force=False)
+        if ok:
+            self._refresh_branches()
+            self._refresh_graph()
+            return
+
+        # 未合并 → 询问是否强制删除
+        if 'not fully merged' in (output or '').lower():
+            force_reply = QMessageBox.warning(
+                self,
+                t("git.delete_branch_title"),
+                t("git.delete_branch_force_msg", name=name),
+                QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No,
+                QMessageBox.StandardButton.No,
+            )
+            if force_reply != QMessageBox.StandardButton.Yes:
+                return
+            ok, output = self._git_manager.delete_branch(name, force=True)
+            if ok:
+                self._refresh_branches()
+                self._refresh_graph()
+                return
+
+        QMessageBox.critical(
+            self,
+            t("git.error_title"),
+            t("git.delete_branch_failed_msg", error=(output or '').strip()),
+        )
 
     # ---------- Git 设置（代理等） ----------
 

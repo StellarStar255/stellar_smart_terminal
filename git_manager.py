@@ -641,6 +641,28 @@ class GitManager(QObject):
         self.status_changed.emit()
         return True
 
+    def delete_branch(self, name: str, force: bool = False) -> Tuple[bool, str]:
+        """删除本地分支。
+
+        Args:
+            name: 分支名
+            force: True 时使用 -D 强制删除（即使未合并）
+
+        Returns:
+            (是否成功, 错误/输出文本)。失败时调用方可据此判断是否
+            需要给用户提供"force 删除"的二次确认（git 在未合并分支上
+            的报错包含 'not fully merged'）。
+        """
+        name = (name or '').strip()
+        if not name:
+            return False, t("git_mgr.branch_name_empty")
+        flag = '-D' if force else '-d'
+        success, output = self._run_git('branch', flag, name)
+        if not success:
+            return False, output
+        self.status_changed.emit()
+        return True, output
+
     def checkout_ref(self, kind: str, name: str) -> bool:
         """切换到指定引用（本地分支 / 远程分支 / tag）
 

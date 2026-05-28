@@ -326,6 +326,12 @@ TRANSLATIONS = {
     "git.create_branch_tooltip": {"zh": "创建新分支（从当前 HEAD）", "en": "Create New Branch (from current HEAD)"},
     "git.create_branch_title": {"zh": "创建新分支", "en": "Create New Branch"},
     "git.create_branch_prompt": {"zh": "新分支名（将基于当前 HEAD 创建并切换过去）", "en": "New branch name (created from current HEAD and switched to)"},
+    "git.delete_branch_menu": {"zh": "删除分支 \"{name}\"", "en": "Delete branch \"{name}\""},
+    "git.delete_branch_title": {"zh": "删除分支", "en": "Delete Branch"},
+    "git.delete_branch_confirm_msg": {"zh": "确定要删除本地分支 \"{name}\" 吗？\n此操作不可撤销。", "en": "Delete local branch \"{name}\"?\nThis cannot be undone."},
+    "git.delete_branch_current_msg": {"zh": "无法删除当前所在的分支 \"{name}\"。\n请先切到其它分支再删除。", "en": "Cannot delete the currently checked-out branch \"{name}\".\nSwitch to another branch first."},
+    "git.delete_branch_force_msg": {"zh": "分支 \"{name}\" 尚未合并到上游，安全删除被拒绝。\n\n仍然强制删除（git branch -D）？此操作可能丢失未合并的提交。", "en": "Branch \"{name}\" is not fully merged; safe delete was rejected.\n\nForce delete (git branch -D)? This may lose unmerged commits."},
+    "git.delete_branch_failed_msg": {"zh": "删除分支失败：{error}", "en": "Delete branch failed: {error}"},
 
     # ===== Git Manager 错误消息 =====
     "git_mgr.no_repo_path": {"zh": "未设置仓库路径", "en": "Repository path not set"},
