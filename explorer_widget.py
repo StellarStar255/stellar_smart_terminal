@@ -16,7 +16,8 @@ import explorer_clipboard
 from PyQt6.QtWidgets import (
     QWidget, QVBoxLayout, QHBoxLayout, QFrame, QLabel,
     QPushButton, QTreeView, QMenu, QLineEdit, QMessageBox,
-    QAbstractItemView, QFileDialog, QApplication, QProgressDialog
+    QAbstractItemView, QFileDialog, QApplication, QProgressDialog,
+    QStyledItemDelegate
 )
 from PyQt6.QtCore import Qt, QDir, QModelIndex, QPersistentModelIndex, pyqtSignal, QTimer, QEventLoop
 from PyQt6.QtGui import (
@@ -184,6 +185,38 @@ class _LocalDropTreeView(QTreeView):
         self._panel._handle_drop_copy(local_paths, target_dir)
 
 
+class _RenameNameOnlyDelegate(QStyledItemDelegate):
+    """原地重命名时只选中文件"基名"部分，避免误改扩展名。
+
+    目录、无扩展名文件（含以点开头的隐藏文件）保持全选。
+    用 singleShot(0) 推到事件队列末尾，绕开 Qt item-view 内部 show/focus
+    之后偶尔会触发的 selectAll。"""
+
+    def setEditorData(self, editor, index):
+        super().setEditorData(editor, index)
+        if not isinstance(editor, QLineEdit) or not index.isValid():
+            return
+        is_dir = False
+        model = index.model()
+        if isinstance(model, QFileSystemModel):
+            is_dir = model.isDir(index)
+        text = editor.text()
+        if is_dir or not text:
+            return
+        stem, ext = os.path.splitext(text)
+        if not ext or not stem:
+            return
+        sel_len = len(stem)
+
+        def _apply():
+            try:
+                editor.setSelection(0, sel_len)
+            except RuntimeError:
+                pass  # editor 已销毁
+
+        QTimer.singleShot(0, _apply)
+
+
 class FilteredFileSystemModel(QFileSystemModel):
     """过滤隐藏文件的文件系统模型"""
 
@@ -287,6 +320,9 @@ class ExplorerPanel(QWidget):
 
         # 编辑触发：仅 F2 / 代码触发，避免双击/单击意外进入重命名（双击仍用于打开文件）
         self.tree_view.setEditTriggers(QAbstractItemView.EditTrigger.EditKeyPressed)
+
+        # 重命名时默认只选中"基名"，扩展名保留不选
+        self.tree_view.setItemDelegate(_RenameNameOnlyDelegate(self.tree_view))
 
         # 设置动画效果
         self.tree_view.setAnimated(True)

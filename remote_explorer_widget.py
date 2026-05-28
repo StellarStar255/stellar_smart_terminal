@@ -312,7 +312,24 @@ class _RemoteItemDelegate(QStyledItemDelegate):
         )
         if entry is not None and isinstance(editor, QLineEdit):
             editor.setText(entry.name)
-            editor.selectAll()
+            # 默认只选中"基名"部分，避免误改扩展名；目录或无扩展名时全选
+            if entry.is_dir:
+                editor.selectAll()
+                return
+            stem, ext = posixpath.splitext(entry.name)
+            if not ext or not stem:
+                editor.selectAll()
+                return
+            sel_len = len(stem)
+
+            def _apply():
+                try:
+                    editor.setSelection(0, sel_len)
+                except RuntimeError:
+                    pass
+
+            # 推到事件队列末尾，避免被 Qt item-view 内部的 show/focus 流程覆盖
+            QTimer.singleShot(0, _apply)
             return
         super().setEditorData(editor, index)
 
