@@ -85,7 +85,7 @@ class CommandPalette(QWidget):
 
         self.line_edit = QLineEdit(self)
         self.line_edit.setPlaceholderText(placeholder)
-        self.line_edit.setMinimumWidth(200)
+        self.line_edit.setMinimumWidth(280)
         self.line_edit.setFixedHeight(28)
         self.line_edit.setStyleSheet("""
             QLineEdit {
