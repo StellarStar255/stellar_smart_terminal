@@ -8795,8 +8795,19 @@ class MainWindow(QMainWindow):
                             config['navigator_font_size'] = old['navigator_font_size']
                 except Exception:
                     pass
+            # 合并写入：保留由其它组件维护、本函数未列出的字段（如 git_widget
+            # 写入的 git_proxy / git_proxies）。直接整体覆盖会把这些键清空，
+            # 导致退出后再次打开时丢失代理等设置。
+            merged = {}
+            try:
+                if self.CONFIG_FILE.exists():
+                    with open(self.CONFIG_FILE, 'r', encoding='utf-8') as f:
+                        merged = json.load(f) or {}
+            except Exception:
+                merged = {}
+            merged.update(config)
             with open(self.CONFIG_FILE, 'w', encoding='utf-8') as f:
-                json.dump(config, f, ensure_ascii=False, indent=2)
+                json.dump(merged, f, ensure_ascii=False, indent=2)
         except Exception:
             pass
 
