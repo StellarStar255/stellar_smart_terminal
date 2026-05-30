@@ -803,10 +803,16 @@ class WindowNavigatorPanel(QWidget):
         标题格式通常为: "预设名-文件夹名 - Smart Terminal #N" 或 "预设名-文件夹名"
         提取最后一个有效的文件夹名部分。
         如果无法提取，则从窗口的工作目录获取。
+        SSH 远程会话格式为 "SSH: {host}"，需保留完整远程主机名。
         """
         # 先去掉 " - Smart Terminal" 后缀
         if " - Smart Terminal" in title:
             title = title.split(" - Smart Terminal")[0]
+
+        # SSH 远程会话：标题格式 "SSH: {host}"，host 本身可能含 "-"
+        # （例如 Zhiyuan-Ubuntu-Server），必须整段保留，不能再按 "-" 拆。
+        if title.startswith("SSH: "):
+            return title[len("SSH: "):].strip() or title.strip()
 
         # 尝试找到最后一个 "-" 或 ")-" 之后的部分作为文件夹名
         # 格式如 "Claude Opus (with proxy)-stellar_markdown"
