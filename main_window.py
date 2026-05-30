@@ -1798,7 +1798,7 @@ class LLMConfigDialog(QDialog):
         api_key_layout.addWidget(self.api_key_edit)
 
         self.toggle_key_btn = QPushButton(t("llm.show_key"))
-        self.toggle_key_btn.setFixedWidth(60)
+        self.toggle_key_btn.setMinimumWidth(72)
         self.toggle_key_btn.clicked.connect(self._toggle_api_key_visibility)
         api_key_layout.addWidget(self.toggle_key_btn)
 
