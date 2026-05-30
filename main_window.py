@@ -3961,38 +3961,9 @@ class MainWindow(QMainWindow):
         lang_idx = self.lang_combo.findData(get_language())
         if lang_idx >= 0:
             self.lang_combo.setCurrentIndex(lang_idx)
-        self.lang_combo.setStyleSheet("""
-            QComboBox {
-                background-color: #16213e;
-                border: 1px solid #3d3d5c;
-                border-radius: 4px;
-                padding: 4px 18px 4px 8px;
-                color: #eaeaea;
-                combobox-popup: 0;
-            }
-            QComboBox:hover {
-                border-color: #667eea;
-            }
-            QComboBox::drop-down {
-                border: none;
-                width: 0px;
-            }
-            QComboBox QAbstractItemView {
-                background-color: #16213e;
-                color: #eaeaea;
-                selection-background-color: #667eea;
-                selection-color: #ffffff;
-                border: 1px solid #3d3d5c;
-                border-radius: 4px;
-                outline: none;
-                padding: 5px;
-            }
-            QComboBox QAbstractItemView::item {
-                min-height: 30px;
-                padding: 0px 12px;
-                border-radius: 4px;
-            }
-        """)
+        # 用与 theme/GUI 字号/透明度一致的共享样式（drop-down 宽 20px，
+        # 避免之前 width:0px 让箭头子区域塌缩到右边框、三角被挤出去）
+        self.lang_combo.setStyleSheet(self._COMBO_STYLE)
         self.lang_combo.currentIndexChanged.connect(self._on_language_changed)
 
         # 语言容器：标签 "Language:" + 下拉框（与 GUI 字号/透明度一致）
