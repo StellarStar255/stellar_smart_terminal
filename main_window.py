@@ -279,7 +279,7 @@ class CenteredComboBox(QComboBox):
         content_width = view.sizeHintForColumn(0) if view is not None else 0
         # The list view needs room for the combo frame, delegate padding and the
         # current-item marker area. Without this, short popups elide "English".
-        return max(self.width(), self.minimumWidth(), self._minimum_popup_width, content_width + 36)
+        return max(self._minimum_popup_width, content_width + 12)
 
     def showPopup(self):
         popup_width = self._popup_width()
@@ -3869,7 +3869,7 @@ class MainWindow(QMainWindow):
         self.theme_label.setStyleSheet("color: #888; margin-left: 0px;")
 
         self.theme_combo = CenteredComboBox()
-        self.theme_combo.setMinimumWidth(80)
+        self.theme_combo.setFixedWidth(130)
         for theme_key in self.THEMES.keys():
             # CenteredComboBox.addItem 已自动为新增项设置居中对齐
             self.theme_combo.addItem(t(f"theme.{theme_key}"), theme_key)
