@@ -6919,6 +6919,7 @@ class MainWindow(QMainWindow):
         left_visible = (
             getattr(self, 'explorer_panel_visible', False)
             or getattr(self, 'git_panel_visible', False)
+            or getattr(self, 'remote_panel_visible', False)
         )
 
         if editor_in_main and self.file_editor.isVisible() and len(msizes) == 4:
@@ -7388,11 +7389,13 @@ class MainWindow(QMainWindow):
         except Exception:
             pass
 
-        # 显示编辑器（按当前 Explorer 模式安排位置）
-        if getattr(self, '_explorer_split_horizontal', False):
-            self._place_editor_in_main_splitter()
-        else:
-            self._place_editor_in_explorer_splitter()
+        # 远程文件始终放到 main_splitter（左右布局）。
+        # Remote 面板自身没有内嵌的编辑器区域，而 explorer_splitter（上下分屏用）
+        # 位于此刻被隐藏的 explorer_panel_container 内——若按本地 Explorer 的
+        # 上下分屏模式放进去，编辑器/图片会落在隐藏容器里且 Remote 面板与之间
+        # 没有可拖拽的分隔条。放进 main_splitter 则图片紧邻 Remote 树显示，
+        # 中间的 QSplitter handle 可拖动来调整 Remote 面板宽度。
+        self._place_editor_in_main_splitter()
 
     def _update_splitter_sizes(self):
         """更新分割器大小"""

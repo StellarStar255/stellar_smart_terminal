@@ -398,6 +398,7 @@ TRANSLATIONS = {
     "editor.all_files": {"zh": "所有文件 (*.*)", "en": "All Files (*.*)"},
     "editor.copy_image": {"zh": "复制图片", "en": "Copy Image"},
     "editor.save_image_as": {"zh": "图片另存为…", "en": "Save Image As…"},
+    "editor.close_image": {"zh": "关闭图片", "en": "Close Image"},
     "editor.save_image_failed": {"zh": "无法保存图片到: {path}", "en": "Failed to save image to: {path}"},
     "editor.search_placeholder": {"zh": "在文件中查找…", "en": "Find in file..."},
     "editor.search_case_tooltip": {"zh": "区分大小写", "en": "Match case"},

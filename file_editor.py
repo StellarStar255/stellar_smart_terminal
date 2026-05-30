@@ -2042,12 +2042,16 @@ class FileEditorWidget(QWidget):
         """)
         copy_act = menu.addAction(t("editor.copy_image"))
         save_act = menu.addAction(t("editor.save_image_as"))
+        menu.addSeparator()
+        close_act = menu.addAction(t("editor.close_image"))
 
         chosen = menu.exec(QCursor.pos())
         if chosen is copy_act:
             self._copy_image_to_clipboard()
         elif chosen is save_act:
             self._save_image_as()
+        elif chosen is close_act:
+            self._close_editor()
 
     def _copy_image_to_clipboard(self):
         """把原图（不是缩放后的）放到系统剪贴板"""
