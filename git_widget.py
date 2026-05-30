@@ -130,26 +130,6 @@ class GitFileItem(QWidget):
             self.stage_btn.clicked.connect(lambda: self.stage_clicked.emit(self.git_file.path))
             btn_layout.addWidget(self.stage_btn)
 
-            # 放弃更改按钮
-            self.discard_btn = QPushButton("x")
-            self.discard_btn.setToolTip(t("git.discard_tooltip"))
-            self.discard_btn.setFixedSize(24, 20)
-            discard_style = f"""
-                QPushButton {{
-                    background-color: {self.theme.get('danger', '#ef4444')};
-                    color: white;
-                    border: none;
-                    border-radius: 3px;
-                    padding: 2px 6px;
-                    font-size: 12px;
-                }}
-                QPushButton:hover {{
-                    background-color: {self.theme.get('danger_hover', '#dc2626')};
-                }}
-            """
-            self.discard_btn.setStyleSheet(discard_style)
-            self.discard_btn.clicked.connect(lambda: self.discard_clicked.emit(self.git_file.path))
-            btn_layout.addWidget(self.discard_btn)
 
         # 初始隐藏按钮
         self.btn_container.setVisible(False)
@@ -179,6 +159,31 @@ class GitFileItem(QWidget):
         except RuntimeError:
             # 条目可能在刷新中已被销毁，忽略本次事件即可
             pass
+
+    def contextMenuEvent(self, event):
+        """右键菜单：暂存 / 取消暂存 / 丢弃更改，避免常驻按钮误触"""
+        from PyQt6.QtWidgets import QMenu
+        menu = QMenu(self)
+        menu.setStyleSheet(
+            "QMenu { background-color: #252526; color: #cccccc;"
+            " border: 1px solid #454545; }"
+            "QMenu::item { padding: 6px 24px 6px 12px; }"
+            "QMenu::item:selected { background-color: #094771; }"
+        )
+        if self.is_staged:
+            unstage_act = menu.addAction(t("git.menu_unstage"))
+            chosen = menu.exec(event.globalPos())
+            if chosen == unstage_act:
+                self.unstage_clicked.emit(self.git_file.path)
+        else:
+            stage_act = menu.addAction(t("git.menu_stage"))
+            menu.addSeparator()
+            discard_act = menu.addAction(t("git.menu_discard"))
+            chosen = menu.exec(event.globalPos())
+            if chosen == stage_act:
+                self.stage_clicked.emit(self.git_file.path)
+            elif chosen == discard_act:
+                self.discard_clicked.emit(self.git_file.path)
 
 
 class CollapsibleSection(QWidget):
