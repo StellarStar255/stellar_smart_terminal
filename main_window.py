@@ -40,7 +40,7 @@ from PyQt6.QtWidgets import (
 )
 from PyQt6 import sip  # 用于检查 C++ 对象是否已被删除
 from PyQt6.QtCore import Qt, QTimer, QEvent, QPoint, QMimeData, pyqtSignal, QObject
-from PyQt6.QtGui import QAction, QIcon, QFont, QColor, QPixmap, QPainter, QPen, QDrag, QCursor, QBrush, QPalette, QShortcut, QKeySequence
+from PyQt6.QtGui import QAction, QIcon, QFont, QColor, QPixmap, QPainter, QPainterPath, QPen, QDrag, QCursor, QBrush, QPalette, QShortcut, QKeySequence
 from PyQt6.QtWidgets import QWidgetAction, QStylePainter, QStyleOptionComboBox
 
 from terminal_widget import TerminalWidget
@@ -332,13 +332,27 @@ class CenteredComboBox(QComboBox):
         painter = QStylePainter(self)
         painter.drawComplexControl(QStyle.ComplexControl.CC_ComboBox, opt)
 
+        # 右侧预留出箭头区域，文本在剩余区域内居中——这样缩窄 combo 时
+        # 文字也不会贴住箭头。（Qt 样式表无法用 border 画三角，故手绘箭头。）
+        arrow_zone = 16
+        rect = self.rect()
+        text_rect = rect.adjusted(6, 0, -arrow_zone, 0)
         painter.setPen(self.palette().color(QPalette.ColorRole.Text))
         painter.setFont(self.font())
-        painter.drawText(
-            self.rect().adjusted(4, 0, -4, 0),
-            Qt.AlignmentFlag.AlignCenter,
-            text,
-        )
+        painter.drawText(text_rect, Qt.AlignmentFlag.AlignCenter, text)
+
+        # 手绘一个简洁的下拉三角
+        painter.setRenderHint(QPainter.RenderHint.Antialiasing, True)
+        cx = rect.right() - arrow_zone / 2 - 1
+        cy = rect.center().y() + 1
+        half_w = 4.0
+        height = 4.0
+        path = QPainterPath()
+        path.moveTo(cx - half_w, cy - height / 2)
+        path.lineTo(cx + half_w, cy - height / 2)
+        path.lineTo(cx, cy + height / 2)
+        path.closeSubpath()
+        painter.fillPath(path, QColor("#cfd6ff"))
 
 
 class DetachableTabBar(QTabBar):
@@ -3898,8 +3912,8 @@ class MainWindow(QMainWindow):
         # --- 语言选择 ---
         # 用 CenteredComboBox 让显示文本在 edit-field 居中（不依赖 editable hack）
         self.lang_combo = CenteredComboBox()
-        self.lang_combo.setFixedWidth(104)
-        self.lang_combo.setMinimumPopupWidth(112)
+        self.lang_combo.setFixedWidth(94)
+        self.lang_combo.setMinimumPopupWidth(100)
         self.lang_combo.setSizeAdjustPolicy(QComboBox.SizeAdjustPolicy.AdjustToMinimumContentsLengthWithIcon)
         self.lang_combo.setMinimumContentsLength(7)
         self.lang_combo.addItem("中文", "zh")
@@ -3918,7 +3932,7 @@ class MainWindow(QMainWindow):
                 background-color: #16213e;
                 border: 1px solid #3d3d5c;
                 border-radius: 4px;
-                padding: 4px 24px 4px 10px;
+                padding: 4px 18px 4px 8px;
                 color: #eaeaea;
                 combobox-popup: 0;
             }
@@ -3927,18 +3941,7 @@ class MainWindow(QMainWindow):
             }
             QComboBox::drop-down {
                 border: none;
-                width: 22px;
-                subcontrol-origin: padding;
-                subcontrol-position: top right;
-            }
-            QComboBox::down-arrow {
-                image: none;
                 width: 0px;
-                height: 0px;
-                border-left: 4px solid transparent;
-                border-right: 4px solid transparent;
-                border-top: 5px solid #cfd6ff;
-                margin-right: 8px;
             }
             QComboBox QAbstractItemView {
                 background-color: #16213e;
