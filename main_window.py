@@ -332,19 +332,23 @@ class CenteredComboBox(QComboBox):
         painter = QStylePainter(self)
         painter.drawComplexControl(QStyle.ComplexControl.CC_ComboBox, opt)
 
-        # 右侧预留出箭头区域，文本在剩余区域内居中——这样缩窄 combo 时
-        # 文字也不会贴住箭头。（Qt 样式表无法用 border 画三角，故手绘箭头。）
-        arrow_zone = 16
-        rect = self.rect()
-        text_rect = rect.adjusted(6, 0, -arrow_zone, 0)
+        # 用样式按 stylesheet(margin/border/padding/箭头宽度)算出的子区域来定位，
+        # 避免手算 rect.right() 时忽略 margin-right 导致三角顶到/越出控件右边框。
+        style = self.style()
+        text_rect = style.subControlRect(
+            QStyle.ComplexControl.CC_ComboBox, opt,
+            QStyle.SubControl.SC_ComboBoxEditField, self)
+        arrow_rect = style.subControlRect(
+            QStyle.ComplexControl.CC_ComboBox, opt,
+            QStyle.SubControl.SC_ComboBoxArrow, self)
         painter.setPen(self.palette().color(QPalette.ColorRole.Text))
         painter.setFont(self.font())
         painter.drawText(text_rect, Qt.AlignmentFlag.AlignCenter, text)
 
-        # 手绘一个简洁的下拉三角
+        # 手绘一个简洁的下拉三角，居中于样式给出的箭头区域
         painter.setRenderHint(QPainter.RenderHint.Antialiasing, True)
-        cx = rect.right() - arrow_zone / 2 - 1
-        cy = rect.center().y() + 1
+        cx = arrow_rect.center().x()
+        cy = arrow_rect.center().y() + 1
         half_w = 4.0
         height = 4.0
         path = QPainterPath()
