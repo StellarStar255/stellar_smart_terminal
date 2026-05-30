@@ -2495,6 +2495,40 @@ class MainWindow(QMainWindow):
     LOCAL_CONFIG_DIR = ".sterminal"
     LOCAL_COMMANDS_FILE = "quick_commands.json"
 
+    # 工具栏小下拉框（GUI 字号 / 透明度等）通用样式，与主题下拉框一致
+    _COMBO_STYLE = """
+        QComboBox {
+            background-color: #16213e;
+            border: 1px solid #3d3d5c;
+            border-radius: 4px;
+            padding: 4px 8px;
+            color: #eaeaea;
+            combobox-popup: 0;
+        }
+        QComboBox:hover {
+            border-color: #667eea;
+        }
+        QComboBox::drop-down {
+            border: none;
+            width: 20px;
+        }
+        QComboBox QAbstractItemView {
+            background-color: #16213e;
+            color: #eaeaea;
+            selection-background-color: #667eea;
+            selection-color: #ffffff;
+            border: 1px solid #3d3d5c;
+            border-radius: 4px;
+            outline: none;
+            padding: 4px;
+        }
+        QComboBox QAbstractItemView::item {
+            min-height: 28px;
+            padding: 0px 6px;
+            border-radius: 4px;
+        }
+    """
+
     # 主题定义
     THEMES = {
         "深蓝": {
@@ -2838,17 +2872,13 @@ class MainWindow(QMainWindow):
             self.icon_tint_checkbox.setChecked(self._use_icon_tint)
             self.icon_tint_checkbox.blockSignals(False)
 
-        # 恢复 GUI 字体大小 SpinBox
+        # 恢复 GUI 字体大小下拉框
         if hasattr(self, 'gui_font_spin') and self._gui_font_size != 0:
-            self.gui_font_spin.blockSignals(True)
-            self.gui_font_spin.setValue(self._gui_font_size)
-            self.gui_font_spin.blockSignals(False)
+            self._select_combo_value(self.gui_font_spin, self._gui_font_size)
 
         # 恢复窗口透明度
         if hasattr(self, 'opacity_spin') and self._window_opacity != 100:
-            self.opacity_spin.blockSignals(True)
-            self.opacity_spin.setValue(self._window_opacity)
-            self.opacity_spin.blockSignals(False)
+            self._select_combo_value(self.opacity_spin, self._window_opacity)
             self.setWindowOpacity(self._window_opacity / 100.0)
 
         # 恢复固定第二排工具栏 checkbox
@@ -4032,52 +4062,18 @@ class MainWindow(QMainWindow):
         self.gui_font_label.setStyleSheet("color: #888;")
         gui_font_layout.addWidget(self.gui_font_label)
 
-        self.gui_font_spin = QSpinBox()
-        self.gui_font_spin.setRange(0, 32)
-        self.gui_font_spin.setValue(self._gui_font_size)
-        self.gui_font_spin.setSpecialValueText(t("toolbar.gui_font_auto"))
+        # 用下拉框（CenteredComboBox）代替 SpinBox：Auto(0) + 8–32pt
+        self.gui_font_spin = CenteredComboBox()
         self.gui_font_spin.setToolTip(t("toolbar.gui_font_tooltip"))
-        self.gui_font_spin.setSuffix(" pt")
         self.gui_font_spin.setFixedWidth(90)
-        self.gui_font_spin.setAlignment(Qt.AlignmentFlag.AlignCenter)
-        self.gui_font_spin.setFocusPolicy(Qt.FocusPolicy.StrongFocus)
-        self.gui_font_spin.setStyleSheet("""
-            QSpinBox {
-                background-color: #16213e;
-                border: 1px solid #3d3d5c;
-                border-radius: 4px;
-                padding: 4px 6px;
-                color: #eaeaea;
-            }
-            QSpinBox:hover {
-                border-color: #667eea;
-            }
-            QSpinBox::up-button, QSpinBox::down-button {
-                background-color: #3d3d5c;
-                border: none;
-                width: 18px;
-            }
-            QSpinBox::up-button:hover, QSpinBox::down-button:hover {
-                background-color: #667eea;
-            }
-            QSpinBox::up-arrow {
-                image: none;
-                border-left: 4px solid transparent;
-                border-right: 4px solid transparent;
-                border-bottom: 5px solid #eaeaea;
-                width: 0px;
-                height: 0px;
-            }
-            QSpinBox::down-arrow {
-                image: none;
-                border-left: 4px solid transparent;
-                border-right: 4px solid transparent;
-                border-top: 5px solid #eaeaea;
-                width: 0px;
-                height: 0px;
-            }
-        """)
-        self.gui_font_spin.valueChanged.connect(self._on_gui_font_size_changed)
+        self.gui_font_spin.setMinimumPopupWidth(90)
+        self.gui_font_spin.addItem(t("toolbar.gui_font_auto"), 0)
+        for _pt in range(8, 33):
+            self.gui_font_spin.addItem(f"{_pt} pt", _pt)
+        _gf_idx = self.gui_font_spin.findData(self._gui_font_size)
+        self.gui_font_spin.setCurrentIndex(_gf_idx if _gf_idx >= 0 else 0)
+        self.gui_font_spin.setStyleSheet(self._COMBO_STYLE)
+        self.gui_font_spin.currentIndexChanged.connect(self._on_gui_font_size_changed)
         gui_font_layout.addWidget(self.gui_font_spin)
 
         # 窗口透明度控件
@@ -4090,52 +4086,17 @@ class MainWindow(QMainWindow):
         self.opacity_label.setStyleSheet("color: #888;")
         opacity_layout.addWidget(self.opacity_label)
 
-        self.opacity_spin = QSpinBox()
-        self.opacity_spin.setRange(10, 100)
-        self.opacity_spin.setValue(self._window_opacity)
+        # 用下拉框（CenteredComboBox）代替 SpinBox：100% → 10%（步进 5）
+        self.opacity_spin = CenteredComboBox()
         self.opacity_spin.setToolTip(t("toolbar.opacity_tooltip"))
-        self.opacity_spin.setSuffix("%")
-        self.opacity_spin.setSingleStep(5)
         self.opacity_spin.setFixedWidth(80)
-        self.opacity_spin.setAlignment(Qt.AlignmentFlag.AlignCenter)
-        self.opacity_spin.setFocusPolicy(Qt.FocusPolicy.StrongFocus)
-        self.opacity_spin.setStyleSheet("""
-            QSpinBox {
-                background-color: #16213e;
-                border: 1px solid #3d3d5c;
-                border-radius: 4px;
-                padding: 4px 6px;
-                color: #eaeaea;
-            }
-            QSpinBox:hover {
-                border-color: #667eea;
-            }
-            QSpinBox::up-button, QSpinBox::down-button {
-                background-color: #3d3d5c;
-                border: none;
-                width: 18px;
-            }
-            QSpinBox::up-button:hover, QSpinBox::down-button:hover {
-                background-color: #667eea;
-            }
-            QSpinBox::up-arrow {
-                image: none;
-                border-left: 4px solid transparent;
-                border-right: 4px solid transparent;
-                border-bottom: 5px solid #eaeaea;
-                width: 0px;
-                height: 0px;
-            }
-            QSpinBox::down-arrow {
-                image: none;
-                border-left: 4px solid transparent;
-                border-right: 4px solid transparent;
-                border-top: 5px solid #eaeaea;
-                width: 0px;
-                height: 0px;
-            }
-        """)
-        self.opacity_spin.valueChanged.connect(self._on_opacity_changed)
+        self.opacity_spin.setMinimumPopupWidth(80)
+        for _pct in range(100, 9, -5):
+            self.opacity_spin.addItem(f"{_pct}%", _pct)
+        _op_idx = self.opacity_spin.findData(self._window_opacity)
+        self.opacity_spin.setCurrentIndex(_op_idx if _op_idx >= 0 else 0)
+        self.opacity_spin.setStyleSheet(self._COMBO_STYLE)
+        self.opacity_spin.currentIndexChanged.connect(self._on_opacity_changed)
         opacity_layout.addWidget(self.opacity_spin)
 
         # 固定第二排工具栏 checkbox
@@ -4905,21 +4866,28 @@ class MainWindow(QMainWindow):
 
     # ==================== 全局字体缩放 ====================
 
-    def _on_gui_font_size_changed(self, value: int):
-        """GUI 字体大小调整（跳过 1-7 的无意义区间）"""
-        if 1 <= value <= 7:
-            # 从 0(Auto) 向上 → 跳到 8；从 8 向下 → 跳到 0(Auto)
-            self.gui_font_spin.blockSignals(True)
-            new_val = 8 if value > self._gui_font_size else 0
-            self.gui_font_spin.setValue(new_val)
-            self.gui_font_spin.blockSignals(False)
-            value = new_val
-        self._gui_font_size = value
+    @staticmethod
+    def _select_combo_value(combo, value):
+        """按存储的数据值选中下拉项（静默，不触发 currentIndexChanged）。"""
+        idx = combo.findData(value)
+        combo.blockSignals(True)
+        combo.setCurrentIndex(idx if idx >= 0 else 0)
+        combo.blockSignals(False)
+
+    def _on_gui_font_size_changed(self, _index: int = -1):
+        """GUI 字体大小调整（下拉框：Auto=0 或 8–32pt）"""
+        value = self.gui_font_spin.currentData()
+        if value is None:
+            return
+        self._gui_font_size = int(value)
         self._apply_global_zoom()
 
-    def _on_opacity_changed(self, value: int):
+    def _on_opacity_changed(self, _index: int = -1):
         """窗口透明度调整 — 同步到所有窗口"""
-        self._window_opacity = value
+        value = self.opacity_spin.currentData()
+        if value is None:
+            return
+        self._window_opacity = int(value)
         self._apply_opacity_to_all_windows()
         self._save_config()
 
@@ -4935,11 +4903,9 @@ class MainWindow(QMainWindow):
                         for terminal in terminals:
                             if hasattr(terminal, '_invalidate_render_cache'):
                                 terminal._invalidate_render_cache()
-                    # 同步其他窗口的 opacity_spin 值（避免信号循环）
+                    # 同步其他窗口的透明度下拉框（避免信号循环）
                     if widget is not self and hasattr(widget, 'opacity_spin'):
-                        widget.opacity_spin.blockSignals(True)
-                        widget.opacity_spin.setValue(self._window_opacity)
-                        widget.opacity_spin.blockSignals(False)
+                        self._select_combo_value(widget.opacity_spin, self._window_opacity)
                         widget._window_opacity = self._window_opacity
 
     def _on_pin_row2_changed(self, state):
@@ -5220,20 +5186,20 @@ class MainWindow(QMainWindow):
     def _opacity_increase(self):
         """增加窗口透明度（更不透明）"""
         new_val = min(100, self._window_opacity + 5)
+        self._window_opacity = new_val
         if hasattr(self, 'opacity_spin'):
-            self.opacity_spin.setValue(new_val)  # 会触发 _on_opacity_changed
-        else:
-            self._window_opacity = new_val
-            self._apply_opacity_to_all_windows()
+            self._select_combo_value(self.opacity_spin, new_val)
+        self._apply_opacity_to_all_windows()
+        self._save_config()
 
     def _opacity_decrease(self):
         """减少窗口透明度（更透明）"""
         new_val = max(10, self._window_opacity - 5)
+        self._window_opacity = new_val
         if hasattr(self, 'opacity_spin'):
-            self.opacity_spin.setValue(new_val)  # 会触发 _on_opacity_changed
-        else:
-            self._window_opacity = new_val
-            self._apply_opacity_to_all_windows()
+            self._select_combo_value(self.opacity_spin, new_val)
+        self._apply_opacity_to_all_windows()
+        self._save_config()
 
     def _apply_global_zoom(self):
         """应用全局缩放到所有组件"""
@@ -7800,7 +7766,7 @@ class MainWindow(QMainWindow):
         if hasattr(self, 'gui_font_label'):
             self.gui_font_label.setText(t("toolbar.gui_font_label"))
         if hasattr(self, 'gui_font_spin'):
-            self.gui_font_spin.setSpecialValueText(t("toolbar.gui_font_auto"))
+            self.gui_font_spin.setItemText(0, t("toolbar.gui_font_auto"))
             self.gui_font_spin.setToolTip(t("toolbar.gui_font_tooltip"))
 
         # 语言
