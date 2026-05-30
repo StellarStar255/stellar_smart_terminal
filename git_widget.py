@@ -1236,7 +1236,10 @@ class GitOutputView(QWidget):
 class _GraphCanvas(QWidget):
     """提交历史 graph 画布：左侧 lane 点线（仿 VS Code），右侧 引用徽标 + 标题 + 作者。"""
 
-    commit_clicked = pyqtSignal(str)  # 提交 hash
+    commit_clicked = pyqtSignal(str)            # 提交 hash
+    revert_requested = pyqtSignal(str)          # 撤销提交（git revert）
+    reset_requested = pyqtSignal(str, str)      # 重置到提交 (hash, mode)
+    copy_hash_requested = pyqtSignal(str)       # 复制提交 hash
 
     LANE_COLORS = ['#e06c75', '#61afef', '#98c379', '#c678dd',
                    '#e5c07b', '#56b6c2', '#d19a66', '#abb2bf']
@@ -1321,6 +1324,43 @@ class _GraphCanvas(QWidget):
         idx = self._row_at(int(event.position().y()))
         if idx >= 0:
             self.commit_clicked.emit(self._rows[idx]['commit']['hash'])
+
+    def contextMenuEvent(self, event):
+        """右键提交行：撤销(revert) / 重置(reset) / 复制哈希。"""
+        from PyQt6.QtWidgets import QMenu
+        idx = self._row_at(int(event.pos().y()))
+        if idx < 0:
+            return
+        commit = self._rows[idx]['commit']
+        h = commit['hash']
+        menu = QMenu(self)
+        menu.setStyleSheet(
+            "QMenu { background-color: #252526; color: #cccccc;"
+            " border: 1px solid #454545; }"
+            "QMenu::item { padding: 6px 24px 6px 12px; }"
+            "QMenu::item:selected { background-color: #094771; }"
+            "QMenu::separator { height: 1px; background: #454545; margin: 4px 8px; }"
+        )
+        revert_act = menu.addAction(t("git.ctx_revert"))
+        menu.addSeparator()
+        reset_soft_act = menu.addAction(t("git.ctx_reset_soft"))
+        reset_mixed_act = menu.addAction(t("git.ctx_reset_mixed"))
+        reset_hard_act = menu.addAction(t("git.ctx_reset_hard"))
+        menu.addSeparator()
+        copy_act = menu.addAction(t("git.ctx_copy_hash"))
+        chosen = menu.exec(event.globalPos())
+        if chosen is None:
+            return
+        if chosen == revert_act:
+            self.revert_requested.emit(h)
+        elif chosen == reset_soft_act:
+            self.reset_requested.emit(h, 'soft')
+        elif chosen == reset_mixed_act:
+            self.reset_requested.emit(h, 'mixed')
+        elif chosen == reset_hard_act:
+            self.reset_requested.emit(h, 'hard')
+        elif chosen == copy_act:
+            self.copy_hash_requested.emit(h)
 
     def paintEvent(self, event):
         painter = QPainter(self)
@@ -1414,6 +1454,9 @@ class GitGraphWidget(QWidget):
     """提交历史 graph 面板：顶部 "GRAPH" 标题 + 可滚动的 graph 画布。"""
 
     commit_clicked = pyqtSignal(str)
+    revert_requested = pyqtSignal(str)
+    reset_requested = pyqtSignal(str, str)
+    copy_hash_requested = pyqtSignal(str)
 
     def __init__(self, theme: dict = None, parent=None):
         super().__init__(parent)
@@ -1433,6 +1476,9 @@ class GitGraphWidget(QWidget):
         self._scroll.setHorizontalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAlwaysOff)
         self._canvas = _GraphCanvas(self.theme)
         self._canvas.commit_clicked.connect(self.commit_clicked.emit)
+        self._canvas.revert_requested.connect(self.revert_requested.emit)
+        self._canvas.reset_requested.connect(self.reset_requested.emit)
+        self._canvas.copy_hash_requested.connect(self.copy_hash_requested.emit)
         self._scroll.setWidget(self._canvas)
         layout.addWidget(self._scroll, 1)
 
@@ -1837,6 +1883,9 @@ class GitPanel(QWidget):
         # 提交历史 graph（仿 VS Code）放在最下方，可拖拽分隔条调整高度
         self.graph_widget = GitGraphWidget(self.theme)
         self.graph_widget.commit_clicked.connect(self._on_commit_clicked)
+        self.graph_widget.revert_requested.connect(self._on_revert_commit)
+        self.graph_widget.reset_requested.connect(self._on_reset_commit)
+        self.graph_widget.copy_hash_requested.connect(self._on_copy_commit_hash)
         self.body_splitter.addWidget(self.graph_widget)
 
         # 变更列表 + graph 吃掉多余空间，提交区默认停在它的自然高度
@@ -2020,6 +2069,50 @@ class GitPanel(QWidget):
         self.output_requested.emit(
             t("git.commit_show_title", short=commit_hash[:7]), text
         )
+
+    def _on_revert_commit(self, commit_hash: str):
+        """右键菜单：撤销某次提交（git revert，安全、不改写历史）。"""
+        short = commit_hash[:7]
+        reply = QMessageBox.question(
+            self,
+            t("git.confirm_revert_title"),
+            t("git.confirm_revert_msg", short=short),
+            QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No,
+            QMessageBox.StandardButton.No,
+        )
+        if reply != QMessageBox.StandardButton.Yes:
+            return
+        if self._git_manager.revert_commit(commit_hash):
+            self._refresh_status()
+            self._refresh_branches()
+            self._refresh_graph()
+
+    def _on_reset_commit(self, commit_hash: str, mode: str):
+        """右键菜单：重置当前分支到某次提交（git reset --<mode>，会改写本地历史）。"""
+        short = commit_hash[:7]
+        msg_key = {
+            'soft': 'git.confirm_reset_soft_msg',
+            'mixed': 'git.confirm_reset_mixed_msg',
+            'hard': 'git.confirm_reset_hard_msg',
+        }.get(mode, 'git.confirm_reset_mixed_msg')
+        reply = QMessageBox.question(
+            self,
+            t("git.confirm_reset_title"),
+            t(msg_key, short=short),
+            QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No,
+            QMessageBox.StandardButton.No,
+        )
+        if reply != QMessageBox.StandardButton.Yes:
+            return
+        if self._git_manager.reset_to_commit(commit_hash, mode):
+            self._refresh_status()
+            self._refresh_branches()
+            self._refresh_graph()
+
+    def _on_copy_commit_hash(self, commit_hash: str):
+        """右键菜单：复制提交完整哈希到剪贴板。"""
+        from PyQt6.QtWidgets import QApplication
+        QApplication.clipboard().setText(commit_hash)
 
     def _refresh_status(self):
         """刷新文件状态"""

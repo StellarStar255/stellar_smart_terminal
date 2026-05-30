@@ -494,6 +494,55 @@ class GitManager(QObject):
         self.status_changed.emit()
         return True
 
+    def revert_commit(self, commit_hash: str) -> bool:
+        """撤销某次提交（git revert）：生成一个新提交来抵消该提交的改动。
+
+        这是 push 之后也安全的「撤销」方式，不改写历史。
+        若产生冲突则自动 abort 并报错，避免仓库卡在冲突状态（GUI 无冲突解决界面）。
+
+        Args:
+            commit_hash: 要撤销的提交 hash
+
+        Returns:
+            是否成功
+        """
+        if not commit_hash:
+            return False
+        success, output = self._run_git('revert', '--no-edit', commit_hash, check=False)
+        if not success:
+            # 冲突或其它失败：回滚到干净状态再报错
+            self._run_git('revert', '--abort', check=False)
+            self.error_occurred.emit(t("git_mgr.revert_failed", error=output))
+            return False
+        self.status_changed.emit()
+        return True
+
+    def reset_to_commit(self, commit_hash: str, mode: str = 'mixed') -> bool:
+        """重置当前分支到某次提交（git reset --<mode>）。
+
+        会改写本地历史，仅适合未 push 的提交。
+        - soft：保留工作区与暂存区（撤销提交但保留改动为已暂存）
+        - mixed：保留工作区，清空暂存区（默认）
+        - hard：丢弃工作区改动（危险，不可恢复）
+
+        Args:
+            commit_hash: 目标提交 hash
+            mode: 'soft' | 'mixed' | 'hard'
+
+        Returns:
+            是否成功
+        """
+        if not commit_hash:
+            return False
+        if mode not in ('soft', 'mixed', 'hard'):
+            mode = 'mixed'
+        success, output = self._run_git('reset', f'--{mode}', commit_hash, check=False)
+        if not success:
+            self.error_occurred.emit(t("git_mgr.reset_failed", error=output))
+            return False
+        self.status_changed.emit()
+        return True
+
     def get_diff(self, path: str, staged: bool = False) -> str:
         """获取文件 diff
 
