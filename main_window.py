@@ -7323,8 +7323,12 @@ class MainWindow(QMainWindow):
             ssh_args.append(target)
         # 交互式 shell + 可选 cd
         if remote_cd_path:
-            # -t 强制分配 tty；cd 后 exec $SHELL -l 进入交互
-            ssh_args.extend(["-t", f"cd {self._shell_quote(remote_cd_path)} && exec \\$SHELL -l"])
+            # -t 强制分配 tty；cd 后 exec 登录 shell 进入交互。
+            # 整条 arg 之后会被 shlex.quote 用单引号包起来传给本地 ssh，
+            # 本地 shell 不会展开 $SHELL，故这里不能写 \$SHELL（会让远端收到
+            # 字面量 \$SHELL → exec: $SHELL: not found）。${SHELL:-/bin/bash}
+            # 兜底远端未设置 $SHELL 的情况。
+            ssh_args.extend(["-t", f"cd {self._shell_quote(remote_cd_path)} && exec ${{SHELL:-/bin/bash}} -l"])
 
         # 新 tab，标签名标记 SSH host
         tab_name = t("remote.terminal_tab_name", host=alias)
