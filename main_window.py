@@ -1735,6 +1735,18 @@ class LLMConfigDialog(QDialog):
         self.set_default_btn.clicked.connect(self._set_as_default)
         left_layout.addWidget(self.set_default_btn)
 
+        # JSON 导入/导出按钮组
+        json_btn_layout = QHBoxLayout()
+        self.copy_json_btn = QPushButton(t("llm.copy_json"))
+        self.copy_json_btn.setToolTip(t("llm.copy_json_tooltip"))
+        self.copy_json_btn.clicked.connect(self._copy_as_json)
+        self.paste_json_btn = QPushButton(t("llm.paste_json"))
+        self.paste_json_btn.setToolTip(t("llm.paste_json_tooltip"))
+        self.paste_json_btn.clicked.connect(self._paste_as_json)
+        json_btn_layout.addWidget(self.copy_json_btn)
+        json_btn_layout.addWidget(self.paste_json_btn)
+        left_layout.addLayout(json_btn_layout)
+
         content_layout.addLayout(left_layout, 1)
 
         # 右侧：编辑区
@@ -2060,6 +2072,88 @@ class LLMConfigDialog(QDialog):
             self.default_index = row
             self._populate_list()
             self.config_list.setCurrentRow(row)
+
+    def _copy_as_json(self):
+        """将当前选中的配置复制为 JSON 到剪贴板"""
+        row = self.config_list.currentRow()
+        item = self.config_list.item(row) if row >= 0 else None
+        cid = item.data(Qt.ItemDataRole.UserRole) if item else None
+        config = self._get_config_by_id(cid) if cid else None
+        if not config:
+            QMessageBox.warning(self, t("llm.copy_success"), t("llm.select_first"))
+            return
+        # 同步当前编辑内容后再导出
+        self._on_field_changed()
+        export = {k: v for k, v in config.items() if k != '_id'}
+        text = json.dumps(export, ensure_ascii=False, indent=2)
+        QApplication.clipboard().setText(text)
+        QMessageBox.information(self, t("llm.copy_success"), t("llm.copy_done"))
+
+    def _sanitize_config(self, raw):
+        """将任意 dict 规范化为合法的配置（基于默认模板，做类型转换）"""
+        config = self.DEFAULT_CONFIG.copy()
+        # 名称
+        name = str(raw.get('name', '')).strip()
+        if name:
+            config['name'] = name
+        # 字符串字段
+        for key in ('api_base', 'api_key', 'model', 'proxy'):
+            if key in raw and raw[key] is not None:
+                config[key] = str(raw[key])
+        # 整数字段
+        for key, default in (('timeout', 30), ('max_tokens', 4096)):
+            try:
+                config[key] = int(raw[key]) if raw.get(key) not in (None, '') else default
+            except (ValueError, TypeError):
+                config[key] = default
+        # 浮点字段（带范围限制）
+        try:
+            temp = float(raw['temperature']) if raw.get('temperature') not in (None, '') else 1.0
+            config['temperature'] = max(0.0, min(2.0, temp))
+        except (ValueError, TypeError):
+            config['temperature'] = 1.0
+        try:
+            top_p = float(raw['top_p']) if raw.get('top_p') not in (None, '') else 1.0
+            config['top_p'] = max(0.0, min(1.0, top_p))
+        except (ValueError, TypeError):
+            config['top_p'] = 1.0
+        return config
+
+    def _paste_as_json(self):
+        """从剪贴板的 JSON 导入配置（支持单个对象或列表）"""
+        text = QApplication.clipboard().text().strip()
+        if not text:
+            QMessageBox.warning(self, t("llm.paste_failed"), t("llm.clipboard_empty"))
+            return
+        try:
+            data = json.loads(text)
+        except (json.JSONDecodeError, ValueError):
+            QMessageBox.warning(self, t("llm.paste_failed"), t("llm.invalid_json"))
+            return
+        # 接受单个对象或对象列表
+        if isinstance(data, dict):
+            items = [data]
+        elif isinstance(data, list):
+            items = [d for d in data if isinstance(d, dict)]
+        else:
+            items = []
+        if not items:
+            QMessageBox.warning(self, t("llm.paste_failed"), t("llm.invalid_config"))
+            return
+        last_row = -1
+        for raw in items:
+            config = self._sanitize_config(raw)
+            cid = self._next_config_id()
+            config['_id'] = cid
+            self.configs.append(config)
+            self._config_map[cid] = config
+            list_item = QListWidgetItem(config['name'])
+            list_item.setData(Qt.ItemDataRole.UserRole, cid)
+            self.config_list.addItem(list_item)
+            last_row = self.config_list.count() - 1
+        if last_row >= 0:
+            self.config_list.setCurrentRow(last_row)
+        QMessageBox.information(self, t("llm.paste_success"), t("llm.paste_done", n=len(items)))
 
     def _on_rows_moved(self, parent, start, end, destination, row):
         """拖拽排序后同步 configs 列表顺序"""
