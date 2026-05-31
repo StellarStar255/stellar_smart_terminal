@@ -2496,6 +2496,13 @@ class TerminalWidget(QWidget):
 
         menu.addSeparator()
 
+        # 刷新终端：强制重绘 + 给 PTY 重发尺寸（SIGWINCH），修复偶发花屏/错位
+        refresh_action = QAction(t("ctx.refresh"), self)
+        refresh_action.triggered.connect(self.refresh_terminal)
+        menu.addAction(refresh_action)
+
+        menu.addSeparator()
+
         # 全选
         select_all_action = QAction(t("ctx.select_all"), self)
         select_all_action.triggered.connect(self._select_all)
@@ -2995,6 +3002,17 @@ class TerminalWidget(QWidget):
     def clear_screen(self):
         """清屏"""
         self.screen.reset()
+        self._invalidate_render_cache()
+
+    def refresh_terminal(self):
+        """刷新终端显示（非破坏性）：
+
+        - 重建渲染缓存并强制重绘，修复本地渲染脏区造成的花屏/错位；
+        - 给 PTY 重发一次窗口尺寸（触发 SIGWINCH），让远端 TUI 程序
+          （vim / tmux / claude 等）重画自己。
+        不清空内容、不影响滚动历史，区别于 clear_screen / Ctrl+L。
+        """
+        self._update_pty_size()
         self._invalidate_render_cache()
 
     def is_running(self) -> bool:
