@@ -3613,37 +3613,120 @@ if (hasFileURL) {{
 
     # ==================== 双击选词、三击选行 ====================
 
+    def _row_count_total(self) -> int:
+        """历史 + 当前屏幕的总行数（绝对行号上界）。"""
+        return len(self._get_history_top()) + self.term_rows
+
+    def _is_row_soft_wrapped(self, abs_row: int) -> bool:
+        """该绝对行是否被软换行（内容续接到下一可见行，中间没有真实换行符）。
+
+        长路径/长命令超过终端宽度时会被 pyte 自动折行并打上软换行标记；
+        双击选词/选行需要据此把选区跨过这些视觉换行，才能选中完整的单行。
+        """
+        history = self._get_history_top()
+        history_count = len(history)
+        if abs_row < 0:
+            return False
+        if abs_row < history_count:
+            buffer_line = history[abs_row]
+        else:
+            buffer_row = abs_row - history_count
+            if 0 <= buffer_row < self.term_rows:
+                buffer_line = self.screen.buffer[buffer_row]
+            else:
+                return False
+        try:
+            return bool(self.screen.is_soft_wrapped(buffer_line))
+        except Exception:
+            return False
+
     def _select_word_at(self, cell: tuple):
-        """选中指定位置的单词"""
+        """选中指定位置的单词。
+
+        若单词因终端宽度被自动折行（中间无真实换行符）而跨越多个可见行，
+        则连续选中完整单词，避免只复制到折行处的一半。复制时
+        _get_selected_text 会把软换行行无缝拼接，得到完整字符串。
+        """
         row, col = cell
         line_text = self._get_line_text(row)
         if not line_text:
             return
 
-        # 找到单词边界
-        word_chars = set('abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789_-')
+        # 找到单词边界。纳入路径/URL 常见字符（/ . : ~ @ % + = ,），
+        # 这样双击一条完整路径或 URL 能整体选中，而不是停在第一个 / 或 . 处。
+        word_chars = set('abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789_-./:~@%+=,')
 
         # 向左找边界
         start = col
         while start > 0 and (start - 1 < len(line_text)) and line_text[start - 1] in word_chars:
             start -= 1
-
         # 向右找边界
         end = col
         while end < len(line_text) and line_text[end] in word_chars:
             end += 1
 
-        if start < end:
-            self._selection_start = (row, start)
-            self._selection_end = (row, end - 1)
-            self._is_selecting = False
+        if start >= end:
+            return
+
+        start_row, start_col = row, start
+        end_row, end_col = row, end - 1
+        total = self._row_count_total()
+
+        # 向上扩展：单词顶到行首且上一行是被折行的续行 → 接到上一行末尾的单词部分
+        while start_col == 0 and start_row > 0 and self._is_row_soft_wrapped(start_row - 1):
+            prev_text = self._get_line_text(start_row - 1).rstrip('\x00')
+            if not prev_text or prev_text[-1] not in word_chars:
+                break
+            s = len(prev_text)
+            while s > 0 and prev_text[s - 1] in word_chars:
+                s -= 1
+            start_row -= 1
+            start_col = s
+            if start_col != 0:
+                break
+
+        # 向下扩展：单词顶到行尾且本行被折行 → 接到下一行开头的单词部分
+        while end_row < total - 1 and self._is_row_soft_wrapped(end_row):
+            cur_text = self._get_line_text(end_row)
+            if end_col < len(cur_text) - 1 and cur_text[end_col + 1] in word_chars:
+                # 单词其实还没到本可见行末尾（理论上不该发生），停止
+                pass
+            next_text = self._get_line_text(end_row + 1)
+            if not next_text or next_text[0] not in word_chars:
+                break
+            e = 0
+            while e < len(next_text) and next_text[e] in word_chars:
+                e += 1
+            end_row += 1
+            end_col = e - 1
+            if end_col != len(next_text) - 1:
+                break
+
+        self._selection_start = (start_row, start_col)
+        self._selection_end = (end_row, end_col)
+        self._is_selecting = False
 
     def _select_line_at(self, cell: tuple):
-        """选中指定位置的整行"""
+        """选中整条逻辑行。
+
+        长行因终端宽度不足被自动折成多个可见行（之间无真实换行符）。
+        这里向上/向下扩展到同一逻辑行的首尾可见行，让三击/双击选行选中完整内容；
+        复制时 _get_selected_text 会把软换行行无缝拼接。
+        """
         row, _ = cell
-        self._selection_start = (row, 0)
-        self._selection_end = (row, self.term_cols - 1)
+        total = self._row_count_total()
+
+        start_row = row
+        while start_row > 0 and self._is_row_soft_wrapped(start_row - 1):
+            start_row -= 1
+        end_row = row
+        while end_row < total - 1 and self._is_row_soft_wrapped(end_row):
+            end_row += 1
+
+        self._selection_start = (start_row, 0)
+        self._selection_end = (end_row, self.term_cols - 1)
         self._is_selecting = False
+
 
     def _get_line_text(self, abs_row: int) -> str:
         """获取指定绝对行号的文本
