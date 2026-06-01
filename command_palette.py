@@ -182,6 +182,10 @@ class CommandPalette(QWidget):
 
         self.list_widget = QListWidget(self.popup)
         self.list_widget.setFocusPolicy(Qt.FocusPolicy.NoFocus)
+        # 开启鼠标追踪，鼠标移动才会发 itemEntered，让高亮跟随光标
+        self.list_widget.setMouseTracking(True)
+        self.list_widget.viewport().setMouseTracking(True)
+        # 只保留「当前项」一个高亮：去掉单独的 :hover，避免出现蓝+灰两个高亮不同步。
         self.list_widget.setStyleSheet("""
             QListWidget {
                 background-color: transparent;
@@ -197,13 +201,14 @@ class CommandPalette(QWidget):
                 color: white;
                 border-radius: 3px;
             }
-            QListWidget::item:hover {
-                background-color: #2a2a3e;
-                border-radius: 3px;
-            }
         """)
         self.list_widget.itemActivated.connect(self._on_item_activated)
         self.list_widget.itemClicked.connect(self._on_item_activated)
+        # 鼠标移到某项 → 让它成为当前项，单一高亮自然跟随光标
+        self.list_widget.itemEntered.connect(self.list_widget.setCurrentItem)
+        # 兜底：非激活的 Tool 窗口在 macOS 上未必持续收到 MouseMove，但 HoverMove 一定到
+        # （灰色 :hover 能显示即证明）。用视口的 HoverMove 直接驱动当前项，保证跟随。
+        self.list_widget.viewport().installEventFilter(self)
         pv.addWidget(self.list_widget)
 
         self.empty_label = QLabel("No matches", self.popup)
@@ -368,6 +373,14 @@ class CommandPalette(QWidget):
             print(f"[CommandPalette] command failed: {cmd.title}: {e}")
 
     def eventFilter(self, obj, ev):
+        # 列表视口的 hover：让光标所在项成为当前项，高亮自然跟随鼠标。
+        if obj is self.list_widget.viewport():
+            if ev.type() in (QEvent.Type.HoverMove, QEvent.Type.MouseMove):
+                it = self.list_widget.itemAt(ev.position().toPoint())
+                if it is not None:
+                    self.list_widget.setCurrentItem(it)
+            return super().eventFilter(obj, ev)
+
         # 注意：本过滤器只装在 line_edit 上，只处理 line_edit 自己的事件。
         # 点外部/Esc 的全局兜底由独立的 _OutsideClickFilter（装在 app 上）负责，
         # 避免同一过滤器对 line_edit 的同一次点击被调用两次而出现"开→关→开"。
