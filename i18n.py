@@ -388,6 +388,8 @@ TRANSLATIONS = {
     "editor.split_h_menu": {"zh": "Split  ⌘\\", "en": "Split  ⌘\\"},
     "editor.split_v_menu": {"zh": "V-Split  ⌘⇧\\", "en": "V-Split  ⌘⇧\\"},
     "editor.close_split_menu": {"zh": "Close Split", "en": "Close Split"},
+    "editor.move_left_menu": {"zh": "Move Left", "en": "Move Left"},
+    "editor.move_up_menu": {"zh": "Move Up", "en": "Move Up"},
     "editor.error": {"zh": "错误", "en": "Error"},
     "editor.file_not_found": {"zh": "文件不存在: {path}", "en": "File not found: {path}"},
     "editor.file_too_large_title": {"zh": "文件过大", "en": "File Too Large"},

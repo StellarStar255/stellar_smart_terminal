@@ -601,6 +601,8 @@ class CodeEditor(QPlainTextEdit):
     split_h_requested = pyqtSignal()
     split_v_requested = pyqtSignal()
     close_split_requested = pyqtSignal()
+    move_left_requested = pyqtSignal()
+    move_up_requested = pyqtSignal()
 
     def __init__(self, parent=None):
         super().__init__(parent)
@@ -643,25 +645,47 @@ class CodeEditor(QPlainTextEdit):
         act_close = menu.addAction(self._split_menu_icon('close', icon_color), t("editor.close_split_menu"))
         act_close.setEnabled(bool(area and len(area.panes) > 1))
         act_close.triggered.connect(self.close_split_requested.emit)
+
+        # 移动当前分屏（与终端一致）：仅在有多个窗格时出现
+        pane = self._find_pane()
+        if area is not None and pane is not None and len(area.panes) > 1:
+            menu.addSeparator()
+            act_left = menu.addAction(self._split_menu_icon('left', icon_color), t("editor.move_left_menu"))
+            act_left.setEnabled(area.can_move_left(pane))
+            act_left.triggered.connect(self.move_left_requested.emit)
+            act_up = menu.addAction(self._split_menu_icon('up', icon_color), t("editor.move_up_menu"))
+            act_up.setEnabled(area.can_move_up(pane))
+            act_up.triggered.connect(self.move_up_requested.emit)
+
         menu.exec(event.globalPos())
 
     @staticmethod
     def _split_menu_icon(kind: str, color: QColor) -> QIcon:
-        """画一个 16×16 的分屏图标：'h' 竖分隔、'v' 横分隔、'close' 打叉。"""
+        """画一个 16×16 的菜单图标：'h' 竖分隔、'v' 横分隔、'close' 打叉、
+        'left' 左箭头、'up' 上箭头。"""
         pm = QPixmap(16, 16)
         pm.fill(Qt.GlobalColor.transparent)
         painter = QPainter(pm)
         painter.setRenderHint(QPainter.RenderHint.Antialiasing, True)
         painter.setPen(color)
-        rect = QRect(3, 4, 10, 8)  # x3..13, y4..12, 中心 (8, 8)
-        painter.drawRoundedRect(rect, 2, 2)
-        if kind == 'h':
-            painter.drawLine(8, 4, 8, 12)       # 竖向分隔 → 左右分屏
-        elif kind == 'v':
-            painter.drawLine(3, 8, 13, 8)       # 横向分隔 → 上下分屏
-        elif kind == 'close':
-            painter.drawLine(5, 6, 11, 10)      # × 关闭
-            painter.drawLine(11, 6, 5, 10)
+        if kind in ('h', 'v', 'close'):
+            rect = QRect(3, 4, 10, 8)  # x3..13, y4..12, 中心 (8, 8)
+            painter.drawRoundedRect(rect, 2, 2)
+            if kind == 'h':
+                painter.drawLine(8, 4, 8, 12)       # 竖向分隔 → 左右分屏
+            elif kind == 'v':
+                painter.drawLine(3, 8, 13, 8)       # 横向分隔 → 上下分屏
+            elif kind == 'close':
+                painter.drawLine(5, 6, 11, 10)      # × 关闭
+                painter.drawLine(11, 6, 5, 10)
+        elif kind == 'left':                        # ← 左箭头
+            painter.drawLine(4, 8, 12, 8)
+            painter.drawLine(4, 8, 8, 4)
+            painter.drawLine(4, 8, 8, 12)
+        elif kind == 'up':                          # ↑ 上箭头
+            painter.drawLine(8, 4, 8, 12)
+            painter.drawLine(8, 4, 4, 8)
+            painter.drawLine(8, 4, 12, 8)
         painter.end()
         return QIcon(pm)
 
@@ -670,6 +694,15 @@ class CodeEditor(QPlainTextEdit):
         p = self.parent()
         while p is not None:
             if type(p).__name__ == 'EditorArea':
+                return p
+            p = p.parent()
+        return None
+
+    def _find_pane(self):
+        """沿父链向上找到所属的 FileEditorWidget 窗格（找不到返回 None）。"""
+        p = self.parent()
+        while p is not None:
+            if type(p).__name__ == 'FileEditorWidget':
                 return p
             p = p.parent()
         return None
@@ -1510,6 +1543,8 @@ class FileEditorWidget(QWidget):
     editor_closed = pyqtSignal()  # 编辑器关闭信号
     split_h_requested = pyqtSignal()  # 请求左右分屏（并排）
     split_v_requested = pyqtSignal()  # 请求上下分屏
+    move_left_requested = pyqtSignal()  # 与左侧窗格交换位置
+    move_up_requested = pyqtSignal()  # 与上方窗格交换位置
     pane_focused = pyqtSignal()  # 本窗格获得焦点 / 被点击
 
     def __init__(self, theme: dict = None, parent=None):
@@ -1596,6 +1631,9 @@ class FileEditorWidget(QWidget):
         self.editor.split_v_requested.connect(self.split_v_requested.emit)
         # 关闭当前分屏 → 走与关闭按钮相同的路径（含未保存提示）
         self.editor.close_split_requested.connect(self._close_editor)
+        # 移动分屏 → 转发为本窗格的移动信号
+        self.editor.move_left_requested.connect(self.move_left_requested.emit)
+        self.editor.move_up_requested.connect(self.move_up_requested.emit)
 
         # 设置等宽字体
         font = QFont("Menlo", 13)
@@ -2525,6 +2563,8 @@ class EditorArea(QWidget):
         pane = FileEditorWidget(theme=self.theme)
         pane.split_h_requested.connect(lambda p=pane: self.split_pane(p, Qt.Orientation.Horizontal))
         pane.split_v_requested.connect(lambda p=pane: self.split_pane(p, Qt.Orientation.Vertical))
+        pane.move_left_requested.connect(lambda p=pane: self.move_pane_left(p))
+        pane.move_up_requested.connect(lambda p=pane: self.move_pane_up(p))
         pane.editor_closed.connect(lambda p=pane: self._on_pane_close_requested(p))
         pane.pane_focused.connect(lambda p=pane: self._set_active(p))
         pane.file_saved.connect(self.file_saved)
@@ -2692,6 +2732,64 @@ class EditorArea(QWidget):
             if len(gp_sizes) == parent.count():
                 parent.setSizes(gp_sizes)
             splitter = parent
+
+    # ---------- 移动窗格（与终端 Move Left / Move Up 行为一致）----------
+
+    def _root_child_of(self, pane: FileEditorWidget):
+        """返回顶层 splitter 中包含 pane 的那个直接子组件（pane 本身或其所在的嵌套
+        splitter）。顶层不是 splitter（单窗格）时返回 None。"""
+        if not isinstance(self._root, QSplitter):
+            return None
+        w = pane
+        while w is not None and w.parent() is not self._root:
+            w = w.parent()
+        return w
+
+    def can_move_left(self, pane: FileEditorWidget) -> bool:
+        """是否可在顶层 splitter 中把 pane 所在的列向左移（左边还有兄弟）。"""
+        w = self._root_child_of(pane)
+        return w is not None and self._root.indexOf(w) > 0
+
+    def can_move_up(self, pane: FileEditorWidget) -> bool:
+        """是否可在 pane 所在的垂直 splitter 中把它上移（上方还有兄弟）。"""
+        parent = pane.parent()
+        return (
+            isinstance(parent, QSplitter)
+            and parent.orientation() == Qt.Orientation.Vertical
+            and parent.indexOf(pane) > 0
+        )
+
+    def move_pane_left(self, pane: FileEditorWidget):
+        """在顶层 splitter 内，把 pane 所在的列与左边一列交换位置。"""
+        w = self._root_child_of(pane)
+        if w is None:
+            return
+        idx = self._root.indexOf(w)
+        if idx <= 0:
+            return
+        sizes = self._root.sizes()
+        self._root.insertWidget(idx - 1, w)
+        if len(sizes) == self._root.count():
+            sizes[idx], sizes[idx - 1] = sizes[idx - 1], sizes[idx]
+            self._root.setSizes(sizes)
+        self._set_active(pane)
+        pane.editor.setFocus()
+
+    def move_pane_up(self, pane: FileEditorWidget):
+        """在 pane 所在的垂直 splitter 内，把它与上方的兄弟交换位置。"""
+        parent = pane.parent()
+        if not isinstance(parent, QSplitter) or parent.orientation() != Qt.Orientation.Vertical:
+            return
+        idx = parent.indexOf(pane)
+        if idx <= 0:
+            return
+        sizes = parent.sizes()
+        parent.insertWidget(idx - 1, pane)
+        if len(sizes) == parent.count():
+            sizes[idx], sizes[idx - 1] = sizes[idx - 1], sizes[idx]
+            parent.setSizes(sizes)
+        self._set_active(pane)
+        pane.editor.setFocus()
 
     # ---------- 窗格级便捷转发 ----------
 
