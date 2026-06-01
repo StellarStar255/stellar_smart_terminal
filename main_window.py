@@ -3800,7 +3800,7 @@ class MainWindow(QMainWindow):
                 background-color: #6a5d8a;
             }
         """)
-        self.split_btn.clicked.connect(self._split_current_tab)
+        self.split_btn.clicked.connect(lambda: self._split_current_tab(self._shift_held()))
 
         self.split_v_btn = QPushButton(t("toolbar.split_v"))
         self.split_v_btn.setToolTip(t("toolbar.split_v_tooltip"))
@@ -3812,7 +3812,7 @@ class MainWindow(QMainWindow):
                 background-color: #5d6a8a;
             }
         """)
-        self.split_v_btn.clicked.connect(self._split_vertical_current_terminal)
+        self.split_v_btn.clicked.connect(lambda: self._split_vertical_current_terminal(self._shift_held()))
 
         self.close_split_btn = QPushButton(t("toolbar.close_split"))
         self.close_split_btn.setToolTip(t("toolbar.close_split_tooltip"))
@@ -5768,8 +5768,8 @@ class MainWindow(QMainWindow):
                 terminal.manage_local_presets_requested.connect(self._manage_local_presets)
                 terminal.add_local_command_requested.connect(self._add_new_local_preset)
                 terminal.close_split_requested.connect(self._close_current_split)
-                terminal.split_horizontal_requested.connect(self._split_current_tab)
-                terminal.split_vertical_requested.connect(self._split_vertical_current_terminal)
+                terminal.split_horizontal_requested.connect(lambda: self._split_current_tab(self._shift_held()))
+                terminal.split_vertical_requested.connect(lambda: self._split_vertical_current_terminal(self._shift_held()))
                 terminal.move_split_left_requested.connect(self._move_split_left)
                 terminal.move_split_up_requested.connect(self._move_split_up)
                 terminal.installEventFilter(self)
@@ -5889,8 +5889,8 @@ class MainWindow(QMainWindow):
         terminal.manage_local_presets_requested.connect(self._manage_local_presets)
         terminal.add_local_command_requested.connect(self._add_new_local_preset)
         terminal.close_split_requested.connect(self._close_current_split)
-        terminal.split_horizontal_requested.connect(self._split_current_tab)
-        terminal.split_vertical_requested.connect(self._split_vertical_current_terminal)
+        terminal.split_horizontal_requested.connect(lambda: self._split_current_tab(self._shift_held()))
+        terminal.split_vertical_requested.connect(lambda: self._split_vertical_current_terminal(self._shift_held()))
         terminal.move_split_left_requested.connect(self._move_split_left)
         terminal.move_split_up_requested.connect(self._move_split_up)
 
@@ -5917,8 +5917,84 @@ class MainWindow(QMainWindow):
                 self.active_terminal = obj
         return super().eventFilter(obj, event)
 
-    def _split_current_tab(self):
-        """对当前选中的终端进行左右分屏（只分裂该终端所在的小窗口，而非整个标签页）"""
+    def _shift_held(self):
+        """是否按住 Shift —— 按住时分屏作用于整个标签页，而非当前小窗口"""
+        return bool(QApplication.keyboardModifiers() & Qt.KeyboardModifier.ShiftModifier)
+
+    def _styled_splitter(self, orientation):
+        """创建一个带统一手柄样式的 QSplitter"""
+        splitter = QSplitter(orientation)
+        splitter.setHandleWidth(2)
+        splitter.setStyleSheet("""
+            QSplitter::handle {
+                background-color: #3d3d5c;
+            }
+            QSplitter::handle:hover {
+                background-color: #667eea;
+            }
+        """)
+        return splitter
+
+    def _restore_tab_close_button(self, idx):
+        """为第 idx 个标签页重新创建右上角的关闭按钮（removeTab 会丢弃原按钮）"""
+        close_btn = QPushButton("×")
+        close_btn.setFixedSize(20, 20)
+        close_btn.setStyleSheet("""
+            QPushButton {
+                background-color: #e74c3c;
+                color: white;
+                border: none;
+                border-radius: 10px;
+                font-size: 16px;
+                font-family: 'Segoe UI Emoji', 'Apple Color Emoji', 'Noto Color Emoji', Arial, sans-serif;
+                padding: 0;
+                margin: 0;
+            }
+            QPushButton:hover {
+                background-color: #ff6b6b;
+            }
+        """)
+        close_btn.clicked.connect(lambda checked, i=idx: self._close_tab_by_button(i))
+        self.tab_widget.tabBar().setTabButton(idx, QTabBar.ButtonPosition.RightSide, close_btn)
+
+    def _wrap_tab_page(self, idx, orientation, new_terminal):
+        """把整个标签页内容包进一个新的 orientation 方向的 splitter，并加入 new_terminal。
+
+        用于对整个标签页（而非单个小窗口）进行分屏：让 new_terminal 贯穿整个宽（垂直分屏）
+        或整个高（水平分屏）。会更新 tab_splitters[idx] 指向新的外层 splitter，
+        以保持 “标签页页面控件 == tab_splitters[idx]” 的不变式（detach / 重建映射依赖它）。
+        """
+        old_page = self.tab_splitters.get(idx)
+        outer = self._styled_splitter(orientation)
+        title = self.tab_widget.tabText(idx)
+        was_current = self.tab_widget.currentIndex() == idx
+
+        # 先把旧页面从 tab 中摘下（removeTab 不销毁控件，Python 引用仍在），再重组
+        self.tab_widget.removeTab(idx)
+        outer.addWidget(old_page)
+        outer.addWidget(new_terminal)
+        old_page.show()
+
+        self.tab_widget.insertTab(idx, outer, title)
+        self._restore_tab_close_button(idx)
+        if was_current:
+            self.tab_widget.setCurrentIndex(idx)
+
+        self.tab_splitters[idx] = outer
+
+        if orientation == Qt.Orientation.Horizontal:
+            size = outer.width() if outer.width() > 0 else 800
+        else:
+            size = outer.height() if outer.height() > 0 else 600
+        outer.setSizes([size // 2, size // 2])
+        return outer
+
+    def _split_current_tab(self, whole_tab=False):
+        """左右分屏。
+
+        默认只分裂当前活动终端所在的小窗口；按住 Shift（whole_tab=True）时
+        对整个标签页进行左右分屏，新终端贯穿整个高度。
+        """
         idx = self.tab_widget.currentIndex()
         if idx < 0:
             return
@@ -5935,76 +6011,55 @@ class MainWindow(QMainWindow):
             current_cwd = self.tab_cwds.get(idx, self._window_cwd)
 
         terminals = self.tab_terminals.get(idx, [])
-
-        # 没有有效的活动终端时，退回到旧行为：直接在标签页顶层 splitter 添加一列
-        if not self.active_terminal or self.active_terminal not in terminals:
-            terminal = self._create_terminal()
-            splitter.addWidget(terminal)
-            self.tab_terminals[idx].append(terminal)
-            count = splitter.count()
-            total_width = splitter.width()
-            splitter.setSizes([total_width // count] * count)
-            terminal.start_process([get_default_shell()], cwd=current_cwd)
-            self.active_terminal = terminal
-            terminal.setFocus()
-            self.statusbar.showMessage(t("status.split_done", count=count), 3000)
-            return
-
-        # 找到当前终端所在的父 splitter（可能是顶层水平 splitter，也可能是嵌套的垂直 splitter）
-        parent_widget = self.active_terminal.parent()
-        if not isinstance(parent_widget, QSplitter):
-            self.statusbar.showMessage(t("msg.cannot_find_container"), 3000)
-            return
-
-        parent_splitter = parent_widget
-        terminal_index = parent_splitter.indexOf(self.active_terminal)
-
-        # 创建新终端
         new_terminal = self._create_terminal()
 
-        if parent_splitter.orientation() == Qt.Orientation.Horizontal:
-            # 父级已是水平方向：直接在活动终端右侧插入新终端，
-            # 并把原终端原本占用的空间一分为二，避免影响其它分屏
-            parent_sizes = parent_splitter.sizes()
-            parent_splitter.insertWidget(terminal_index + 1, new_terminal)
-            if terminal_index < len(parent_sizes):
-                orig = parent_sizes[terminal_index]
-                new_sizes = list(parent_sizes)
-                new_sizes[terminal_index] = orig // 2
-                new_sizes.insert(terminal_index + 1, orig - orig // 2)
-                parent_splitter.setSizes(new_sizes)
+        # 没有有效活动终端时，也按整页分屏处理
+        split_whole = whole_tab or not self.active_terminal or self.active_terminal not in terminals
+
+        if split_whole:
+            # 对整个标签页左右分屏：新终端成为贯穿整高的一列
+            top = splitter
+            if top.orientation() == Qt.Orientation.Horizontal:
+                top.addWidget(new_terminal)
+                count = top.count()
+                total_width = top.width()
+                top.setSizes([total_width // count] * count)
+            else:
+                # 顶层是垂直方向，需要包裹整页才能让新列贯穿整高
+                self._wrap_tab_page(idx, Qt.Orientation.Horizontal, new_terminal)
         else:
-            # 父级是垂直方向：把原终端包裹进一个新的水平 splitter，
-            # 这样只会在该终端所在的小窗口内部进行左右分屏
-            parent_sizes = parent_splitter.sizes()
-            original_terminal = self.active_terminal
+            # 只分裂当前活动终端所在的小窗口
+            parent_widget = self.active_terminal.parent()
+            if not isinstance(parent_widget, QSplitter):
+                self.statusbar.showMessage(t("msg.cannot_find_container"), 3000)
+                new_terminal.deleteLater()
+                return
 
-            horizontal_splitter = QSplitter(Qt.Orientation.Horizontal)
-            horizontal_splitter.setHandleWidth(2)
-            horizontal_splitter.setStyleSheet("""
-                QSplitter::handle {
-                    background-color: #3d3d5c;
-                }
-                QSplitter::handle:hover {
-                    background-color: #667eea;
-                }
-            """)
+            parent_splitter = parent_widget
+            terminal_index = parent_splitter.indexOf(self.active_terminal)
 
-            # 先将原终端移入水平 splitter（会自动从父 splitter 移除）
-            horizontal_splitter.addWidget(original_terminal)
-            horizontal_splitter.addWidget(new_terminal)
-
-            # 将水平 splitter 插回父 splitter 的原位置
-            parent_splitter.insertWidget(terminal_index, horizontal_splitter)
-
-            # 恢复父 splitter 的尺寸分配
-            if parent_sizes and len(parent_sizes) == parent_splitter.count():
-                parent_splitter.setSizes(parent_sizes)
-
-            # 水平 splitter 内部均分空间（使用宽度）
-            h_width = horizontal_splitter.width() if horizontal_splitter.width() > 0 else 400
-            half_width = h_width // 2
-            horizontal_splitter.setSizes([half_width, half_width])
+            if parent_splitter.orientation() == Qt.Orientation.Horizontal:
+                # 父级已是水平方向：直接在活动终端右侧插入，把原终端的空间一分为二
+                parent_sizes = parent_splitter.sizes()
+                parent_splitter.insertWidget(terminal_index + 1, new_terminal)
+                if terminal_index < len(parent_sizes):
+                    orig = parent_sizes[terminal_index]
+                    new_sizes = list(parent_sizes)
+                    new_sizes[terminal_index] = orig // 2
+                    new_sizes.insert(terminal_index + 1, orig - orig // 2)
+                    parent_splitter.setSizes(new_sizes)
+            else:
+                # 父级是垂直方向：把原终端包裹进一个新的水平 splitter
+                parent_sizes = parent_splitter.sizes()
+                original_terminal = self.active_terminal
+                horizontal_splitter = self._styled_splitter(Qt.Orientation.Horizontal)
+                horizontal_splitter.addWidget(original_terminal)
+                horizontal_splitter.addWidget(new_terminal)
+                parent_splitter.insertWidget(terminal_index, horizontal_splitter)
+                if parent_sizes and len(parent_sizes) == parent_splitter.count():
+                    parent_splitter.setSizes(parent_sizes)
+                h_width = horizontal_splitter.width() if horizontal_splitter.width() > 0 else 400
+                horizontal_splitter.setSizes([h_width // 2, h_width // 2])
 
         # 更新终端列表
         self.tab_terminals[idx].append(new_terminal)
@@ -6017,78 +6072,80 @@ class MainWindow(QMainWindow):
         new_terminal.setFocus()
 
         count = len(self.tab_terminals[idx])
-        self.statusbar.showMessage(t("status.split_done", count=count), 3000)
+        msg = "status.split_tab_done" if split_whole else "status.split_done"
+        self.statusbar.showMessage(t(msg, count=count), 3000)
 
-    def _split_vertical_current_terminal(self):
-        """对当前选中的终端进行上下分屏"""
+    def _split_vertical_current_terminal(self, whole_tab=False):
+        """上下分屏。
+
+        默认只分裂当前活动终端所在的小窗口；按住 Shift（whole_tab=True）时
+        对整个标签页进行上下分屏，新终端贯穿整个宽度。
+        """
         idx = self.tab_widget.currentIndex()
         if idx < 0:
             return
 
-        # 必须有活动终端
-        if not self.active_terminal:
-            self.statusbar.showMessage(t("msg.no_selected_terminal"), 3000)
+        splitter = self.tab_splitters.get(idx)
+        if not splitter:
             return
 
         terminals = self.tab_terminals.get(idx, [])
-        if self.active_terminal not in terminals:
-            self.statusbar.showMessage(t("msg.active_terminal_not_in_tab"), 3000)
-            return
 
         # 获取当前终端的工作目录，回退到标签页的工作目录，再回退到窗口级别的工作目录
         current_cwd = None
-        if self.active_terminal.is_running():
+        if self.active_terminal and self.active_terminal.is_running():
             current_cwd = self.active_terminal.get_cwd()
         if not current_cwd:
             current_cwd = self.tab_cwds.get(idx, self._window_cwd)
 
-        # 找到当前终端所在的父 splitter
-        parent_widget = self.active_terminal.parent()
-        if not isinstance(parent_widget, QSplitter):
-            self.statusbar.showMessage(t("msg.cannot_find_container"), 3000)
-            return
-
-        parent_splitter = parent_widget
-        terminal_index = parent_splitter.indexOf(self.active_terminal)
-
-        # 记录父 splitter 的所有尺寸
-        parent_sizes = parent_splitter.sizes()
-        original_size = parent_sizes[terminal_index] if terminal_index < len(parent_sizes) else 0
-
-        # 保存对原终端的引用
-        original_terminal = self.active_terminal
-
-        # 创建垂直方向的 splitter
-        vertical_splitter = QSplitter(Qt.Orientation.Vertical)
-        vertical_splitter.setHandleWidth(2)
-        vertical_splitter.setStyleSheet("""
-            QSplitter::handle {
-                background-color: #3d3d5c;
-            }
-            QSplitter::handle:hover {
-                background-color: #667eea;
-            }
-        """)
-
-        # 关键步骤：先将原终端添加到垂直 splitter
-        # 这会自动将原终端从父 splitter 中移除
-        vertical_splitter.addWidget(original_terminal)
-
-        # 创建新终端并添加到垂直 splitter
         new_terminal = self._create_terminal()
-        vertical_splitter.addWidget(new_terminal)
 
-        # 将垂直 splitter 插入到父 splitter 的原位置
-        parent_splitter.insertWidget(terminal_index, vertical_splitter)
+        # 没有有效活动终端时，也按整页分屏处理
+        split_whole = whole_tab or not self.active_terminal or self.active_terminal not in terminals
 
-        # 恢复父 splitter 的尺寸分配
-        if parent_sizes and len(parent_sizes) == parent_splitter.count():
-            parent_splitter.setSizes(parent_sizes)
+        if split_whole:
+            # 对整个标签页上下分屏：新终端成为贯穿整宽的一行
+            top = splitter
+            if top.orientation() == Qt.Orientation.Vertical:
+                top.addWidget(new_terminal)
+                count = top.count()
+                total_height = top.height()
+                top.setSizes([total_height // count] * count)
+            else:
+                # 顶层是水平方向，需要包裹整页才能让新行贯穿整宽
+                self._wrap_tab_page(idx, Qt.Orientation.Vertical, new_terminal)
+        else:
+            # 只分裂当前活动终端所在的小窗口
+            parent_widget = self.active_terminal.parent()
+            if not isinstance(parent_widget, QSplitter):
+                self.statusbar.showMessage(t("msg.cannot_find_container"), 3000)
+                new_terminal.deleteLater()
+                return
 
-        # 垂直 splitter 内部均分空间（使用高度）
-        v_height = vertical_splitter.height() if vertical_splitter.height() > 0 else 400
-        half_height = v_height // 2
-        vertical_splitter.setSizes([half_height, half_height])
+            parent_splitter = parent_widget
+            terminal_index = parent_splitter.indexOf(self.active_terminal)
+            parent_sizes = parent_splitter.sizes()
+
+            if parent_splitter.orientation() == Qt.Orientation.Vertical:
+                # 父级已是垂直方向：直接在活动终端下方插入，把原终端的空间一分为二
+                parent_splitter.insertWidget(terminal_index + 1, new_terminal)
+                if terminal_index < len(parent_sizes):
+                    orig = parent_sizes[terminal_index]
+                    new_sizes = list(parent_sizes)
+                    new_sizes[terminal_index] = orig // 2
+                    new_sizes.insert(terminal_index + 1, orig - orig // 2)
+                    parent_splitter.setSizes(new_sizes)
+            else:
+                # 父级是水平方向：把原终端包裹进一个新的垂直 splitter
+                original_terminal = self.active_terminal
+                vertical_splitter = self._styled_splitter(Qt.Orientation.Vertical)
+                vertical_splitter.addWidget(original_terminal)
+                vertical_splitter.addWidget(new_terminal)
+                parent_splitter.insertWidget(terminal_index, vertical_splitter)
+                if parent_sizes and len(parent_sizes) == parent_splitter.count():
+                    parent_splitter.setSizes(parent_sizes)
+                v_height = vertical_splitter.height() if vertical_splitter.height() > 0 else 400
+                vertical_splitter.setSizes([v_height // 2, v_height // 2])
 
         # 更新终端列表
         self.tab_terminals[idx].append(new_terminal)
@@ -6101,7 +6158,8 @@ class MainWindow(QMainWindow):
         new_terminal.setFocus()
 
         count = len(self.tab_terminals[idx])
-        self.statusbar.showMessage(t("status.vsplit_done", count=count), 3000)
+        msg = "status.vsplit_tab_done" if split_whole else "status.vsplit_done"
+        self.statusbar.showMessage(t(msg, count=count), 3000)
 
     def _close_current_split(self):
         """关闭当前聚焦的分屏终端"""
@@ -6136,13 +6194,16 @@ class MainWindow(QMainWindow):
             self.active_terminal = terminals[0]
             terminals[0].setFocus()
 
-        # 重新均分空间
+        # 重新均分空间（按顶层 splitter 的方向使用宽度或高度）
         splitter = self.tab_splitters.get(idx)
         if splitter:
             count = splitter.count()
-            total_width = splitter.width()
-            sizes = [total_width // count] * count
-            splitter.setSizes(sizes)
+            if count > 0:
+                if splitter.orientation() == Qt.Orientation.Horizontal:
+                    total = splitter.width()
+                else:
+                    total = splitter.height()
+                splitter.setSizes([total // count] * count)
 
         self.statusbar.showMessage(t("status.close_split_done", count=len(terminals)), 3000)
 
