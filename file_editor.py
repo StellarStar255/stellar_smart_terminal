@@ -620,6 +620,18 @@ class CodeEditor(QPlainTextEdit):
     def contextMenuEvent(self, event):
         """在默认编辑菜单（撤销/剪切/复制/粘贴…）末尾追加分屏项。"""
         menu = self.createStandardContextMenu()
+        # 编辑器自身的 `QWidget {background-color}` 样式表会级联到这个子菜单的每个
+        # item，盖住 Qt 默认的 hover 高亮。这里补回 :selected 高亮并把常态底色置透明。
+        area = self._find_editor_area()
+        theme = area.theme if area is not None else {}
+        accent = theme.get('accent', '#667eea')
+        text_dim = theme.get('text_dim', '#888888')
+        menu.setStyleSheet(f"""
+            QMenu::item {{ background-color: transparent; }}
+            QMenu::item:selected {{ background-color: {accent}; color: #ffffff; }}
+            QMenu::item:disabled {{ color: {text_dim}; background-color: transparent; }}
+        """)
+
         menu.addSeparator()
         # 用菜单当前文字色绘制图标，自动适配深/浅主题
         icon_color = menu.palette().color(QPalette.ColorRole.WindowText)
@@ -627,8 +639,7 @@ class CodeEditor(QPlainTextEdit):
         act_h.triggered.connect(self.split_h_requested.emit)
         act_v = menu.addAction(self._split_menu_icon('v', icon_color), t("editor.split_v_menu"))
         act_v.triggered.connect(self.split_v_requested.emit)
-        # 关闭当前分屏：仅在编辑器组里有多个窗格时可用
-        area = self._find_editor_area()
+        # 关闭当前分屏：仅在编辑器组里有多个窗格时可用（area 已在上方求得）
         act_close = menu.addAction(self._split_menu_icon('close', icon_color), t("editor.close_split_menu"))
         act_close.setEnabled(bool(area and len(area.panes) > 1))
         act_close.triggered.connect(self.close_split_requested.emit)
