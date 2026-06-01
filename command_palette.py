@@ -11,7 +11,7 @@ from dataclasses import dataclass, field
 from typing import Callable, List, Optional
 
 from PyQt6.QtCore import Qt, QEvent, QPoint, pyqtSignal
-from PyQt6.QtGui import QKeyEvent, QFont, QFocusEvent
+from PyQt6.QtGui import QKeyEvent, QFont
 from PyQt6.QtWidgets import (
     QWidget, QLineEdit, QListWidget, QListWidgetItem, QVBoxLayout, QLabel,
     QHBoxLayout, QFrame
@@ -261,21 +261,14 @@ class CommandPalette(QWidget):
     def eventFilter(self, obj, ev):
         if obj is self.line_edit:
             if ev.type() == QEvent.Type.FocusIn:
-                # 只在用户"主动"聚焦时弹出列表。窗口被重新激活、菜单/弹层关闭、
-                # 控件 reparent 等场景下，Qt 也会给输入框补发 FocusIn —— 这些
-                # 不是用户意图，不能弹层。典型 bug：右键菜单选 V-Split 后窗口
-                # raise_()/activateWindow()，焦点被以 ActiveWindowFocusReason
-                # 还给搜索框，导致搜索菜单莫名弹出。
-                # 鼠标点击由 MouseButtonPress 分支处理，快捷键由 focus_search()
-                # 直接处理，所以这里只需放行 Tab 键导航这种真实用户操作。
-                reason = ev.reason() if isinstance(ev, QFocusEvent) else None
-                if reason in (
-                    Qt.FocusReason.MouseFocusReason,
-                    Qt.FocusReason.TabFocusReason,
-                    Qt.FocusReason.BacktabFocusReason,
-                    Qt.FocusReason.ShortcutFocusReason,
-                ):
-                    self._refresh_popup()
+                # 不在 FocusIn 上自动弹层。所有用户"主动"打开命令面板的入口都已
+                # 单独处理：鼠标点击 → MouseButtonPress（force_show）；Cmd+K →
+                # focus_search()；打字 → textChanged；方向键 → 下方 KeyPress。
+                # FocusIn 反而会在程序性/意外的焦点转移时误触发 —— 典型 bug：
+                # V-Split 把当前持焦点的终端 reparent 进新 splitter，Qt 用
+                # focusNextChild(TabFocusReason) 把焦点甩给工具栏搜索框，导致
+                # 搜索菜单莫名弹出。横向 Split 不 reparent 原终端，故无此问题。
+                pass
             elif ev.type() == QEvent.Type.FocusOut:
                 # popup 自身是独立窗口，焦点移到 popup/list 时也会触发 FocusOut；
                 # 简单处理：延迟一拍隐藏，避免点击 list 时来不及触发 itemClicked。
