@@ -2451,8 +2451,10 @@ class GitPanel(QWidget):
             # 去重：若新值已存在于其他行，删除原行并选中已存在那行
             for i in range(list_widget.count()):
                 if i != list_widget.row(item) and list_widget.item(i).text() == new:
-                    list_widget.takeItem(list_widget.row(item))
-                    list_widget.setCurrentRow(i if i < list_widget.row(item) else i - 1)
+                    item_row = list_widget.row(item)
+                    list_widget.takeItem(item_row)
+                    # takeItem 后 item 已移除，须用移除前缓存的行号判断
+                    list_widget.setCurrentRow(i if i < item_row else i - 1)
                     _persist_from_list(old_url=old, new_url=new)
                     return
             item.setText(new)

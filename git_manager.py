@@ -935,7 +935,8 @@ class GitManager(QObject):
             '--format=commit %H%nAuthor: %an <%ae>%nDate:   %ad%n%n    %s%n%n%b',
             check=False,
         )
-        return out if ok else out
+        # check=False 时 _run_git 失败会把错误信息放进 out，直接回传即可
+        return out
 
     def refresh(self):
         """手动刷新状态"""

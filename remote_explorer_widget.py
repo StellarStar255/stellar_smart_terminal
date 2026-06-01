@@ -390,6 +390,8 @@ class RemoteExplorerPanel(QWidget):
         # 维护已下载的临时文件 -> (host_alias, remote_path) 映射，
         # 便于编辑器保存时调度上传
         self._open_temp_map: dict[str, tuple[str, str]] = {}
+        # local_path -> 发起下载时所用的 session（回调时 self._session 可能已切换/断开）
+        self._open_session_map: dict[str, "SSHSession"] = {}
         # 新建文件/文件夹后，等刷新把它装进树里再原地重命名（不弹窗）
         self._pending_edit_path: Optional[str] = None
 
@@ -1884,6 +1886,7 @@ class RemoteExplorerPanel(QWidget):
                     and entry.mtime
                     and abs(os.path.getmtime(local_path) - float(entry.mtime)) < 1.0):
                 self._open_temp_map[local_path] = (host_alias, entry.path)
+                self._open_session_map[local_path] = sess
                 self._file_ready.emit(host_alias, entry.path, local_path)
                 return
         except OSError:
@@ -1925,6 +1928,7 @@ class RemoteExplorerPanel(QWidget):
                     os.utime(local_path, (float(attr.st_mtime), float(attr.st_mtime)))
             except OSError:
                 pass
+            self._open_session_map[local_path] = sess
             self._file_ready.emit(host_alias, remote_path, local_path)
         fut.add_done_callback(on_done)
 
@@ -1965,7 +1969,9 @@ class RemoteExplorerPanel(QWidget):
         if sess is not None:
             self._subtitle_label.setText(sess.host_config.alias)
         self._open_temp_map[local_path] = (host_alias, remote_path)
-        self.file_open_requested.emit(host_alias, remote_path, local_path, self._session)
+        # 用发起下载时的 session，而不是当前 self._session（期间可能已切换/断开）
+        sess_for_open = self._open_session_map.pop(local_path, self._session)
+        self.file_open_requested.emit(host_alias, remote_path, local_path, sess_for_open)
 
     def _on_file_downloaded(self, host_alias: str, remote_path: str,
                               local_path: str, data: bytes):
@@ -1976,8 +1982,9 @@ class RemoteExplorerPanel(QWidget):
             self._toast_error(str(e))
             return
         self._open_temp_map[local_path] = (host_alias, remote_path)
-        # session 总是当前活动的 session（下载就是用它发起的）
-        self.file_open_requested.emit(host_alias, remote_path, local_path, self._session)
+        # 用发起下载时的 session，而不是当前 self._session（期间可能已切换/断开）
+        sess_for_open = self._open_session_map.pop(local_path, self._session)
+        self.file_open_requested.emit(host_alias, remote_path, local_path, sess_for_open)
 
     def remote_mapping_for(self, local_path: str) -> Optional[tuple[str, str]]:
         """主窗口的编辑器保存时调，查 local_path 对应哪个 (host_alias, remote_path)"""

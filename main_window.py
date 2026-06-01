@@ -2825,7 +2825,7 @@ class MainWindow(QMainWindow):
         self.openai_server_manager.server_stopped.connect(self._on_openai_server_stopped)
         self.openai_server_manager.server_error.connect(self._on_openai_server_error)
         # API 服务器设置：每个 tab 是否启用 "每次 Query 后清除会话"
-        self.api_server_clear_after_query: Dict[int, bool] = {}
+        self.api_server_clear_after_query = {}  # type: dict[int, bool]
 
         # 日志缓冲区（批量更新以提高性能）
         self._log_buffer = []

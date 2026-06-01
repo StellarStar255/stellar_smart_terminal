@@ -490,7 +490,7 @@ class ExplorerPanel(QWidget):
                     continue
                 if os.path.exists(dst):
                     reply = QMessageBox.question(
-                        self, t("explorer.overwrite_title") if hasattr(self, '_t_overwrite') else "Overwrite?",
+                        self, t("explorer.overwrite_title"),
                         f"{os.path.basename(dst)} already exists in this folder. Overwrite?",
                         QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No,
                         QMessageBox.StandardButton.No,

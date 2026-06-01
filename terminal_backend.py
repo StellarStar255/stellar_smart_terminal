@@ -395,6 +395,8 @@ if IS_WINDOWS:
 
                 # 清理属性列表（进程已创建，不再需要）
                 kernel32.DeleteProcThreadAttributeList(attr_list_buf)
+                # 置空，防止 _cleanup() 再次释放同一列表（重复释放未定义/不安全）
+                self._attr_list_buf = None
 
                 # 关闭 ConPTY 端的管道端（我们不直接使用这些）
                 kernel32.CloseHandle(wintypes.HANDLE(self._pipe_in_read))

@@ -452,8 +452,8 @@ class VSCodeExtensionPanel(QWidget):
         self.search_btn.setEnabled(True)
         self._current_extensions = extensions
 
-        # 清空现有列表
-        self._clear_layout(self.search_layout)
+        # 清空现有列表（保留 search_hint，避免被销毁后再访问导致崩溃）
+        self._clear_layout(self.search_layout, keep=self.search_hint)
 
         if not extensions:
             hint = QLabel("未找到相关扩展")
@@ -535,12 +535,12 @@ class VSCodeExtensionPanel(QWidget):
 
         self.installed_layout.addStretch()
 
-    def _clear_layout(self, layout):
-        """清空布局"""
+    def _clear_layout(self, layout, keep=None):
+        """清空布局；keep 指向的 widget 仅从布局移除、不销毁，供后续复用"""
         while layout.count():
             item = layout.takeAt(0)
             widget = item.widget()
-            if widget:
+            if widget and widget is not keep:
                 widget.deleteLater()
 
     def _show_error(self, message: str):
