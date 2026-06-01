@@ -3099,11 +3099,38 @@ class TerminalWidget(QWidget):
         """刷新终端显示（非破坏性）：
 
         - 重建渲染缓存并强制重绘，修复本地渲染脏区造成的花屏/错位；
-        - 给 PTY 重发一次窗口尺寸（触发 SIGWINCH），让远端 TUI 程序
-          （vim / tmux / claude 等）重画自己。
+        - 用「收窄一列再恢复」的方式抖动 PTY 尺寸，**保证**产生一次 SIGWINCH，
+          让前台 TUI 程序（vim / tmux / claude 等）整屏重画自己。
+          （直接重发当前尺寸时，尺寸未变 → 内核不发 SIGWINCH → 程序不会重画，
+          这正是之前"刷新没反应"的原因。）
         不清空内容、不影响滚动历史，区别于 clear_screen / Ctrl+L。
         """
-        self._update_pty_size()
+        # 先本地重绘，修复纯渲染层的脏区
+        self._invalidate_render_cache()
+
+        if self._backend is None:
+            return
+
+        # 抖动 PTY 尺寸强制 SIGWINCH：收窄一列 → 等一拍 → 恢复并再重绘。
+        # 分两拍（singleShot）是为了让子进程先收到"变窄"的 SIGWINCH 再收到"恢复"的，
+        # 避免两次 resize 在内核里被合并成一次而失去效果。
+        try:
+            if self.term_cols > 1:
+                self._backend.resize(self.term_cols - 1, self.term_rows)
+                QTimer.singleShot(40, self._restore_pty_size_after_refresh)
+            else:
+                self._update_pty_size()
+        except Exception as e:
+            print(f"[Terminal] refresh resize error: {e}")
+
+    def _restore_pty_size_after_refresh(self):
+        """refresh_terminal 抖动后把 PTY 尺寸恢复到当前实际值，并再重绘一次。"""
+        if self._backend is None:
+            return
+        try:
+            self._backend.resize(self.term_cols, self.term_rows)
+        except Exception as e:
+            print(f"[Terminal] refresh restore error: {e}")
         self._invalidate_render_cache()
 
     def is_running(self) -> bool:
