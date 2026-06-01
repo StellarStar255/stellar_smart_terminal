@@ -10,7 +10,7 @@ Command Palette
 from dataclasses import dataclass, field
 from typing import Callable, List, Optional
 
-from PyQt6.QtCore import Qt, QEvent, QPoint, QRect, pyqtSignal, QTimer
+from PyQt6.QtCore import Qt, QEvent, QPoint, QRect, QObject, pyqtSignal, QTimer
 from PyQt6.QtGui import QKeyEvent, QFont
 from PyQt6.QtWidgets import (
     QWidget, QLineEdit, QListWidget, QListWidgetItem, QVBoxLayout, QLabel,
@@ -70,14 +70,42 @@ def _fuzzy_score(query: str, hay: str) -> int:
     return 100 + int(len(q) * 50 / span)
 
 
+class _OutsideClickFilter(QObject):
+    """装在 QApplication 上的独立过滤器：弹层可见时，点击弹层/输入框之外 → 收起，
+    Esc → 收起。
+
+    必须是独立对象（而非复用 CommandPalette.eventFilter）——否则同一个过滤器既装在
+    app 又装在 line_edit 上，会对 line_edit 的同一次点击触发两次处理：第一次收起、
+    第二次又把刚收起的列表展开回来，导致"点了等于没点"。
+    """
+
+    def __init__(self, palette: "CommandPalette"):
+        super().__init__(palette)
+        self._palette = palette
+
+    def eventFilter(self, obj, ev):
+        p = self._palette
+        if p.popup.isVisible():
+            et = ev.type()
+            if et == QEvent.Type.MouseButtonPress:
+                gp = ev.globalPosition().toPoint()
+                if not p._point_in_popup_or_input(gp):
+                    p._hide_popup()  # 仅收起，不消费事件，点击照常透传
+            elif et == QEvent.Type.KeyPress and ev.key() == Qt.Key.Key_Escape:
+                p._clear_and_hide()
+                return True
+        return super().eventFilter(obj, ev)
+
+
 class CommandPalette(QWidget):
     """搜索框 + 弹出命令列表组件。"""
 
     def __init__(self, placeholder: str = "Search commands…", parent=None):
         super().__init__(parent)
         self._commands: List[Command] = []
-        # 弹层可见期间是否已挂上应用级事件过滤器（用于点外部/Esc 关闭）
+        # 弹层可见期间挂在 app 上的独立过滤器（点外部/Esc 关闭）；独立对象避免双重触发
         self._app_filter_on = False
+        self._global_filter = _OutsideClickFilter(self)
         # 首选宽度（像素）。0 表示不强制，沿用布局算出的自然宽度。
         # 工具栏在 pin 后用 FlowLayout 摆放，而 FlowLayout 只读 sizeHint /
         # minimumSizeHint，不读 minimumWidth —— 所以必须把宽度写进这两个 hint。
@@ -256,14 +284,14 @@ class CommandPalette(QWidget):
         if not self._app_filter_on:
             app = QApplication.instance()
             if app is not None:
-                app.installEventFilter(self)
+                app.installEventFilter(self._global_filter)
                 self._app_filter_on = True
 
     def _remove_global_filter(self):
         if self._app_filter_on:
             app = QApplication.instance()
             if app is not None:
-                app.removeEventFilter(self)
+                app.removeEventFilter(self._global_filter)
             self._app_filter_on = False
 
     def _hide_popup(self):
@@ -340,19 +368,9 @@ class CommandPalette(QWidget):
             print(f"[CommandPalette] command failed: {cmd.title}: {e}")
 
     def eventFilter(self, obj, ev):
-        # ① 应用级兜底（弹层可见时挂上）：点击弹层/输入框之外 → 关闭；Esc → 关闭。
-        #    放在最前面，不依赖输入框是否持有键盘焦点，确保始终能收起列表。
-        if self._app_filter_on and self.popup.isVisible():
-            et = ev.type()
-            if et == QEvent.Type.MouseButtonPress:
-                gp = ev.globalPosition().toPoint()
-                if not self._point_in_popup_or_input(gp):
-                    # 仅收起，不吞掉事件，让这次点击照常作用到目标控件
-                    self._hide_popup()
-            elif et == QEvent.Type.KeyPress and ev.key() == Qt.Key.Key_Escape:
-                self._clear_and_hide()
-                return True
-
+        # 注意：本过滤器只装在 line_edit 上，只处理 line_edit 自己的事件。
+        # 点外部/Esc 的全局兜底由独立的 _OutsideClickFilter（装在 app 上）负责，
+        # 避免同一过滤器对 line_edit 的同一次点击被调用两次而出现"开→关→开"。
         if obj is self.line_edit:
             if ev.type() == QEvent.Type.FocusIn:
                 # 不在 FocusIn 上自动弹层。所有用户"主动"打开命令面板的入口都已
@@ -391,11 +409,12 @@ class CommandPalette(QWidget):
                     self._clear_and_hide()
                     return True
             elif ev.type() == QEvent.Type.MouseButtonPress:
-                # 三种"点了没反应"的情形都靠这里兜底：
-                # 1) popup 经外部点击关闭后 line_edit 仍持有焦点 → 无 FocusIn
-                # 2) macOS 上 Qt::Popup 关闭后焦点状态紊乱 → FocusIn 不可靠
-                # 3) MousePress 早于 FocusIn → 此刻 hasFocus()=False
-                # 主动 setFocus 把焦点拿回来，force_show 跳过 hasFocus 检查。
-                self.line_edit.setFocus(Qt.FocusReason.MouseFocusReason)
-                self._refresh_popup(force_show=True)
+                # 点击输入框 = 开关：列表已展开则收起，未展开则展开。
+                if self.popup.isVisible():
+                    self._hide_popup()
+                else:
+                    # 主动 setFocus 把焦点拿回来，force_show 跳过 hasFocus 检查
+                    # （MousePress 早于 FocusIn，此刻 hasFocus() 可能为 False）。
+                    self.line_edit.setFocus(Qt.FocusReason.MouseFocusReason)
+                    self._refresh_popup(force_show=True)
         return super().eventFilter(obj, ev)
