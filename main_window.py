@@ -208,24 +208,28 @@ class SelectAllLineEdit(QLineEdit):
         # focusInEvent 安排的延迟全选负责，覆盖掉基类的光标定位。
         super().mousePressEvent(event)
 
+    def toggle_popup(self):
+        """做“恰好一次”的开/关历史下拉列表，并复用同一套防抖状态：
+          - 列表仍显示 → 关闭它
+          - 列表未显示且不在刚关闭的防抖窗口内 → 打开它
+          - 列表未显示但刚被这次点击（或其抓取）关掉 → 什么都不做，避免反弹重开
+        输入框空白点击与 🕘 按钮共用此方法，确保两者可见性/防抖状态一致，
+        避免按钮无条件 showPopup() 在弹窗已开/刚关时造成“关→开”闪烁。"""
+        owner = self._popup_owner
+        if owner is None:
+            return
+        if self._popup_visible():
+            owner.hidePopup()
+        elif not self._recently_hidden():
+            self._install_popup_filter()
+            owner.showPopup()
+
     def mouseReleaseEvent(self, event):
         if self._is_blank_click(event):
             event.accept()
             # 推迟到事件循环空闲再切换：此时按下的隐式抓取已释放、弹窗抓取若要关闭
-            # 列表也已完成，弹窗可见性此刻是稳定且可信的。据此做“恰好一次”开或关：
-            #   - 列表仍显示 → 关闭它
-            #   - 列表未显示且不在刚关闭的防抖窗口内 → 打开它
-            #   - 列表未显示但刚被这次点击（或其抓取）关掉 → 什么都不做，避免反弹重开
-            def _toggle():
-                owner = self._popup_owner
-                if owner is None:
-                    return
-                if self._popup_visible():
-                    owner.hidePopup()
-                elif not self._recently_hidden():
-                    self._install_popup_filter()
-                    owner.showPopup()
-            QTimer.singleShot(0, _toggle)
+            # 列表也已完成，弹窗可见性此刻是稳定且可信的。
+            QTimer.singleShot(0, self.toggle_popup)
             return
         super().mouseReleaseEvent(event)
 
@@ -4380,11 +4384,16 @@ class MainWindow(QMainWindow):
                     stop:0 #5b4b85, stop:1 #4b3b75);
             }
         """)
-        self.dir_dropdown_btn.clicked.connect(lambda: self.working_dir_combo.showPopup())
         # 使用自定义 LineEdit：点击文字附近全选，点击右侧空白处弹出历史列表
         select_all_edit = SelectAllLineEdit(popup_owner=self.working_dir_combo)
         select_all_edit.setAlignment(Qt.AlignmentFlag.AlignLeft | Qt.AlignmentFlag.AlignVCenter)
         self.working_dir_combo.setLineEdit(select_all_edit)
+        # 🕘 按钮与输入框空白点击共用同一套带防抖的开/关逻辑，避免无条件 showPopup()
+        # 在弹窗已开/刚被抓取关闭时反弹重开造成闪烁。推迟到事件循环空闲再切换，
+        # 等原生弹窗抓取（若有）先把列表关掉、可见性稳定后再据此做恰好一次切换。
+        self.dir_dropdown_btn.clicked.connect(
+            lambda: QTimer.singleShot(0, select_all_edit.toggle_popup)
+        )
         self._populate_working_dirs()
         # 从下拉列表选择时自动切换目录
         self.working_dir_combo.activated.connect(self._on_working_dir_selected)
