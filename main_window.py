@@ -235,17 +235,20 @@ class SelectAllLineEdit(QLineEdit):
 
 
 class QuietPopupComboBox(QComboBox):
-    """关闭 popup 时不让列表当前项做最后一次高亮重绘。
+    """关闭 popup 时不让列表当前项做最后一次高亮重绘（消失瞬间蓝色高亮条闪烁）。
 
-    实现：仅在隐藏期间冻结列表 view 的重绘（setUpdatesEnabled(False)），
-    隐藏完成后再恢复。绝不能在 hidePopup 里清空 view 的当前项/选区——鼠标
-    点选某一项时，Qt 的弹窗容器正是在 hidePopup 过程中读取 view 的当前项来
-    提交选择；若提前清空，combo 会以无效索引提交（currentIndex 变 -1），
-    导致选中的路径丢失、输入框被清空。"""
+    实现：进入 hidePopup 时冻结列表 view 的重绘（setUpdatesEnabled(False)）并保持
+    冻结，由下次 showPopup 在重新显示前恢复（setUpdatesEnabled(True)）。
 
-    def _restore_view_updates(self, view):
-        if view is not None and not sip.isdeleted(view):
-            view.setUpdatesEnabled(True)
+    关键：绝不在 hidePopup 里用 QTimer.singleShot 提前恢复更新——macOS 上原生弹窗
+    隐藏是异步的，列表窗口可能还在屏上停留一帧；而 setUpdatesEnabled(True) 会隐式
+    触发一次 update() 重绘（已实测验证），于是会在“列表即将消失”那一刻把蓝色高亮
+    重绘出来，随后窗口才真正隐藏 = 蓝条闪一下。隐藏期间保持冻结、靠 showPopup 恢复，
+    此时 view 仍处于隐藏态，重新启用更新不会产生可见重绘。
+
+    另：绝不能在 hidePopup 里清空 view 的当前项/选区——鼠标点选某一项时，Qt 的弹窗
+    容器正是在 hidePopup 过程中读取 view 的当前项来提交选择；若提前清空，combo 会以
+    无效索引提交（currentIndex 变 -1），导致选中的路径丢失、输入框被清空。"""
 
     def showPopup(self):
         view = self.view()
@@ -258,7 +261,6 @@ class QuietPopupComboBox(QComboBox):
         if view is not None:
             view.setUpdatesEnabled(False)
         super().hidePopup()
-        QTimer.singleShot(0, lambda v=view: self._restore_view_updates(v))
 
 
 class CenteredComboBox(QComboBox):
