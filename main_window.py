@@ -3656,7 +3656,8 @@ class MainWindow(QMainWindow):
         # 命令搜索框（Cmd+K 聚焦）
         self.command_palette = CommandPalette(t("palette.placeholder"))
         self.command_palette.set_empty_text(t("palette.no_results"))
-        self.command_palette.line_edit.setMinimumWidth(320)
+        # 两倍宽，保证占位文字 "Search commands… (⌘K)" 完整可见、不被截断
+        self.command_palette.line_edit.setMinimumWidth(640)
         # 让搜索框尽可能占用空闲宽度，避免 placeholder 被截断
         self.command_palette.line_edit.setSizePolicy(
             QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Fixed

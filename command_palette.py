@@ -10,7 +10,7 @@ Command Palette
 from dataclasses import dataclass, field
 from typing import Callable, List, Optional
 
-from PyQt6.QtCore import Qt, QEvent, QPoint, pyqtSignal
+from PyQt6.QtCore import Qt, QEvent, QPoint, pyqtSignal, QTimer
 from PyQt6.QtGui import QKeyEvent, QFont
 from PyQt6.QtWidgets import (
     QWidget, QLineEdit, QListWidget, QListWidgetItem, QVBoxLayout, QLabel,
@@ -85,7 +85,7 @@ class CommandPalette(QWidget):
 
         self.line_edit = QLineEdit(self)
         self.line_edit.setPlaceholderText(placeholder)
-        self.line_edit.setMinimumWidth(280)
+        self.line_edit.setMinimumWidth(360)
         self.line_edit.setFixedHeight(28)
         self.line_edit.setStyleSheet("""
             QLineEdit {
@@ -102,8 +102,20 @@ class CommandPalette(QWidget):
         """)
         layout.addWidget(self.line_edit)
 
-        # 弹出列表：独立顶层窗口，使用 Popup 类型，便于点击外部关闭
-        self.popup = QFrame(self.line_edit, Qt.WindowType.Popup)
+        # 弹出列表：独立顶层窗口。
+        # 关键：用 Tool + WA_ShowWithoutActivating，而不是 Qt::Popup。
+        # Qt::Popup 在 show() 时会抢占键盘/鼠标 grab，导致输入框收不到后续按键
+        # （打几个字弹出列表后就再也打不了字）。Tool 顶层不抢 grab，输入框保持
+        # 焦点可继续输入；列表导航/回车/Esc 由 line_edit 的 eventFilter 处理。
+        # 代价：Tool 不会随外部点击自动关闭，靠下方 FocusOut 延迟收起来兜底。
+        self.popup = QFrame(
+            self.line_edit,
+            Qt.WindowType.Tool
+            | Qt.WindowType.FramelessWindowHint
+            | Qt.WindowType.NoDropShadowWindowHint,
+        )
+        self.popup.setAttribute(Qt.WidgetAttribute.WA_ShowWithoutActivating, True)
+        self.popup.setFocusPolicy(Qt.FocusPolicy.NoFocus)
         self.popup.setFrameShape(QFrame.Shape.NoFrame)
         self.popup.setStyleSheet("""
             QFrame {
@@ -209,12 +221,17 @@ class CommandPalette(QWidget):
 
         # 定位弹层在输入框正下方
         self._position_popup()
-        # macOS 上 Qt::Popup 被外部点击关闭后，内部 visible 标志和窗口实际状态
-        # 容易脱钩 —— 再 show() 时表现为"逻辑已显示但渲染不出"，导致用户点击
-        # 输入框毫无反应。先 hide 再 show 强制走一次完整的隐藏→显示流程。
-        self.popup.hide()
+        # 不抢焦点地显示，确保 line_edit 始终保留键盘焦点以便继续输入。
         self.popup.show()
         self.popup.raise_()
+
+    def _hide_popup_if_idle(self):
+        """输入框失焦后的兜底收起：除非输入框仍持焦、或弹层正被鼠标交互。"""
+        if self.line_edit.hasFocus():
+            return
+        if self.popup.isActiveWindow():
+            return
+        self.popup.hide()
 
     def _position_popup(self):
         le = self.line_edit
@@ -270,10 +287,10 @@ class CommandPalette(QWidget):
                 # 搜索菜单莫名弹出。横向 Split 不 reparent 原终端，故无此问题。
                 pass
             elif ev.type() == QEvent.Type.FocusOut:
-                # popup 自身是独立窗口，焦点移到 popup/list 时也会触发 FocusOut；
-                # 简单处理：延迟一拍隐藏，避免点击 list 时来不及触发 itemClicked。
-                # 用 QTimer.singleShot 也行，这里靠 popup 的 Popup 类型本身会在外点关闭。
-                pass
+                # Tool 顶层弹层不会随外部点击自动关闭，这里在输入框真正失焦后收起。
+                # 延迟一拍：点击列表项会短暂把弹层激活成活动窗口，过早隐藏会丢掉
+                # itemClicked；延迟后在 _hide_popup_if_idle 里再判断是否真的该收。
+                QTimer.singleShot(150, self._hide_popup_if_idle)
             elif ev.type() == QEvent.Type.KeyPress:
                 ke: QKeyEvent = ev
                 key = ke.key()
