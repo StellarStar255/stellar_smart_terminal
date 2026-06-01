@@ -6161,8 +6161,43 @@ class MainWindow(QMainWindow):
         msg = "status.vsplit_tab_done" if split_whole else "status.vsplit_done"
         self.statusbar.showMessage(t(msg, count=count), 3000)
 
+    def _collapse_singleton_splitter(self, splitter, idx):
+        """若某个嵌套 splitter 关闭后只剩一个子组件，则解除这层嵌套：
+
+        用唯一的子组件替换该 splitter，并继承它在父 splitter 中的位置和尺寸。
+        这样剩下的分屏会自动扩展占满原来的区域，同时**完全不影响**父 splitter
+        里其它分屏的尺寸。顶层标签页 splitter 不会被解除。
+        """
+        top = self.tab_splitters.get(idx)
+        while (
+            isinstance(splitter, QSplitter)
+            and splitter is not top
+            and splitter.count() == 1
+        ):
+            grandparent = splitter.parent()
+            if not isinstance(grandparent, QSplitter):
+                break
+            child = splitter.widget(0)
+            gp_index = grandparent.indexOf(splitter)
+            gp_sizes = grandparent.sizes()  # 关闭前父级各分屏的尺寸，需原样保留
+            # 把唯一子组件移动到父 splitter 中 splitter 原来的位置
+            child.setParent(None)
+            grandparent.insertWidget(gp_index, child)
+            # 删除已空的嵌套 splitter
+            splitter.setParent(None)
+            splitter.deleteLater()
+            # 恢复父 splitter 的尺寸分配（其它分屏宽/高保持不变）
+            if len(gp_sizes) == grandparent.count():
+                grandparent.setSizes(gp_sizes)
+            # 继续向上检查（一般一层即可）
+            splitter = grandparent
+
     def _close_current_split(self):
-        """关闭当前聚焦的分屏终端"""
+        """关闭当前聚焦的分屏终端。
+
+        只在该终端所在的局部 splitter 范围内回收空间，空出的空间交给相邻分屏
+        自动扩展，**不影响**其它 splitter / 分屏的尺寸。
+        """
         idx = self.tab_widget.currentIndex()
         if idx < 0:
             return
@@ -6179,6 +6214,11 @@ class MainWindow(QMainWindow):
             # 如果活动终端不在当前标签页，关闭最后一个
             terminal_to_close = terminals[-1]
 
+        # 记录被关闭终端所在的父 splitter 及其尺寸（只在这个局部范围内重新分配空间）
+        parent = terminal_to_close.parent()
+        parent_sizes = parent.sizes() if isinstance(parent, QSplitter) else None
+        close_index = parent.indexOf(terminal_to_close) if isinstance(parent, QSplitter) else -1
+
         # 完整清理终端资源
         terminal_to_close.cleanup()
 
@@ -6189,21 +6229,24 @@ class MainWindow(QMainWindow):
         terminal_to_close.setParent(None)
         terminal_to_close.deleteLater()
 
+        # 在局部父 splitter 内，把空出的空间合并给相邻分屏（其它分屏尺寸不变）
+        if isinstance(parent, QSplitter) and parent_sizes and 0 <= close_index < len(parent_sizes):
+            freed = parent_sizes[close_index]
+            new_sizes = parent_sizes[:close_index] + parent_sizes[close_index + 1:]
+            if new_sizes:
+                # 优先把空间给前一个分屏，否则给后一个
+                give = close_index - 1 if close_index - 1 >= 0 else 0
+                new_sizes[give] += freed
+                if len(new_sizes) == parent.count():
+                    parent.setSizes(new_sizes)
+
+        # 若父 splitter 因此只剩一个子组件，解除这层嵌套，让剩余分屏自动扩展
+        self._collapse_singleton_splitter(parent, idx)
+
         # 更新活动终端为剩余的第一个
         if terminals:
             self.active_terminal = terminals[0]
             terminals[0].setFocus()
-
-        # 重新均分空间（按顶层 splitter 的方向使用宽度或高度）
-        splitter = self.tab_splitters.get(idx)
-        if splitter:
-            count = splitter.count()
-            if count > 0:
-                if splitter.orientation() == Qt.Orientation.Horizontal:
-                    total = splitter.width()
-                else:
-                    total = splitter.height()
-                splitter.setSizes([total // count] * count)
 
         self.statusbar.showMessage(t("status.close_split_done", count=len(terminals)), 3000)
 
