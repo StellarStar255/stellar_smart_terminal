@@ -10,11 +10,11 @@ Command Palette
 from dataclasses import dataclass, field
 from typing import Callable, List, Optional
 
-from PyQt6.QtCore import Qt, QEvent, QPoint, pyqtSignal, QTimer
+from PyQt6.QtCore import Qt, QEvent, QPoint, QRect, pyqtSignal, QTimer
 from PyQt6.QtGui import QKeyEvent, QFont
 from PyQt6.QtWidgets import (
     QWidget, QLineEdit, QListWidget, QListWidgetItem, QVBoxLayout, QLabel,
-    QHBoxLayout, QFrame
+    QHBoxLayout, QFrame, QApplication
 )
 
 
@@ -76,6 +76,8 @@ class CommandPalette(QWidget):
     def __init__(self, placeholder: str = "Search commands…", parent=None):
         super().__init__(parent)
         self._commands: List[Command] = []
+        # 弹层可见期间是否已挂上应用级事件过滤器（用于点外部/Esc 关闭）
+        self._app_filter_on = False
         # 首选宽度（像素）。0 表示不强制，沿用布局算出的自然宽度。
         # 工具栏在 pin 后用 FlowLayout 摆放，而 FlowLayout 只读 sizeHint /
         # minimumSizeHint，不读 minimumWidth —— 所以必须把宽度写进这两个 hint。
@@ -218,7 +220,7 @@ class CommandPalette(QWidget):
         # 焦点可能还没切到 line_edit（MousePress 早于 FocusIn），不能拿
         # hasFocus 作为门槛，否则会错误地把刚要弹的层隐藏掉。
         if not force_show and not self.line_edit.hasFocus():
-            self.popup.hide()
+            self._hide_popup()
             return
 
         items = self._rank(query)
@@ -246,6 +248,46 @@ class CommandPalette(QWidget):
         # 不抢焦点地显示，确保 line_edit 始终保留键盘焦点以便继续输入。
         self.popup.show()
         self.popup.raise_()
+        # 弹层是不抢焦点的 Tool 窗口，自身不会随外部点击/Esc 关闭；
+        # 挂一个应用级过滤器来兜底（见 eventFilter 顶部分支）。
+        self._install_global_filter()
+
+    def _install_global_filter(self):
+        if not self._app_filter_on:
+            app = QApplication.instance()
+            if app is not None:
+                app.installEventFilter(self)
+                self._app_filter_on = True
+
+    def _remove_global_filter(self):
+        if self._app_filter_on:
+            app = QApplication.instance()
+            if app is not None:
+                app.removeEventFilter(self)
+            self._app_filter_on = False
+
+    def _hide_popup(self):
+        """统一的收起入口：隐藏弹层并卸掉应用级过滤器。"""
+        self.popup.hide()
+        self._remove_global_filter()
+
+    def _clear_and_hide(self):
+        """清空输入、释放焦点并收起弹层（Esc / 选中命令后用）。"""
+        self.line_edit.blockSignals(True)
+        try:
+            self.line_edit.clear()
+        finally:
+            self.line_edit.blockSignals(False)
+        self.line_edit.clearFocus()
+        self._hide_popup()
+
+    def _point_in_popup_or_input(self, global_pt: QPoint) -> bool:
+        """全局坐标点是否落在弹层或输入框内（用于判断"点了外部"）。"""
+        if self.popup.isVisible() and self.popup.geometry().contains(global_pt):
+            return True
+        le = self.line_edit
+        le_rect = QRect(le.mapToGlobal(QPoint(0, 0)), le.size())
+        return le_rect.contains(global_pt)
 
     def _hide_popup_if_idle(self):
         """输入框失焦后的兜底收起：除非输入框仍持焦、或弹层正被鼠标交互。"""
@@ -253,7 +295,7 @@ class CommandPalette(QWidget):
             return
         if self.popup.isActiveWindow():
             return
-        self.popup.hide()
+        self._hide_popup()
 
     def _position_popup(self):
         le = self.line_edit
@@ -290,7 +332,7 @@ class CommandPalette(QWidget):
         finally:
             self.line_edit.blockSignals(False)
         self.line_edit.clearFocus()
-        self.popup.hide()
+        self._hide_popup()
         try:
             cmd.run()
         except Exception as e:
@@ -298,6 +340,19 @@ class CommandPalette(QWidget):
             print(f"[CommandPalette] command failed: {cmd.title}: {e}")
 
     def eventFilter(self, obj, ev):
+        # ① 应用级兜底（弹层可见时挂上）：点击弹层/输入框之外 → 关闭；Esc → 关闭。
+        #    放在最前面，不依赖输入框是否持有键盘焦点，确保始终能收起列表。
+        if self._app_filter_on and self.popup.isVisible():
+            et = ev.type()
+            if et == QEvent.Type.MouseButtonPress:
+                gp = ev.globalPosition().toPoint()
+                if not self._point_in_popup_or_input(gp):
+                    # 仅收起，不吞掉事件，让这次点击照常作用到目标控件
+                    self._hide_popup()
+            elif et == QEvent.Type.KeyPress and ev.key() == Qt.Key.Key_Escape:
+                self._clear_and_hide()
+                return True
+
         if obj is self.line_edit:
             if ev.type() == QEvent.Type.FocusIn:
                 # 不在 FocusIn 上自动弹层。所有用户"主动"打开命令面板的入口都已
@@ -333,13 +388,7 @@ class CommandPalette(QWidget):
                         self._on_item_activated(item)
                     return True
                 if key == Qt.Key.Key_Escape:
-                    self.line_edit.blockSignals(True)
-                    try:
-                        self.line_edit.clear()
-                    finally:
-                        self.line_edit.blockSignals(False)
-                    self.line_edit.clearFocus()
-                    self.popup.hide()
+                    self._clear_and_hide()
                     return True
             elif ev.type() == QEvent.Type.MouseButtonPress:
                 # 三种"点了没反应"的情形都靠这里兜底：
