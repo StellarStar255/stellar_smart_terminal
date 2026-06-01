@@ -99,9 +99,11 @@ def get_default_shell():
 class SelectAllLineEdit(QLineEdit):
     """点击文字附近时自动全选的输入框；若关联了下拉框（popup_owner），
     点击文字右侧的空白区域则弹出下拉选项列表（而非全选/定位光标）。"""
-    # 弹窗刚关闭后的“防抖窗口”：在此时间内不重新弹出，避免“点击关闭”这一下
-    # 又把列表重新打开造成疯狂闪烁（单位：秒）
+    # 弹窗刚关闭后的“防抖窗口”：用于聚焦返回时不重新全选等场景（单位：秒）
     _POPUP_REOPEN_GUARD = 0.30
+    # 判定“弹窗是被本次点击关掉的”所允许的时序抖动：macOS 原生抓取关闭与本控件
+    # 收到 press 几乎同时发生，可能差几毫秒、先后不定，留一点容差兜住（单位：秒）
+    _CLICK_CLOSE_EPS = 0.05
 
     def __init__(self, parent=None, popup_owner=None):
         super().__init__(parent)
@@ -109,6 +111,7 @@ class SelectAllLineEdit(QLineEdit):
         # 关联的 QComboBox：点击空白处时用它来弹出选项列表
         self._popup_owner = popup_owner
         self._popup_hidden_at = 0.0     # 列表最近一次关闭的时间戳
+        self._blank_press_at = 0.0      # 最近一次“空白区按下”的时间戳，用于精确判定开/关
         self._popup_is_visible = False  # view 的显示状态；用于覆盖 macOS popup 抓取下的焦点事件乱序
         self._filtered_view = None      # 已安装事件过滤器的 view
         if popup_owner is not None:
@@ -202,25 +205,38 @@ class SelectAllLineEdit(QLineEdit):
         # 可能在事件送达本控件前就把列表关掉，导致 press 期的判断不可靠。
         if self._is_blank_click(event):
             self._pending_selectall = False  # 意图是开下拉，不该全选/不该闪烁
+            self._blank_press_at = time.monotonic()  # 记下本次按下时刻，供 toggle 精确判定
             event.accept()
             return
         # 点在文字区域：交给基类处理（定位光标/起始选择），首次聚焦时的全选由
         # focusInEvent 安排的延迟全选负责，覆盖掉基类的光标定位。
         super().mousePressEvent(event)
 
+    def note_external_press(self):
+        """供 🕘 按钮等外部控件在“按下”时调用：补记一次按下时刻，使外部触发与
+        输入框空白点击共用同一套精确的开/关判定（关键是要在原生抓取关闭弹窗的
+        同一时刻附近记下，故接到按钮的 pressed 而非 clicked）。"""
+        self._blank_press_at = time.monotonic()
+
     def toggle_popup(self):
-        """做“恰好一次”的开/关历史下拉列表，并复用同一套防抖状态：
-          - 列表仍显示 → 关闭它
-          - 列表未显示且不在刚关闭的防抖窗口内 → 打开它
-          - 列表未显示但刚被这次点击（或其抓取）关掉 → 什么都不做，避免反弹重开
-        输入框空白点击与 🕘 按钮共用此方法，确保两者可见性/防抖状态一致，
-        避免按钮无条件 showPopup() 在弹窗已开/刚关时造成“关→开”闪烁。"""
+        """做“恰好一次”的开/关历史下拉列表：
+          - 列表此刻仍显示 → 关闭它；
+          - 列表此刻不可见，但它是被“本次点击”关掉的（Hide 时间不早于本次按下，
+            即 macOS 原生抓取在这次点击里把它关了）→ 什么都不做，避免反弹重开；
+          - 否则（列表本就关着、且不是被这次点击关的）→ 打开它。
+        关键：用“本次点击的按下时刻”而非“距上次关闭的固定时间窗”来判定，
+        否则关闭后很快再点空白想打开时，会被固定防抖窗误挡（表现为“有时弹有时不弹”）。
+        输入框空白点击与 🕘 按钮共用此方法。"""
         owner = self._popup_owner
         if owner is None:
             return
         if self._popup_visible():
             owner.hidePopup()
-        elif not self._recently_hidden():
+            return
+        closed_by_this_click = (
+            self._popup_hidden_at >= self._blank_press_at - self._CLICK_CLOSE_EPS
+        )
+        if not closed_by_this_click:
             self._install_popup_filter()
             owner.showPopup()
 
@@ -4390,9 +4406,10 @@ class MainWindow(QMainWindow):
         select_all_edit = SelectAllLineEdit(popup_owner=self.working_dir_combo)
         select_all_edit.setAlignment(Qt.AlignmentFlag.AlignLeft | Qt.AlignmentFlag.AlignVCenter)
         self.working_dir_combo.setLineEdit(select_all_edit)
-        # 🕘 按钮与输入框空白点击共用同一套带防抖的开/关逻辑，避免无条件 showPopup()
-        # 在弹窗已开/刚被抓取关闭时反弹重开造成闪烁。推迟到事件循环空闲再切换，
-        # 等原生弹窗抓取（若有）先把列表关掉、可见性稳定后再据此做恰好一次切换。
+        # 🕘 按钮与输入框空白点击共用同一套精确的开/关逻辑，避免无条件 showPopup()
+        # 在弹窗已开/刚被抓取关闭时反弹重开造成闪烁。按下时补记按下时刻（与原生抓取
+        # 关闭弹窗同刻），松开后推迟到事件循环空闲再据此做恰好一次开/关切换。
+        self.dir_dropdown_btn.pressed.connect(select_all_edit.note_external_press)
         self.dir_dropdown_btn.clicked.connect(
             lambda: QTimer.singleShot(0, select_all_edit.toggle_popup)
         )
