@@ -114,9 +114,49 @@ class CompatibleHistoryScreen(pyte.HistoryScreen):
             if restore_cursor and self._saved_main_cursor is not None:
                 self.cursor.x = self._saved_main_cursor.x
                 self.cursor.y = self._saved_main_cursor.y
+            # 防御：备用屏幕期间若发生过 resize，光标可能落在新屏幕之外，强制夹紧
+            self.cursor.y = max(0, min(self.cursor.y, self.lines - 1))
+            self.cursor.x = max(0, min(self.cursor.x, self.columns - 1))
             self._saved_main_buffer = None
             self._saved_main_cursor = None
         self._in_alt_screen = False
+
+    def resize(self, lines=None, columns=None):
+        """重写 resize：在备用屏幕中调整大小时，同步重排被保存的主屏幕缓冲区和光标。
+
+        否则在 claude-code 等全屏 TUI（备用屏幕）运行期间分屏/改变窗口大小后，
+        退出 TUI 时会把按旧尺寸保存的主屏幕原样恢复，导致提示符错位、上方残留空行。
+        """
+        new_lines = lines if lines is not None else self.lines
+        new_columns = columns if columns is not None else self.columns
+
+        if self._in_alt_screen and self._saved_main_buffer is not None:
+            old_lines, old_columns = self.lines, self.columns
+
+            # 暂存当前（备用屏幕）状态
+            alt_buffer = self.buffer
+            alt_cx, alt_cy = self.cursor.x, self.cursor.y
+
+            # 先借助 pyte 的 resize 逻辑重排被保存的主屏幕缓冲区/光标
+            self.buffer = self._saved_main_buffer
+            if self._saved_main_cursor is not None:
+                self.cursor.x = self._saved_main_cursor.x
+                self.cursor.y = self._saved_main_cursor.y
+            else:
+                self.cursor.x = self.cursor.y = 0
+            super().resize(new_lines, new_columns)
+            self._saved_main_buffer = self.buffer
+            if self._saved_main_cursor is not None:
+                self._saved_main_cursor.x = self.cursor.x
+                self._saved_main_cursor.y = self.cursor.y
+
+            # 还原旧尺寸，再对备用屏幕本身做一次正常 resize
+            self.lines, self.columns = old_lines, old_columns
+            self.buffer = alt_buffer
+            self.cursor.x, self.cursor.y = alt_cx, alt_cy
+            super().resize(new_lines, new_columns)
+        else:
+            super().resize(new_lines, new_columns)
 
     # ------ 原有功能 ------
 
