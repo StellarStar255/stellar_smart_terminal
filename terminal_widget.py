@@ -700,6 +700,11 @@ class TerminalWidget(QWidget):
             # 重新创建screen（HistoryScreen的resize参数顺序是lines, columns）
             self.screen.resize(self.term_rows, self.term_cols)
 
+            # 缩小后若光标停在空闲提示符上、上方却残留一堆空行（常见于 claude-code 等
+            # 退出后清屏但把光标留在低处的情形），把这些空行去掉，让提示符回到顶部。
+            if new_rows < old_rows:
+                self._reflow_idle_prompt_to_top()
+
             # 更新PTY大小（子进程会收到 SIGWINCH，可能会发送完整重绘）
             self._update_pty_size()
 
@@ -710,6 +715,52 @@ class TerminalWidget(QWidget):
 
             self._invalidate_render_cache()
             print(f"[Terminal] Size: {old_cols}x{old_rows} -> {new_cols}x{new_rows} (widget: {self.width()}x{self.height()}, char_w: {self.char_width:.1f})")
+
+    def _reflow_idle_prompt_to_top(self):
+        """缩小终端后，若光标处于空闲提示符（其下方没有任何内容），但上方残留若干空行，
+        则把这些顶部空行去掉，使提示符回到顶部，避免提示符上方出现大片空白。
+
+        仅作用于主屏幕（非备用屏幕），且只在“光标行是最后一行有内容”的空闲场景执行，
+        以免干扰正在主屏幕内增量重绘的程序。
+        """
+        screen = self.screen
+        if getattr(screen, '_in_alt_screen', False):
+            return
+        buf = screen.buffer
+        lines = screen.lines
+        cy = screen.cursor.y
+        if cy <= 0 or cy >= lines:
+            return
+
+        def is_blank(r):
+            return all(c.data == ' ' for c in buf[r].values())
+
+        # 光标下方必须全为空行（典型的空闲提示符）
+        for r in range(cy + 1, lines):
+            if not is_blank(r):
+                return
+
+        # 统计顶部连续空行数（不超过光标行）
+        k = 0
+        while k < cy and is_blank(k):
+            k += 1
+        if k <= 0:
+            return
+
+        # 借助 pyte 的 delete_lines 从顶部删除 k 行（底部自动补空行），再把光标上移 k 行。
+        # bash 收到 SIGWINCH 后用 \r 原地重绘提示符，处理顺序在此之后，因此光标位置保持一致。
+        cx = screen.cursor.x
+        saved_margins = screen.margins
+        screen.margins = None  # 临时取消滚动区域限制，确保对整屏生效
+        screen.cursor.y = 0
+        screen.cursor.x = 0
+        try:
+            screen.delete_lines(k)
+        finally:
+            screen.margins = saved_margins
+        screen.cursor.y = cy - k
+        screen.cursor.x = cx
+        screen.dirty.update(range(lines))
 
     def _update_pty_size(self):
         """更新PTY终端大小"""
