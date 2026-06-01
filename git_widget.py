@@ -702,9 +702,12 @@ class GitCommitWidget(QFrame):
         self.generate_btn.setText(t("git.generating") if generating else t("git.generate_msg"))
 
     def set_message(self, text: str):
-        """把生成的提交信息填进输入框。"""
+        """把生成的提交信息填进输入框。
+
+        注意：生成是异步的，完成时用户很可能正在别处（如终端）打字，
+        这里绝不能 setFocus()，否则会把光标从用户正在输入的地方抢走。
+        只填文本，用户想编辑时自行点进来即可。"""
         self.message_input.setPlainText(text)
-        self.message_input.setFocus()
 
     def set_busy(self, kind: str, busy: bool):
         """push/pull 进行中：禁用相关按钮并显示忙碌文案，避免重复点击。"""
