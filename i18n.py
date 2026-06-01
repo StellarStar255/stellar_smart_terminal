@@ -387,6 +387,7 @@ TRANSLATIONS = {
     "editor.split_v_tooltip": {"zh": "上下分屏 ⌘⇧\\（堆叠查看另一个文件）", "en": "Split editor down ⌘⇧\\ (view another file stacked)"},
     "editor.split_h_menu": {"zh": "Split  ⌘\\", "en": "Split  ⌘\\"},
     "editor.split_v_menu": {"zh": "V-Split  ⌘⇧\\", "en": "V-Split  ⌘⇧\\"},
+    "editor.close_split_menu": {"zh": "Close Split", "en": "Close Split"},
     "editor.error": {"zh": "错误", "en": "Error"},
     "editor.file_not_found": {"zh": "文件不存在: {path}", "en": "File not found: {path}"},
     "editor.file_too_large_title": {"zh": "文件过大", "en": "File Too Large"},

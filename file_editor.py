@@ -17,7 +17,7 @@ from PyQt6.QtCore import Qt, pyqtSignal, QRect, QSize, QFileSystemWatcher, QTime
 from PyQt6.QtGui import (
     QFont, QColor, QTextCharFormat, QSyntaxHighlighter,
     QKeySequence, QPalette, QShortcut, QPainter, QTextCursor,
-    QPixmap, QImageReader, QCursor, QGuiApplication,
+    QPixmap, QImageReader, QCursor, QGuiApplication, QIcon,
 )
 
 
@@ -600,6 +600,7 @@ class CodeEditor(QPlainTextEdit):
     # 由右键菜单 / 快捷键触发，向上转发给 FileEditorWidget → EditorArea
     split_h_requested = pyqtSignal()
     split_v_requested = pyqtSignal()
+    close_split_requested = pyqtSignal()
 
     def __init__(self, parent=None):
         super().__init__(parent)
@@ -620,11 +621,47 @@ class CodeEditor(QPlainTextEdit):
         """在默认编辑菜单（撤销/剪切/复制/粘贴…）末尾追加分屏项。"""
         menu = self.createStandardContextMenu()
         menu.addSeparator()
-        act_h = menu.addAction(t("editor.split_h_menu"))
+        # 用菜单当前文字色绘制图标，自动适配深/浅主题
+        icon_color = menu.palette().color(QPalette.ColorRole.WindowText)
+        act_h = menu.addAction(self._split_menu_icon('h', icon_color), t("editor.split_h_menu"))
         act_h.triggered.connect(self.split_h_requested.emit)
-        act_v = menu.addAction(t("editor.split_v_menu"))
+        act_v = menu.addAction(self._split_menu_icon('v', icon_color), t("editor.split_v_menu"))
         act_v.triggered.connect(self.split_v_requested.emit)
+        # 关闭当前分屏：仅在编辑器组里有多个窗格时可用
+        area = self._find_editor_area()
+        act_close = menu.addAction(self._split_menu_icon('close', icon_color), t("editor.close_split_menu"))
+        act_close.setEnabled(bool(area and len(area.panes) > 1))
+        act_close.triggered.connect(self.close_split_requested.emit)
         menu.exec(event.globalPos())
+
+    @staticmethod
+    def _split_menu_icon(kind: str, color: QColor) -> QIcon:
+        """画一个 16×16 的分屏图标：'h' 竖分隔、'v' 横分隔、'close' 打叉。"""
+        pm = QPixmap(16, 16)
+        pm.fill(Qt.GlobalColor.transparent)
+        painter = QPainter(pm)
+        painter.setRenderHint(QPainter.RenderHint.Antialiasing, True)
+        painter.setPen(color)
+        rect = QRect(3, 4, 10, 8)  # x3..13, y4..12, 中心 (8, 8)
+        painter.drawRoundedRect(rect, 2, 2)
+        if kind == 'h':
+            painter.drawLine(8, 4, 8, 12)       # 竖向分隔 → 左右分屏
+        elif kind == 'v':
+            painter.drawLine(3, 8, 13, 8)       # 横向分隔 → 上下分屏
+        elif kind == 'close':
+            painter.drawLine(5, 6, 11, 10)      # × 关闭
+            painter.drawLine(11, 6, 5, 10)
+        painter.end()
+        return QIcon(pm)
+
+    def _find_editor_area(self):
+        """沿父链向上找到所属的 EditorArea（找不到返回 None）。"""
+        p = self.parent()
+        while p is not None:
+            if type(p).__name__ == 'EditorArea':
+                return p
+            p = p.parent()
+        return None
 
     def line_number_area_width(self) -> int:
         digits = max(3, len(str(max(1, self.blockCount()))))
@@ -1546,6 +1583,8 @@ class FileEditorWidget(QWidget):
         # 右键菜单 / 快捷键的分屏请求 → 转发为本窗格的分屏信号
         self.editor.split_h_requested.connect(self.split_h_requested.emit)
         self.editor.split_v_requested.connect(self.split_v_requested.emit)
+        # 关闭当前分屏 → 走与关闭按钮相同的路径（含未保存提示）
+        self.editor.close_split_requested.connect(self._close_editor)
 
         # 设置等宽字体
         font = QFont("Menlo", 13)
