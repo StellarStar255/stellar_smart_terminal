@@ -6348,12 +6348,14 @@ class MainWindow(QMainWindow):
         new_terminals = {}
         new_sessions = {}
         new_cwds = {}
+        old_to_new = {}  # 旧索引 -> 新索引，用于同步按 tab 索引存储的其他状态
         for i in range(self.tab_widget.count()):
             widget = self.tab_widget.widget(i)
             if widget:
                 # 找到对应的旧映射
                 for old_idx, splitter in self.tab_splitters.items():
                     if splitter is widget:
+                        old_to_new[old_idx] = i
                         new_splitters[i] = splitter
                         new_terminals[i] = self.tab_terminals.get(old_idx, [])
                         new_sessions[i] = self.tab_sessions.get(old_idx)
@@ -6363,6 +6365,17 @@ class MainWindow(QMainWindow):
         self.tab_terminals = new_terminals
         self.tab_sessions = new_sessions
         self.tab_cwds = new_cwds
+
+        # 同步同样按 tab 索引存储的 OpenAI 服务器状态与 "查询后清除会话" 设置，
+        # 否则关闭/分离左侧 tab 后这些 key 会指向错误的 tab。
+        if hasattr(self, 'api_server_clear_after_query'):
+            self.api_server_clear_after_query = {
+                old_to_new[old_idx]: val
+                for old_idx, val in self.api_server_clear_after_query.items()
+                if old_idx in old_to_new
+            }
+        if hasattr(self, 'openai_server_manager'):
+            self.openai_server_manager.remap_indices(old_to_new)
 
     def _on_tab_changed(self, index):
         """标签页切换时的回调"""

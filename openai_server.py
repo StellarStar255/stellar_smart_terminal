@@ -1672,6 +1672,16 @@ class PortAllocator:
     def get_port(self, tab_index: int) -> Optional[int]:
         return self.allocated.get(tab_index)
 
+    def remap_indices(self, old_to_new: Dict[int, int]):
+        """按 old→new 重新映射端口分配的 key；不在 old_to_new 中的（已关闭 tab）丢弃，
+        相当于释放其端口。"""
+        new_allocated = {}
+        for old_idx, port in self.allocated.items():
+            new_idx = old_to_new.get(old_idx)
+            if new_idx is not None:
+                new_allocated[new_idx] = port
+        self.allocated = new_allocated
+
 
 class OpenAIServerManager(QObject):
     """服务器管理器"""
@@ -1692,9 +1702,12 @@ class OpenAIServerManager(QObject):
         actual_port = self.port_allocator.allocate(tab_index, port)
         config = ServerConfig(port=actual_port)
         server = OpenAICompatServer(terminal_widget, config)
-        server.started.connect(lambda p: self.server_started.emit(tab_index, p))
-        server.stopped.connect(lambda: self._on_server_stopped(tab_index))
-        server.error.connect(lambda e: self.server_error.emit(tab_index, e))
+        # tab 索引是位置性的，关闭/分离其他 tab 后会变化；把当前索引存在 server 上，
+        # 信号回调动态读取 server.tab_index，配合 remap_indices() 重新映射，避免指向错误 tab。
+        server.tab_index = tab_index
+        server.started.connect(lambda p, s=server: self.server_started.emit(s.tab_index, p))
+        server.stopped.connect(lambda s=server: self._on_server_stopped(s.tab_index))
+        server.error.connect(lambda e, s=server: self.server_error.emit(s.tab_index, e))
         self.servers[tab_index] = server
         server.start()
         return actual_port
@@ -1718,3 +1731,21 @@ class OpenAIServerManager(QObject):
     def stop_all(self):
         for tab_index in list(self.servers.keys()):
             self.stop_server(tab_index)
+
+    def remap_indices(self, old_to_new: Dict[int, int]):
+        """tab 关闭/分离后位置变化，按 old→new 重新映射 server 与端口分配的 key。
+
+        old_to_new 只包含仍存活的 tab。不在其中的 server 说明对应 tab 已关闭/分离
+        （调用方已先 stop_server），标记为孤儿（tab_index=-1）使其后续 stopped 信号
+        成为无害空操作，并从字典中移除。
+        """
+        new_servers = {}
+        for old_idx, server in self.servers.items():
+            new_idx = old_to_new.get(old_idx)
+            if new_idx is None:
+                server.tab_index = -1
+                continue
+            server.tab_index = new_idx
+            new_servers[new_idx] = server
+        self.servers = new_servers
+        self.port_allocator.remap_indices(old_to_new)
