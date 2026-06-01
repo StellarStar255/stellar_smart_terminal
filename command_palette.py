@@ -76,7 +76,29 @@ class CommandPalette(QWidget):
     def __init__(self, placeholder: str = "Search commands…", parent=None):
         super().__init__(parent)
         self._commands: List[Command] = []
+        # 首选宽度（像素）。0 表示不强制，沿用布局算出的自然宽度。
+        # 工具栏在 pin 后用 FlowLayout 摆放，而 FlowLayout 只读 sizeHint /
+        # minimumSizeHint，不读 minimumWidth —— 所以必须把宽度写进这两个 hint。
+        self._preferred_width = 0
         self._setup_ui(placeholder)
+
+    def set_box_width(self, width: int):
+        """设置搜索框首选宽度（会被 FlowLayout 与普通工具栏共同遵守）。"""
+        self._preferred_width = max(0, int(width))
+        self.line_edit.setMinimumWidth(min(self._preferred_width, 120) if self._preferred_width else 120)
+        self.updateGeometry()
+
+    def sizeHint(self):
+        s = super().sizeHint()
+        if self._preferred_width:
+            s.setWidth(max(s.width(), self._preferred_width))
+        return s
+
+    def minimumSizeHint(self):
+        s = super().minimumSizeHint()
+        if self._preferred_width:
+            s.setWidth(max(s.width(), self._preferred_width))
+        return s
 
     def _setup_ui(self, placeholder: str):
         layout = QHBoxLayout(self)
