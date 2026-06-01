@@ -87,7 +87,7 @@ class _OutsideClickFilter(QObject):
         p = self._palette
         if p.popup.isVisible():
             et = ev.type()
-            if et == QEvent.Type.MouseButtonPress:
+            if et in (QEvent.Type.MouseButtonPress, QEvent.Type.MouseButtonDblClick):
                 gp = ev.globalPosition().toPoint()
                 if not p._point_in_popup_or_input(gp):
                     p._hide_popup()  # 仅收起，不消费事件，点击照常透传
@@ -408,7 +408,10 @@ class CommandPalette(QWidget):
                 if key == Qt.Key.Key_Escape:
                     self._clear_and_hide()
                     return True
-            elif ev.type() == QEvent.Type.MouseButtonPress:
+            elif ev.type() in (
+                QEvent.Type.MouseButtonPress,
+                QEvent.Type.MouseButtonDblClick,  # 连点快时第二下是 DblClick，别漏掉
+            ):
                 # 点击输入框 = 开关：列表已展开则收起，未展开则展开。
                 if self.popup.isVisible():
                     self._hide_popup()
