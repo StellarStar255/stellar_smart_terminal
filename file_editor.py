@@ -13,7 +13,7 @@ from PyQt6.QtWidgets import (
     QSplitter, QLineEdit, QTextEdit, QStackedWidget, QScrollArea,
     QSizePolicy, QMenu, QFileDialog, QApplication,
 )
-from PyQt6.QtCore import Qt, pyqtSignal, QRect, QSize, QFileSystemWatcher, QTimer
+from PyQt6.QtCore import Qt, pyqtSignal, QRect, QSize, QFileSystemWatcher, QTimer, QEvent
 from PyQt6.QtGui import (
     QFont, QColor, QTextCharFormat, QSyntaxHighlighter,
     QKeySequence, QPalette, QShortcut, QPainter, QTextCursor,
@@ -597,6 +597,10 @@ class _LineNumberArea(QWidget):
 class CodeEditor(QPlainTextEdit):
     """带左侧行号条的编辑器"""
 
+    # 由右键菜单 / 快捷键触发，向上转发给 FileEditorWidget → EditorArea
+    split_h_requested = pyqtSignal()
+    split_v_requested = pyqtSignal()
+
     def __init__(self, parent=None):
         super().__init__(parent)
         self._line_number_area = _LineNumberArea(self)
@@ -611,6 +615,16 @@ class CodeEditor(QPlainTextEdit):
         self.cursorPositionChanged.connect(self._apply_extra_selections)
         self._update_viewport_margin()
         self._apply_extra_selections()
+
+    def contextMenuEvent(self, event):
+        """在默认编辑菜单（撤销/剪切/复制/粘贴…）末尾追加分屏项。"""
+        menu = self.createStandardContextMenu()
+        menu.addSeparator()
+        act_h = menu.addAction(t("editor.split_h_menu"))
+        act_h.triggered.connect(self.split_h_requested.emit)
+        act_v = menu.addAction(t("editor.split_v_menu"))
+        act_v.triggered.connect(self.split_v_requested.emit)
+        menu.exec(event.globalPos())
 
     def line_number_area_width(self) -> int:
         digits = max(3, len(str(max(1, self.blockCount()))))
@@ -1446,6 +1460,9 @@ class FileEditorWidget(QWidget):
     # 信号
     file_saved = pyqtSignal(str)  # 文件保存信号
     editor_closed = pyqtSignal()  # 编辑器关闭信号
+    split_h_requested = pyqtSignal()  # 请求左右分屏（并排）
+    split_v_requested = pyqtSignal()  # 请求上下分屏
+    pane_focused = pyqtSignal()  # 本窗格获得焦点 / 被点击
 
     def __init__(self, theme: dict = None, parent=None):
         super().__init__(parent)
@@ -1455,6 +1472,9 @@ class FileEditorWidget(QWidget):
         self._highlighter = None
         self._in_image_mode = False  # 当前显示的是否是图片预览
         self._image_pixmap: QPixmap | None = None  # 原始未缩放的 QPixmap
+        # 多窗格分屏：是否高亮当前活动窗格（仅在 >1 窗格时由 EditorArea 打开）
+        self._is_active = False
+        self._show_active_indicator = False
 
         # --- 外部文件变更检测 ---
         self._file_watcher = QFileSystemWatcher(self)
@@ -1494,6 +1514,20 @@ class FileEditorWidget(QWidget):
 
         header_layout.addStretch()
 
+        # 左右分屏按钮（并排查看不同文件）
+        self.split_h_btn = QPushButton("◫")
+        self.split_h_btn.setFixedSize(26, 26)
+        self.split_h_btn.setToolTip(t("editor.split_h_tooltip"))
+        self.split_h_btn.clicked.connect(self.split_h_requested.emit)
+        header_layout.addWidget(self.split_h_btn)
+
+        # 上下分屏按钮
+        self.split_v_btn = QPushButton("⊟")
+        self.split_v_btn.setFixedSize(26, 26)
+        self.split_v_btn.setToolTip(t("editor.split_v_tooltip"))
+        self.split_v_btn.clicked.connect(self.split_v_requested.emit)
+        header_layout.addWidget(self.split_v_btn)
+
         # 关闭按钮
         self.close_btn = QPushButton("×")
         self.close_btn.setFixedSize(26, 26)
@@ -1507,6 +1541,11 @@ class FileEditorWidget(QWidget):
         self.editor = CodeEditor()
         self.editor.setLineWrapMode(QPlainTextEdit.LineWrapMode.NoWrap)
         self.editor.textChanged.connect(self._on_text_changed)
+        # 点击 / 聚焦编辑器 → 通知 EditorArea 把本窗格设为活动窗格
+        self.editor.installEventFilter(self)
+        # 右键菜单 / 快捷键的分屏请求 → 转发为本窗格的分屏信号
+        self.editor.split_h_requested.connect(self.split_h_requested.emit)
+        self.editor.split_v_requested.connect(self.split_v_requested.emit)
 
         # 设置等宽字体
         font = QFont("Menlo", 13)
@@ -1541,6 +1580,8 @@ class FileEditorWidget(QWidget):
         self._image_label.setContextMenuPolicy(Qt.ContextMenuPolicy.CustomContextMenu)
         self._image_label.customContextMenuRequested.connect(self._show_image_context_menu)
         self._image_scroll.setWidget(self._image_label)
+        # 点击图片预览区也把本窗格设为活动窗格
+        self._image_scroll.viewport().installEventFilter(self)
         # ScrollArea 的空白处也允许右键弹同样的菜单
         self._image_scroll.viewport().setContextMenuPolicy(
             Qt.ContextMenuPolicy.CustomContextMenu
@@ -1562,6 +1603,15 @@ class FileEditorWidget(QWidget):
         comment_shortcut = QShortcut(QKeySequence("Ctrl+/"), self.editor)
         comment_shortcut.setContext(Qt.ShortcutContext.WidgetWithChildrenShortcut)
         comment_shortcut.activated.connect(self._toggle_comment)
+
+        # Cmd+\ 左右分屏；Cmd+Shift+\ 上下分屏（与 VS Code 一致，作用于本窗格）
+        split_h_sc = QShortcut(QKeySequence("Ctrl+\\"), self)
+        split_h_sc.setContext(Qt.ShortcutContext.WidgetWithChildrenShortcut)
+        split_h_sc.activated.connect(self.split_h_requested.emit)
+
+        split_v_sc = QShortcut(QKeySequence("Ctrl+Shift+\\"), self)
+        split_v_sc.setContext(Qt.ShortcutContext.WidgetWithChildrenShortcut)
+        split_v_sc.activated.connect(self.split_v_requested.emit)
 
         # Cmd+F / Ctrl+F 唤出查找栏
         find_shortcut = QShortcut(QKeySequence.StandardKey.Find, self)
@@ -1792,10 +1842,16 @@ class FileEditorWidget(QWidget):
             }}
         """)
 
+        # 活动窗格高亮：多窗格分屏时给活动窗格的标题栏加一道 accent 底边
+        if self._show_active_indicator and self._is_active:
+            header_border = f"border-bottom: 2px solid {accent};"
+        else:
+            header_border = f"border-bottom: 1px solid {border};"
+
         self.header.setStyleSheet(f"""
             QFrame {{
                 background-color: {bg_medium};
-                border-bottom: 1px solid {border};
+                {header_border}
             }}
             QLabel {{
                 color: {text};
@@ -1815,6 +1871,22 @@ class FileEditorWidget(QWidget):
                 color: #666;
             }}
         """)
+
+        # 分屏按钮：透明底，hover 时显示 accent —— 与关闭按钮风格一致
+        split_btn_style = f"""
+            QPushButton {{
+                background-color: transparent;
+                color: {text_dim};
+                font-size: 15px;
+                font-weight: bold;
+            }}
+            QPushButton:hover {{
+                background-color: {accent};
+                color: white;
+            }}
+        """
+        self.split_h_btn.setStyleSheet(split_btn_style)
+        self.split_v_btn.setStyleSheet(split_btn_style)
 
         # 关闭按钮特殊样式
         self.close_btn.setStyleSheet(f"""
@@ -1869,10 +1941,29 @@ class FileEditorWidget(QWidget):
     def apply_language(self):
         """语言切换时更新界面文本"""
         self.close_btn.setToolTip(t("editor.close_tooltip"))
+        self.split_h_btn.setToolTip(t("editor.split_h_tooltip"))
+        self.split_v_btn.setToolTip(t("editor.split_v_tooltip"))
         if not self._current_file:
             self.file_label.setText(t("editor.no_file"))
         if hasattr(self, 'search_bar'):
             self.search_bar.apply_language()
+
+    def eventFilter(self, obj, event):
+        """点击 / 聚焦本窗格的编辑区时，通知 EditorArea 把本窗格设为活动窗格。"""
+        if event.type() in (
+            QEvent.Type.FocusIn,
+            QEvent.Type.MouseButtonPress,
+        ):
+            self.pane_focused.emit()
+        return super().eventFilter(obj, event)
+
+    def set_active(self, active: bool, show_indicator: bool = True):
+        """设置本窗格是否为活动窗格（仅多窗格分屏时显示高亮指示）。"""
+        if active == self._is_active and show_indicator == self._show_active_indicator:
+            return
+        self._is_active = active
+        self._show_active_indicator = show_indicator
+        self._apply_theme()
 
     def open_file(self, file_path: str) -> bool:
         """打开文件"""
@@ -2343,3 +2434,250 @@ class FileEditorWidget(QWidget):
         super().resizeEvent(event)
         if self._in_image_mode and self._image_pixmap is not None:
             self._apply_image_to_label()
+
+
+class EditorArea(QWidget):
+    """编辑器组容器：用嵌套 QSplitter 容纳多个 FileEditorWidget 窗格，
+    支持无限层级的左右 / 上下分屏（仿 VS Code 编辑器组）。
+
+    - 每个窗格是一个独立的 FileEditorWidget，拥有各自的文件、修改状态、查找栏。
+    - 点击某个窗格使其成为「活动窗格」；文件树打开文件时落到活动窗格。
+    - 关闭某个窗格会回收空间并塌缩只剩一个子节点的嵌套 splitter；
+      关闭最后一个窗格则发 all_closed（由主窗口隐藏整个编辑器区）。
+
+    对外它就是一个普通 widget，可被放进任意 splitter；放置 / 显隐 / indexOf
+    等"容器级"操作针对 EditorArea 本身，open/save/字体等"窗格级"操作针对活动窗格。
+    """
+
+    all_closed = pyqtSignal()       # 最后一个窗格被关闭
+    active_changed = pyqtSignal()   # 活动窗格发生变化
+    file_saved = pyqtSignal(str)    # 任一窗格保存文件（转发）
+
+    def __init__(self, theme: dict = None, parent=None):
+        super().__init__(parent)
+        self.theme = theme or {}
+        self._panes: list[FileEditorWidget] = []
+        self._active: FileEditorWidget | None = None
+
+        self._layout = QVBoxLayout(self)
+        self._layout.setContentsMargins(0, 0, 0, 0)
+        self._layout.setSpacing(0)
+
+        # 初始单窗格直接由布局持有；分屏后 _root 变成顶层 QSplitter
+        first = self._create_pane()
+        self._root = first
+        self._layout.addWidget(first)
+        self._set_active(first)
+
+    # ---------- 窗格创建 / 活动态 ----------
+
+    def _create_pane(self) -> FileEditorWidget:
+        pane = FileEditorWidget(theme=self.theme)
+        pane.split_h_requested.connect(lambda p=pane: self.split_pane(p, Qt.Orientation.Horizontal))
+        pane.split_v_requested.connect(lambda p=pane: self.split_pane(p, Qt.Orientation.Vertical))
+        pane.editor_closed.connect(lambda p=pane: self._on_pane_close_requested(p))
+        pane.pane_focused.connect(lambda p=pane: self._set_active(p))
+        pane.file_saved.connect(self.file_saved)
+        self._panes.append(pane)
+        return pane
+
+    def _set_active(self, pane: FileEditorWidget):
+        if pane is self._active or pane not in self._panes:
+            return
+        self._active = pane
+        self._refresh_active_indicators()
+        self.active_changed.emit()
+
+    def _refresh_active_indicators(self):
+        multi = len(self._panes) > 1
+        for p in self._panes:
+            p.set_active(p is self._active and multi, show_indicator=multi)
+
+    @property
+    def active_pane(self) -> FileEditorWidget | None:
+        return self._active
+
+    @property
+    def panes(self) -> list:
+        return list(self._panes)
+
+    def _styled_splitter(self, orientation) -> QSplitter:
+        splitter = QSplitter(orientation)
+        splitter.setHandleWidth(2)
+        accent = self.theme.get('accent', '#667eea')
+        border = self.theme.get('border', '#3d3d5c')
+        splitter.setStyleSheet(f"""
+            QSplitter::handle {{ background-color: {border}; }}
+            QSplitter::handle:hover {{ background-color: {accent}; }}
+        """)
+        return splitter
+
+    # ---------- 分屏 ----------
+
+    def split_pane(self, pane: FileEditorWidget, orientation):
+        """把 pane 一分为二，新窗格复制 pane 当前打开的文件。"""
+        if pane not in self._panes:
+            return
+        new_pane = self._create_pane()
+        # 继承源窗格的字号（用户可能已缩放过编辑器）
+        src_font = pane.editor.font()
+        new_pane.editor.setFont(src_font)
+        new_pane.editor.setTabStopDistance(
+            4 * new_pane.editor.fontMetrics().horizontalAdvance(' ')
+        )
+        if pane.get_current_file():
+            new_pane.open_file(pane.get_current_file())
+
+        parent = pane.parent()
+        if isinstance(parent, QSplitter):
+            parent_splitter = parent
+            index = parent_splitter.indexOf(pane)
+            if parent_splitter.orientation() == orientation:
+                # 同方向：直接在 pane 后插入，把它占的空间一分为二
+                sizes = parent_splitter.sizes()
+                parent_splitter.insertWidget(index + 1, new_pane)
+                if index < len(sizes):
+                    orig = sizes[index]
+                    new_sizes = list(sizes)
+                    new_sizes[index] = orig // 2
+                    new_sizes.insert(index + 1, orig - orig // 2)
+                    if len(new_sizes) == parent_splitter.count():
+                        parent_splitter.setSizes(new_sizes)
+            else:
+                # 异方向：把 pane 包进一个新方向的 splitter
+                sizes = parent_splitter.sizes()
+                new_splitter = self._styled_splitter(orientation)
+                new_splitter.addWidget(pane)       # 把 pane 从父 splitter 移入新 splitter
+                new_splitter.addWidget(new_pane)
+                parent_splitter.insertWidget(index, new_splitter)
+                if sizes and len(sizes) == parent_splitter.count():
+                    parent_splitter.setSizes(sizes)
+                self._split_evenly(new_splitter, orientation)
+        else:
+            # pane 是根（单窗格，直接被布局持有）
+            self._layout.removeWidget(pane)
+            new_splitter = self._styled_splitter(orientation)
+            new_splitter.addWidget(pane)
+            new_splitter.addWidget(new_pane)
+            self._root = new_splitter
+            self._layout.addWidget(new_splitter)
+            self._split_evenly(new_splitter, orientation)
+
+        pane.show()
+        new_pane.show()
+        self._refresh_active_indicators()
+        self._set_active(new_pane)
+        new_pane.editor.setFocus()
+
+    def _split_evenly(self, splitter: QSplitter, orientation):
+        if orientation == Qt.Orientation.Horizontal:
+            extent = splitter.width() if splitter.width() > 0 else max(self.width(), 600)
+        else:
+            extent = splitter.height() if splitter.height() > 0 else max(self.height(), 400)
+        splitter.setSizes([extent // 2, extent - extent // 2])
+
+    # ---------- 关闭 / 塌缩 ----------
+
+    def _on_pane_close_requested(self, pane: FileEditorWidget):
+        """某窗格点了关闭按钮（此时它已自行清空文件并发 editor_closed）。"""
+        if len(self._panes) <= 1:
+            # 最后一个窗格：不销毁，交给主窗口隐藏整个编辑器区
+            self.all_closed.emit()
+            return
+        self.close_pane(pane)
+
+    def close_pane(self, pane: FileEditorWidget):
+        if pane not in self._panes or len(self._panes) <= 1:
+            return
+        parent = pane.parent()
+        parent_sizes = parent.sizes() if isinstance(parent, QSplitter) else None
+        close_index = parent.indexOf(pane) if isinstance(parent, QSplitter) else -1
+
+        was_active = pane is self._active
+        self._panes.remove(pane)
+        pane.setParent(None)
+        pane.deleteLater()
+
+        # 在局部父 splitter 内把空出的空间并给相邻窗格（其它窗格尺寸不变）
+        if isinstance(parent, QSplitter) and parent_sizes and 0 <= close_index < len(parent_sizes):
+            freed = parent_sizes[close_index]
+            new_sizes = parent_sizes[:close_index] + parent_sizes[close_index + 1:]
+            if new_sizes:
+                give = close_index - 1 if close_index - 1 >= 0 else 0
+                new_sizes[give] += freed
+                if len(new_sizes) == parent.count():
+                    parent.setSizes(new_sizes)
+
+        self._collapse_singleton(parent)
+
+        if was_active and self._panes:
+            self._active = None
+            self._set_active(self._panes[0])
+            self._panes[0].editor.setFocus()
+        self._refresh_active_indicators()
+
+    def _collapse_singleton(self, splitter):
+        """某 splitter 关闭后只剩一个子组件时，解除这层嵌套，让剩余窗格自动扩展。"""
+        while isinstance(splitter, QSplitter) and splitter.count() == 1:
+            if splitter is self._root:
+                # 根 splitter 只剩一个子组件 → 子组件成为新根，直接由布局持有
+                child = splitter.widget(0)
+                self._layout.removeWidget(splitter)
+                child.setParent(None)
+                self._root = child
+                self._layout.addWidget(child)
+                child.show()
+                splitter.deleteLater()
+                break
+            parent = splitter.parent()
+            if not isinstance(parent, QSplitter):
+                break
+            child = splitter.widget(0)
+            gp_index = parent.indexOf(splitter)
+            gp_sizes = parent.sizes()
+            child.setParent(None)
+            parent.insertWidget(gp_index, child)
+            splitter.setParent(None)
+            splitter.deleteLater()
+            if len(gp_sizes) == parent.count():
+                parent.setSizes(gp_sizes)
+            splitter = parent
+
+    # ---------- 窗格级便捷转发 ----------
+
+    def open_file_in_active(self, file_path: str) -> bool:
+        if self._active is None:
+            return False
+        return self._active.open_file(file_path)
+
+    def save_active(self) -> bool:
+        return bool(self._active and self._active.save_file())
+
+    def save_active_as(self) -> bool:
+        return bool(self._active and self._active.save_file_as())
+
+    # ---------- 整组级转发 ----------
+
+    def apply_theme(self, theme: dict):
+        self.theme = theme
+        for p in self._panes:
+            p.apply_theme(theme)
+        # 重新着色所有嵌套 splitter 手柄
+        for sp in self.findChildren(QSplitter):
+            accent = theme.get('accent', '#667eea')
+            border = theme.get('border', '#3d3d5c')
+            sp.setStyleSheet(f"""
+                QSplitter::handle {{ background-color: {border}; }}
+                QSplitter::handle:hover {{ background-color: {accent}; }}
+            """)
+
+    def apply_language(self):
+        for p in self._panes:
+            p.apply_language()
+
+    def apply_font(self, font: QFont):
+        for p in self._panes:
+            p.editor.setFont(font)
+            p.editor.setTabStopDistance(
+                4 * p.editor.fontMetrics().horizontalAdvance(' ')
+            )

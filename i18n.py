@@ -383,6 +383,10 @@ TRANSLATIONS = {
     # ===== 文件编辑器 =====
     "editor.no_file": {"zh": "未打开文件", "en": "No file open"},
     "editor.close_tooltip": {"zh": "关闭编辑器", "en": "Close Editor"},
+    "editor.split_h_tooltip": {"zh": "左右分屏 ⌘\\（并排查看另一个文件）", "en": "Split editor right ⌘\\ (view another file side by side)"},
+    "editor.split_v_tooltip": {"zh": "上下分屏 ⌘⇧\\（堆叠查看另一个文件）", "en": "Split editor down ⌘⇧\\ (view another file stacked)"},
+    "editor.split_h_menu": {"zh": "左右分屏  ⌘\\", "en": "Split Right  ⌘\\"},
+    "editor.split_v_menu": {"zh": "上下分屏  ⌘⇧\\", "en": "Split Down  ⌘⇧\\"},
     "editor.error": {"zh": "错误", "en": "Error"},
     "editor.file_not_found": {"zh": "文件不存在: {path}", "en": "File not found: {path}"},
     "editor.file_too_large_title": {"zh": "文件过大", "en": "File Too Large"},

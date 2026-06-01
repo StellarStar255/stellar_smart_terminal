@@ -53,7 +53,7 @@ from remote_explorer_widget import RemoteExplorerPanel
 from explorer_widget import ExplorerPanel
 from toolbar_manager import ToolbarManagerDialog
 from command_palette import CommandPalette
-from file_editor import FileEditorWidget
+from file_editor import FileEditorWidget, EditorArea
 from i18n import t, set_language, get_language
 from flow_layout import FlowLayout
 from utils import read_config_json, atomic_write_json
@@ -5235,15 +5235,13 @@ class MainWindow(QMainWindow):
         self._apply_application_font(effective_px)
 
         # 3. 文件编辑器 (默认13pt, 范围6-48) — 跟随终端缩放，不受 GUI 字号影响
-        if hasattr(self, 'file_editor') and self.file_editor is not None:
+        if hasattr(self, 'editor_area') and self.editor_area.active_pane is not None:
             target_size = max(6, min(48, 13 + delta))
-            font = self.file_editor.editor.font()
+            font = self.editor_area.active_pane.editor.font()
             if font.pointSize() != target_size:
                 font.setPointSize(target_size)
-                self.file_editor.editor.setFont(font)
-                self.file_editor.editor.setTabStopDistance(
-                    4 * self.file_editor.editor.fontMetrics().horizontalAdvance(' ')
-                )
+                # 所有分屏窗格统一字号
+                self.editor_area.apply_font(font)
 
         # 4. 资源管理器文件树 (默认13pt, 范围8-28) — 跟随终端缩放，不受 GUI 字号影响
         if hasattr(self, 'explorer_panel') and self.explorer_panel is not None:
@@ -7061,15 +7059,16 @@ class MainWindow(QMainWindow):
         # 连接文件编辑请求信号
         self.explorer_panel.file_edit_requested.connect(self._open_file_in_editor)
 
-        # 内置文件编辑器
-        self.file_editor = FileEditorWidget(theme=current_theme)
-        self.file_editor.editor_closed.connect(self._on_editor_closed)
-        self.file_editor.hide()  # 默认隐藏
-        self.explorer_splitter.addWidget(self.file_editor)
+        # 内置文件编辑器（编辑器组：支持无限层级 split / v-split 并排查看不同文件）
+        self.editor_area = EditorArea(theme=current_theme)
+        self.editor_area.all_closed.connect(self._on_editor_closed)
+        self.editor_area.active_changed.connect(self._on_active_pane_changed)
+        self.editor_area.hide()  # 默认隐藏
+        self.explorer_splitter.addWidget(self.editor_area)
 
-        # 连接资源管理器的保存信号到文件编辑器
-        self.explorer_panel.save_file_requested.connect(self.file_editor.save_file)
-        self.explorer_panel.save_file_as_requested.connect(self.file_editor.save_file_as)
+        # 连接资源管理器的保存信号到活动窗格
+        self.explorer_panel.save_file_requested.connect(self.editor_area.save_active)
+        self.explorer_panel.save_file_as_requested.connect(self.editor_area.save_active_as)
 
         # 设置初始比例（资源管理器占更多空间）
         self.explorer_splitter.setSizes([400, 0])
@@ -7081,13 +7080,39 @@ class MainWindow(QMainWindow):
 
         layout.addWidget(self.explorer_splitter)
 
+    @property
+    def file_editor(self):
+        """兼容旧调用：返回编辑器组的活动窗格（窗格级操作用）。
+
+        容器级操作（放置 / 显隐 / indexOf / setParent）请直接用 self.editor_area。
+        editor_area 尚未创建时抛 AttributeError，使外部 hasattr 检查返回 False。
+        """
+        return self.editor_area.active_pane
+
+    def _editor_has_any_file(self) -> bool:
+        """编辑器组里是否有任意窗格打开了文件。"""
+        if not hasattr(self, 'editor_area'):
+            return False
+        return any(p.get_current_file() for p in self.editor_area.panes)
+
+    def _on_active_pane_changed(self):
+        """活动窗格变化时，让资源管理器高亮跟随活动窗格当前文件。"""
+        if not hasattr(self, 'explorer_panel'):
+            return
+        pane = self.editor_area.active_pane
+        cur = pane.get_current_file() if pane else None
+        if cur:
+            self.explorer_panel.set_editing_file(cur)
+        else:
+            self.explorer_panel.clear_editing_file()
+
     def _open_file_in_editor(self, file_path: str):
-        """在内置编辑器中打开文件"""
-        if not hasattr(self, 'file_editor'):
+        """在内置编辑器中打开文件（落到当前活动窗格）"""
+        if not hasattr(self, 'editor_area'):
             return
 
-        # 打开文件
-        if not self.file_editor.open_file(file_path):
+        # 在活动窗格中打开文件
+        if not self.editor_area.open_file_in_active(file_path):
             return
 
         # 通知资源管理器当前正在编辑的文件
@@ -7108,14 +7133,14 @@ class MainWindow(QMainWindow):
         - 通过 splitterMoved 信号触发，由 setSizes 引发的程序性变更也会进入此处，
           但目标布局各项均 > 0，记录无害
         """
-        if not hasattr(self, 'file_editor'):
+        if not hasattr(self, 'editor_area'):
             return
 
-        editor_in_main = self.main_splitter.indexOf(self.file_editor) >= 0
-        editor_in_internal = self.explorer_splitter.indexOf(self.file_editor) >= 0
+        editor_in_main = self.main_splitter.indexOf(self.editor_area) >= 0
+        editor_in_internal = self.explorer_splitter.indexOf(self.editor_area) >= 0
 
         # 1) 编辑器在 explorer_splitter 中（上下分屏）— 记录内部分屏尺寸
-        if editor_in_internal and self.file_editor.isVisible():
+        if editor_in_internal and self.editor_area.isVisible():
             isizes = self.explorer_splitter.sizes()
             if len(isizes) == 2 and isizes[0] > 0 and isizes[1] > 0:
                 self._saved_explorer_internal_sizes = list(isizes)
@@ -7128,7 +7153,7 @@ class MainWindow(QMainWindow):
             or getattr(self, 'remote_panel_visible', False)
         )
 
-        if editor_in_main and self.file_editor.isVisible() and len(msizes) == 4:
+        if editor_in_main and self.editor_area.isVisible() and len(msizes) == 4:
             # 4 widget: 左面板 + 编辑器 + 终端 + 日志
             if msizes[0] > 0 and msizes[1] > 0 and msizes[2] > 0:
                 self._saved_explorer_main_sizes = list(msizes)
@@ -7169,15 +7194,15 @@ class MainWindow(QMainWindow):
 
     def _place_editor_in_main_splitter(self):
         """将编辑器放到 main_splitter 中（左右分屏模式）"""
-        if self.main_splitter.indexOf(self.file_editor) >= 0:
+        if self.main_splitter.indexOf(self.editor_area) >= 0:
             # 已经在 main_splitter 中，只需确保可见并调整大小
-            self.file_editor.show()
+            self.editor_area.show()
         else:
             # 从 explorer_splitter 中取出
-            self.file_editor.setParent(None)
-            self.file_editor.show()
+            self.editor_area.setParent(None)
+            self.editor_area.show()
             # 插入到 main_splitter 的 index 1（left_panel 和 tab_widget 之间）
-            self.main_splitter.insertWidget(1, self.file_editor)
+            self.main_splitter.insertWidget(1, self.editor_area)
 
         self.main_splitter.setSizes(self._resolve_main_splitter_sizes_with_editor())
 
@@ -7186,15 +7211,15 @@ class MainWindow(QMainWindow):
 
     def _place_editor_in_explorer_splitter(self):
         """将编辑器放到 explorer_splitter 中（上下分屏模式）"""
-        if self.explorer_splitter.indexOf(self.file_editor) >= 0:
+        if self.explorer_splitter.indexOf(self.editor_area) >= 0:
             # 已经在 explorer_splitter 中，只需确保可见并调整大小
-            self.file_editor.show()
+            self.editor_area.show()
         else:
             # 从 main_splitter 中取出
-            self.file_editor.setParent(None)
-            self.file_editor.show()
+            self.editor_area.setParent(None)
+            self.editor_area.show()
             # 放回 explorer_splitter
-            self.explorer_splitter.addWidget(self.file_editor)
+            self.explorer_splitter.addWidget(self.editor_area)
 
         self.explorer_splitter.setSizes(self._resolve_explorer_splitter_sizes_with_editor())
 
@@ -7203,13 +7228,13 @@ class MainWindow(QMainWindow):
 
     def _on_editor_closed(self):
         """编辑器关闭时"""
-        if hasattr(self, 'file_editor'):
-            self.file_editor.hide()
+        if hasattr(self, 'editor_area'):
+            self.editor_area.hide()
             # 确保编辑器回到 explorer_splitter（归位）
-            if self.explorer_splitter.indexOf(self.file_editor) < 0:
-                self.file_editor.setParent(None)
-                self.explorer_splitter.addWidget(self.file_editor)
-                self.file_editor.hide()
+            if self.explorer_splitter.indexOf(self.editor_area) < 0:
+                self.editor_area.setParent(None)
+                self.explorer_splitter.addWidget(self.editor_area)
+                self.editor_area.hide()
             # 恢复资源管理器占据全部空间
             self.explorer_splitter.setSizes([400, 0])
             # 恢复 main_splitter 正常比例
@@ -7224,7 +7249,7 @@ class MainWindow(QMainWindow):
         self._explorer_split_horizontal = horizontal
 
         # 如果编辑器正在显示，立即切换位置
-        if hasattr(self, 'file_editor') and self.file_editor.isVisible():
+        if hasattr(self, 'editor_area') and self.editor_area.isVisible():
             if horizontal:
                 self._place_editor_in_main_splitter()
             else:
@@ -7258,7 +7283,7 @@ class MainWindow(QMainWindow):
             self.explorer_panel.set_root_path(self._window_cwd)
 
             # 恢复文件编辑器（如果之前有打开的文件）
-            if hasattr(self, 'file_editor') and self.file_editor._current_file:
+            if hasattr(self, 'editor_area') and self._editor_has_any_file():
                 if self._explorer_split_horizontal:
                     self._place_editor_in_main_splitter()
                 else:
@@ -7269,14 +7294,14 @@ class MainWindow(QMainWindow):
             self.explorer_panel_container.hide()
 
             # 同时隐藏文件编辑器
-            if hasattr(self, 'file_editor') and self.file_editor.isVisible():
-                self.file_editor.hide()
+            if hasattr(self, 'editor_area') and self.editor_area.isVisible():
+                self.editor_area.hide()
 
             # 如果编辑器在 main_splitter 中（水平分屏模式），归位到 explorer_splitter
-            if hasattr(self, 'file_editor') and self.main_splitter.indexOf(self.file_editor) >= 0:
-                self.file_editor.setParent(None)
-                self.explorer_splitter.addWidget(self.file_editor)
-                self.file_editor.hide()
+            if hasattr(self, 'editor_area') and self.main_splitter.indexOf(self.editor_area) >= 0:
+                self.editor_area.setParent(None)
+                self.explorer_splitter.addWidget(self.editor_area)
+                self.editor_area.hide()
                 self.explorer_splitter.setSizes([400, 0])
 
             # 如果其他面板也隐藏，则隐藏整个左侧容器
@@ -7390,13 +7415,13 @@ class MainWindow(QMainWindow):
             self.explorer_panel_container.hide()
 
             # 隐藏文件编辑器（如果在 main_splitter 中归位）
-            if hasattr(self, 'file_editor'):
-                if self.file_editor.isVisible():
-                    self.file_editor.hide()
-                if self.main_splitter.indexOf(self.file_editor) >= 0:
-                    self.file_editor.setParent(None)
-                    self.explorer_splitter.addWidget(self.file_editor)
-                    self.file_editor.hide()
+            if hasattr(self, 'editor_area'):
+                if self.editor_area.isVisible():
+                    self.editor_area.hide()
+                if self.main_splitter.indexOf(self.editor_area) >= 0:
+                    self.editor_area.setParent(None)
+                    self.explorer_splitter.addWidget(self.editor_area)
+                    self.editor_area.hide()
                     self.explorer_splitter.setSizes([400, 0])
 
             self.git_panel_container.show()
@@ -7486,13 +7511,13 @@ class MainWindow(QMainWindow):
                 self._hide_git_diff()  # 切到 Remote 时若在看 diff，回到终端
 
             # 编辑器若停在 main_splitter，归位
-            if hasattr(self, 'file_editor'):
-                if self.file_editor.isVisible():
-                    self.file_editor.hide()
-                if self.main_splitter.indexOf(self.file_editor) >= 0:
-                    self.file_editor.setParent(None)
-                    self.explorer_splitter.addWidget(self.file_editor)
-                    self.file_editor.hide()
+            if hasattr(self, 'editor_area'):
+                if self.editor_area.isVisible():
+                    self.editor_area.hide()
+                if self.main_splitter.indexOf(self.editor_area) >= 0:
+                    self.editor_area.setParent(None)
+                    self.explorer_splitter.addWidget(self.editor_area)
+                    self.editor_area.hide()
                     self.explorer_splitter.setSizes([400, 0])
 
             self.remote_panel_container.show()
@@ -7562,11 +7587,13 @@ class MainWindow(QMainWindow):
     def _open_remote_file_in_editor(self, host_alias: str, remote_path: str,
                                       local_temp_path: str, session):
         """远程 Explorer 双击文件后由本方法打开编辑器，并把保存事件转换成上传"""
-        if not hasattr(self, 'file_editor'):
+        if not hasattr(self, 'editor_area'):
             return
-        ok = self.file_editor.open_file(local_temp_path)
+        ok = self.editor_area.open_file_in_active(local_temp_path)
         if not ok:
             return
+        # 在打开该远程文件的那个窗格上挂保存->上传逻辑（精确到窗格，避免活动窗格切换后错挂）
+        pane = self.editor_area.active_pane
         # 把编辑器的「已保存」信号转成上传调用（only this file）
         # 用一个一次性的连接，文件切换时自动清理
         if not hasattr(self, '_remote_save_connections'):
@@ -7575,7 +7602,7 @@ class MainWindow(QMainWindow):
         old = self._remote_save_connections.pop(local_temp_path, None)
         if old:
             try:
-                self.file_editor.file_saved.disconnect(old)
+                pane.file_saved.disconnect(old)
             except Exception:
                 pass
         def on_saved(saved_path: str):
@@ -7583,13 +7610,13 @@ class MainWindow(QMainWindow):
                 return
             # 把本地临时文件 push 回远端
             self.remote_panel.upload_after_save(local_temp_path)
-        self.file_editor.file_saved.connect(on_saved)
+        pane.file_saved.connect(on_saved)
         self._remote_save_connections[local_temp_path] = on_saved
 
         # 让编辑器标题显示远程身份（在 file_label 后追加）
         try:
-            current = self.file_editor.file_label.text()
-            self.file_editor.file_label.setText(
+            current = pane.file_label.text()
+            pane.file_label.setText(
                 f"{current}  ·  {t('remote.editing_remote', host=host_alias, path=remote_path)}"
             )
         except Exception:
@@ -7619,7 +7646,7 @@ class MainWindow(QMainWindow):
         log_width = 300 if self.log_panel_visible else 0
 
         # 检查编辑器是否在 main_splitter 中（左右分屏模式，splitter 有 4 个 widget）
-        editor_in_main = hasattr(self, 'file_editor') and self.main_splitter.indexOf(self.file_editor) >= 0
+        editor_in_main = hasattr(self, 'editor_area') and self.main_splitter.indexOf(self.editor_area) >= 0
         if editor_in_main:
             self.main_splitter.setSizes(self._resolve_main_splitter_sizes_with_editor())
         elif left_width > 0 or log_width > 0:
@@ -8024,9 +8051,8 @@ class MainWindow(QMainWindow):
                 self._remote_title.setText(t("remote.title"))
             except Exception:
                 pass
-        if hasattr(self, 'file_editor'):
-            if hasattr(self.file_editor, 'apply_language'):
-                self.file_editor.apply_language()
+        if hasattr(self, 'editor_area'):
+            self.editor_area.apply_language()
 
     def _on_icon_tint_changed(self, state):
         """图标蒙版开关变更"""
@@ -8485,8 +8511,8 @@ class MainWindow(QMainWindow):
             self.remote_panel.apply_theme(t)
 
         # 内置文件编辑器样式
-        if hasattr(self, 'file_editor'):
-            self.file_editor.apply_theme(t)
+        if hasattr(self, 'editor_area'):
+            self.editor_area.apply_theme(t)
 
         # Explorer 面板容器标题栏样式（直接使用保存的引用，避免 findChildren 搜索）
         if hasattr(self, '_explorer_header'):
