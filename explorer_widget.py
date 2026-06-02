@@ -299,7 +299,11 @@ class ExplorerPanel(QWidget):
         # 文件系统模型
         self.model = QFileSystemModel()
         self.model.setRootPath("")
-        self.model.setFilter(QDir.Filter.AllDirs | QDir.Filter.Files | QDir.Filter.NoDotAndDotDot)
+        # 包含 Hidden 以显示以点开头的隐藏文件/文件夹（仍排除 . 和 ..）
+        self.model.setFilter(
+            QDir.Filter.AllDirs | QDir.Filter.Files
+            | QDir.Filter.Hidden | QDir.Filter.NoDotAndDotDot
+        )
         # 允许通过模型对文件/文件夹原地重命名
         self.model.setReadOnly(False)
 
