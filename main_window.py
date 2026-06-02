@@ -2945,6 +2945,15 @@ class MainWindow(QMainWindow):
                     self._update_flow_toolbar_height()
             QTimer.singleShot(0, _force_pinned_rows_visible)
 
+        # 启动后空闲预热 Explorer：把“首次 ⌘B 才触发”的目录扫描 + macOS 系统
+        # 图标库初始化提前在后台做掉，使首次展开瞬开。若面板已恢复为打开状态则跳过。
+        if not getattr(self, 'explorer_panel_visible', False):
+            def _prewarm_explorer():
+                if sip.isdeleted(self) or not hasattr(self, 'explorer_panel'):
+                    return
+                self.explorer_panel.prewarm(getattr(self, '_window_cwd', None))
+            QTimer.singleShot(1200, _prewarm_explorer)
+
     def showEvent(self, event):
         """窗口显示事件 - 设置 macOS 原生窗口属性"""
         super().showEvent(event)

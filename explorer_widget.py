@@ -17,9 +17,9 @@ from PyQt6.QtWidgets import (
     QWidget, QVBoxLayout, QHBoxLayout, QFrame, QLabel,
     QPushButton, QTreeView, QMenu, QLineEdit, QMessageBox,
     QAbstractItemView, QFileDialog, QApplication, QProgressDialog,
-    QStyledItemDelegate
+    QStyledItemDelegate, QFileIconProvider
 )
-from PyQt6.QtCore import Qt, QDir, QModelIndex, QPersistentModelIndex, pyqtSignal, QTimer, QEventLoop, QSize
+from PyQt6.QtCore import Qt, QDir, QModelIndex, QPersistentModelIndex, pyqtSignal, QTimer, QEventLoop, QSize, QFileInfo
 from PyQt6.QtGui import (
     QFileSystemModel, QAction, QDesktopServices, QCursor,
     QShortcut, QKeySequence, QColor, QBrush,
@@ -530,6 +530,30 @@ class ExplorerPanel(QWidget):
             self.tree_view.setRootIndex(self.model.index(path))
             # 切换了根 → 重置自动刷新基线
             self._auto_refresh_fingerprint = frozenset()
+
+    def prewarm(self, path: str = None):
+        """启动后空闲预热：提前完成首次 ⌘B 才会触发的一次性开销。
+
+        1) 把模型指向目标目录，后台抓取条目并装上文件监听（首次扫描）。
+        2) 主动取一次文件夹/文件图标，触发 macOS 系统图标库初始化——
+           这是首次展开最耗时的部分，预热后真正展示时图标已按类型缓存。
+        预热时面板仍隐藏，不影响启动；之后 set_root_path 路径未变会直接跳过。"""
+        try:
+            target = path or self._current_path
+            if target and os.path.isdir(target):
+                # 与 set_root_path 一致地设置根，使首次 ⌘B 命中“路径未变”快路径
+                self.set_root_path(target)
+
+            # 预热系统图标提供器（首次调用会初始化 NSWorkspace 整套图标子系统）
+            provider = self.model.iconProvider()
+            if provider is not None:
+                folder_icon = provider.icon(QFileIconProvider.IconType.Folder)
+                file_icon = provider.icon(QFileIconProvider.IconType.File)
+                # 强制栅格化，确保初始化真正发生而非被惰性推迟
+                folder_icon.pixmap(QSize(16, 16))
+                file_icon.pixmap(QSize(16, 16))
+        except Exception:
+            pass  # 预热失败不影响功能，首次展开退回原有（稍慢）路径
 
     def refresh(self):
         """刷新文件树"""
