@@ -1842,11 +1842,12 @@ class TerminalWidget(QWidget):
                 event.accept()
                 return
 
-        # Cmd+Shift+G (macOS) / Ctrl+Shift+G: 切换 Git 面板 — 委托给主窗口
+        # Cmd+G (macOS) / Ctrl+G: 切换 Git 面板 — 委托给主窗口
+        # 注意：只匹配 Cmd(ControlModifier)，物理 Ctrl+G(MetaModifier) 仍发送到终端
         if (modifiers & Qt.KeyboardModifier.ControlModifier
-                and (modifiers & Qt.KeyboardModifier.ShiftModifier)
                 and not (modifiers & (Qt.KeyboardModifier.MetaModifier
-                                       | Qt.KeyboardModifier.AltModifier))
+                                       | Qt.KeyboardModifier.AltModifier
+                                       | Qt.KeyboardModifier.ShiftModifier))
                 and key == Qt.Key.Key_G):
             main_win = self.window()
             if hasattr(main_win, '_toggle_git_panel'):
