@@ -549,6 +549,37 @@ class _GitOpWorker(QThread):
         self.done.emit(ok, self._kind)
 
 
+class _RefreshWorker(QThread):
+    """后台收集刷新面板所需的全部只读数据（status / branches / tags / log）。
+
+    避免在 UI 线程跑 git status/branch/log —— 大仓库的 `git log -150 --all`
+    会卡住界面。GitManager 的读命令各自 spawn/release 子进程（_proc_lock 守护），
+    并发读安全，可与后台 fetch 同时运行。数据收齐后一次性发回 UI 线程再应用。
+    """
+    loaded = pyqtSignal(dict)
+
+    def __init__(self, git_manager, parent=None):
+        super().__init__(parent)
+        self._gm = git_manager
+
+    def run(self):
+        data = {'ok': False}
+        try:
+            gm = self._gm
+            staged, unstaged = gm.get_status()
+            data['staged'] = staged
+            data['unstaged'] = unstaged
+            data['ahead'], data['behind'] = gm.get_ahead_behind()
+            data['branches'] = gm.get_branches()
+            data['tags'] = gm.get_tags()
+            data['head_ref'] = gm.get_head_ref()
+            data['commits'] = gm.get_log(limit=150, all_branches=True)
+            data['ok'] = True
+        except Exception:
+            data['ok'] = False
+        self.loaded.emit(data)
+
+
 class GitCommitWidget(QFrame):
     """Git 提交区组件"""
 
@@ -1848,6 +1879,8 @@ class GitPanel(QWidget):
         self._last_fetch_ts = 0.0  # 上次后台 fetch 的时间（节流用）
         self._active_workers = set()  # 在跑的后台线程，关闭时统一等待，避免被销毁时 abort
         self._fetch_running = False
+        self._refresh_running = False   # 后台全量刷新是否进行中
+        self._refresh_pending = False   # 进行中又被请求 → 跑完后补一次（合并）
 
         self._setup_ui()
         self._connect_signals()
@@ -2044,9 +2077,7 @@ class GitPanel(QWidget):
             self.changes_widget.show()
             self.graph_widget.show()
             self.commit_widget.show()
-            self._refresh_status()
-            self._refresh_branches()
-            self._refresh_graph()
+            self._refresh_all_async()
             # 面板每次显示时，恢复用户记忆的各栏高度
             if self._desired_body_sizes:
                 self._apply_body_sizes()
@@ -2060,11 +2091,6 @@ class GitPanel(QWidget):
             self.changes_widget.hide()
             self.graph_widget.hide()
             self.commit_widget.hide()
-
-    def _refresh_graph(self):
-        """刷新提交历史 graph（commit/pull/fetch/切分支后调用）。"""
-        commits = self._git_manager.get_log(limit=150, all_branches=True)
-        self.graph_widget.set_commits(commits)
 
     def _on_commit_clicked(self, commit_hash: str):
         """点击 graph 上的提交 → 在右侧大空间展示该提交详情（git show）。"""
@@ -2086,9 +2112,7 @@ class GitPanel(QWidget):
         if reply != QMessageBox.StandardButton.Yes:
             return
         if self._git_manager.revert_commit(commit_hash):
-            self._refresh_status()
-            self._refresh_branches()
-            self._refresh_graph()
+            self._refresh_all_async()
 
     def _on_reset_commit(self, commit_hash: str, mode: str):
         """右键菜单：重置当前分支到某次提交（git reset --<mode>，会改写本地历史）。"""
@@ -2108,14 +2132,44 @@ class GitPanel(QWidget):
         if reply != QMessageBox.StandardButton.Yes:
             return
         if self._git_manager.reset_to_commit(commit_hash, mode):
-            self._refresh_status()
-            self._refresh_branches()
-            self._refresh_graph()
+            self._refresh_all_async()
 
     def _on_copy_commit_hash(self, commit_hash: str):
         """右键菜单：复制提交完整哈希到剪贴板。"""
         from PyQt6.QtWidgets import QApplication
         QApplication.clipboard().setText(commit_hash)
+
+    def _refresh_all_async(self):
+        """后台收集 status/branches/log 并一次性应用，不阻塞 UI（首次 ⌘G 秒开）。
+
+        合并策略：已有刷新在跑时只置 pending，跑完再补一次，避免叠 worker。
+        """
+        if self._git_manager._repo_path is None:
+            return
+        if self._refresh_running:
+            self._refresh_pending = True
+            return
+        self._refresh_running = True
+        worker = _RefreshWorker(self._git_manager, self)
+        worker.loaded.connect(self._apply_refresh)
+        worker.finished.connect(self._on_refresh_all_finished)
+        self._register_worker(worker)
+        worker.start()
+
+    def _on_refresh_all_finished(self):
+        self._refresh_running = False
+        if self._refresh_pending:
+            self._refresh_pending = False
+            self._refresh_all_async()
+
+    def _apply_refresh(self, data: dict):
+        """在 UI 线程应用后台收集到的刷新数据。"""
+        if not data.get('ok'):
+            return
+        self.changes_widget.update_files(data['staged'], data['unstaged'])
+        self.commit_widget.set_ahead_behind(data['ahead'], data['behind'])
+        self.header.update_branches(data['branches'], data['head_ref'], data['tags'])
+        self.graph_widget.set_commits(data['commits'])
 
     def _refresh_status(self):
         """刷新文件状态"""
@@ -2125,18 +2179,9 @@ class GitPanel(QWidget):
         ahead, behind = self._git_manager.get_ahead_behind()
         self.commit_widget.set_ahead_behind(ahead, behind)
 
-    def _refresh_branches(self):
-        """刷新分支/Tag 列表"""
-        branches = self._git_manager.get_branches()
-        tags = self._git_manager.get_tags()
-        head_ref = self._git_manager.get_head_ref()
-        self.header.update_branches(branches, head_ref, tags)
-
     def _on_refresh_clicked(self):
         """点击 ↻：刷新状态 + 强制抓取一次远程（更新可 pull 条数）"""
-        self._refresh_status()
-        self._refresh_branches()
-        self._refresh_graph()
+        self._refresh_all_async()
         self._fetch_async(force=True)
 
     def _on_create_branch(self):
@@ -2154,9 +2199,7 @@ class GitPanel(QWidget):
         if not name:
             return
         if self._git_manager.create_branch(name):
-            self._refresh_status()
-            self._refresh_branches()
-            self._refresh_graph()
+            self._refresh_all_async()
 
     def _on_delete_branch(self, name: str):
         """右键菜单确认删除本地分支。
@@ -2192,8 +2235,7 @@ class GitPanel(QWidget):
 
         ok, output = self._git_manager.delete_branch(name, force=False)
         if ok:
-            self._refresh_branches()
-            self._refresh_graph()
+            self._refresh_all_async()
             return
 
         # 未合并 → 询问是否强制删除
@@ -2209,8 +2251,7 @@ class GitPanel(QWidget):
                 return
             ok, output = self._git_manager.delete_branch(name, force=True)
             if ok:
-                self._refresh_branches()
-                self._refresh_graph()
+                self._refresh_all_async()
                 return
 
         QMessageBox.critical(
@@ -2498,8 +2539,7 @@ class GitPanel(QWidget):
     def _on_fetch_done(self, ok: bool, _kind: str):
         # 抓取成功后远程跟踪分支已更新 → 重算 ahead/behind，刷新 Pull 计数 + graph
         if ok:
-            self._refresh_status()
-            self._refresh_graph()
+            self._refresh_all_async()
 
     def _register_worker(self, worker):
         """登记后台线程：跑完自动从集合移除并 deleteLater；关闭时统一等待。"""
@@ -2542,11 +2582,9 @@ class GitPanel(QWidget):
         # 已经在目标引用上，无需切换
         if (kind, name) == (head_kind, head_name):
             return
-        if self._git_manager.checkout_ref(kind, name):
-            self._refresh_status()
-        # 不论成功失败都刷新一次，以同步 UI 选中态
-        self._refresh_branches()
-        self._refresh_graph()
+        # 不论 checkout 成功失败都刷新一次（含状态），以同步 UI 选中态
+        self._git_manager.checkout_ref(kind, name)
+        self._refresh_all_async()
 
     def _on_discard_file(self, path: str):
         """放弃更改确认"""
@@ -2563,8 +2601,7 @@ class GitPanel(QWidget):
     def _on_commit(self, message: str):
         """提交处理"""
         if self._git_manager.commit(message):
-            self._refresh_status()
-            self._refresh_graph()
+            self._refresh_all_async()
 
     def _on_push(self):
         """推送处理（后台线程，避免网络阻塞卡死 UI）"""
@@ -2589,8 +2626,7 @@ class GitPanel(QWidget):
             # 失败信息已由 GitManager.error_occurred 弹出
             return
         # 成功不再弹窗打扰：push 后 ahead 计数归零、pull 后列表刷新，按钮本身就是反馈
-        self._refresh_status()
-        self._refresh_graph()
+        self._refresh_all_async()
 
     # ---------- ✨ 用大模型生成提交信息 ----------
 
@@ -2709,5 +2745,4 @@ class GitPanel(QWidget):
 
     def refresh(self):
         """手动刷新"""
-        self._refresh_status()
-        self._refresh_branches()
+        self._refresh_all_async()
