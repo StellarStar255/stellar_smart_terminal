@@ -2841,6 +2841,9 @@ class MainWindow(QMainWindow):
         else:
             self._window_cwd = os.getcwd()  # 初始化为当前进程的工作目录
 
+        # 本会话粘贴过的图片路径（按粘贴顺序，供“图片”按钮查看）
+        self._pasted_images = []
+
         # OpenAI API 服务器管理器
         self.openai_server_manager = OpenAIServerManager()
         self.openai_server_manager.server_started.connect(self._on_openai_server_started)
@@ -3798,6 +3801,10 @@ class MainWindow(QMainWindow):
         self.history_btn = QPushButton(t("toolbar.history"))
         self.history_btn.clicked.connect(self._show_history)
 
+        self.images_btn = QPushButton(t("toolbar.images"))
+        self.images_btn.setToolTip(t("toolbar.images_tooltip"))
+        self.images_btn.clicked.connect(self._show_pasted_images)
+
         self.clear_btn = QPushButton(t("toolbar.clear"))
         self.clear_btn.clicked.connect(self._clear_terminal)
 
@@ -4149,6 +4156,7 @@ class MainWindow(QMainWindow):
             "操作": {
                 "export_btn": self.export_btn,
                 "history_btn": self.history_btn,
+                "images_btn": self.images_btn,
                 "clear_btn": self.clear_btn,
             },
             "分屏管理": {
@@ -4179,7 +4187,7 @@ class MainWindow(QMainWindow):
 
         self._group_default_orders = {
             "选项": ["image_prefix_checkbox", "image_local_checkbox", "window_nav_checkbox"],
-            "操作": ["export_btn", "history_btn", "clear_btn"],
+            "操作": ["export_btn", "history_btn", "images_btn", "clear_btn"],
             "分屏管理": ["split_btn", "split_v_btn", "close_split_btn", "close_tab_btn"],
             "面板与编辑器": ["explorer_toggle_btn", "git_toggle_btn", "remote_toggle_btn", "vscode_open_btn", "cursor_open_btn", "log_toggle_btn"],
             "主题": ["theme_combo", "icon_tint_checkbox"],
@@ -4268,6 +4276,7 @@ class MainWindow(QMainWindow):
             "window_nav_checkbox": self.window_nav_checkbox,
             "export_btn": self.export_btn,
             "history_btn": self.history_btn,
+            "images_btn": self.images_btn,
             "clear_btn": self.clear_btn,
             "split_btn": self.split_btn,
             "split_v_btn": self.split_v_btn,
@@ -6828,8 +6837,34 @@ class MainWindow(QMainWindow):
             self.statusbar.showMessage(t("status.pasted_audio", path=file_path), 3000)
         elif ext in image_extensions:
             self.statusbar.showMessage(t("status.pasted_image", path=file_path), 3000)
+            # 记录到会话粘贴图片列表（去重、保持最新在后），供“图片”按钮查看
+            if file_path in self._pasted_images:
+                self._pasted_images.remove(file_path)
+            self._pasted_images.append(file_path)
+            # 防止无限增长：只保留最近 200 张
+            if len(self._pasted_images) > 200:
+                self._pasted_images = self._pasted_images[-200:]
         else:
             self.statusbar.showMessage(t("status.pasted_file", path=file_path), 3000)
+
+    def _show_pasted_images(self):
+        """打开“已粘贴图片”画廊，双击缩略图可用系统看图打开。"""
+        from pasted_images_dialog import PastedImagesDialog
+
+        def _on_clear():
+            self._pasted_images = []
+
+        def _on_remove(path):
+            if path in self._pasted_images:
+                self._pasted_images.remove(path)
+
+        dialog = PastedImagesDialog(
+            self._pasted_images,
+            on_clear=_on_clear,
+            on_remove=_on_remove,
+            parent=self,
+        )
+        dialog.exec()
 
     def _update_running_state(self, running: bool):
         """更新运行状态UI"""
@@ -7940,6 +7975,9 @@ class MainWindow(QMainWindow):
             self.export_btn.setText(t("toolbar.export"))
         if hasattr(self, 'history_btn'):
             self.history_btn.setText(t("toolbar.history"))
+        if hasattr(self, 'images_btn'):
+            self.images_btn.setText(t("toolbar.images"))
+            self.images_btn.setToolTip(t("toolbar.images_tooltip"))
         if hasattr(self, 'clear_btn'):
             self.clear_btn.setText(t("toolbar.clear"))
 

@@ -356,6 +356,7 @@ class ToolbarManagerDialog(QDialog):
         # 第三组：操作
         ("export_btn", "导出", True, "操作"),
         ("history_btn", "历史", True, "操作"),
+        ("images_btn", "图片", True, "操作"),
         ("clear_btn", "清屏", True, "操作"),
 
         # 第四组：分屏
