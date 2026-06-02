@@ -3845,7 +3845,7 @@ class MainWindow(QMainWindow):
         self.explorer_toggle_btn = QPushButton(t("toolbar.explorer"))
         self.explorer_toggle_btn.setObjectName("explorerToggleBtn")
         self.explorer_toggle_btn.setCheckable(True)
-        self.explorer_toggle_btn.setToolTip(t("toolbar.explorer_tooltip"))
+        self.explorer_toggle_btn.setToolTip(t("toolbar.explorer_tooltip") + "  (⌘B)")
         self.explorer_toggle_btn.setStyleSheet("""
             QPushButton {
                 background-color: #22c55e;
@@ -4838,6 +4838,12 @@ class MainWindow(QMainWindow):
         split_v_action.setShortcut("Ctrl+Shift+V")
         split_v_action.triggered.connect(self._split_vertical_current_terminal)
         self.addAction(split_v_action)
+
+        # 切换 Explorer 面板（Cmd+B，同 VS Code 侧边栏）
+        toggle_explorer_action = QAction(self)
+        toggle_explorer_action.setShortcut("Ctrl+B")
+        toggle_explorer_action.triggered.connect(self._toggle_explorer_panel)
+        self.addAction(toggle_explorer_action)
 
         # 全局缩放快捷键 (Cmd+= 和 Cmd+Shift+= 都放大, Cmd+- 缩小)
         zoom_in_action1 = QAction(self)
@@ -7938,7 +7944,7 @@ class MainWindow(QMainWindow):
         # 面板与编辑器组
         if hasattr(self, 'explorer_toggle_btn'):
             self.explorer_toggle_btn.setText(t("toolbar.explorer"))
-            self.explorer_toggle_btn.setToolTip(t("toolbar.explorer_tooltip"))
+            self.explorer_toggle_btn.setToolTip(t("toolbar.explorer_tooltip") + "  (⌘B)")
         if hasattr(self, 'git_toggle_btn'):
             self.git_toggle_btn.setText(t("toolbar.git"))
         if hasattr(self, 'vscode_open_btn'):
