@@ -3862,6 +3862,7 @@ class MainWindow(QMainWindow):
         self.git_toggle_btn = QPushButton("Git")
         self.git_toggle_btn.setObjectName("gitToggleBtn")
         self.git_toggle_btn.setCheckable(True)
+        self.git_toggle_btn.setToolTip("Git  (⌘⇧G)")
         self.git_toggle_btn.setStyleSheet("""
             QPushButton {
                 background-color: #f97316;
@@ -4844,6 +4845,12 @@ class MainWindow(QMainWindow):
         toggle_explorer_action.setShortcut("Ctrl+B")
         toggle_explorer_action.triggered.connect(self._toggle_explorer_panel)
         self.addAction(toggle_explorer_action)
+
+        # 切换 Git 面板（Cmd+Shift+G，同 VS Code 源代码管理）
+        toggle_git_action = QAction(self)
+        toggle_git_action.setShortcut("Ctrl+Shift+G")
+        toggle_git_action.triggered.connect(self._toggle_git_panel)
+        self.addAction(toggle_git_action)
 
         # 全局缩放快捷键 (Cmd+= 和 Cmd+Shift+= 都放大, Cmd+- 缩小)
         zoom_in_action1 = QAction(self)
