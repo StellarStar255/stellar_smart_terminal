@@ -1829,6 +1829,19 @@ class TerminalWidget(QWidget):
             event.accept()
             return
 
+        # Cmd+B (macOS) / Ctrl+B: 切换 Explorer 面板 — 委托给主窗口
+        # 注意：只匹配 Cmd(ControlModifier)，物理 Ctrl+B(MetaModifier) 仍发送到终端
+        if (modifiers & Qt.KeyboardModifier.ControlModifier
+                and not (modifiers & (Qt.KeyboardModifier.MetaModifier
+                                       | Qt.KeyboardModifier.AltModifier
+                                       | Qt.KeyboardModifier.ShiftModifier))
+                and key == Qt.Key.Key_B):
+            main_win = self.window()
+            if hasattr(main_win, '_toggle_explorer_panel'):
+                main_win._toggle_explorer_panel()
+                event.accept()
+                return
+
         # Ctrl+Plus/Minus/= 字体缩放 — 委托给主窗口全局缩放
         if modifiers & Qt.KeyboardModifier.ControlModifier:
             if key in (Qt.Key.Key_Plus, Qt.Key.Key_Equal):
