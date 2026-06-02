@@ -19,10 +19,11 @@ from PyQt6.QtWidgets import (
     QAbstractItemView, QFileDialog, QApplication, QProgressDialog,
     QStyledItemDelegate
 )
-from PyQt6.QtCore import Qt, QDir, QModelIndex, QPersistentModelIndex, pyqtSignal, QTimer, QEventLoop
+from PyQt6.QtCore import Qt, QDir, QModelIndex, QPersistentModelIndex, pyqtSignal, QTimer, QEventLoop, QSize
 from PyQt6.QtGui import (
     QFileSystemModel, QAction, QDesktopServices, QCursor,
     QShortcut, QKeySequence, QColor, QBrush,
+    QIcon, QPixmap, QPainter,
 )
 from PyQt6.QtCore import QUrl
 
@@ -222,13 +223,45 @@ class FilteredFileSystemModel(QFileSystemModel):
 
     # 隐藏条目的前景色（浅灰，半透明感）
     HIDDEN_COLOR = QColor("#888888")
+    # 隐藏条目图标的不透明度
+    HIDDEN_ICON_OPACITY = 0.45
+
+    def __init__(self, parent=None):
+        super().__init__(parent)
+        self._dim_icon_cache = {}  # 原图标 cacheKey -> 变淡后的 QIcon
 
     def data(self, index, role=Qt.ItemDataRole.DisplayRole):
-        if role == Qt.ItemDataRole.ForegroundRole and index.isValid():
-            name = self.fileName(index)
-            if name.startswith('.'):
+        if index.isValid() and self.fileName(index).startswith('.'):
+            if role == Qt.ItemDataRole.ForegroundRole:
                 return QBrush(self.HIDDEN_COLOR)
+            if role == Qt.ItemDataRole.DecorationRole:
+                icon = super().data(index, role)
+                if isinstance(icon, QIcon):
+                    return self._dimmed_icon(icon)
         return super().data(index, role)
+
+    def _dimmed_icon(self, icon: QIcon) -> QIcon:
+        """返回降低不透明度后的图标（带缓存）"""
+        key = icon.cacheKey()
+        cached = self._dim_icon_cache.get(key)
+        if cached is not None:
+            return cached
+
+        sizes = icon.availableSizes()
+        src = icon.pixmap(sizes[0] if sizes else QSize(16, 16))
+        if src.isNull():
+            return icon
+
+        dimmed = QPixmap(src.size())
+        dimmed.fill(Qt.GlobalColor.transparent)
+        painter = QPainter(dimmed)
+        painter.setOpacity(self.HIDDEN_ICON_OPACITY)
+        painter.drawPixmap(0, 0, src)
+        painter.end()
+
+        result = QIcon(dimmed)
+        self._dim_icon_cache[key] = result
+        return result
 
 
 class ExplorerPanel(QWidget):
