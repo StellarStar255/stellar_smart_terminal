@@ -22,7 +22,7 @@ from PyQt6.QtWidgets import (
 from PyQt6.QtCore import Qt, QDir, QModelIndex, QPersistentModelIndex, pyqtSignal, QTimer, QEventLoop
 from PyQt6.QtGui import (
     QFileSystemModel, QAction, QDesktopServices, QCursor,
-    QShortcut, QKeySequence,
+    QShortcut, QKeySequence, QColor, QBrush,
 )
 from PyQt6.QtCore import QUrl
 
@@ -218,49 +218,17 @@ class _RenameNameOnlyDelegate(QStyledItemDelegate):
 
 
 class FilteredFileSystemModel(QFileSystemModel):
-    """过滤隐藏文件的文件系统模型"""
+    """文件系统模型：隐藏文件/文件夹（以点开头）以浅灰色显示"""
 
-    # 默认隐藏的文件/文件夹
-    HIDDEN_PATTERNS = {
-        '.git', '.svn', '.hg',
-        '__pycache__', '.pytest_cache', '.mypy_cache',
-        'node_modules', '.npm', '.yarn',
-        '.DS_Store', 'Thumbs.db', '.idea',
-        '.vscode', '.vs', '*.pyc', '*.pyo',
-        '.env', '.venv', 'venv', 'env',
-        '.eggs', '*.egg-info', 'dist', 'build',
-    }
+    # 隐藏条目的前景色（浅灰，半透明感）
+    HIDDEN_COLOR = QColor("#888888")
 
-    def __init__(self, parent=None):
-        super().__init__(parent)
-        self._show_hidden = False
-
-    def filterAcceptsRow(self, source_row, source_parent):
-        """过滤隐藏文件"""
-        if self._show_hidden:
-            return True
-
-        index = self.index(source_row, 0, source_parent)
-        if not index.isValid():
-            return True
-
-        name = self.fileName(index)
-
-        # 过滤以点开头的文件（隐藏文件）
-        if name.startswith('.'):
-            return False
-
-        # 过滤特定模式
-        if name in self.HIDDEN_PATTERNS:
-            return False
-
-        return True
-
-    def set_show_hidden(self, show: bool):
-        """设置是否显示隐藏文件"""
-        self._show_hidden = show
-        # 刷新视图
-        self.setRootPath(self.rootPath())
+    def data(self, index, role=Qt.ItemDataRole.DisplayRole):
+        if role == Qt.ItemDataRole.ForegroundRole and index.isValid():
+            name = self.fileName(index)
+            if name.startswith('.'):
+                return QBrush(self.HIDDEN_COLOR)
+        return super().data(index, role)
 
 
 class ExplorerPanel(QWidget):
@@ -297,7 +265,7 @@ class ExplorerPanel(QWidget):
         layout.setSpacing(0)
 
         # 文件系统模型
-        self.model = QFileSystemModel()
+        self.model = FilteredFileSystemModel()
         self.model.setRootPath("")
         # 包含 Hidden 以显示以点开头的隐藏文件/文件夹（仍排除 . 和 ..）
         self.model.setFilter(
