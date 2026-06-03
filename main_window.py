@@ -7188,12 +7188,16 @@ class MainWindow(QMainWindow):
         if hasattr(self, 'explorer_panel'):
             self.explorer_panel.set_editing_file(file_path)
 
-        if self._explorer_split_horizontal:
-            # 左右分屏：编辑器放到 main_splitter 中（左面板和终端之间）
-            self._place_editor_in_main_splitter()
-        else:
-            # 上下分屏：编辑器在 explorer_splitter 中（默认行为）
-            self._place_editor_in_explorer_splitter()
+        # 编辑器若已显示在正确的 splitter 里，打开新文件不再重新放置，
+        # 避免扰动其它编辑窗格 / 分屏的尺寸。
+        target = self.main_splitter if self._explorer_split_horizontal else self.explorer_splitter
+        if not self._editor_placed_and_visible(target):
+            if self._explorer_split_horizontal:
+                # 左右分屏：编辑器放到 main_splitter 中（左面板和终端之间）
+                self._place_editor_in_main_splitter()
+            else:
+                # 上下分屏：编辑器在 explorer_splitter 中（默认行为）
+                self._place_editor_in_explorer_splitter()
 
     def _capture_explorer_layout(self):
         """记录当前资源管理器/编辑器的尺寸用于下次还原
@@ -7260,6 +7264,19 @@ class MainWindow(QMainWindow):
         if saved and len(saved) == 2 and saved[0] > 0 and saved[1] > 0:
             return list(saved)
         return [200, 400]
+
+    def _editor_placed_and_visible(self, splitter) -> bool:
+        """编辑器已经在目标 splitter 里且可见。
+
+        这种情况下「打开另一个文件」只需把内容换到活动窗格即可，不应再调用
+        _place_editor_in_*（它会对外层 splitter setSizes，从而等比重排内部各编辑
+        窗格、扰动其它分屏的宽高）。仅首次打开 / 切换分屏方向时才需要重新放置。
+        """
+        return (
+            hasattr(self, 'editor_area')
+            and self.editor_area.isVisible()
+            and splitter.indexOf(self.editor_area) >= 0
+        )
 
     def _place_editor_in_main_splitter(self):
         """将编辑器放到 main_splitter 中（左右分屏模式）"""
@@ -7782,10 +7799,14 @@ class MainWindow(QMainWindow):
         # 勾选=左右分屏（编辑器进 main_splitter，紧邻 Remote 树）；
         # 不勾=上下分屏（编辑器进 remote_splitter，落在 Remote 树下方，
         # 中间有可拖拽的分隔条调整两者高度）。
-        if self._remote_split_horizontal:
-            self._place_editor_in_main_splitter()
-        else:
-            self._place_editor_in_remote_splitter()
+        # 编辑器若已显示在正确的 splitter 里，打开新文件不再重新放置，
+        # 避免扰动其它编辑窗格 / 分屏的尺寸。
+        target = self.main_splitter if self._remote_split_horizontal else self.remote_splitter
+        if not self._editor_placed_and_visible(target):
+            if self._remote_split_horizontal:
+                self._place_editor_in_main_splitter()
+            else:
+                self._place_editor_in_remote_splitter()
 
     def _update_splitter_sizes(self):
         """更新分割器大小"""
