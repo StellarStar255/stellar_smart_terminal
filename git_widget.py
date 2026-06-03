@@ -3,6 +3,7 @@ Git 面板 UI 组件
 提供类似 Cursor IDE 的 Git 管理界面
 """
 import json
+import math
 from pathlib import Path
 
 from PyQt6.QtWidgets import (
@@ -12,11 +13,79 @@ from PyQt6.QtWidgets import (
     QAbstractItemView, QMessageBox, QDialog, QTextEdit, QSplitter,
     QLineEdit, QDialogButtonBox, QMenu, QInputDialog
 )
-from PyQt6.QtCore import Qt, pyqtSignal, QSize, QThread, QTimer, QPoint, QRect
+from PyQt6.QtCore import Qt, pyqtSignal, QSize, QThread, QTimer, QPoint, QRect, QPointF, QRectF
 from PyQt6.QtGui import (
     QFont, QColor, QBrush, QTextCursor, QTextCharFormat, QTextBlockFormat,
-    QFontMetrics, QPainter, QPen, QAction
+    QFontMetrics, QPainter, QPen, QAction, QIcon, QPixmap, QPainterPath
 )
+
+
+def _make_git_tool_icon(kind: str, color: str, px: int = 16) -> QIcon:
+    """用 QPainter 画出统一风格的线条图标（刷新/加号/齿轮）。
+
+    三者用同一支笔（同线宽、圆角端点）、同一画布尺寸绘制并居中，因此大小、
+    粗细、颜色、对齐完全一致——解决直接用 ⟳ / + / ⚙ 字形时大小粗细参差、
+    且 ⚙ 在 macOS 上被渲染成彩色 emoji 的问题。
+    """
+    scale = 3  # 超采样，缩回 px 时边缘更锐利
+    s = px * scale
+    pm = QPixmap(s, s)
+    pm.fill(Qt.GlobalColor.transparent)
+    p = QPainter(pm)
+    p.setRenderHint(QPainter.RenderHint.Antialiasing, True)
+    pen = QPen(QColor(color))
+    pen.setWidthF(1.5 * scale)
+    pen.setCapStyle(Qt.PenCapStyle.RoundCap)
+    pen.setJoinStyle(Qt.PenJoinStyle.RoundJoin)
+    p.setPen(pen)
+    cx = cy = s / 2.0
+
+    if kind == 'plus':
+        m = s * 0.28
+        p.drawLine(QPointF(cx, cy - m), QPointF(cx, cy + m))
+        p.drawLine(QPointF(cx - m, cy), QPointF(cx + m, cy))
+
+    elif kind == 'refresh':
+        r = s * 0.29
+        rect = QRectF(cx - r, cy - r, 2 * r, 2 * r)
+        start_deg, span_deg = 60.0, 285.0
+        p.drawArc(rect, int(start_deg * 16), int(span_deg * 16))
+        # 在弧末端补一个箭头（两根短斜线组成的尖角）
+        end = math.radians(start_deg + span_deg)
+        ex, ey = cx + r * math.cos(end), cy - r * math.sin(end)
+        tx, ty = -math.sin(end), -math.cos(end)  # 逆时针切线方向
+        bl = s * 0.22
+        for a in (math.radians(145), math.radians(-145)):
+            ca, sa = math.cos(a), math.sin(a)
+            p.drawLine(QPointF(ex, ey),
+                       QPointF(ex + (tx * ca - ty * sa) * bl,
+                               ey + (tx * sa + ty * ca) * bl))
+
+    elif kind == 'gear':
+        # 经典平顶齿 cog：每个齿用 内→外→外→内 四个顶点，齿顶是平的
+        teeth = 8
+        r_out, r_in = s * 0.36, s * 0.27
+        tooth_w = 0.5  # 齿顶占每齿周期的比例
+        period = 2 * math.pi / teeth
+        path = QPainterPath()
+        for i in range(teeth):
+            base = i * period - math.pi / 2  # 从正上方开始
+            a0, a1 = base, base + period * tooth_w
+            for j, (ang, rr) in enumerate((
+                (a0, r_in), (a0, r_out), (a1, r_out), (a1, r_in),
+            )):
+                x, y = cx + rr * math.cos(ang), cy + rr * math.sin(ang)
+                if i == 0 and j == 0:
+                    path.moveTo(x, y)
+                else:
+                    path.lineTo(x, y)
+        path.closeSubpath()
+        p.drawPath(path)
+        hole = s * 0.13
+        p.drawEllipse(QPointF(cx, cy), hole, hole)
+
+    p.end()
+    return QIcon(pm)
 
 from git_manager import GitManager, GitFile, FileStatus
 from i18n import t, get_language
@@ -1607,61 +1676,25 @@ class GitHeaderWidget(QFrame):
         view.customContextMenuRequested.connect(self._on_branch_combo_context_menu)
         layout.addWidget(self.branch_combo)
 
-        # 刷新按钮
-        self.refresh_btn = QPushButton("⟳")
+        # 刷新 / 新建分支 / 设置：三个统一风格的线条图标按钮（图标在 _update_style 里按主题色绘制）
+        self.refresh_btn = QPushButton()
         self.refresh_btn.setToolTip(t("git.refresh_tooltip"))
         self.refresh_btn.setFixedSize(28, 28)
-        self.refresh_btn.setStyleSheet(f"""
-            QPushButton {{
-                background-color: {self.theme.get('bg_lighter', '#3d3d5c')};
-                color: {self.theme.get('text', '#eaeaea')};
-                border: none;
-                border-radius: 4px;
-                font-size: 16px;
-            }}
-            QPushButton:hover {{
-                background-color: {self.theme.get('bg_hover', '#4d4d6c')};
-            }}
-        """)
+        self.refresh_btn.setIconSize(QSize(16, 16))
         self.refresh_btn.clicked.connect(self.refresh_clicked.emit)
         layout.addWidget(self.refresh_btn)
 
-        # 新建分支按钮
-        self.create_branch_btn = QPushButton("+")
+        self.create_branch_btn = QPushButton()
         self.create_branch_btn.setToolTip(t("git.create_branch_tooltip"))
         self.create_branch_btn.setFixedSize(28, 28)
-        self.create_branch_btn.setStyleSheet(f"""
-            QPushButton {{
-                background-color: {self.theme.get('bg_lighter', '#3d3d5c')};
-                color: {self.theme.get('text', '#eaeaea')};
-                border: none;
-                border-radius: 4px;
-                font-size: 18px;
-                font-weight: bold;
-            }}
-            QPushButton:hover {{
-                background-color: {self.theme.get('bg_hover', '#4d4d6c')};
-            }}
-        """)
+        self.create_branch_btn.setIconSize(QSize(16, 16))
         self.create_branch_btn.clicked.connect(self.create_branch_clicked.emit)
         layout.addWidget(self.create_branch_btn)
 
-        # 设置按钮（齿轮）→ 打开 Git 代理等设置
-        self.settings_btn = QPushButton("⚙")
+        self.settings_btn = QPushButton()
         self.settings_btn.setToolTip(t("git.settings_tooltip"))
         self.settings_btn.setFixedSize(28, 28)
-        self.settings_btn.setStyleSheet(f"""
-            QPushButton {{
-                background-color: {self.theme.get('bg_lighter', '#3d3d5c')};
-                color: {self.theme.get('text', '#eaeaea')};
-                border: none;
-                border-radius: 4px;
-                font-size: 16px;
-            }}
-            QPushButton:hover {{
-                background-color: {self.theme.get('bg_hover', '#4d4d6c')};
-            }}
-        """)
+        self.settings_btn.setIconSize(QSize(16, 16))
         self.settings_btn.clicked.connect(self.settings_clicked.emit)
         layout.addWidget(self.settings_btn)
 
@@ -1825,10 +1858,9 @@ class GitHeaderWidget(QFrame):
         btn_style = f"""
             QPushButton {{
                 background-color: {theme.get('bg_lighter', '#3d3d5c')};
-                color: {theme.get('text', '#eaeaea')};
                 border: none;
                 border-radius: 4px;
-                font-size: 16px;
+                padding: 0px;
             }}
             QPushButton:hover {{
                 background-color: {theme.get('bg_hover', '#4d4d6c')};
@@ -1836,19 +1868,13 @@ class GitHeaderWidget(QFrame):
         """
         self.refresh_btn.setStyleSheet(btn_style)
         self.settings_btn.setStyleSheet(btn_style)
-        self.create_branch_btn.setStyleSheet(f"""
-            QPushButton {{
-                background-color: {theme.get('bg_lighter', '#3d3d5c')};
-                color: {theme.get('text', '#eaeaea')};
-                border: none;
-                border-radius: 4px;
-                font-size: 18px;
-                font-weight: bold;
-            }}
-            QPushButton:hover {{
-                background-color: {theme.get('bg_hover', '#4d4d6c')};
-            }}
-        """)
+        self.create_branch_btn.setStyleSheet(btn_style)
+
+        # 用主题前景色重绘三个线条图标，保证大小/粗细/对齐一致
+        icon_color = theme.get('text', '#eaeaea')
+        self.refresh_btn.setIcon(_make_git_tool_icon('refresh', icon_color))
+        self.create_branch_btn.setIcon(_make_git_tool_icon('plus', icon_color))
+        self.settings_btn.setIcon(_make_git_tool_icon('gear', icon_color))
 
     def apply_language(self):
         """更新语言相关的 UI 文本"""
