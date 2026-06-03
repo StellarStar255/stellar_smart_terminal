@@ -50,6 +50,38 @@ def _make_git_tool_icon(kind: str, color: str, px: int = 16) -> QIcon:
         p.drawLine(QPointF(cx - m, cy - m), QPointF(cx + m, cy + m))
         p.drawLine(QPointF(cx + m, cy - m), QPointF(cx - m, cy + m))
 
+    elif kind == 'up':
+        m = s * 0.26
+        p.drawLine(QPointF(cx, cy - m), QPointF(cx, cy + m))  # 竖杆
+        head = s * 0.17                                       # 箭头
+        p.drawLine(QPointF(cx, cy - m), QPointF(cx - head, cy - m + head))
+        p.drawLine(QPointF(cx, cy - m), QPointF(cx + head, cy - m + head))
+
+    elif kind == 'home':
+        apex = QPointF(cx, cy - s * 0.30)        # 屋脊
+        eave_y = cy - s * 0.02                    # 屋檐高度
+        p.drawLine(QPointF(cx - s * 0.32, eave_y), apex)   # 左斜屋顶（带出檐）
+        p.drawLine(apex, QPointF(cx + s * 0.32, eave_y))   # 右斜屋顶
+        bw = s * 0.22                             # 墙体半宽
+        bottom = cy + s * 0.28
+        p.drawLine(QPointF(cx - bw, eave_y), QPointF(cx - bw, bottom))
+        p.drawLine(QPointF(cx + bw, eave_y), QPointF(cx + bw, bottom))
+        p.drawLine(QPointF(cx - bw, bottom), QPointF(cx + bw, bottom))
+
+    elif kind in ('star', 'star_filled'):
+        r_out = s * 0.34
+        r_in = r_out * 0.42
+        path = QPainterPath()
+        for i in range(10):
+            ang = -math.pi / 2 + i * (math.pi / 5)
+            rr = r_out if i % 2 == 0 else r_in
+            x, y = cx + rr * math.cos(ang), cy + rr * math.sin(ang)
+            path.moveTo(x, y) if i == 0 else path.lineTo(x, y)
+        path.closeSubpath()
+        if kind == 'star_filled':
+            p.setBrush(QColor(color))   # 已收藏 → 实心
+        p.drawPath(path)
+
     elif kind == 'refresh':
         r = s * 0.29
         rect = QRectF(cx - r, cy - r, 2 * r, 2 * r)

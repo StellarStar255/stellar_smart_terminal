@@ -626,33 +626,38 @@ class RemoteExplorerPanel(QWidget):
         tp_layout.setSpacing(0)
 
         # 路径栏 + 操作按钮
-        path_bar = QFrame()
-        path_bar.setFixedHeight(30)
-        pb_layout = QHBoxLayout(path_bar)
+        self._path_bar = QFrame()
+        self._path_bar.setFixedHeight(32)
+        pb_layout = QHBoxLayout(self._path_bar)
         pb_layout.setContentsMargins(6, 2, 6, 2)
-        pb_layout.setSpacing(4)
+        pb_layout.setSpacing(2)
 
-        self._up_btn = QPushButton("↑")
-        self._up_btn.setFixedSize(22, 22)
+        # 四个统一风格的矢量线条图标按钮（图标在 _apply_theme 里按主题色绘制）
+        self._up_btn = QPushButton()
+        self._up_btn.setFixedSize(26, 26)
+        self._up_btn.setIconSize(QSize(16, 16))
         self._up_btn.setToolTip(t("remote.up"))
         self._up_btn.clicked.connect(self._on_up)
         pb_layout.addWidget(self._up_btn)
 
-        self._home_btn = QPushButton("⌂")
-        self._home_btn.setFixedSize(22, 22)
+        self._home_btn = QPushButton()
+        self._home_btn.setFixedSize(26, 26)
+        self._home_btn.setIconSize(QSize(16, 16))
         self._home_btn.setToolTip(t("remote.go_home"))
         self._home_btn.clicked.connect(self._on_home)
         pb_layout.addWidget(self._home_btn)
 
-        self._refresh_btn = QPushButton("⟳")
-        self._refresh_btn.setFixedSize(22, 22)
+        self._refresh_btn = QPushButton()
+        self._refresh_btn.setFixedSize(26, 26)
+        self._refresh_btn.setIconSize(QSize(16, 16))
         self._refresh_btn.setToolTip(t("remote.refresh"))
         self._refresh_btn.clicked.connect(self._on_refresh)
         pb_layout.addWidget(self._refresh_btn)
 
-        # 书签按钮：弹出菜单管理 / 跳转到已保存的远端路径
-        self._bookmark_btn = QPushButton("★")
-        self._bookmark_btn.setFixedSize(22, 22)
+        # 书签按钮：弹出菜单管理 / 跳转到已保存的远端路径（图标随收藏状态切换实/空心）
+        self._bookmark_btn = QPushButton()
+        self._bookmark_btn.setFixedSize(26, 26)
+        self._bookmark_btn.setIconSize(QSize(16, 16))
         self._bookmark_btn.setToolTip(t("remote.bookmarks_tooltip"))
         self._bookmark_btn.clicked.connect(self._show_bookmark_menu)
         pb_layout.addWidget(self._bookmark_btn)
@@ -661,7 +666,7 @@ class RemoteExplorerPanel(QWidget):
         self._path_edit.returnPressed.connect(self._on_path_edited)
         pb_layout.addWidget(self._path_edit, 1)
 
-        tp_layout.addWidget(path_bar)
+        tp_layout.addWidget(self._path_bar)
 
         self._tree = _RemoteTreeWidget(self)
         self._tree.setHeaderHidden(True)
@@ -708,10 +713,26 @@ class RemoteExplorerPanel(QWidget):
             QPushButton:hover {{ background-color: {bg_hover}; }}
             QPushButton:pressed {{ background-color: {border}; }}
         """)
-        # 用主题前景色重绘三个线条图标，保证大小/粗细/对齐统一
+        # 用主题前景色重绘头部三个线条图标，保证大小/粗细/对齐统一
+        self._icon_color = text  # 书签按钮按收藏状态切换图标时复用
         self._reload_btn.setIcon(_make_git_tool_icon('refresh', text))
         self._add_btn.setIcon(_make_git_tool_icon('plus', text))
         self._disconnect_btn.setIcon(_make_git_tool_icon('close', text))
+
+        # 文件树页的导航工具栏：同一套矢量图标 + 一致的悬停样式
+        self._path_bar.setStyleSheet(f"""
+            QFrame {{ background-color: {bg_medium}; border-bottom: 1px solid {border}; }}
+            QPushButton {{
+                background-color: transparent;
+                border: 1px solid transparent; border-radius: 5px;
+            }}
+            QPushButton:hover {{ background-color: {bg_hover}; }}
+            QPushButton:pressed {{ background-color: {border}; }}
+        """)
+        self._up_btn.setIcon(_make_git_tool_icon('up', text))
+        self._home_btn.setIcon(_make_git_tool_icon('home', text))
+        self._refresh_btn.setIcon(_make_git_tool_icon('refresh', text))
+        self._update_bookmark_btn_state()  # 按当前收藏状态画 ★/☆
         list_tree_css = f"""
             QListWidget, QTreeWidget {{
                 background-color: {bg_dark}; color: {text};
@@ -1261,14 +1282,16 @@ class RemoteExplorerPanel(QWidget):
         self._update_bookmark_btn_state()
 
     def _update_bookmark_btn_state(self):
-        """根据当前路径是否已收藏，切换 ★/☆ 显示"""
+        """根据当前路径是否已收藏，切换实心 ★ / 空心 ☆ 图标"""
+        color = getattr(self, '_icon_color', '#eaeaea')
         if self._session is None:
-            self._bookmark_btn.setText("★")
+            self._bookmark_btn.setIcon(_make_git_tool_icon('star', color))
             return
         host = self._session.host_config.alias
         cwd = self._current_path or "/"
         starred = remote_bookmarks.is_bookmarked(host, cwd)
-        self._bookmark_btn.setText("★" if starred else "☆")
+        kind = 'star_filled' if starred else 'star'
+        self._bookmark_btn.setIcon(_make_git_tool_icon(kind, color))
 
     def _fill_children(self, parent_item: QTreeWidgetItem, path: str):
         if self._session is None:
