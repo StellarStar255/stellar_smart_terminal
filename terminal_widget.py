@@ -2309,15 +2309,15 @@ class TerminalWidget(QWidget):
                     return
 
             if self._click_count == 2:
-                # 双击：选词（遇空格等非单词字符即截断，符合通用终端/编辑器习惯）
+                # 双击：选「宽」词——整条路径/URL（只在空格处截断）
                 if self._mouse_mode and not force_local_selection:
                     self._send_mouse_event(event, 'press')
                 self._select_word_at(abs_cell)
             elif self._click_count >= 3:
-                # 三击：选整条逻辑行
+                # 三击：选「窄」词——只取 / @ . : - ~ 之间的一段（如 huangqiliang）
                 if self._mouse_mode and not force_local_selection:
                     self._send_mouse_event(event, 'press')
-                self._select_line_at(abs_cell)
+                self._select_word_at(abs_cell, self._WORD_CHARS_NARROW)
                 self._click_count = 0  # 重置
             else:
                 # 单击开始选择 - 使用绝对坐标
@@ -3776,21 +3776,29 @@ if (hasFileURL) {{
         except Exception:
             return False
 
-    def _select_word_at(self, cell: tuple):
+    # 双击用的「宽」单词字符集：纳入路径/URL 常见字符（/ . : ~ @ % + = , -），
+    # 这样双击一条完整路径或 URL 能整体选中，而不是停在第一个 / 或 . 处。
+    _WORD_CHARS_WIDE = set('abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789_-./:~@%+=,')
+    # 三击用的「窄」单词字符集：只含字母数字和下划线，遇到 / @ . : - ~ 等分隔符即截断，
+    # 所以三击 /home/huangqiliang 或 huangqiliang@host 只选中其中一个 huangqiliang。
+    _WORD_CHARS_NARROW = set('abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789_')
+
+    def _select_word_at(self, cell: tuple, word_chars: set = None):
         """选中指定位置的单词。
+
+        word_chars 决定单词边界：默认用「宽」集（双击，整条路径/URL），传入
+        _WORD_CHARS_NARROW 则按「窄」集（三击，只选 / @ . 之间的一段）。
 
         若单词因终端宽度被自动折行（中间无真实换行符）而跨越多个可见行，
         则连续选中完整单词，避免只复制到折行处的一半。复制时
         _get_selected_text 会把软换行行无缝拼接，得到完整字符串。
         """
+        if word_chars is None:
+            word_chars = self._WORD_CHARS_WIDE
         row, col = cell
         line_text = self._get_line_text(row)
         if not line_text:
             return
-
-        # 找到单词边界。纳入路径/URL 常见字符（/ . : ~ @ % + = ,），
-        # 这样双击一条完整路径或 URL 能整体选中，而不是停在第一个 / 或 . 处。
-        word_chars = set('abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789_-./:~@%+=,')
 
         # 向左找边界
         start = col
