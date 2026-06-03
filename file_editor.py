@@ -1588,14 +1588,22 @@ class FileEditorWidget(QWidget):
         # 文件名标签
         self.file_label = QLabel(t("editor.no_file"))
         self.file_label.setStyleSheet("font-weight: bold;")
-        header_layout.addWidget(self.file_label)
+        # 远程文件会把 "· [remote] host:/很长的/路径" 追加到这里。若让标签按文字
+        # 首选宽度参与布局，长标题会把整个编辑窗格 / 外层 splitter 撑宽、挤压终端，
+        # 表现为「打开某些文件后窗口宽度变了」。Ignored 水平策略 = 布局给多少用多少、
+        # 不因文字变长而要求更宽；超出部分裁掉（文件名在最前，不影响辨认）。
+        self.file_label.setSizePolicy(
+            QSizePolicy.Policy.Ignored, QSizePolicy.Policy.Preferred,
+        )
+        self.file_label.setMinimumWidth(0)
+        header_layout.addWidget(self.file_label, 1)
 
         # 修改状态指示
         self.modified_label = QLabel("")
         self.modified_label.setStyleSheet("color: #f59e0b;")
         header_layout.addWidget(self.modified_label)
 
-        header_layout.addStretch()
+        # 不再 addStretch：file_label 已用 stretch=1 占满中间空间，按钮自然靠右。
 
         # 左右分屏按钮（并排查看不同文件）
         self.split_h_btn = QPushButton("◫")
