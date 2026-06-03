@@ -1079,15 +1079,49 @@ class ExplorerPanel(QWidget):
                 t("explorer.delete_failed", error="\n".join(errors)),
             )
 
+    @staticmethod
+    def _macos_trash_via_finder(file_path: str) -> bool:
+        """让 Finder 把路径移到废纸篓。成功返回 True，被拦截/失败返回 False。
+
+        用 AppleScript 变量传路径并转义引号/反斜杠，避免路径里带特殊字符时
+        脚本被截断。20s 超时防止 Finder 卡死时一直挂着。
+        """
+        escaped = file_path.replace("\\", "\\\\").replace('"', '\\"')
+        script = (
+            f'set p to POSIX file "{escaped}"\n'
+            f'tell application "Finder" to delete p'
+        )
+        try:
+            subprocess.run(
+                ['osascript', '-e', script],
+                check=True, capture_output=True, timeout=20,
+            )
+            return True
+        except (subprocess.CalledProcessError, subprocess.TimeoutExpired, OSError):
+            return False
+
     def _send_to_trash(self, file_path: str):
         """把单个本地路径移到回收站（平台分发）；失败时回退到永久删除。"""
         is_dir = os.path.isdir(file_path)
         if sys.platform == 'darwin':
-            subprocess.run(
-                ['osascript', '-e',
-                 f'tell app "Finder" to delete POSIX file "{file_path}"'],
-                check=True, capture_output=True,
-            )
+            # 首选 Finder 把它丢进废纸篓（可还原）。但这条路依赖「自动化」权限
+            # （系统设置 › 隐私与安全性 › 自动化 › 允许本 App 控制 Finder）——
+            # 没授权 / Finder 繁忙时 osascript 会报错。以前这里直接 check=True 抛出、
+            # 没有任何兜底，于是表现成「右键删不掉文件夹」。现在失败就逐级回退。
+            if self._macos_trash_via_finder(file_path):
+                return
+            # 回退 1：send2trash（走原生 API，不需要 Finder 自动化权限）
+            try:
+                from send2trash import send2trash
+                send2trash(file_path)
+                return
+            except Exception:
+                pass
+            # 回退 2：永久删除（不进废纸篓，但保证「删得掉」）
+            if is_dir:
+                shutil.rmtree(file_path)
+            else:
+                os.remove(file_path)
         elif sys.platform == 'win32':
             try:
                 from send2trash import send2trash
