@@ -20,7 +20,7 @@ from PyQt6.QtWidgets import (
     QListWidget, QListWidgetItem, QTreeWidget, QTreeWidgetItem, QMenu,
     QInputDialog, QMessageBox, QStackedWidget, QFileDialog, QLineEdit,
     QApplication, QSizePolicy, QProgressDialog, QStyledItemDelegate,
-    QAbstractItemView,
+    QAbstractItemView, QDialog,
 )
 from PyQt6.QtCore import Qt, pyqtSignal, QTimer, QMimeData, QUrl
 from PyQt6.QtGui import QAction, QCursor, QDrag, QShortcut, QKeySequence
@@ -35,6 +35,119 @@ from ssh_session import HostConfig, RemoteEntry, SSHSession, parse_ssh_config
 # 子项的 UserRole 数据键
 _ROLE_ENTRY = Qt.ItemDataRole.UserRole
 _ROLE_LOADED = Qt.ItemDataRole.UserRole + 1
+
+
+class _AddHostDialog(QDialog):
+    """添加 SSH 主机的对话框 —— 暗色主题，替代原生 QInputDialog。
+
+    复用项目里其它对话框的配色（#1e1e2e 背景 / #667eea 强调色 / #3d3d5c 边框），
+    返回值通过 `value()` 取（[user@]host[:port] 原文）。
+    """
+
+    def __init__(self, parent=None):
+        super().__init__(parent)
+        self.setWindowTitle(t("remote.add_host_title"))
+        self.setModal(True)
+        self.setMinimumWidth(360)
+        self.setStyleSheet("""
+            QDialog {
+                background-color: #1e1e2e;
+            }
+            QLabel#title {
+                color: #eaeaea;
+                font-size: 15px;
+                font-weight: 600;
+            }
+            QLabel#hint {
+                color: #8a8aa0;
+                font-size: 12px;
+            }
+            QLineEdit {
+                background-color: #2d2d44;
+                color: #eaeaea;
+                border: 1px solid #3d3d5c;
+                border-radius: 6px;
+                padding: 8px 10px;
+                font-size: 13px;
+                selection-background-color: #667eea;
+            }
+            QLineEdit:focus {
+                border: 1px solid #667eea;
+            }
+            QPushButton {
+                background-color: #2d2d44;
+                color: #eaeaea;
+                border: 1px solid #3d3d5c;
+                border-radius: 6px;
+                padding: 7px 18px;
+                font-size: 13px;
+            }
+            QPushButton:hover {
+                border: 1px solid #6a5d8a;
+            }
+            QPushButton#ok {
+                background-color: #667eea;
+                border: 1px solid #667eea;
+                color: white;
+                font-weight: 600;
+            }
+            QPushButton#ok:hover {
+                background-color: #764ba2;
+                border: 1px solid #764ba2;
+            }
+            QPushButton#ok:disabled {
+                background-color: #3a3a52;
+                border: 1px solid #3a3a52;
+                color: #777;
+            }
+        """)
+
+        layout = QVBoxLayout(self)
+        layout.setContentsMargins(20, 18, 20, 16)
+        layout.setSpacing(12)
+
+        title = QLabel(t("remote.add_host_title"))
+        title.setObjectName("title")
+        layout.addWidget(title)
+
+        hint = QLabel(t("remote.add_host_hint"))
+        hint.setObjectName("hint")
+        hint.setWordWrap(True)
+        layout.addWidget(hint)
+
+        self._edit = QLineEdit()
+        self._edit.setPlaceholderText("deploy@10.0.0.5:22")
+        self._edit.setClearButtonEnabled(True)
+        layout.addWidget(self._edit)
+
+        btn_row = QHBoxLayout()
+        btn_row.setSpacing(8)
+        btn_row.addStretch(1)
+
+        cancel_btn = QPushButton(t("remote.add_host_cancel"))
+        cancel_btn.clicked.connect(self.reject)
+        btn_row.addWidget(cancel_btn)
+
+        self._ok_btn = QPushButton(t("remote.add_host_ok"))
+        self._ok_btn.setObjectName("ok")
+        self._ok_btn.setDefault(True)
+        self._ok_btn.setEnabled(False)
+        self._ok_btn.clicked.connect(self.accept)
+        btn_row.addWidget(self._ok_btn)
+
+        layout.addLayout(btn_row)
+
+        # 输入为空时禁用 OK，回车直接提交
+        self._edit.textChanged.connect(
+            lambda s: self._ok_btn.setEnabled(bool(s.strip()))
+        )
+        self._edit.returnPressed.connect(
+            lambda: self.accept() if self._edit.text().strip() else None
+        )
+        self._edit.setFocus()
+
+    def value(self) -> str:
+        return self._edit.text().strip()
 
 
 class _RemoteTreeWidget(QTreeWidget):
@@ -663,15 +776,10 @@ class RemoteExplorerPanel(QWidget):
                 self._hosts_list.addItem(item)
 
     def _on_add_host_clicked(self):
-        text, ok = QInputDialog.getText(
-            self, t("remote.add_host_title"),
-            t("remote.add_host_hint"),
-            QLineEdit.EchoMode.Normal,
-            ""
-        )
-        if not ok:
+        dlg = _AddHostDialog(self)
+        if dlg.exec() != QDialog.DialogCode.Accepted:
             return
-        text = text.strip()
+        text = dlg.value()
         if not text:
             return
         # 解析 [user@]host[:port]
