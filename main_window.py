@@ -2783,6 +2783,7 @@ class MainWindow(QMainWindow):
         self.command_history = []
         self.presets = []  # 预设命令列表
         self._presets_modified = False  # 标记预设是否在本窗口中被修改（防止多窗口覆盖）
+        self._llm_configs_modified = False  # 标记 LLM API 配置是否在本窗口中被修改（防止多窗口覆盖）
         self.local_presets = []  # 本地快速命令列表（目录级别）
         self.pending_commands = []  # 待执行的命令队列
         self.current_theme = "深蓝"  # 当前主题名称
@@ -7993,6 +7994,9 @@ class MainWindow(QMainWindow):
         if dialog.exec() == QDialog.DialogCode.Accepted:
             self.llm_configs = dialog.get_configs()
             self.default_llm_config = dialog.get_default_index()
+            # 标记本窗口改过 LLM 配置 → _save_config 才会用本窗口的内存值落盘，
+            # 否则默认从磁盘取最新值，避免覆盖其它窗口的改动。
+            self._llm_configs_modified = True
             self._save_config()
             self.statusbar.showMessage(t("status.llm_config_saved"), 3000)
 
@@ -9255,6 +9259,15 @@ class MainWindow(QMainWindow):
             else:
                 presets_to_save = existing_config.get('presets', self.presets)
 
+            # 同理保护 LLM API 配置：本窗口没改过就用磁盘上的最新值，避免一个持有
+            # 旧副本的窗口（不是最后关闭的那个）在退出时把别的窗口新存的 API 配置覆盖掉。
+            if getattr(self, '_llm_configs_modified', False):
+                llm_configs_to_save = self.llm_configs
+                default_llm_to_save = self.default_llm_config
+            else:
+                llm_configs_to_save = existing_config.get('llm_configs', self.llm_configs)
+                default_llm_to_save = existing_config.get('default_llm_config', self.default_llm_config)
+
             config = {
                 'presets': presets_to_save,
                 'last_preset_index': current_index,
@@ -9266,8 +9279,8 @@ class MainWindow(QMainWindow):
                 'theme': self.current_theme,  # 保存主题设置
                 'icon_tint': self._use_icon_tint,  # 保存图标蒙版设置
                 'toolbar_config': self.toolbar_config,  # 保存工具栏配置
-                'llm_configs': self.llm_configs,  # 保存 LLM 配置
-                'default_llm_config': self.default_llm_config,  # 保存默认 LLM 配置索引
+                'llm_configs': llm_configs_to_save,  # 保存 LLM 配置（带多窗口防覆盖）
+                'default_llm_config': default_llm_to_save,  # 保存默认 LLM 配置索引
                 'global_zoom_delta': self._global_zoom_delta,  # 保存全局缩放偏移
                 'gui_font_size': self._gui_font_size,  # 保存 GUI 字体大小
                 'pin_toolbar_row2': self._pin_toolbar_row2,  # 保存固定第二排工具栏
