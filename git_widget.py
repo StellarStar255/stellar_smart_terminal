@@ -45,6 +45,11 @@ def _make_git_tool_icon(kind: str, color: str, px: int = 16) -> QIcon:
         p.drawLine(QPointF(cx, cy - m), QPointF(cx, cy + m))
         p.drawLine(QPointF(cx - m, cy), QPointF(cx + m, cy))
 
+    elif kind == 'close':
+        m = s * 0.24
+        p.drawLine(QPointF(cx - m, cy - m), QPointF(cx + m, cy + m))
+        p.drawLine(QPointF(cx + m, cy - m), QPointF(cx - m, cy + m))
+
     elif kind == 'refresh':
         r = s * 0.29
         rect = QRectF(cx - r, cy - r, 2 * r, 2 * r)

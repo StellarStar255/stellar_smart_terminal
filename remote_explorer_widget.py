@@ -22,7 +22,7 @@ from PyQt6.QtWidgets import (
     QApplication, QSizePolicy, QProgressDialog, QStyledItemDelegate,
     QAbstractItemView, QDialog,
 )
-from PyQt6.QtCore import Qt, pyqtSignal, QTimer, QMimeData, QUrl
+from PyQt6.QtCore import Qt, pyqtSignal, QTimer, QMimeData, QUrl, QSize
 from PyQt6.QtGui import QAction, QCursor, QDrag, QShortcut, QKeySequence
 from PyQt6 import sip  # 用于检查 C++ 对象是否已被删除
 
@@ -32,6 +32,7 @@ import remote_bookmarks
 from ssh_session import (
     HostConfig, RemoteEntry, SSHSession, parse_ssh_config, append_ssh_config_host,
 )
+from git_widget import _make_git_tool_icon  # 复用统一风格的矢量线条图标
 
 
 # 子项的 UserRole 数据键
@@ -570,20 +571,24 @@ class RemoteExplorerPanel(QWidget):
         h_layout.addWidget(self._subtitle_label, 1)  # 占据中间剩余空间
         # （原来这里有 addStretch；现在交给上面 stretch=1 的 label 接管）
 
-        self._reload_btn = QPushButton("⟳")
-        self._reload_btn.setFixedSize(24, 24)
+        # 三个统一风格的矢量线条图标按钮（图标在 _apply_theme 里按主题色绘制）
+        self._reload_btn = QPushButton()
+        self._reload_btn.setFixedSize(28, 28)
+        self._reload_btn.setIconSize(QSize(16, 16))
         self._reload_btn.setToolTip(t("remote.refresh_hosts"))
         self._reload_btn.clicked.connect(self._reload_hosts)
         h_layout.addWidget(self._reload_btn)
 
-        self._add_btn = QPushButton("+")
-        self._add_btn.setFixedSize(24, 24)
+        self._add_btn = QPushButton()
+        self._add_btn.setFixedSize(28, 28)
+        self._add_btn.setIconSize(QSize(16, 16))
         self._add_btn.setToolTip(t("remote.add_host"))
         self._add_btn.clicked.connect(self._on_add_host_clicked)
         h_layout.addWidget(self._add_btn)
 
-        self._disconnect_btn = QPushButton("×")
-        self._disconnect_btn.setFixedSize(24, 24)
+        self._disconnect_btn = QPushButton()
+        self._disconnect_btn.setFixedSize(28, 28)
+        self._disconnect_btn.setIconSize(QSize(16, 16))
         self._disconnect_btn.setToolTip(t("remote.disconnect"))
         self._disconnect_btn.clicked.connect(self._disconnect)
         self._disconnect_btn.hide()
@@ -697,12 +702,16 @@ class RemoteExplorerPanel(QWidget):
             QFrame {{ background-color: {bg_medium}; border-bottom: 1px solid {border}; }}
             QLabel {{ color: {text}; }}
             QPushButton {{
-                background-color: transparent; color: {text_dim};
-                border: 1px solid transparent; border-radius: 3px;
-                font-weight: bold;
+                background-color: transparent;
+                border: 1px solid transparent; border-radius: 5px;
             }}
-            QPushButton:hover {{ background-color: {bg_hover}; color: {text}; }}
+            QPushButton:hover {{ background-color: {bg_hover}; }}
+            QPushButton:pressed {{ background-color: {border}; }}
         """)
+        # 用主题前景色重绘三个线条图标，保证大小/粗细/对齐统一
+        self._reload_btn.setIcon(_make_git_tool_icon('refresh', text))
+        self._add_btn.setIcon(_make_git_tool_icon('plus', text))
+        self._disconnect_btn.setIcon(_make_git_tool_icon('close', text))
         list_tree_css = f"""
             QListWidget, QTreeWidget {{
                 background-color: {bg_dark}; color: {text};
