@@ -175,6 +175,55 @@ def append_ssh_config_host(
     )
 
 
+def rename_ssh_config_host(old_alias: str, new_alias: str,
+                           path: Optional[str] = None) -> bool:
+    """把 ~/.ssh/config 里某个 Host 的别名从 old_alias 改成 new_alias。
+
+    只改 `Host` 行里匹配到的那个别名 token（一行可能有多个别名，其余不动），
+    其它配置项保持原样。成功改写返回 True；config 不存在 / 没匹配到返回 False；
+    新别名与现有别名冲突时抛 ValueError。
+    """
+    config_path = Path(path or os.path.expanduser("~/.ssh/config"))
+    if not config_path.is_file():
+        return False
+    new_alias = (new_alias or "").strip()
+    if not new_alias or new_alias == old_alias:
+        return False
+    if new_alias in _existing_aliases(config_path):
+        raise ValueError(f"alias '{new_alias}' already exists")
+
+    try:
+        with config_path.open("r", encoding="utf-8", errors="replace") as fh:
+            lines = fh.readlines()
+    except OSError:
+        return False
+
+    changed = False
+    for i, line in enumerate(lines):
+        body = line.rstrip("\n")
+        newline = line[len(body):]            # 保留原行尾（\n / \r\n / 无）
+        tokens = body.split()
+        if len(tokens) >= 2 and tokens[0].lower() == "host":
+            replaced = False
+            for j in range(1, len(tokens)):
+                if tokens[j] == old_alias:
+                    tokens[j] = new_alias
+                    replaced = True
+            if replaced:
+                indent = body[:len(body) - len(body.lstrip())]
+                lines[i] = indent + " ".join(tokens) + newline
+                changed = True
+
+    if changed:
+        with config_path.open("w", encoding="utf-8") as fh:
+            fh.writelines(lines)
+        try:
+            os.chmod(config_path, 0o600)
+        except OSError:
+            pass
+    return changed
+
+
 # ---------- SFTP entry ----------
 
 @dataclass

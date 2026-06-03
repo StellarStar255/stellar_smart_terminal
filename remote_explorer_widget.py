@@ -31,6 +31,7 @@ import explorer_clipboard
 import remote_bookmarks
 from ssh_session import (
     HostConfig, RemoteEntry, SSHSession, parse_ssh_config, append_ssh_config_host,
+    rename_ssh_config_host,
 )
 from git_widget import _make_git_tool_icon  # 复用统一风格的矢量线条图标
 
@@ -41,15 +42,20 @@ _ROLE_LOADED = Qt.ItemDataRole.UserRole + 1
 
 
 class _AddHostDialog(QDialog):
-    """添加 SSH 主机的对话框 —— 暗色主题，替代原生 QInputDialog。
+    """SSH 主机文本输入对话框 —— 暗色主题，替代原生 QInputDialog。
 
-    复用项目里其它对话框的配色（#1e1e2e 背景 / #667eea 强调色 / #3d3d5c 边框），
-    返回值通过 `value()` 取（[user@]host[:port] 原文）。
+    复用项目里其它对话框的配色（#1e1e2e 背景 / #667eea 强调色 / #3d3d5c 边框）。
+    默认用于「添加主机」；传入 title/hint/placeholder/initial/ok_label 可复用为
+    「重命名」等场景。返回值通过 `value()` 取。
     """
 
-    def __init__(self, parent=None):
+    def __init__(self, parent=None, *, title=None, hint=None,
+                 placeholder="deploy@10.0.0.5:22", initial="", ok_label=None):
         super().__init__(parent)
-        self.setWindowTitle(t("remote.add_host_title"))
+        title = title or t("remote.add_host_title")
+        hint = hint if hint is not None else t("remote.add_host_hint")
+        ok_label = ok_label or t("remote.add_host_ok")
+        self.setWindowTitle(title)
         self.setModal(True)
         self.setMinimumWidth(360)
         self.setStyleSheet("""
@@ -109,18 +115,22 @@ class _AddHostDialog(QDialog):
         layout.setContentsMargins(20, 18, 20, 16)
         layout.setSpacing(12)
 
-        title = QLabel(t("remote.add_host_title"))
-        title.setObjectName("title")
-        layout.addWidget(title)
+        title_lbl = QLabel(title)
+        title_lbl.setObjectName("title")
+        layout.addWidget(title_lbl)
 
-        hint = QLabel(t("remote.add_host_hint"))
-        hint.setObjectName("hint")
-        hint.setWordWrap(True)
-        layout.addWidget(hint)
+        if hint:
+            hint_lbl = QLabel(hint)
+            hint_lbl.setObjectName("hint")
+            hint_lbl.setWordWrap(True)
+            layout.addWidget(hint_lbl)
 
         self._edit = QLineEdit()
-        self._edit.setPlaceholderText("deploy@10.0.0.5:22")
+        self._edit.setPlaceholderText(placeholder)
         self._edit.setClearButtonEnabled(True)
+        if initial:
+            self._edit.setText(initial)
+            self._edit.selectAll()
         layout.addWidget(self._edit)
 
         btn_row = QHBoxLayout()
@@ -131,10 +141,10 @@ class _AddHostDialog(QDialog):
         cancel_btn.clicked.connect(self.reject)
         btn_row.addWidget(cancel_btn)
 
-        self._ok_btn = QPushButton(t("remote.add_host_ok"))
+        self._ok_btn = QPushButton(ok_label)
         self._ok_btn.setObjectName("ok")
         self._ok_btn.setDefault(True)
-        self._ok_btn.setEnabled(False)
+        self._ok_btn.setEnabled(bool(initial.strip()))
         self._ok_btn.clicked.connect(self.accept)
         btn_row.addWidget(self._ok_btn)
 
@@ -615,6 +625,8 @@ class RemoteExplorerPanel(QWidget):
 
         self._hosts_list = QListWidget()
         self._hosts_list.itemDoubleClicked.connect(self._on_host_activated)
+        self._hosts_list.setContextMenuPolicy(Qt.ContextMenuPolicy.CustomContextMenu)
+        self._hosts_list.customContextMenuRequested.connect(self._on_hosts_context_menu)
         hp_layout.addWidget(self._hosts_list, 1)
 
         self._stack.addWidget(self._hosts_page)
@@ -852,6 +864,71 @@ class RemoteExplorerPanel(QWidget):
         if not host:
             return
         self._connect_to(host)
+
+    def _on_hosts_context_menu(self, pos):
+        """主机列表右键菜单：连接 / 重命名（改别名，方便管理）。"""
+        item = self._hosts_list.itemAt(pos)
+        if item is None:
+            return
+        host: HostConfig = item.data(_ROLE_ENTRY)
+        if not host:
+            return
+        bg_medium = self.theme.get('bg_medium', '#16213e')
+        text = self.theme.get('text', '#eaeaea')
+        border = self.theme.get('border', '#3d3d5c')
+        accent = self.theme.get('accent', '#667eea')
+        menu = QMenu(self)
+        menu.setStyleSheet(f"""
+            QMenu {{
+                background-color: {bg_medium}; color: {text};
+                border: 1px solid {border}; border-radius: 4px; padding: 4px;
+            }}
+            QMenu::item {{ padding: 6px 20px; border-radius: 3px; }}
+            QMenu::item:selected {{ background-color: {accent}; }}
+            QMenu::separator {{ height: 1px; background-color: {border}; margin: 4px 10px; }}
+        """)
+        connect_act = menu.addAction(t("remote.connect"))
+        connect_act.triggered.connect(lambda checked=False, h=host: self._connect_to(h))
+        rename_act = menu.addAction(t("remote.rename_host"))
+        rename_act.triggered.connect(lambda checked=False, h=host: self._rename_host(h))
+        menu.exec(self._hosts_list.viewport().mapToGlobal(pos))
+
+    def _rename_host(self, host: HostConfig):
+        """给主机起个好记的别名（rename），并写回 ~/.ssh/config。"""
+        dlg = _AddHostDialog(
+            self,
+            title=t("remote.rename_host_title"),
+            hint=t("remote.rename_host_hint"),
+            placeholder=t("remote.rename_host_placeholder"),
+            initial=host.alias,
+            ok_label=t("remote.rename_host_ok"),
+        )
+        if dlg.exec() != QDialog.DialogCode.Accepted:
+            return
+        new_alias = dlg.value()
+        if not new_alias or new_alias == host.alias:
+            return
+
+        try:
+            renamed = rename_ssh_config_host(host.alias, new_alias)
+        except ValueError:
+            QMessageBox.warning(
+                self, t("remote.rename_host_title"),
+                t("remote.rename_host_exists").format(alias=new_alias),
+            )
+            return
+        except Exception as e:
+            QMessageBox.warning(
+                self, t("remote.rename_host_title"),
+                t("remote.rename_host_failed").format(error=e),
+            )
+            return
+
+        if renamed:
+            self._reload_hosts()            # config 改了 → 重新读取
+        else:
+            host.alias = new_alias          # 仅内存中的主机（未落 config）→ 直接改
+            self._populate_hosts_list()
 
     # ---------- 连接 ----------
 
