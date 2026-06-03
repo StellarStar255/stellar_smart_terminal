@@ -218,6 +218,33 @@ class _RenameNameOnlyDelegate(QStyledItemDelegate):
         QTimer.singleShot(0, _apply)
 
 
+class _FastIconProvider(QFileIconProvider):
+    """轻量图标提供器：只用通用「文件夹 / 文件」两种图标。
+
+    默认的 QFileIconProvider 会对每个文件按类型走 macOS NSWorkspace 查询系统图标，
+    几十个文件的目录展开时，这些查询全在 UI 线程同步发生 → 卡顿主因。
+    这里把图标收敛成两种、各只解析一次并缓存，大目录展开/收起即时完成。
+    """
+
+    def __init__(self):
+        super().__init__()
+        self._folder_icon = None
+        self._file_icon = None
+
+    def icon(self, arg):
+        # icon() 有两个重载：icon(IconType) 与 icon(QFileInfo)。
+        # 只拦截按文件信息取图标的热路径，其余仍交给基类。
+        if isinstance(arg, QFileInfo):
+            if arg.isDir():
+                if self._folder_icon is None:
+                    self._folder_icon = super().icon(QFileIconProvider.IconType.Folder)
+                return self._folder_icon
+            if self._file_icon is None:
+                self._file_icon = super().icon(QFileIconProvider.IconType.File)
+            return self._file_icon
+        return super().icon(arg)
+
+
 class FilteredFileSystemModel(QFileSystemModel):
     """文件系统模型：隐藏文件/文件夹（以点开头）以浅灰色显示"""
 
@@ -231,10 +258,12 @@ class FilteredFileSystemModel(QFileSystemModel):
         self._dim_icon_cache = {}  # 原图标 cacheKey -> 变淡后的 QIcon
 
     def data(self, index, role=Qt.ItemDataRole.DisplayRole):
-        if index.isValid() and self.fileName(index).startswith('.'):
-            if role == Qt.ItemDataRole.ForegroundRole:
-                return QBrush(self.HIDDEN_COLOR)
-            if role == Qt.ItemDataRole.DecorationRole:
+        # 只有这两个角色才需要判断「是否隐藏文件」，避免在热路径（DisplayRole）
+        # 上对每个单元格都调用一次 fileName()。
+        if role == Qt.ItemDataRole.ForegroundRole or role == Qt.ItemDataRole.DecorationRole:
+            if index.isValid() and self.fileName(index).startswith('.'):
+                if role == Qt.ItemDataRole.ForegroundRole:
+                    return QBrush(self.HIDDEN_COLOR)
                 icon = super().data(index, role)
                 if isinstance(icon, QIcon):
                     return self._dimmed_icon(icon)
@@ -299,6 +328,9 @@ class ExplorerPanel(QWidget):
 
         # 文件系统模型
         self.model = FilteredFileSystemModel()
+        # 用轻量图标提供器，避免大目录展开时逐文件查询系统图标导致卡顿
+        self._icon_provider = _FastIconProvider()
+        self.model.setIconProvider(self._icon_provider)
         self.model.setRootPath("")
         # 包含 Hidden 以显示以点开头的隐藏文件/文件夹（仍排除 . 和 ..）
         self.model.setFilter(
@@ -329,8 +361,9 @@ class ExplorerPanel(QWidget):
         # 重命名时默认只选中"基名"，扩展名保留不选
         self.tree_view.setItemDelegate(_RenameNameOnlyDelegate(self.tree_view))
 
-        # 设置动画效果
-        self.tree_view.setAnimated(True)
+        # 关闭展开/收起动画：动画会对所有新出现的行反复重新布局+重绘，
+        # 大目录（几十个文件）展开/收起时明显卡顿；关掉后即时完成。
+        self.tree_view.setAnimated(False)
         self.tree_view.setIndentation(16)
 
         # 允许拖拽
