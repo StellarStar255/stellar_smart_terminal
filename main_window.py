@@ -365,7 +365,12 @@ class CenteredComboBox(QComboBox):
             QStyle.SubControl.SC_ComboBoxArrow, self)
         painter.setPen(self.palette().color(QPalette.ColorRole.Text))
         painter.setFont(self.font())
-        painter.drawText(text_rect, Qt.AlignmentFlag.AlignCenter, text)
+        # 文本超出可用宽度时用「…」省略，否则居中绘制会把首尾都截掉（如 "Midnight Black"
+        # 变成 "idnight Blac"）。先按文字区宽度做右省略，再居中。
+        elided = painter.fontMetrics().elidedText(
+            text, Qt.TextElideMode.ElideRight, text_rect.width()
+        )
+        painter.drawText(text_rect, Qt.AlignmentFlag.AlignCenter, elided)
 
         # 手绘一个简洁的下拉三角，居中于样式给出的箭头区域
         painter.setRenderHint(QPainter.RenderHint.Antialiasing, True)
