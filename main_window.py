@@ -6424,22 +6424,22 @@ class MainWindow(QMainWindow):
                 # 有多个分屏，关闭当前选中的分屏
                 self._close_current_split()
             else:
-                # 只有一个分屏，关闭整个标签页
-                # 如果这是最后一个标签页且有活动进程，需要二次确认
+                # 只有一个分屏，关闭整个标签页。
+                # 若这是最后一个标签页，这一步会退出整个窗口 → 一律二次确认，
+                # 避免一次误触把整个窗口（布局/会话）丢掉。有进程在跑时用更强措辞。
                 if self.tab_widget.count() == 1:
-                    # 检查是否有活动进程在运行
-                    has_running_process = any(
-                        t.is_running() for t in terminals
+                    has_running_process = any(t.is_running() for t in terminals)
+                    msg = (t("msg.confirm_close_last_tab") if has_running_process
+                           else t("msg.confirm_close_window"))
+                    reply = QMessageBox.question(
+                        self, t("msg.confirm_close_title"), msg,
+                        QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No,
+                        QMessageBox.StandardButton.No  # 默认选择"否"，回车不会误关
                     )
-                    if has_running_process:
-                        reply = QMessageBox.question(
-                            self, t("msg.confirm_close_title"),
-                            t("msg.confirm_close_last_tab"),
-                            QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No,
-                            QMessageBox.StandardButton.No  # 默认选择"否"
-                        )
-                        if reply != QMessageBox.StandardButton.Yes:
-                            return
+                    if reply != QMessageBox.StandardButton.Yes:
+                        return
+                    # 已经确认过了，self.close() 触发的 closeEvent 不必再问一次
+                    self._force_closing = True
 
                 self._close_tab(idx, auto_create_new=False)
                 # 如果关闭后没有标签页了，关闭窗口
