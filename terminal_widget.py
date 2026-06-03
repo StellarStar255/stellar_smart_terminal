@@ -2309,23 +2309,15 @@ class TerminalWidget(QWidget):
                     return
 
             if self._click_count == 2:
-                # 双击：若当前已是该行的整行选择，则降级为选词；否则选行
-                if self._mouse_mode and not force_local_selection:
-                    self._send_mouse_event(event, 'press')
-                row = abs_cell[0]
-                already_line_selected = (
-                    self._selection_start == (row, 0)
-                    and self._selection_end == (row, self.term_cols - 1)
-                )
-                if already_line_selected:
-                    self._select_word_at(abs_cell)
-                else:
-                    self._select_line_at(abs_cell)
-            elif self._click_count >= 3:
-                # 三击：始终选词（保留按词选择能力）
+                # 双击：选词（遇空格等非单词字符即截断，符合通用终端/编辑器习惯）
                 if self._mouse_mode and not force_local_selection:
                     self._send_mouse_event(event, 'press')
                 self._select_word_at(abs_cell)
+            elif self._click_count >= 3:
+                # 三击：选整条逻辑行
+                if self._mouse_mode and not force_local_selection:
+                    self._send_mouse_event(event, 'press')
+                self._select_line_at(abs_cell)
                 self._click_count = 0  # 重置
             else:
                 # 单击开始选择 - 使用绝对坐标
