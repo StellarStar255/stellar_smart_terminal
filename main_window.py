@@ -2921,6 +2921,10 @@ class MainWindow(QMainWindow):
             self._explorer_split_checkbox.blockSignals(True)
             self._explorer_split_checkbox.setChecked(True)
             self._explorer_split_checkbox.blockSignals(False)
+        if hasattr(self, '_remote_split_checkbox') and getattr(self, '_remote_split_horizontal', False):
+            self._remote_split_checkbox.blockSignals(True)
+            self._remote_split_checkbox.setChecked(True)
+            self._remote_split_checkbox.blockSignals(False)
 
         # 恢复窗口几何（仅主窗口，不用于拖拽分离的 tab 窗口）
         if not initial_tab_data:
@@ -7315,6 +7319,65 @@ class MainWindow(QMainWindow):
             else:
                 self._place_editor_in_explorer_splitter()
 
+    # ---------- Remote 面板的分屏（与 Explorer 行为一致） ----------
+
+    def _resolve_remote_splitter_sizes_with_editor(self):
+        """计算编辑器在 remote_splitter 中时的目标尺寸（优先使用记忆值）"""
+        saved = getattr(self, '_saved_remote_internal_sizes', None)
+        if saved and len(saved) == 2 and saved[0] > 0 and saved[1] > 0:
+            return list(saved)
+        return [200, 400]
+
+    def _place_editor_in_remote_splitter(self):
+        """将编辑器放到 remote_splitter 中（Remote 上下分屏模式）"""
+        if self.remote_splitter.indexOf(self.editor_area) >= 0:
+            self.editor_area.show()
+        else:
+            self.editor_area.setParent(None)
+            self.editor_area.show()
+            self.remote_splitter.addWidget(self.editor_area)
+
+        self.remote_splitter.setSizes(self._resolve_remote_splitter_sizes_with_editor())
+        # 恢复 main_splitter 正常比例（编辑器不在 main_splitter 里）
+        self._update_splitter_sizes()
+
+    def _capture_remote_layout(self):
+        """记录 remote_splitter 的内部尺寸（上下分屏），供下次还原。"""
+        if not hasattr(self, 'editor_area') or not hasattr(self, 'remote_splitter'):
+            return
+        if self.remote_splitter.indexOf(self.editor_area) >= 0 and self.editor_area.isVisible():
+            isizes = self.remote_splitter.sizes()
+            if len(isizes) == 2 and isizes[0] > 0 and isizes[1] > 0:
+                self._saved_remote_internal_sizes = list(isizes)
+
+    def _on_remote_split_orientation_changed(self, state):
+        """切换 Remote 树与编辑器的分屏方向"""
+        horizontal = (state == Qt.CheckState.Checked.value)
+        self._remote_split_horizontal = horizontal
+
+        # 仅当编辑器正显示且 Remote 面板可见时，立即切换位置
+        if (hasattr(self, 'editor_area') and self.editor_area.isVisible()
+                and getattr(self, 'remote_panel_visible', False)):
+            if horizontal:
+                self._place_editor_in_main_splitter()
+            else:
+                self._place_editor_in_remote_splitter()
+
+    def _home_editor_hidden(self):
+        """把编辑器归位到 explorer_splitter 并隐藏（编辑器的默认家）。
+
+        编辑器可能停在 main_splitter（左右）或 remote_splitter（Remote 上下），
+        切换/隐藏面板时统一收回到 explorer_splitter，避免被遗留在隐藏容器里。
+        """
+        if not hasattr(self, 'editor_area'):
+            return
+        self.editor_area.hide()
+        if self.explorer_splitter.indexOf(self.editor_area) < 0:
+            self.editor_area.setParent(None)
+            self.explorer_splitter.addWidget(self.editor_area)
+            self.editor_area.hide()
+            self.explorer_splitter.setSizes([400, 0])
+
     def _toggle_explorer_panel(self):
         """切换 Explorer 面板显示"""
         self.explorer_panel_visible = not self.explorer_panel_visible
@@ -7474,15 +7537,8 @@ class MainWindow(QMainWindow):
             self.explorer_toggle_btn.setChecked(False)
             self.explorer_panel_container.hide()
 
-            # 隐藏文件编辑器（如果在 main_splitter 中归位）
-            if hasattr(self, 'editor_area'):
-                if self.editor_area.isVisible():
-                    self.editor_area.hide()
-                if self.main_splitter.indexOf(self.editor_area) >= 0:
-                    self.editor_area.setParent(None)
-                    self.explorer_splitter.addWidget(self.editor_area)
-                    self.editor_area.hide()
-                    self.explorer_splitter.setSizes([400, 0])
+            # 隐藏文件编辑器并收回默认家（可能停在 main_splitter 或 remote_splitter）
+            self._home_editor_hidden()
 
             self.git_panel_container.show()
             self.left_panel_container.show()
@@ -7508,7 +7564,9 @@ class MainWindow(QMainWindow):
 
     def _setup_remote_panel(self):
         """设置 Remote Explorer 面板（SSH/SFTP）"""
-        from PyQt6.QtWidgets import QVBoxLayout, QHBoxLayout, QFrame, QLabel, QPushButton
+        from PyQt6.QtWidgets import (
+            QVBoxLayout, QHBoxLayout, QFrame, QLabel, QPushButton, QCheckBox, QSplitter
+        )
 
         layout = QVBoxLayout(self.remote_panel_container)
         layout.setContentsMargins(0, 0, 0, 0)
@@ -7526,6 +7584,25 @@ class MainWindow(QMainWindow):
         self._remote_title.setStyleSheet("color: #38bdf8; font-weight: bold;")
         rh_layout.addWidget(self._remote_title)
         rh_layout.addStretch()
+
+        # 分屏方向切换 checkbox（与 Explorer 行为一致：勾选=左右分屏，不勾=上下分屏）
+        self._remote_split_checkbox = QCheckBox(t("explorer.left_right_split"))
+        self._remote_split_checkbox.setToolTip(t("explorer.split_tooltip"))
+        self._remote_split_checkbox.setStyleSheet("""
+            QCheckBox { color: #888; font-size: 11px; spacing: 4px; }
+            QCheckBox:hover { color: #eaeaea; }
+            QCheckBox::indicator { width: 14px; height: 14px; }
+            QCheckBox::indicator:unchecked {
+                border: 1px solid #3d3d5c; border-radius: 2px; background-color: #16213e;
+            }
+            QCheckBox::indicator:checked {
+                border: 1px solid #667eea; border-radius: 2px; background-color: #667eea;
+            }
+        """)
+        if not hasattr(self, '_remote_split_horizontal'):
+            self._remote_split_horizontal = False  # 默认上下分屏
+        self._remote_split_checkbox.stateChanged.connect(self._on_remote_split_orientation_changed)
+        rh_layout.addWidget(self._remote_split_checkbox)
 
         hide_btn = QPushButton("×")
         hide_btn.setFixedSize(24, 24)
@@ -7548,7 +7625,19 @@ class MainWindow(QMainWindow):
         )
         # 右键 "在此处打开终端" → 同样开一个 SSH tab，且 cd 进指定目录
         self.remote_panel.open_terminal_at.connect(self._open_ssh_terminal_tab)
-        layout.addWidget(self.remote_panel)
+
+        # 用竖直 QSplitter 包住远程树，以便上下分屏时把编辑器放到树下方
+        # （编辑器 editor_area 为共享单例，按需在 remote_splitter / main_splitter 间移动）
+        self.remote_splitter = QSplitter(Qt.Orientation.Vertical)
+        self.remote_splitter.setHandleWidth(3)
+        self.remote_splitter.setStyleSheet("""
+            QSplitter::handle { background-color: #3d3d5c; }
+            QSplitter::handle:hover { background-color: #667eea; }
+        """)
+        self.remote_splitter.addWidget(self.remote_panel)
+        self.remote_splitter.setSizes([400, 0])
+        self.remote_splitter.splitterMoved.connect(lambda *_: self._capture_remote_layout())
+        layout.addWidget(self.remote_splitter)
 
     def _toggle_remote_panel(self):
         """切换 Remote Explorer 面板显示（与 Explorer / Git 互斥）"""
@@ -7570,20 +7659,22 @@ class MainWindow(QMainWindow):
                 self.git_panel_container.hide()
                 self._hide_git_diff()  # 切到 Remote 时若在看 diff，回到终端
 
-            # 编辑器若停在 main_splitter，归位
-            if hasattr(self, 'editor_area'):
-                if self.editor_area.isVisible():
-                    self.editor_area.hide()
-                if self.main_splitter.indexOf(self.editor_area) >= 0:
-                    self.editor_area.setParent(None)
-                    self.explorer_splitter.addWidget(self.editor_area)
-                    self.editor_area.hide()
-                    self.explorer_splitter.setSizes([400, 0])
+            # 先把编辑器收回默认家（避免它停在 explorer/main_splitter 里）
+            self._home_editor_hidden()
 
             self.remote_panel_container.show()
             self.left_panel_container.show()
+
+            # 若之前有打开的文件，按 Side-by-Side 偏好恢复编辑器位置（与 Explorer 一致）
+            if hasattr(self, 'editor_area') and self._editor_has_any_file():
+                if self._remote_split_horizontal:
+                    self._place_editor_in_main_splitter()
+                else:
+                    self._place_editor_in_remote_splitter()
         else:
             self.remote_panel_container.hide()
+            # 隐藏 Remote 时把编辑器收回默认家，避免遗留在隐藏的 remote_splitter 内
+            self._home_editor_hidden()
             if not self.explorer_panel_visible and not self.git_panel_visible:
                 self.left_panel_container.hide()
 
@@ -7682,13 +7773,14 @@ class MainWindow(QMainWindow):
         except Exception:
             pass
 
-        # 远程文件始终放到 main_splitter（左右布局）。
-        # Remote 面板自身没有内嵌的编辑器区域，而 explorer_splitter（上下分屏用）
-        # 位于此刻被隐藏的 explorer_panel_container 内——若按本地 Explorer 的
-        # 上下分屏模式放进去，编辑器/图片会落在隐藏容器里且 Remote 面板与之间
-        # 没有可拖拽的分隔条。放进 main_splitter 则图片紧邻 Remote 树显示，
-        # 中间的 QSplitter handle 可拖动来调整 Remote 面板宽度。
-        self._place_editor_in_main_splitter()
+        # 按 Side-by-Side 开关放置编辑器，行为与本地 Explorer 一致：
+        # 勾选=左右分屏（编辑器进 main_splitter，紧邻 Remote 树）；
+        # 不勾=上下分屏（编辑器进 remote_splitter，落在 Remote 树下方，
+        # 中间有可拖拽的分隔条调整两者高度）。
+        if self._remote_split_horizontal:
+            self._place_editor_in_main_splitter()
+        else:
+            self._place_editor_in_remote_splitter()
 
     def _update_splitter_sizes(self):
         """更新分割器大小"""
@@ -8095,6 +8187,9 @@ class MainWindow(QMainWindow):
         if hasattr(self, '_explorer_split_checkbox'):
             self._explorer_split_checkbox.setText(t("explorer.left_right_split"))
             self._explorer_split_checkbox.setToolTip(t("explorer.split_tooltip"))
+        if hasattr(self, '_remote_split_checkbox'):
+            self._remote_split_checkbox.setText(t("explorer.left_right_split"))
+            self._remote_split_checkbox.setToolTip(t("explorer.split_tooltip"))
 
         # Git 面板标题
         if hasattr(self, '_git_title'):
@@ -8892,6 +8987,7 @@ class MainWindow(QMainWindow):
         # 记忆资源管理器/编辑器拖拽过的尺寸，避免每次重新打开都重置
         self._saved_explorer_main_sizes = None  # main_splitter 4 项尺寸（左右分屏）
         self._saved_explorer_internal_sizes = None  # explorer_splitter 2 项尺寸（上下分屏）
+        self._saved_remote_internal_sizes = None  # remote_splitter 2 项尺寸（上下分屏）
         self._saved_left_panel_width = None  # 仅左面板可见时的宽度（无编辑器场景）
         self._saved_git_commit_height = None  # Git 面板提交区高度（拖拽记忆，兼容旧版）
         self._saved_git_body_sizes = None     # Git 面板 body splitter 各栏尺寸（拖拽记忆）
@@ -8931,8 +9027,9 @@ class MainWindow(QMainWindow):
                     self._pin_toolbar_row2 = config.get('pin_toolbar_row2', False)
                     # 加载窗口透明度
                     self._window_opacity = config.get('window_opacity', 100)
-                    # 加载左右分屏偏好
+                    # 加载左右分屏偏好（Explorer / Remote 各自记忆）
                     self._explorer_split_horizontal = config.get('explorer_split_horizontal', False)
+                    self._remote_split_horizontal = config.get('remote_split_horizontal', False)
                     # 加载语言设置
                     saved_lang = config.get('language', 'zh')
                     if saved_lang in ('zh', 'en'):
@@ -8950,6 +9047,9 @@ class MainWindow(QMainWindow):
                     internal_sizes = config.get('explorer_internal_splitter_sizes', None)
                     if isinstance(internal_sizes, list) and len(internal_sizes) == 2 and all(isinstance(s, int) and s >= 0 for s in internal_sizes):
                         self._saved_explorer_internal_sizes = internal_sizes
+                    remote_internal = config.get('remote_internal_splitter_sizes', None)
+                    if isinstance(remote_internal, list) and len(remote_internal) == 2 and all(isinstance(s, int) and s >= 0 for s in remote_internal):
+                        self._saved_remote_internal_sizes = remote_internal
                     left_width = config.get('left_panel_width', None)
                     if isinstance(left_width, int) and left_width > 0:
                         self._saved_left_panel_width = left_width
@@ -9119,6 +9219,7 @@ class MainWindow(QMainWindow):
                 'pin_toolbar_row2': self._pin_toolbar_row2,  # 保存固定第二排工具栏
                 'window_opacity': self._window_opacity,  # 保存窗口透明度
                 'explorer_split_horizontal': getattr(self, '_explorer_split_horizontal', False),  # 保存左右分屏偏好
+                'remote_split_horizontal': getattr(self, '_remote_split_horizontal', False),  # Remote 左右分屏偏好
                 'language': get_language(),  # 保存语言设置
                 'window_geometry': [self.x(), self.y(), self.width(), self.height()],
                 'window_maximized': self.isMaximized(),
@@ -9127,6 +9228,7 @@ class MainWindow(QMainWindow):
                 'log_panel_visible': getattr(self, 'log_panel_visible', False),
                 'explorer_main_splitter_sizes': getattr(self, '_saved_explorer_main_sizes', None),
                 'explorer_internal_splitter_sizes': getattr(self, '_saved_explorer_internal_sizes', None),
+                'remote_internal_splitter_sizes': getattr(self, '_saved_remote_internal_sizes', None),
                 'left_panel_width': getattr(self, '_saved_left_panel_width', None),
                 'git_commit_height': getattr(self, '_saved_git_commit_height', None),
                 'git_body_splitter_sizes': getattr(self, '_saved_git_body_sizes', None),
