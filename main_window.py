@@ -6509,6 +6509,13 @@ class MainWindow(QMainWindow):
         # 重建映射
         self._rebuild_tab_mappings()
 
+        # removeTab 触发的 currentChanged 发生在重建映射「之前」，那时读到的是错位的
+        # tab_cwds（可能正好读成被分离标签的目录）。这里按重建后的正确索引再同步一次，
+        # 让残留窗口的 Directory 输入框与 Current 标签都回到真正的当前标签目录。
+        cur_idx = self.tab_widget.currentIndex()
+        if cur_idx >= 0:
+            self._on_tab_changed(cur_idx)
+
         # 如果没有存储的工作目录，尝试从终端获取或使用窗口默认值
         if not tab_cwd:
             if terminals:
@@ -6652,6 +6659,12 @@ class MainWindow(QMainWindow):
             if hasattr(self, 'current_dir_label'):
                 self.current_dir_label.setText(t("dir.current", cwd=tab_cwd))
                 self.current_dir_label.setToolTip(tab_cwd)
+            # 让 "Directory:" 输入框也跟随当前标签页（之前只更新 Current 标签，
+            # 导致分离标签页后输入框仍停留在被分离标签的目录上、与 Current 不一致）。
+            if hasattr(self, 'working_dir_combo'):
+                self.working_dir_combo.blockSignals(True)
+                self.working_dir_combo.setCurrentText(tab_cwd)
+                self.working_dir_combo.blockSignals(False)
             if hasattr(self, 'explorer_panel') and self.explorer_panel_visible:
                 self.explorer_panel.set_root_path(tab_cwd)
             if hasattr(self, 'git_panel') and self.git_panel_visible:
