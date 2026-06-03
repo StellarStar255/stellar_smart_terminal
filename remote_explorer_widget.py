@@ -29,7 +29,9 @@ from PyQt6 import sip  # 用于检查 C++ 对象是否已被删除
 from i18n import t
 import explorer_clipboard
 import remote_bookmarks
-from ssh_session import HostConfig, RemoteEntry, SSHSession, parse_ssh_config
+from ssh_session import (
+    HostConfig, RemoteEntry, SSHSession, parse_ssh_config, append_ssh_config_host,
+)
 
 
 # 子项的 UserRole 数据键
@@ -800,9 +802,20 @@ class RemoteExplorerPanel(QWidget):
         host = host.strip()
         if not host:
             return
-        cfg = HostConfig(alias=text, hostname=host, user=user.strip(), port=port)
-        self._extra_hosts.append(cfg)
-        self._populate_hosts_list()
+        user = user.strip()
+        # 持久化到 ~/.ssh/config，使其成为系统记录、重启后仍在
+        try:
+            append_ssh_config_host(hostname=host, user=user, port=port)
+            self._reload_hosts()  # 从 config 重新读取，新主机会出现在列表里
+        except Exception as e:
+            # 写盘失败（权限等）→ 退回到仅本会话内存，避免直接丢失
+            QMessageBox.warning(
+                self, t("remote.add_host_title"),
+                t("remote.add_host_save_failed").format(error=e),
+            )
+            cfg = HostConfig(alias=text, hostname=host, user=user, port=port)
+            self._extra_hosts.append(cfg)
+            self._populate_hosts_list()
 
     def _on_host_activated(self, item: QListWidgetItem):
         host: HostConfig = item.data(_ROLE_ENTRY)

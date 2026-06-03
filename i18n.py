@@ -484,6 +484,7 @@ TRANSLATIONS = {
     "remote.add_host_hint": {"zh": "格式: [user@]host[:port]\n例: deploy@10.0.0.5:22", "en": "Format: [user@]host[:port]\nExample: deploy@10.0.0.5:22"},
     "remote.add_host_ok": {"zh": "添加", "en": "Add"},
     "remote.add_host_cancel": {"zh": "取消", "en": "Cancel"},
+    "remote.add_host_save_failed": {"zh": "无法写入 ~/.ssh/config（已仅本会话保留）：\n{error}", "en": "Couldn't write ~/.ssh/config (kept for this session only):\n{error}"},
     "remote.editing_remote": {"zh": "[远程] {host}:{path}", "en": "[remote] {host}:{path}"},
     "remote.open_terminal_here": {"zh": "在此处打开 SSH 终端", "en": "Open SSH terminal here"},
     "remote.terminal_tab_name": {"zh": "SSH: {host}", "en": "SSH: {host}"},

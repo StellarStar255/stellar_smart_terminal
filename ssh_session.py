@@ -97,6 +97,84 @@ def parse_ssh_config(path: Optional[str] = None) -> list[HostConfig]:
     return hosts
 
 
+def _existing_aliases(config_path: Path) -> set:
+    """返回 config 里已有的 Host 别名集合（含通配符），用于避免重名。"""
+    if not config_path.is_file():
+        return set()
+    try:
+        cfg = SSHConfig()
+        with config_path.open("r", encoding="utf-8", errors="replace") as fh:
+            cfg.parse(fh)
+        return set(cfg.get_hostnames())
+    except Exception:
+        return set()
+
+
+def append_ssh_config_host(
+    hostname: str,
+    user: str = "",
+    port: int = 22,
+    identity_file: Optional[str] = None,
+    alias: Optional[str] = None,
+    path: Optional[str] = None,
+) -> HostConfig:
+    """把一台主机追加写入 ~/.ssh/config，持久化为系统记录。
+
+    - 生成一个干净的 Host 别名（默认用 hostname），与已有别名冲突时自动加数字后缀。
+    - 文件/目录权限收敛到 600/700（ssh 对宽松权限会拒绝读取）。
+    返回写入后的 HostConfig（alias 为最终采用的别名）。
+    """
+    config_path = Path(path or os.path.expanduser("~/.ssh/config"))
+    config_path.parent.mkdir(parents=True, exist_ok=True)
+    try:
+        os.chmod(config_path.parent, 0o700)
+    except OSError:
+        pass
+
+    existing = _existing_aliases(config_path)
+    base = (alias or hostname).strip() or hostname
+    candidate = base
+    i = 2
+    while candidate in existing:
+        candidate = f"{base}-{i}"
+        i += 1
+
+    lines = [f"Host {candidate}", f"    HostName {hostname}"]
+    if user:
+        lines.append(f"    User {user}")
+    if port and int(port) != 22:
+        lines.append(f"    Port {int(port)}")
+    if identity_file:
+        lines.append(f"    IdentityFile {identity_file}")
+
+    # 与已有内容之间留一个空行，避免粘到上一个块
+    prefix = ""
+    if config_path.is_file() and config_path.stat().st_size > 0:
+        try:
+            with config_path.open("rb") as fh:
+                fh.seek(-1, os.SEEK_END)
+                last = fh.read(1)
+            prefix = "\n" if last == b"\n" else "\n\n"
+        except OSError:
+            prefix = "\n"
+
+    block = prefix + "\n".join(lines) + "\n"
+    with config_path.open("a", encoding="utf-8") as fh:
+        fh.write(block)
+    try:
+        os.chmod(config_path, 0o600)
+    except OSError:
+        pass
+
+    return HostConfig(
+        alias=candidate,
+        hostname=hostname,
+        user=user,
+        port=int(port),
+        identity_file=identity_file,
+    )
+
+
 # ---------- SFTP entry ----------
 
 @dataclass
