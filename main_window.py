@@ -6408,14 +6408,29 @@ class MainWindow(QMainWindow):
         """关闭当前标签页"""
         self._close_tab(self.tab_widget.currentIndex())
 
+    def _focus_in_editor_area(self) -> bool:
+        """当前键盘焦点是否落在编辑器区域（某个文件编辑窗格）里。"""
+        if not hasattr(self, 'editor_area') or not self.editor_area.isVisible():
+            return False
+        fw = QApplication.focusWidget()
+        return fw is not None and (
+            fw is self.editor_area or self.editor_area.isAncestorOf(fw)
+        )
+
     def _close_tab_or_window(self):
         """关闭当前分屏/标签页/窗口 (Cmd+W)
 
         优先级：
+        0. 如果焦点在编辑器窗格里，关闭当前选中的编辑器窗格
         1. 如果当前标签页有多个分屏，关闭当前选中的分屏
         2. 如果只有一个分屏，关闭整个标签页
         3. 如果没有标签页了，关闭窗口
         """
+        # 焦点在编辑器里 → Cmd+W 关闭当前选中的编辑器窗格（而不是终端标签）
+        if self._focus_in_editor_area():
+            if self.editor_area.close_focused_pane():
+                return
+
         idx = self.tab_widget.currentIndex()
 
         if idx >= 0:

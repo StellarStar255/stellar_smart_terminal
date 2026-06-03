@@ -2595,6 +2595,18 @@ class EditorArea(QWidget):
     def active_pane(self) -> FileEditorWidget | None:
         return self._active
 
+    def close_focused_pane(self) -> bool:
+        """关闭当前活动（聚焦）的编辑窗格，行为与点该窗格的 × 按钮完全一致：
+        会走未保存提示，最后一个窗格则交主窗口隐藏整个编辑区。
+
+        供 Cmd+W 在焦点落在编辑器里时调用。成功发起关闭返回 True。
+        """
+        pane = self._active
+        if pane is None or pane not in self._panes:
+            return False
+        pane._close_editor()
+        return True
+
     @property
     def panes(self) -> list:
         return list(self._panes)
