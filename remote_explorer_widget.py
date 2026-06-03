@@ -1493,7 +1493,10 @@ class RemoteExplorerPanel(QWidget):
         # 删除：右键项在选中里 → 批量删整批选中；否则只删该项
         delete_targets = self._selection_entries_including(entry, item)
         act_delete = QAction(t("remote.delete"), self)
-        act_delete.triggered.connect(lambda targets=delete_targets: self._delete_entries(targets))
+        # triggered 会发出 checked(bool)，用第一个形参吃掉它，否则 targets 会被 False 覆盖
+        act_delete.triggered.connect(
+            lambda checked=False, targets=delete_targets: self._delete_entries(targets)
+        )
         menu.addAction(act_delete)
 
         # 下载到本地：右键项在选中里 → 批量保存到一个目录；否则单文件另存为

@@ -841,7 +841,11 @@ class ExplorerPanel(QWidget):
             # 删除：如果右键的对象在当前选中里，则删除整批选中；否则只删该项
             delete_paths = self._selection_paths_including(file_path)
             delete_action = menu.addAction(t("explorer.delete"))
-            delete_action.triggered.connect(lambda paths=delete_paths: self._delete_paths(paths))
+            # 注意：triggered 会发出 checked(bool)，必须用第一个形参吃掉它，
+            # 否则 paths 会被 False 覆盖 → _delete_paths(False) 报错、删除「没反应」。
+            delete_action.triggered.connect(
+                lambda checked=False, paths=delete_paths: self._delete_paths(paths)
+            )
 
             menu.addSeparator()
 
