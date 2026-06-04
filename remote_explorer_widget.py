@@ -1611,7 +1611,9 @@ class RemoteExplorerPanel(QWidget):
     def _on_home(self):
         if self._session is None:
             return
-        self._current_path = self._session.home()
+        # 设过默认启动目录就回默认目录，否则回 SSH home —— 与连接时的行为保持一致
+        default_dir = self._get_default_dir(self._session.host_config.alias)
+        self._current_path = default_dir or self._session.home()
         self._path_edit.setText(self._current_path)
         self._populate_tree_root()
 
