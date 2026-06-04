@@ -832,20 +832,23 @@ class ExplorerPanel(QWidget):
                 if not show_hidden:
                     # 原地裁剪隐藏目录，避免走进 .git / .venv 等
                     dirnames[:] = [d for d in dirnames if not d.startswith('.')]
-                for name in dirnames + filenames:
-                    if not show_hidden and name.startswith('.'):
-                        continue
-                    scanned += 1
-                    if name_matches_tokens(name, tokens):
-                        abs_path = os.path.join(dirpath, name)
-                        is_dir = name in dirnames
-                        rel = os.path.relpath(abs_path, root)
-                        results.append((abs_path, is_dir, rel))
-                        if len(results) >= self._SEARCH_MAX_RESULTS:
+                # 分别遍历目录/文件，避免 `name in dirnames` 的 O(n²) 成员判断
+                for is_dir, names in ((True, dirnames), (False, filenames)):
+                    for name in names:
+                        if not show_hidden and name.startswith('.'):
+                            continue
+                        scanned += 1
+                        if name_matches_tokens(name, tokens):
+                            abs_path = os.path.join(dirpath, name)
+                            rel = os.path.relpath(abs_path, root)
+                            results.append((abs_path, is_dir, rel))
+                            if len(results) >= self._SEARCH_MAX_RESULTS:
+                                truncated = True
+                                break
+                        if scanned >= self._SEARCH_MAX_SCANNED:
                             truncated = True
                             break
-                    if scanned >= self._SEARCH_MAX_SCANNED:
-                        truncated = True
+                    if truncated:
                         break
                 if truncated:
                     break

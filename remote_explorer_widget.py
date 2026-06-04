@@ -13,6 +13,7 @@ import os
 import posixpath
 import tempfile
 import time
+from collections import deque
 from pathlib import Path
 from typing import Optional
 
@@ -1108,6 +1109,11 @@ class RemoteExplorerPanel(QWidget):
         self._session = None
 
     def _disconnect(self):
+        # 先作废在途搜索并停掉防抖：递归搜索独占 SSH 单工作线程，
+        # 否则 disconnect() 的 .result(timeout=5) 会排在搜索后面，最长卡 UI 5 秒。
+        self._search_gen += 1
+        self._search_timer.stop()
+        self._exit_search()
         if self._session is not None:
             try:
                 self._session.disconnect()
@@ -1821,11 +1827,11 @@ class RemoteExplorerPanel(QWidget):
         results: list[RemoteEntry] = []
         dirs_scanned = 0
         truncated = False
-        queue = [(root, 0)]
+        queue = deque([(root, 0)])  # deque.popleft() 是 O(1)，避免 list.pop(0) 的 O(n)
         while queue:
             if gen != self._search_gen:
                 return None  # 查询已变化 → 放弃本轮
-            path, depth = queue.pop(0)
+            path, depth = queue.popleft()
             try:
                 entries = sess.listdir(path)
             except Exception:
