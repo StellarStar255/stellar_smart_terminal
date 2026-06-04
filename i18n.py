@@ -296,6 +296,13 @@ TRANSLATIONS = {
     "explorer.refresh_tooltip": {"zh": "刷新", "en": "Refresh"},
     "explorer.settings_tooltip": {"zh": "视图设置", "en": "View settings"},
     "explorer.show_hidden_files": {"zh": "显示隐藏文件", "en": "Show hidden files"},
+    "sort.by": {"zh": "排序方式", "en": "Sort by"},
+    "sort.name": {"zh": "名称", "en": "Name"},
+    "sort.modified": {"zh": "修改日期", "en": "Date modified"},
+    "sort.size": {"zh": "大小", "en": "Size"},
+    "sort.type": {"zh": "类型", "en": "Type"},
+    "sort.ascending": {"zh": "升序", "en": "Ascending"},
+    "sort.descending": {"zh": "降序", "en": "Descending"},
 
     # ===== Git 面板 =====
     "git.source_control": {"zh": "Source Control", "en": "Source Control"},

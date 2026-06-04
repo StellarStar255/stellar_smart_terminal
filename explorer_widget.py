@@ -314,6 +314,12 @@ class ExplorerPanel(QWidget):
 
     # 配置文件里"是否显示隐藏文件"的键名（与 main_window 共用 .smart_terminal_config.json）
     CONFIG_KEY_SHOW_HIDDEN = 'explorer_show_hidden'
+    # 排序方式 / 升降序的键名
+    CONFIG_KEY_SORT_KEY = 'explorer_sort_key'
+    CONFIG_KEY_SORT_DESC = 'explorer_sort_desc'
+
+    # 排序键 -> QFileSystemModel 列号（0 名称 / 1 大小 / 2 类型 / 3 修改日期）
+    _SORT_COLUMN = {'name': 0, 'size': 1, 'type': 2, 'modified': 3}
 
     def __init__(self, theme: dict = None, parent=None):
         super().__init__(parent)
@@ -322,6 +328,8 @@ class ExplorerPanel(QWidget):
         self._editing_file = None  # 当前正在编辑的文件路径
         # 是否显示隐藏文件（以点开头），从配置读取，默认显示
         self._show_hidden = self._load_show_hidden()
+        # 排序方式（默认按名称升序），从配置读取
+        self._sort_key, self._sort_desc = self._load_sort()
 
         self._setup_ui()
         self._connect_signals()
@@ -353,6 +361,50 @@ class ExplorerPanel(QWidget):
             return
         cfg[self.CONFIG_KEY_SHOW_HIDDEN] = self._show_hidden
         atomic_write_json(p, cfg)
+
+    # ---- 排序方式（持久化到共享配置） ----
+
+    def _load_sort(self) -> tuple:
+        cfg, _ok = read_config_json(self._config_file_path())
+        key = cfg.get(self.CONFIG_KEY_SORT_KEY, 'name')
+        if key not in self._SORT_COLUMN:
+            key = 'name'
+        return key, bool(cfg.get(self.CONFIG_KEY_SORT_DESC, False))
+
+    def _save_sort(self):
+        # 读-改-写：只在读到完整配置时才回写，避免多窗口下覆盖别人刚写的字段
+        p = self._config_file_path()
+        cfg, ok = read_config_json(p)
+        if not ok:
+            return
+        cfg[self.CONFIG_KEY_SORT_KEY] = self._sort_key
+        cfg[self.CONFIG_KEY_SORT_DESC] = self._sort_desc
+        atomic_write_json(p, cfg)
+
+    def _apply_sort(self):
+        """把当前排序方式应用到 QFileSystemModel（会立即反映到视图）。"""
+        if not hasattr(self, 'model'):
+            return
+        col = self._SORT_COLUMN.get(self._sort_key, 0)
+        order = (Qt.SortOrder.DescendingOrder if self._sort_desc
+                 else Qt.SortOrder.AscendingOrder)
+        self.model.sort(col, order)
+
+    def get_sort(self) -> tuple:
+        """返回 (sort_key, descending)，供设置菜单勾选当前项。"""
+        return self._sort_key, self._sort_desc
+
+    def set_sort(self, key: str, desc: bool):
+        """设置排序方式：立即应用 + 持久化。"""
+        if key not in self._SORT_COLUMN:
+            key = 'name'
+        desc = bool(desc)
+        if key == self._sort_key and desc == self._sort_desc:
+            return
+        self._sort_key = key
+        self._sort_desc = desc
+        self._apply_sort()
+        self._save_sort()
 
     def _build_filter(self) -> "QDir.Filter":
         f = (QDir.Filter.AllDirs | QDir.Filter.Files
@@ -424,6 +476,9 @@ class ExplorerPanel(QWidget):
 
         # 应用样式
         self._update_style()
+
+        # 应用持久化的排序方式（默认名称升序）
+        self._apply_sort()
 
         layout.addWidget(self.tree_view)
 

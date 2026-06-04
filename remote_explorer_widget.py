@@ -24,7 +24,7 @@ from PyQt6.QtWidgets import (
     QAbstractItemView, QDialog,
 )
 from PyQt6.QtCore import Qt, pyqtSignal, QTimer, QMimeData, QUrl, QSize
-from PyQt6.QtGui import QAction, QCursor, QDrag, QShortcut, QKeySequence
+from PyQt6.QtGui import QAction, QActionGroup, QCursor, QDrag, QShortcut, QKeySequence
 from PyQt6 import sip  # 用于检查 C++ 对象是否已被删除
 
 from i18n import t
@@ -543,6 +543,8 @@ class RemoteExplorerPanel(QWidget):
         self._pending_edit_path: Optional[str] = None
         # 是否显示隐藏文件（以点开头），从配置读取，默认显示
         self._show_hidden = self._load_show_hidden()
+        # 排序方式（默认按名称升序，文件夹始终置顶），从配置读取
+        self._sort_key, self._sort_desc = self._load_sort()
 
         self._setup_ui()
         self._apply_theme()
@@ -1178,6 +1180,69 @@ class RemoteExplorerPanel(QWidget):
             return
         self._set_default_dir(self._session.host_config.alias, None)
 
+    # ---- 排序方式（持久化到共享配置） ----
+
+    CONFIG_KEY_SORT_KEY = 'remote_explorer_sort_key'
+    CONFIG_KEY_SORT_DESC = 'remote_explorer_sort_desc'
+    _SORT_KEYS = ('name', 'modified', 'size', 'type')
+
+    def _load_sort(self) -> tuple:
+        cfg, _ok = read_config_json(self._config_file_path())
+        key = cfg.get(self.CONFIG_KEY_SORT_KEY, 'name')
+        if key not in self._SORT_KEYS:
+            key = 'name'
+        return key, bool(cfg.get(self.CONFIG_KEY_SORT_DESC, False))
+
+    def _save_sort(self):
+        p = self._config_file_path()
+        cfg, ok = read_config_json(p)
+        if not ok:
+            return
+        cfg[self.CONFIG_KEY_SORT_KEY] = self._sort_key
+        cfg[self.CONFIG_KEY_SORT_DESC] = self._sort_desc
+        atomic_write_json(p, cfg)
+
+    def _sorted_entries(self, entries):
+        """按当前排序方式排序，文件夹始终置顶（保持远程一贯行为）。
+
+        用 Python 稳定排序分层处理：先按名称做基准，再按主键排序，
+        最后用稳定排序把目录拎到前面 —— 这样目录组、文件组内部都按主键有序。
+        """
+        if not entries:
+            return entries
+        key = self._sort_key
+        reverse = self._sort_desc
+        out = sorted(entries, key=lambda e: e.name.lower())
+        if key == 'modified':
+            out.sort(key=lambda e: e.mtime, reverse=reverse)
+        elif key == 'size':
+            out.sort(key=lambda e: e.size, reverse=reverse)
+        elif key == 'type':
+            out.sort(key=lambda e: posixpath.splitext(e.name)[1].lower(),
+                     reverse=reverse)
+        elif reverse:  # name 降序
+            out.sort(key=lambda e: e.name.lower(), reverse=True)
+        # 目录始终置顶（稳定排序保留上面的组内顺序）
+        out.sort(key=lambda e: not e.is_dir)
+        return out
+
+    def get_sort(self) -> tuple:
+        return self._sort_key, self._sort_desc
+
+    def set_sort(self, key: str, desc: bool):
+        """设置排序方式：持久化 + 重建当前可见目录（已展开子树会收起）。"""
+        if key not in self._SORT_KEYS:
+            key = 'name'
+        desc = bool(desc)
+        if key == self._sort_key and desc == self._sort_desc:
+            return
+        self._sort_key = key
+        self._sort_desc = desc
+        self._save_sort()
+        self._auto_refresh_fingerprints.clear()
+        if self._session is not None:
+            self._populate_tree_root()
+
     def _visible_entries(self, entries):
         """根据开关过滤掉以点开头的隐藏条目（在条目刚到达 UI 线程时统一过滤，
         这样指纹比对、建项、增量刷新看到的都是同一份"可见集合"）。"""
@@ -1204,6 +1269,31 @@ class RemoteExplorerPanel(QWidget):
         act.setCheckable(True)
         act.setChecked(self._show_hidden)
         act.toggled.connect(self._set_show_hidden)
+
+        # 排序方式子菜单（名称 / 修改日期 / 大小 / 类型 + 升/降序）
+        menu.addSeparator()
+        sort_menu = menu.addMenu(t("sort.by"))
+        sort_menu.setStyleSheet(menu.styleSheet())
+        sort_group = QActionGroup(sort_menu)
+        sort_group.setExclusive(True)
+        for key, label in (('name', t("sort.name")), ('modified', t("sort.modified")),
+                           ('size', t("sort.size")), ('type', t("sort.type"))):
+            a = sort_menu.addAction(label)
+            a.setCheckable(True)
+            a.setChecked(key == self._sort_key)
+            sort_group.addAction(a)
+            a.triggered.connect(
+                lambda checked=False, k=key: self.set_sort(k, self._sort_desc))
+        sort_menu.addSeparator()
+        order_group = QActionGroup(sort_menu)
+        order_group.setExclusive(True)
+        for desc, label in ((False, t("sort.ascending")), (True, t("sort.descending"))):
+            a = sort_menu.addAction(label)
+            a.setCheckable(True)
+            a.setChecked(desc == self._sort_desc)
+            order_group.addAction(a)
+            a.triggered.connect(
+                lambda checked=False, d=desc: self.set_sort(self._sort_key, d))
 
         # 已连接时：把当前目录设为该主机默认启动目录 / 清除
         if self._session is not None:
@@ -1255,7 +1345,7 @@ class RemoteExplorerPanel(QWidget):
 
     def _apply_top_level(self, entries: list[RemoteEntry]):
         """把目录内容直接放到树根（批量插入 + 关闭重绘减少卡顿）"""
-        entries = self._visible_entries(entries)
+        entries = self._sorted_entries(self._visible_entries(entries))
         try:
             self._tree.setUpdatesEnabled(False)
             self._tree.clear()
@@ -1384,6 +1474,8 @@ class RemoteExplorerPanel(QWidget):
 
     def _auto_refresh_apply(self, path: str, entries: list):
         """增量更新一个目录的子项：删消失的、加新出现的，不动已存在的"""
+        # 让新增项按当前排序顺序彼此相邻插入（整体顺序在下次手动刷新时归位）
+        entries = self._sorted_entries(entries)
         # 找到父节点
         if path == self._current_path:
             parent_item = None
@@ -1559,7 +1651,7 @@ class RemoteExplorerPanel(QWidget):
 
     def _apply_children(self, parent_item: QTreeWidgetItem, entries: list[RemoteEntry]):
         # 父项可能已被释放（用户断开了），守一下
-        entries = self._visible_entries(entries)
+        entries = self._sorted_entries(self._visible_entries(entries))
         try:
             self._tree.setUpdatesEnabled(False)
             parent_item.takeChildren()

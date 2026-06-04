@@ -40,7 +40,7 @@ from PyQt6.QtWidgets import (
 )
 from PyQt6 import sip  # 用于检查 C++ 对象是否已被删除
 from PyQt6.QtCore import Qt, QTimer, QEvent, QPoint, QMimeData, pyqtSignal, QObject, QSize
-from PyQt6.QtGui import QAction, QIcon, QFont, QColor, QPixmap, QPainter, QPainterPath, QPen, QDrag, QCursor, QBrush, QPalette, QShortcut, QKeySequence
+from PyQt6.QtGui import QAction, QActionGroup, QIcon, QFont, QColor, QPixmap, QPainter, QPainterPath, QPen, QDrag, QCursor, QBrush, QPalette, QShortcut, QKeySequence
 from PyQt6.QtWidgets import QWidgetAction, QStylePainter, QStyleOptionComboBox
 
 from terminal_widget import TerminalWidget
@@ -7222,6 +7222,35 @@ class MainWindow(QMainWindow):
         act.setCheckable(True)
         act.setChecked(self.explorer_panel.is_showing_hidden())
         act.toggled.connect(self.explorer_panel.set_show_hidden)
+
+        # 排序方式子菜单（名称 / 修改日期 / 大小 / 类型 + 升/降序）
+        menu.addSeparator()
+        cur_key, cur_desc = self.explorer_panel.get_sort()
+        sort_menu = menu.addMenu(t("sort.by"))
+        sort_menu.setStyleSheet(menu.styleSheet())
+        sort_group = QActionGroup(sort_menu)
+        sort_group.setExclusive(True)
+        for key, label in (('name', t("sort.name")), ('modified', t("sort.modified")),
+                           ('size', t("sort.size")), ('type', t("sort.type"))):
+            a = sort_menu.addAction(label)
+            a.setCheckable(True)
+            a.setChecked(key == cur_key)
+            sort_group.addAction(a)
+            a.triggered.connect(
+                lambda checked=False, k=key: self.explorer_panel.set_sort(
+                    k, self.explorer_panel.get_sort()[1]))
+        sort_menu.addSeparator()
+        order_group = QActionGroup(sort_menu)
+        order_group.setExclusive(True)
+        for desc, label in ((False, t("sort.ascending")), (True, t("sort.descending"))):
+            a = sort_menu.addAction(label)
+            a.setCheckable(True)
+            a.setChecked(desc == cur_desc)
+            order_group.addAction(a)
+            a.triggered.connect(
+                lambda checked=False, d=desc: self.explorer_panel.set_sort(
+                    self.explorer_panel.get_sort()[0], d))
+
         menu.exec(self._explorer_settings_btn.mapToGlobal(
             self._explorer_settings_btn.rect().bottomLeft()
         ))
