@@ -270,25 +270,34 @@ class FilteredFileSystemModel(QFileSystemModel):
         return super().data(index, role)
 
     def _dimmed_icon(self, icon: QIcon) -> QIcon:
-        """返回降低不透明度后的图标（带缓存）"""
+        """返回降低不透明度后的图标（带缓存）。
+
+        关键点：要为「所有可用尺寸」分别生成变淡后的位图，并保留每个位图的
+        devicePixelRatio。否则在 Retina 屏上图标会被当成更小/更模糊的一档来
+        渲染，看起来就比普通文件的图标小一圈。
+        """
         key = icon.cacheKey()
         cached = self._dim_icon_cache.get(key)
         if cached is not None:
             return cached
 
-        sizes = icon.availableSizes()
-        src = icon.pixmap(sizes[0] if sizes else QSize(16, 16))
-        if src.isNull():
+        result = QIcon()
+        for size in (icon.availableSizes() or [QSize(16, 16)]):
+            src = icon.pixmap(size)
+            if src.isNull():
+                continue
+            dimmed = QPixmap(src.size())
+            dimmed.setDevicePixelRatio(src.devicePixelRatio())
+            dimmed.fill(Qt.GlobalColor.transparent)
+            painter = QPainter(dimmed)
+            painter.setOpacity(self.HIDDEN_ICON_OPACITY)
+            painter.drawPixmap(0, 0, src)
+            painter.end()
+            result.addPixmap(dimmed)
+
+        if result.isNull():
             return icon
 
-        dimmed = QPixmap(src.size())
-        dimmed.fill(Qt.GlobalColor.transparent)
-        painter = QPainter(dimmed)
-        painter.setOpacity(self.HIDDEN_ICON_OPACITY)
-        painter.drawPixmap(0, 0, src)
-        painter.end()
-
-        result = QIcon(dimmed)
         self._dim_icon_cache[key] = result
         return result
 
