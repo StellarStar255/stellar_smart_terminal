@@ -12,6 +12,7 @@ from typing import Optional
 
 from i18n import t
 import explorer_clipboard
+from utils import read_config_json, atomic_write_json
 
 from PyQt6.QtWidgets import (
     QWidget, QVBoxLayout, QHBoxLayout, QFrame, QLabel,
@@ -311,11 +312,16 @@ class ExplorerPanel(QWidget):
     save_file_requested = pyqtSignal()  # 请求保存当前编辑的文件
     save_file_as_requested = pyqtSignal()  # 请求另存为当前编辑的文件
 
+    # 配置文件里"是否显示隐藏文件"的键名（与 main_window 共用 .smart_terminal_config.json）
+    CONFIG_KEY_SHOW_HIDDEN = 'explorer_show_hidden'
+
     def __init__(self, theme: dict = None, parent=None):
         super().__init__(parent)
         self.theme = theme or {}
         self._current_path = os.path.expanduser("~")
         self._editing_file = None  # 当前正在编辑的文件路径
+        # 是否显示隐藏文件（以点开头），从配置读取，默认显示
+        self._show_hidden = self._load_show_hidden()
 
         self._setup_ui()
         self._connect_signals()
@@ -329,6 +335,45 @@ class ExplorerPanel(QWidget):
         self._auto_refresh_timer.timeout.connect(self._auto_refresh_tick)
         self._auto_refresh_timer.start()
 
+    # ---- 隐藏文件显示开关（持久化到共享配置） ----
+
+    def _config_file_path(self) -> Path:
+        """主配置文件位置（与 main_window / git_widget 共用）。"""
+        return Path(__file__).parent / ".smart_terminal_config.json"
+
+    def _load_show_hidden(self) -> bool:
+        cfg, _ok = read_config_json(self._config_file_path())
+        return bool(cfg.get(self.CONFIG_KEY_SHOW_HIDDEN, True))
+
+    def _save_show_hidden(self):
+        # 读-改-写：只在读到完整配置时才回写，避免多窗口下覆盖别人刚写的字段
+        p = self._config_file_path()
+        cfg, ok = read_config_json(p)
+        if not ok:
+            return
+        cfg[self.CONFIG_KEY_SHOW_HIDDEN] = self._show_hidden
+        atomic_write_json(p, cfg)
+
+    def _build_filter(self) -> "QDir.Filter":
+        f = (QDir.Filter.AllDirs | QDir.Filter.Files
+             | QDir.Filter.NoDotAndDotDot)
+        if self._show_hidden:
+            f |= QDir.Filter.Hidden
+        return f
+
+    def is_showing_hidden(self) -> bool:
+        return self._show_hidden
+
+    def set_show_hidden(self, show: bool):
+        """切换是否显示隐藏文件，并立即应用 + 持久化。"""
+        show = bool(show)
+        if show == self._show_hidden:
+            return
+        self._show_hidden = show
+        if hasattr(self, 'model'):
+            self.model.setFilter(self._build_filter())
+        self._save_show_hidden()
+
     def _setup_ui(self):
         """设置 UI"""
         layout = QVBoxLayout(self)
@@ -341,11 +386,8 @@ class ExplorerPanel(QWidget):
         self._icon_provider = _FastIconProvider()
         self.model.setIconProvider(self._icon_provider)
         self.model.setRootPath("")
-        # 包含 Hidden 以显示以点开头的隐藏文件/文件夹（仍排除 . 和 ..）
-        self.model.setFilter(
-            QDir.Filter.AllDirs | QDir.Filter.Files
-            | QDir.Filter.Hidden | QDir.Filter.NoDotAndDotDot
-        )
+        # 是否显示以点开头的隐藏文件/文件夹由 _show_hidden 决定（始终排除 . 和 ..）
+        self.model.setFilter(self._build_filter())
         # 允许通过模型对文件/文件夹原地重命名
         self.model.setReadOnly(False)
 

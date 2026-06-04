@@ -13,6 +13,7 @@ import os
 import posixpath
 import tempfile
 import time
+from pathlib import Path
 from typing import Optional
 
 from PyQt6.QtWidgets import (
@@ -34,6 +35,7 @@ from ssh_session import (
     rename_ssh_config_host,
 )
 from git_widget import _make_git_tool_icon  # 复用统一风格的矢量线条图标
+from utils import read_config_json, atomic_write_json
 
 
 # 子项的 UserRole 数据键
@@ -539,6 +541,8 @@ class RemoteExplorerPanel(QWidget):
         self._open_session_map: dict[str, "SSHSession"] = {}
         # 新建文件/文件夹后，等刷新把它装进树里再原地重命名（不弹窗）
         self._pending_edit_path: Optional[str] = None
+        # 是否显示隐藏文件（以点开头），从配置读取，默认显示
+        self._show_hidden = self._load_show_hidden()
 
         self._setup_ui()
         self._apply_theme()
@@ -693,6 +697,14 @@ class RemoteExplorerPanel(QWidget):
         self._bookmark_btn.clicked.connect(self._show_bookmark_menu)
         pb_layout.addWidget(self._bookmark_btn)
 
+        # 视图设置按钮（齿轮）：弹出菜单，含"显示隐藏文件"开关
+        self._settings_btn = QPushButton()
+        self._settings_btn.setFixedSize(26, 26)
+        self._settings_btn.setIconSize(QSize(16, 16))
+        self._settings_btn.setToolTip(t("remote.settings_tooltip"))
+        self._settings_btn.clicked.connect(self._show_settings_menu)
+        pb_layout.addWidget(self._settings_btn)
+
         self._path_edit = QLineEdit()
         self._path_edit.returnPressed.connect(self._on_path_edited)
         pb_layout.addWidget(self._path_edit, 1)
@@ -763,6 +775,7 @@ class RemoteExplorerPanel(QWidget):
         self._up_btn.setIcon(_make_git_tool_icon('up', text))
         self._home_btn.setIcon(_make_git_tool_icon('home', text))
         self._refresh_btn.setIcon(_make_git_tool_icon('refresh', text))
+        self._settings_btn.setIcon(_make_git_tool_icon('gear', text))
         self._update_bookmark_btn_state()  # 按当前收藏状态画 ★/☆
         list_tree_css = f"""
             QListWidget, QTreeWidget {{
@@ -814,6 +827,7 @@ class RemoteExplorerPanel(QWidget):
         self._home_btn.setToolTip(t("remote.go_home"))
         self._refresh_btn.setToolTip(t("remote.refresh"))
         self._bookmark_btn.setToolTip(t("remote.bookmarks_tooltip"))
+        self._settings_btn.setToolTip(t("remote.settings_tooltip"))
         self._empty_hint.setText(t("remote.no_hosts"))
         # 重建主机列表（条目文本本身是别名+真实地址，不用国际化）
         if self._session is None:
@@ -1089,6 +1103,69 @@ class RemoteExplorerPanel(QWidget):
             self._top_level_ready.emit(entries)
         fut.add_done_callback(on_done)
 
+    # ---- 隐藏文件显示开关（持久化到共享配置） ----
+
+    CONFIG_KEY_SHOW_HIDDEN = 'remote_explorer_show_hidden'
+
+    def _config_file_path(self) -> Path:
+        """主配置文件位置（与 main_window / git_widget 共用）。"""
+        return Path(__file__).parent / ".smart_terminal_config.json"
+
+    def _load_show_hidden(self) -> bool:
+        cfg, _ok = read_config_json(self._config_file_path())
+        return bool(cfg.get(self.CONFIG_KEY_SHOW_HIDDEN, True))
+
+    def _save_show_hidden(self):
+        # 读-改-写：只在读到完整配置时才回写，避免多窗口下覆盖别人刚写的字段
+        p = self._config_file_path()
+        cfg, ok = read_config_json(p)
+        if not ok:
+            return
+        cfg[self.CONFIG_KEY_SHOW_HIDDEN] = self._show_hidden
+        atomic_write_json(p, cfg)
+
+    def _visible_entries(self, entries):
+        """根据开关过滤掉以点开头的隐藏条目（在条目刚到达 UI 线程时统一过滤，
+        这样指纹比对、建项、增量刷新看到的都是同一份"可见集合"）。"""
+        if self._show_hidden or not entries:
+            return entries
+        return [e for e in entries if not e.name.startswith('.')]
+
+    def _show_settings_menu(self):
+        """齿轮按钮：弹出视图设置菜单（含"显示隐藏文件"开关）。"""
+        menu = QMenu(self)
+        accent = self.theme.get('accent_color', '#667eea')
+        border = self.theme.get('border_color', '#3d3d5c')
+        bg = self.theme.get('bg_medium', '#2d2d44')
+        text = self.theme.get('text_color', '#eaeaea')
+        menu.setStyleSheet(f"""
+            QMenu {{
+                background-color: {bg}; color: {text};
+                border: 1px solid {border}; border-radius: 6px; padding: 4px;
+            }}
+            QMenu::item {{ padding: 6px 24px 6px 12px; border-radius: 4px; }}
+            QMenu::item:selected {{ background-color: {accent}; }}
+        """)
+        act = menu.addAction(t("remote.show_hidden_files"))
+        act.setCheckable(True)
+        act.setChecked(self._show_hidden)
+        act.toggled.connect(self._set_show_hidden)
+        menu.exec(self._settings_btn.mapToGlobal(
+            self._settings_btn.rect().bottomLeft()
+        ))
+
+    def _set_show_hidden(self, show: bool):
+        """切换是否显示隐藏文件：持久化 + 重建当前可见目录。"""
+        show = bool(show)
+        if show == self._show_hidden:
+            return
+        self._show_hidden = show
+        self._save_show_hidden()
+        # 重新拉取根目录与所有已展开子树，让过滤结果立即生效
+        self._auto_refresh_fingerprints.clear()
+        if self._session is not None:
+            self._populate_tree_root()
+
     @classmethod
     def _make_item(cls, e: RemoteEntry) -> QTreeWidgetItem:
         """根据一个远端条目构建树节点（含图标、占位子项）。
@@ -1110,6 +1187,7 @@ class RemoteExplorerPanel(QWidget):
 
     def _apply_top_level(self, entries: list[RemoteEntry]):
         """把目录内容直接放到树根（批量插入 + 关闭重绘减少卡顿）"""
+        entries = self._visible_entries(entries)
         try:
             self._tree.setUpdatesEnabled(False)
             self._tree.clear()
@@ -1224,6 +1302,8 @@ class RemoteExplorerPanel(QWidget):
                 # 网络错误或目录不存在了：清掉指纹，下次会重新建基线
                 self._auto_refresh_fingerprints.pop(path, None)
                 return
+            # 与建项/基线保持一致：隐藏开关关闭时先滤掉点开头的条目
+            entries = self._visible_entries(entries)
             fp = self._entries_fingerprint(entries)
             old_fp = self._auto_refresh_fingerprints.get(path)
             self._auto_refresh_fingerprints[path] = fp
@@ -1411,6 +1491,7 @@ class RemoteExplorerPanel(QWidget):
 
     def _apply_children(self, parent_item: QTreeWidgetItem, entries: list[RemoteEntry]):
         # 父项可能已被释放（用户断开了），守一下
+        entries = self._visible_entries(entries)
         try:
             self._tree.setUpdatesEnabled(False)
             parent_item.takeChildren()

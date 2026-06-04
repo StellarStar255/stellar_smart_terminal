@@ -294,6 +294,8 @@ TRANSLATIONS = {
     "explorer.left_right_split": {"zh": "左右分屏", "en": "Side by Side"},
     "explorer.split_tooltip": {"zh": "勾选：文件编辑器在右侧（左右分屏）\n不勾选：文件编辑器在下方（上下分屏）", "en": "Checked: editor on right (horizontal split)\nUnchecked: editor below (vertical split)"},
     "explorer.refresh_tooltip": {"zh": "刷新", "en": "Refresh"},
+    "explorer.settings_tooltip": {"zh": "视图设置", "en": "View settings"},
+    "explorer.show_hidden_files": {"zh": "显示隐藏文件", "en": "Show hidden files"},
 
     # ===== Git 面板 =====
     "git.source_control": {"zh": "Source Control", "en": "Source Control"},
@@ -507,6 +509,8 @@ TRANSLATIONS = {
         "en": "Clear all {count} bookmarks for host \"{host}\"?\n\nThis cannot be undone."
     },
     "remote.bookmarks_tooltip": {"zh": "书签：管理 / 跳转远程路径", "en": "Bookmarks: manage / jump to remote paths"},
+    "remote.settings_tooltip": {"zh": "视图设置", "en": "View settings"},
+    "remote.show_hidden_files": {"zh": "显示隐藏文件", "en": "Show hidden files"},
     "remote.copy": {"zh": "复制", "en": "Copy"},
     "remote.paste": {"zh": "粘贴", "en": "Paste"},
     "remote.paste_with_label": {"zh": "粘贴 ({label})", "en": "Paste ({label})"},

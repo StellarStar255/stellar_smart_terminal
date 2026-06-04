@@ -39,7 +39,7 @@ from PyQt6.QtWidgets import (
     QStackedWidget
 )
 from PyQt6 import sip  # 用于检查 C++ 对象是否已被删除
-from PyQt6.QtCore import Qt, QTimer, QEvent, QPoint, QMimeData, pyqtSignal, QObject
+from PyQt6.QtCore import Qt, QTimer, QEvent, QPoint, QMimeData, pyqtSignal, QObject, QSize
 from PyQt6.QtGui import QAction, QIcon, QFont, QColor, QPixmap, QPainter, QPainterPath, QPen, QDrag, QCursor, QBrush, QPalette, QShortcut, QKeySequence
 from PyQt6.QtWidgets import QWidgetAction, QStylePainter, QStyleOptionComboBox
 
@@ -48,7 +48,7 @@ from session_manager import SessionManager
 from exporter import export_session
 from history_dialog import HistoryDialog
 from openai_server import OpenAIServerManager
-from git_widget import GitPanel, GitDiffView, GitOutputView
+from git_widget import GitPanel, GitDiffView, GitOutputView, _make_git_tool_icon
 from remote_explorer_widget import RemoteExplorerPanel
 from explorer_widget import ExplorerPanel
 from toolbar_manager import ToolbarManagerDialog
@@ -7098,6 +7098,25 @@ class MainWindow(QMainWindow):
         self._explorer_split_checkbox.stateChanged.connect(self._on_explorer_split_orientation_changed)
         explorer_header_layout.addWidget(self._explorer_split_checkbox)
 
+        # 视图设置按钮（齿轮）：弹出菜单，含"显示隐藏文件"开关
+        self._explorer_settings_btn = QPushButton()
+        self._explorer_settings_btn.setFixedSize(24, 24)
+        self._explorer_settings_btn.setIconSize(QSize(16, 16))
+        self._explorer_settings_btn.setIcon(_make_git_tool_icon('gear', '#888'))
+        self._explorer_settings_btn.setToolTip(t("explorer.settings_tooltip"))
+        self._explorer_settings_btn.setStyleSheet("""
+            QPushButton {
+                background-color: transparent;
+                border: none;
+            }
+            QPushButton:hover {
+                background-color: rgba(255, 255, 255, 0.08);
+                border-radius: 4px;
+            }
+        """)
+        self._explorer_settings_btn.clicked.connect(self._show_explorer_settings_menu)
+        explorer_header_layout.addWidget(self._explorer_settings_btn)
+
         # 刷新按钮
         refresh_btn = QPushButton("↻")
         refresh_btn.setFixedSize(24, 24)
@@ -7177,6 +7196,35 @@ class MainWindow(QMainWindow):
         )
 
         layout.addWidget(self.explorer_splitter)
+
+    def _show_explorer_settings_menu(self):
+        """Explorer 齿轮按钮：弹出视图设置菜单（含"显示隐藏文件"开关）。"""
+        if not hasattr(self, 'explorer_panel'):
+            return
+        menu = QMenu(self)
+        menu.setStyleSheet("""
+            QMenu {
+                background-color: #2d2d44;
+                color: #eaeaea;
+                border: 1px solid #3d3d5c;
+                border-radius: 6px;
+                padding: 4px;
+            }
+            QMenu::item {
+                padding: 6px 24px 6px 12px;
+                border-radius: 4px;
+            }
+            QMenu::item:selected {
+                background-color: #667eea;
+            }
+        """)
+        act = menu.addAction(t("explorer.show_hidden_files"))
+        act.setCheckable(True)
+        act.setChecked(self.explorer_panel.is_showing_hidden())
+        act.toggled.connect(self.explorer_panel.set_show_hidden)
+        menu.exec(self._explorer_settings_btn.mapToGlobal(
+            self._explorer_settings_btn.rect().bottomLeft()
+        ))
 
     @property
     def file_editor(self):
