@@ -511,6 +511,8 @@ TRANSLATIONS = {
     "remote.bookmarks_tooltip": {"zh": "书签：管理 / 跳转远程路径", "en": "Bookmarks: manage / jump to remote paths"},
     "remote.settings_tooltip": {"zh": "视图设置", "en": "View settings"},
     "remote.show_hidden_files": {"zh": "显示隐藏文件", "en": "Show hidden files"},
+    "remote.set_default_dir": {"zh": "将当前目录设为该主机的默认启动目录", "en": "Set current folder as default for this host"},
+    "remote.clear_default_dir": {"zh": "清除默认启动目录（{path}）", "en": "Clear default folder ({path})"},
     "remote.copy": {"zh": "复制", "en": "Copy"},
     "remote.paste": {"zh": "粘贴", "en": "Paste"},
     "remote.paste_with_label": {"zh": "粘贴 ({label})", "en": "Paste ({label})"},

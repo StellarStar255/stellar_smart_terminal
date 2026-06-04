@@ -1018,7 +1018,10 @@ class RemoteExplorerPanel(QWidget):
         self._subtitle_label.setText(sess.host_config.alias)
         self._disconnect_btn.show()
         self._stack.setCurrentWidget(self._tree_page)
-        self._current_path = sess.home()
+        # 若为该主机设过默认启动目录就跳过去，否则回 home
+        # （目录若已失效，_populate_tree_root 的 listdir 会通过 _error_signal 提示）
+        default_dir = self._get_default_dir(sess.host_config.alias)
+        self._current_path = default_dir or sess.home()
         self._path_edit.setText(self._current_path)
         self._populate_tree_root()
         self._auto_refresh_timer.start()
@@ -1125,6 +1128,56 @@ class RemoteExplorerPanel(QWidget):
         cfg[self.CONFIG_KEY_SHOW_HIDDEN] = self._show_hidden
         atomic_write_json(p, cfg)
 
+    # ---- 每台主机的默认启动目录（按别名持久化到共享配置） ----
+
+    CONFIG_KEY_DEFAULT_DIRS = 'remote_explorer_default_dirs'
+
+    def _load_default_dirs(self) -> dict:
+        cfg, _ok = read_config_json(self._config_file_path())
+        dirs = cfg.get(self.CONFIG_KEY_DEFAULT_DIRS)
+        return dict(dirs) if isinstance(dirs, dict) else {}
+
+    def _get_default_dir(self, alias: str) -> Optional[str]:
+        """取某台主机记住的默认启动目录；没有则返回 None。"""
+        if not alias:
+            return None
+        val = self._load_default_dirs().get(alias)
+        return val if isinstance(val, str) and val else None
+
+    def _set_default_dir(self, alias: str, path: Optional[str]):
+        """记住 / 清除某台主机的默认启动目录（path=None 表示清除）。
+
+        读-改-写：只在读到完整配置时才回写，避免多窗口下覆盖别人刚写的字段。
+        """
+        if not alias:
+            return
+        p = self._config_file_path()
+        cfg, ok = read_config_json(p)
+        if not ok:
+            return
+        dirs = cfg.get(self.CONFIG_KEY_DEFAULT_DIRS)
+        if not isinstance(dirs, dict):
+            dirs = {}
+        if path:
+            dirs[alias] = path
+        else:
+            dirs.pop(alias, None)
+        cfg[self.CONFIG_KEY_DEFAULT_DIRS] = dirs
+        atomic_write_json(p, cfg)
+
+    def _set_current_as_default_dir(self):
+        """把当前所在目录设为当前主机的默认启动目录。"""
+        if self._session is None:
+            return
+        path = self._current_path or self._session.home()
+        self._set_default_dir(self._session.host_config.alias, path)
+
+    def _clear_default_dir(self):
+        """清除当前主机的默认启动目录（下次连接回到 home）。"""
+        if self._session is None:
+            return
+        self._set_default_dir(self._session.host_config.alias, None)
+
     def _visible_entries(self, entries):
         """根据开关过滤掉以点开头的隐藏条目（在条目刚到达 UI 线程时统一过滤，
         这样指纹比对、建项、增量刷新看到的都是同一份"可见集合"）。"""
@@ -1151,6 +1204,20 @@ class RemoteExplorerPanel(QWidget):
         act.setCheckable(True)
         act.setChecked(self._show_hidden)
         act.toggled.connect(self._set_show_hidden)
+
+        # 已连接时：把当前目录设为该主机默认启动目录 / 清除
+        if self._session is not None:
+            menu.addSeparator()
+            alias = self._session.host_config.alias
+            set_act = menu.addAction(t("remote.set_default_dir"))
+            set_act.triggered.connect(self._set_current_as_default_dir)
+            current_default = self._get_default_dir(alias)
+            if current_default:
+                clear_act = menu.addAction(
+                    t("remote.clear_default_dir", path=current_default)
+                )
+                clear_act.triggered.connect(self._clear_default_dir)
+
         menu.exec(self._settings_btn.mapToGlobal(
             self._settings_btn.rect().bottomLeft()
         ))
