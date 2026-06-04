@@ -823,11 +823,18 @@ class GitCommitWidget(QFrame):
         """)
 
     def _on_commit(self):
-        """提交按钮点击"""
+        """提交按钮点击
+
+        注意：这里不清空输入框 —— 提交可能失败（如无暂存改动、钩子拒绝），
+        若在此处提前清空，用户辛苦写/生成的提交信息就丢了。改由 GitPanel
+        在提交确实成功后调用 clear_message()。"""
         message = self.message_input.toPlainText().strip()
         if message:
             self.commit_requested.emit(message)
-            self.message_input.clear()
+
+    def clear_message(self):
+        """清空提交信息输入框（仅在提交成功后由 GitPanel 调用）。"""
+        self.message_input.clear()
 
     def _on_generate(self):
         """生成提交信息按钮点击 —— 由 GitPanel 接管（它持有 GitManager 和 LLM 配置）"""
@@ -2662,8 +2669,9 @@ class GitPanel(QWidget):
             self._git_manager.discard_changes(path)
 
     def _on_commit(self, message: str):
-        """提交处理"""
+        """提交处理：仅在提交成功后才清空输入框，失败时保留用户已写的信息。"""
         if self._git_manager.commit(message):
+            self.commit_widget.clear_message()
             self._refresh_all_async()
 
     def _on_push(self):
