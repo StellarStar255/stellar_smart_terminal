@@ -697,17 +697,18 @@ class RemoteExplorerPanel(QWidget):
         self._bookmark_btn.clicked.connect(self._show_bookmark_menu)
         pb_layout.addWidget(self._bookmark_btn)
 
+        self._path_edit = QLineEdit()
+        self._path_edit.returnPressed.connect(self._on_path_edited)
+        pb_layout.addWidget(self._path_edit, 1)
+
         # 视图设置按钮（齿轮）：弹出菜单，含"显示隐藏文件"开关
+        # 放在最右侧，避免干扰路径栏左侧的常用导航按钮
         self._settings_btn = QPushButton()
         self._settings_btn.setFixedSize(26, 26)
         self._settings_btn.setIconSize(QSize(16, 16))
         self._settings_btn.setToolTip(t("remote.settings_tooltip"))
         self._settings_btn.clicked.connect(self._show_settings_menu)
         pb_layout.addWidget(self._settings_btn)
-
-        self._path_edit = QLineEdit()
-        self._path_edit.returnPressed.connect(self._on_path_edited)
-        pb_layout.addWidget(self._path_edit, 1)
 
         tp_layout.addWidget(self._path_bar)
 
