@@ -35,7 +35,10 @@ from ssh_session import (
     rename_ssh_config_host,
 )
 from git_widget import _make_git_tool_icon  # 复用统一风格的矢量线条图标
-from utils import read_config_json, atomic_write_json
+from utils import (
+    read_config_json, atomic_write_json,
+    parse_search_tokens, name_matches_tokens,
+)
 
 
 # 子项的 UserRole 数据键
@@ -520,6 +523,14 @@ class RemoteExplorerPanel(QWidget):
     _refresh_root_signal = pyqtSignal()
     _refresh_subtree_signal = pyqtSignal(object, str)  # (item, path)
     _auto_refresh_result = pyqtSignal(str, object)    # (path, entries or None on error)
+    _search_result_signal = pyqtSignal(int, list, bool)  # (generation, items, truncated)
+
+    # 远程递归搜索上限：命中数 / 已扫描目录数 / 最大深度。
+    # SFTP 是单工作线程串行的，每个目录一次网络往返，所以上限取得保守，
+    # 避免一次搜索把会话占用太久（命中/目录/深度任一触顶即停并提示已截断）。
+    _SEARCH_MAX_RESULTS = 500
+    _SEARCH_MAX_DIRS = 600
+    _SEARCH_MAX_DEPTH = 6
 
     def __init__(self, theme: Optional[dict] = None, parent: Optional[QWidget] = None):
         super().__init__(parent)
@@ -545,6 +556,8 @@ class RemoteExplorerPanel(QWidget):
         self._show_hidden = self._load_show_hidden()
         # 排序方式（默认按名称升序，文件夹始终置顶），从配置读取
         self._sort_key, self._sort_desc = self._load_sort()
+        # 文件搜索状态：generation 用于丢弃过期/已取消的后台结果
+        self._search_gen = 0
 
         self._setup_ui()
         self._apply_theme()
@@ -574,6 +587,13 @@ class RemoteExplorerPanel(QWidget):
         self._refresh_root_signal.connect(self._populate_tree_root)
         self._refresh_subtree_signal.connect(self._reload_subtree)
         self._password_prompt_signal.connect(self._on_password_prompt)
+        self._search_result_signal.connect(self._on_search_results)
+
+        # 搜索输入防抖：停止输入 300ms 后才发起递归搜索
+        self._search_timer = QTimer(self)
+        self._search_timer.setSingleShot(True)
+        self._search_timer.setInterval(300)
+        self._search_timer.timeout.connect(self._start_search)
 
     # ---------- UI ----------
 
@@ -714,6 +734,13 @@ class RemoteExplorerPanel(QWidget):
 
         tp_layout.addWidget(self._path_bar)
 
+        # 搜索框：多关键词（空格分隔）递归搜索当前目录下的远程文件/文件夹
+        self._search_edit = QLineEdit()
+        self._search_edit.setPlaceholderText(t("search.placeholder"))
+        self._search_edit.setClearButtonEnabled(True)
+        self._search_edit.textChanged.connect(self._on_search_text_changed)
+        tp_layout.addWidget(self._search_edit)
+
         self._tree = _RemoteTreeWidget(self)
         self._tree.setHeaderHidden(True)
         self._tree.setContextMenuPolicy(Qt.ContextMenuPolicy.CustomContextMenu)
@@ -723,6 +750,13 @@ class RemoteExplorerPanel(QWidget):
         # 原地重命名的编辑器代理（去掉 emoji 前缀，由 panel 异步走 SFTP rename）
         self._tree.setItemDelegate(_RemoteItemDelegate(self, self._tree))
         tp_layout.addWidget(self._tree, 1)
+
+        # 搜索结果列表（扁平展示命中项；默认隐藏，搜索时替换 _tree）
+        self._search_results = QListWidget()
+        self._search_results.setUniformItemSizes(True)
+        self._search_results.setVisible(False)
+        self._search_results.itemDoubleClicked.connect(self._open_search_result)
+        tp_layout.addWidget(self._search_results, 1)
 
         # Cmd+C / Cmd+V — 当 tree 或其子项有焦点时触发
         copy_sc = QShortcut(QKeySequence.StandardKey.Copy, self._tree)
@@ -817,6 +851,33 @@ class RemoteExplorerPanel(QWidget):
             QLineEdit:focus {{ border: 1px solid {accent}; }}
         """)
 
+        self._search_edit.setStyleSheet(f"""
+            QLineEdit {{
+                background-color: {bg_medium}; color: {text};
+                border: 1px solid {border}; border-radius: 4px;
+                padding: 4px 8px; margin: 4px;
+            }}
+            QLineEdit:focus {{ border: 1px solid {accent}; }}
+        """)
+
+        self._search_results.setStyleSheet(f"""
+            QListWidget {{
+                background-color: {bg_dark}; color: {text};
+                border: none; outline: none;
+            }}
+            QListWidget::item {{ padding: 4px 8px; }}
+            QListWidget::item:hover {{ background-color: {bg_hover}; }}
+            QListWidget::item:selected {{ background-color: {accent}; color: white; }}
+            QScrollBar:vertical {{
+                background-color: {bg_dark}; width: 10px; border: none;
+            }}
+            QScrollBar::handle:vertical {{
+                background-color: {border}; border-radius: 5px; min-height: 20px;
+            }}
+            QScrollBar::handle:vertical:hover {{ background-color: {text_dim}; }}
+            QScrollBar::add-line:vertical, QScrollBar::sub-line:vertical {{ height: 0px; }}
+        """)
+
     def apply_theme(self, theme: dict):
         self.theme = theme or {}
         self._apply_theme()
@@ -831,6 +892,7 @@ class RemoteExplorerPanel(QWidget):
         self._refresh_btn.setToolTip(t("remote.refresh"))
         self._bookmark_btn.setToolTip(t("remote.bookmarks_tooltip"))
         self._settings_btn.setToolTip(t("remote.settings_tooltip"))
+        self._search_edit.setPlaceholderText(t("search.placeholder"))
         self._empty_hint.setText(t("remote.no_hosts"))
         # 重建主机列表（条目文本本身是别名+真实地址，不用国际化）
         if self._session is None:
@@ -1088,6 +1150,14 @@ class RemoteExplorerPanel(QWidget):
 
         和本地 Explorer 行为一致：path 在路径栏里显示，文件/目录直接平铺在树根。
         """
+        # 任何导航（上一级/主目录/路径栏/刷新/双击进目录）都退出搜索态：
+        # 清掉搜索框、作废在途搜索、恢复显示文件树。
+        if self._search_edit.text():
+            self._search_edit.blockSignals(True)
+            self._search_edit.clear()
+            self._search_edit.blockSignals(False)
+            self._search_gen += 1
+        self._exit_search()
         # 整树重建 → 旧的自动刷新指纹全部失效，等 _apply_top_level 后重新基线
         self._auto_refresh_fingerprints.clear()
         self._tree.clear()
@@ -1691,6 +1761,129 @@ class RemoteExplorerPanel(QWidget):
             self._populate_tree_root()
         else:
             self._open_remote_file(entry)
+
+    # ---------- 文件搜索（递归、多关键词组合） ----------
+
+    def _on_search_text_changed(self, _text: str):
+        """输入变化：空 → 立即退出搜索；非空 → 防抖后发起递归搜索。"""
+        self._search_gen += 1  # 让上一轮后台结果作废
+        if self._session is None or not self._search_edit.text().strip():
+            self._search_timer.stop()
+            self._exit_search()
+            return
+        self._search_timer.start()
+
+    def _exit_search(self):
+        """退出搜索态：隐藏结果列表，恢复正常文件树。"""
+        self._search_results.setVisible(False)
+        self._search_results.clear()
+        self._tree.setVisible(True)
+
+    def _start_search(self):
+        """防抖结束 → 在 SSH 工作线程上递归扫描当前目录。"""
+        if self._session is None:
+            return
+        query = self._search_edit.text().strip()
+        tokens = parse_search_tokens(query)
+        if not tokens:
+            self._exit_search()
+            return
+        gen = self._search_gen
+        sess = self._session
+        root = self._current_path or "/"
+        show_hidden = self._show_hidden
+        # 切到结果视图并给个「搜索中」占位
+        self._tree.setVisible(False)
+        self._search_results.setVisible(True)
+        self._search_results.clear()
+        placeholder = QListWidgetItem(t("search.searching"))
+        placeholder.setFlags(Qt.ItemFlag.NoItemFlags)
+        self._search_results.addItem(placeholder)
+
+        fut = sess.submit(self._remote_search_walk, gen, sess, root, tokens, show_hidden)
+
+        def on_done(f):
+            try:
+                res = f.result()
+            except Exception:
+                res = None
+            if res is None:
+                return  # 已取消或出错
+            results, truncated = res
+            self._search_result_signal.emit(gen, results, truncated)
+        fut.add_done_callback(on_done)
+
+    def _remote_search_walk(self, gen, sess, root, tokens, show_hidden):
+        """在 SSH 工作线程里 BFS 递归 listdir，匹配文件名（多关键词 AND）。
+
+        触顶（命中/目录数/深度）或查询变化即停。返回 (entries, truncated)，
+        若中途查询已变化则返回 None 让回调丢弃。"""
+        results: list[RemoteEntry] = []
+        dirs_scanned = 0
+        truncated = False
+        queue = [(root, 0)]
+        while queue:
+            if gen != self._search_gen:
+                return None  # 查询已变化 → 放弃本轮
+            path, depth = queue.pop(0)
+            try:
+                entries = sess.listdir(path)
+            except Exception:
+                continue
+            dirs_scanned += 1
+            for e in entries:
+                if not show_hidden and e.name.startswith('.'):
+                    continue  # 既不匹配也不深入隐藏项
+                if name_matches_tokens(e.name, tokens):
+                    results.append(e)
+                    if len(results) >= self._SEARCH_MAX_RESULTS:
+                        truncated = True
+                        break
+                if e.is_dir and not e.is_link and depth < self._SEARCH_MAX_DEPTH:
+                    queue.append((e.path, depth + 1))
+            if truncated:
+                break
+            if dirs_scanned >= self._SEARCH_MAX_DIRS:
+                truncated = True
+                break
+        return results, truncated
+
+    def _on_search_results(self, gen: int, results: list, truncated: bool):
+        """回到 UI 线程：把命中项填进结果列表。"""
+        if gen != self._search_gen:
+            return  # 过期结果
+        self._search_results.clear()
+        if not results:
+            empty = QListWidgetItem(t("search.no_results"))
+            empty.setFlags(Qt.ItemFlag.NoItemFlags)
+            self._search_results.addItem(empty)
+            return
+        root = self._current_path or "/"
+        results.sort(key=lambda e: (not e.is_dir, e.path.lower()))
+        for e in results:
+            icon = "📁  " if e.is_dir else "📄  "
+            rel = e.path[len(root):].lstrip("/") if e.path.startswith(root) else e.path
+            item = QListWidgetItem(icon + (rel or e.name))
+            item.setData(Qt.ItemDataRole.UserRole, e)
+            item.setToolTip(e.path)
+            self._search_results.addItem(item)
+        if truncated:
+            note = QListWidgetItem(t("search.truncated", count=len(results)))
+            note.setFlags(Qt.ItemFlag.NoItemFlags)
+            self._search_results.addItem(note)
+
+    def _open_search_result(self, item: QListWidgetItem):
+        """双击搜索结果：文件 → 打开；文件夹 → 进入该目录并退出搜索。"""
+        e: RemoteEntry = item.data(Qt.ItemDataRole.UserRole)
+        if not e:
+            return
+        if e.is_dir:
+            self._search_edit.clear()  # 触发 _exit_search
+            self._current_path = e.path
+            self._path_edit.setText(self._current_path)
+            self._populate_tree_root()
+        else:
+            self._open_remote_file(e)
 
     def _on_up(self):
         if not self._current_path or self._current_path == "/":

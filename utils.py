@@ -16,6 +16,29 @@ CODE_EXTENSIONS = {'.py', '.js', '.ts', '.jsx', '.tsx', '.html', '.css', '.json'
 
 ALL_EXTENSIONS = IMAGE_EXTENSIONS | DOCUMENT_EXTENSIONS | CODE_EXTENSIONS
 
+
+def parse_search_tokens(query: str) -> list:
+    """把搜索框文本拆成空格分隔的关键词（小写、去空白、去重保序）。
+
+    多个关键词是 AND 关系：例如 "stellar terminal" 拆成 ['stellar', 'terminal']，
+    可命中 "stellar_smart_terminal"。返回空列表表示「不过滤」。
+    """
+    seen = set()
+    tokens = []
+    for tok in query.lower().split():
+        if tok and tok not in seen:
+            seen.add(tok)
+            tokens.append(tok)
+    return tokens
+
+
+def name_matches_tokens(name: str, tokens: list) -> bool:
+    """文件名是否命中全部关键词（大小写不敏感的子串 AND 匹配）。"""
+    if not tokens:
+        return True
+    low = name.lower()
+    return all(tok in low for tok in tokens)
+
 # 预编译文件路径匹配正则表达式
 _ext_pattern = '|'.join(ext[1:] for ext in ALL_EXTENSIONS)
 # Unix absolute paths: /home/user/file.py

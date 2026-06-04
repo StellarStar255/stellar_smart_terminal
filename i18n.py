@@ -303,6 +303,10 @@ TRANSLATIONS = {
     "sort.type": {"zh": "类型", "en": "Type"},
     "sort.ascending": {"zh": "升序", "en": "Ascending"},
     "sort.descending": {"zh": "降序", "en": "Descending"},
+    "search.placeholder": {"zh": "搜索文件（空格分隔多个关键词）", "en": "Search files (space-separated keywords)"},
+    "search.searching": {"zh": "搜索中…", "en": "Searching…"},
+    "search.no_results": {"zh": "没有匹配的文件", "en": "No matching files"},
+    "search.truncated": {"zh": "结果较多，仅显示前 {count} 项", "en": "Too many results — showing first {count}"},
 
     # ===== Git 面板 =====
     "git.source_control": {"zh": "Source Control", "en": "Source Control"},

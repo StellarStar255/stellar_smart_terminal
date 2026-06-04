@@ -7,18 +7,22 @@ import posixpath
 import sys
 import subprocess
 import shutil
+import threading
 from pathlib import Path
 from typing import Optional
 
 from i18n import t
 import explorer_clipboard
-from utils import read_config_json, atomic_write_json
+from utils import (
+    read_config_json, atomic_write_json,
+    parse_search_tokens, name_matches_tokens,
+)
 
 from PyQt6.QtWidgets import (
     QWidget, QVBoxLayout, QHBoxLayout, QFrame, QLabel,
     QPushButton, QTreeView, QMenu, QLineEdit, QMessageBox,
     QAbstractItemView, QFileDialog, QApplication, QProgressDialog,
-    QStyledItemDelegate, QFileIconProvider
+    QStyledItemDelegate, QFileIconProvider, QListWidget, QListWidgetItem
 )
 from PyQt6.QtCore import Qt, QDir, QModelIndex, QPersistentModelIndex, pyqtSignal, QTimer, QEventLoop, QSize, QFileInfo
 from PyQt6.QtGui import (
@@ -311,6 +315,12 @@ class ExplorerPanel(QWidget):
     file_edit_requested = pyqtSignal(str)  # 请求在内置编辑器中打开文件
     save_file_requested = pyqtSignal()  # 请求保存当前编辑的文件
     save_file_as_requested = pyqtSignal()  # 请求另存为当前编辑的文件
+    # 后台搜索结果回 UI 线程：(generation, items, truncated)
+    _search_result_signal = pyqtSignal(int, list, bool)
+
+    # 搜索上限：命中数 / 已扫描条目数（防止超大目录把内存/时间打满）
+    _SEARCH_MAX_RESULTS = 2000
+    _SEARCH_MAX_SCANNED = 200000
 
     # 配置文件里"是否显示隐藏文件"的键名（与 main_window 共用 .smart_terminal_config.json）
     CONFIG_KEY_SHOW_HIDDEN = 'explorer_show_hidden'
@@ -331,8 +341,18 @@ class ExplorerPanel(QWidget):
         # 排序方式（默认按名称升序），从配置读取
         self._sort_key, self._sort_desc = self._load_sort()
 
+        # 文件搜索状态：generation 用于丢弃过期的后台结果
+        self._search_gen = 0
+
         self._setup_ui()
         self._connect_signals()
+
+        # 输入防抖：停止输入 250ms 后才真正发起递归搜索
+        self._search_timer = QTimer(self)
+        self._search_timer.setSingleShot(True)
+        self._search_timer.setInterval(250)
+        self._search_timer.timeout.connect(self._start_search)
+        self._search_result_signal.connect(self._on_search_results)
 
         # 自动刷新兜底：QFileSystemModel 已经通过 FSEvents 监听本地变更；
         # 这里只是一道保险，60s 检查一次当前目录的条目集合，差异时才 refresh。
@@ -432,6 +452,20 @@ class ExplorerPanel(QWidget):
         layout.setContentsMargins(0, 0, 0, 0)
         layout.setSpacing(0)
 
+        # 顶部搜索框：多关键词（空格分隔）递归搜索当前根目录下的文件/文件夹
+        self.search_edit = QLineEdit()
+        self.search_edit.setPlaceholderText(t("search.placeholder"))
+        self.search_edit.setClearButtonEnabled(True)
+        self.search_edit.textChanged.connect(self._on_search_text_changed)
+        layout.addWidget(self.search_edit)
+
+        # 搜索结果列表（扁平展示命中项；默认隐藏，搜索时替换 tree_view）。
+        # 在此处先创建，确保 _update_style() 引用时已存在；稍后再加入布局。
+        self.search_results = QListWidget()
+        self.search_results.setUniformItemSizes(True)
+        self.search_results.setVisible(False)
+        self.search_results.itemDoubleClicked.connect(self._open_search_result)
+
         # 文件系统模型
         self.model = FilteredFileSystemModel()
         # 用轻量图标提供器，避免大目录展开时逐文件查询系统图标导致卡顿
@@ -481,6 +515,7 @@ class ExplorerPanel(QWidget):
         self._apply_sort()
 
         layout.addWidget(self.tree_view)
+        layout.addWidget(self.search_results, 1)
 
     def _connect_signals(self):
         """连接信号"""
@@ -614,6 +649,40 @@ class ExplorerPanel(QWidget):
             }}
         """)
 
+        # 搜索框
+        self.search_edit.setStyleSheet(f"""
+            QLineEdit {{
+                background-color: {bg_medium};
+                color: {text};
+                border: 1px solid {border};
+                border-radius: 4px;
+                padding: 4px 8px;
+                margin: 4px;
+            }}
+            QLineEdit:focus {{ border: 1px solid {accent}; }}
+        """)
+
+        # 搜索结果列表
+        self.search_results.setStyleSheet(f"""
+            QListWidget {{
+                background-color: {bg_dark};
+                color: {text};
+                border: none;
+                outline: none;
+            }}
+            QListWidget::item {{ padding: 4px 8px; }}
+            QListWidget::item:hover {{ background-color: {bg_hover}; }}
+            QListWidget::item:selected {{ background-color: {accent}; color: white; }}
+            QScrollBar:vertical {{
+                background-color: {bg_dark}; width: 10px; border: none;
+            }}
+            QScrollBar::handle:vertical {{
+                background-color: {border}; border-radius: 5px; min-height: 20px;
+            }}
+            QScrollBar::handle:vertical:hover {{ background-color: {text_dim}; }}
+            QScrollBar::add-line:vertical, QScrollBar::sub-line:vertical {{ height: 0px; }}
+        """)
+
     def _handle_drop_copy(self, src_paths: list, target_dir: str):
         """把从其他面板/Finder 拖入的文件复制到 target_dir。
 
@@ -669,6 +738,9 @@ class ExplorerPanel(QWidget):
             self.tree_view.setRootIndex(self.model.index(path))
             # 切换了根 → 重置自动刷新基线
             self._auto_refresh_fingerprint = frozenset()
+            # 换了目录 → 退出可能正在进行的搜索（结果属于旧根目录）
+            if hasattr(self, 'search_edit') and self.search_edit.text():
+                self.search_edit.clear()
 
     def prewarm(self, path: str = None):
         """启动后空闲预热：提前完成首次 ⌘B 才会触发的一次性开销。
@@ -702,6 +774,129 @@ class ExplorerPanel(QWidget):
         self.model.setRootPath(current)
         self.tree_view.setRootIndex(self.model.index(current))
         self._auto_refresh_fingerprint = frozenset()
+
+    # ---------- 文件搜索（递归、多关键词组合） ----------
+
+    def _on_search_text_changed(self, _text: str):
+        """输入变化：空 → 立即退出搜索；非空 → 防抖后发起后台搜索。"""
+        # 每次输入都让上一轮后台结果作废
+        self._search_gen += 1
+        if not self.search_edit.text().strip():
+            self._search_timer.stop()
+            self._exit_search()
+            return
+        self._search_timer.start()
+
+    def _exit_search(self):
+        """退出搜索态：隐藏结果列表，恢复正常文件树。"""
+        self.search_results.setVisible(False)
+        self.search_results.clear()
+        self.tree_view.setVisible(True)
+
+    def _start_search(self):
+        """防抖结束 → 在后台线程递归扫描当前根目录。"""
+        query = self.search_edit.text().strip()
+        if not query:
+            self._exit_search()
+            return
+        tokens = parse_search_tokens(query)
+        if not tokens:
+            self._exit_search()
+            return
+        gen = self._search_gen
+        root = self._current_path
+        show_hidden = self._show_hidden
+        # 切到结果视图并给个「搜索中」占位
+        self.tree_view.setVisible(False)
+        self.search_results.setVisible(True)
+        self.search_results.clear()
+        placeholder = QListWidgetItem(t("search.searching"))
+        placeholder.setFlags(Qt.ItemFlag.NoItemFlags)
+        self.search_results.addItem(placeholder)
+
+        t_thread = threading.Thread(
+            target=self._run_search, args=(gen, root, tokens, show_hidden),
+            daemon=True,
+        )
+        t_thread.start()
+
+    def _run_search(self, gen: int, root: str, tokens: list, show_hidden: bool):
+        """后台线程：os.walk 递归匹配，命中/已扫描达到上限即停。"""
+        results = []
+        scanned = 0
+        truncated = False
+        try:
+            for dirpath, dirnames, filenames in os.walk(root):
+                if gen != self._search_gen:
+                    return  # 查询已变化，丢弃本轮
+                if not show_hidden:
+                    # 原地裁剪隐藏目录，避免走进 .git / .venv 等
+                    dirnames[:] = [d for d in dirnames if not d.startswith('.')]
+                for name in dirnames + filenames:
+                    if not show_hidden and name.startswith('.'):
+                        continue
+                    scanned += 1
+                    if name_matches_tokens(name, tokens):
+                        abs_path = os.path.join(dirpath, name)
+                        is_dir = name in dirnames
+                        rel = os.path.relpath(abs_path, root)
+                        results.append((abs_path, is_dir, rel))
+                        if len(results) >= self._SEARCH_MAX_RESULTS:
+                            truncated = True
+                            break
+                    if scanned >= self._SEARCH_MAX_SCANNED:
+                        truncated = True
+                        break
+                if truncated:
+                    break
+        except Exception:
+            pass
+        if gen == self._search_gen:
+            self._search_result_signal.emit(gen, results, truncated)
+
+    def _on_search_results(self, gen: int, results: list, truncated: bool):
+        """回到 UI 线程：把命中项填进结果列表。"""
+        if gen != self._search_gen:
+            return  # 过期结果
+        self.search_results.clear()
+        if not results:
+            empty = QListWidgetItem(t("search.no_results"))
+            empty.setFlags(Qt.ItemFlag.NoItemFlags)
+            self.search_results.addItem(empty)
+            return
+        # 文件夹在前，再按相对路径排序，观感稳定
+        results.sort(key=lambda r: (not r[1], r[2].lower()))
+        for abs_path, is_dir, rel in results:
+            icon = "📁  " if is_dir else "📄  "
+            item = QListWidgetItem(icon + rel)
+            item.setData(Qt.ItemDataRole.UserRole, (abs_path, is_dir))
+            item.setToolTip(abs_path)
+            self.search_results.addItem(item)
+        if truncated:
+            note = QListWidgetItem(
+                t("search.truncated", count=len(results)))
+            note.setFlags(Qt.ItemFlag.NoItemFlags)
+            self.search_results.addItem(note)
+
+    def _open_search_result(self, item: QListWidgetItem):
+        """双击搜索结果：文件 → 打开；文件夹 → 退出搜索并在树里定位展开。"""
+        data = item.data(Qt.ItemDataRole.UserRole)
+        if not data:
+            return
+        abs_path, is_dir = data
+        if is_dir:
+            # 不改变根目录（否则会与工具栏目录脱节且无法返回），
+            # 而是退出搜索、在原有文件树里定位并展开该文件夹。
+            self.search_edit.clear()  # 触发 _exit_search
+            idx = self.model.index(abs_path)
+            if idx.isValid():
+                self.tree_view.setCurrentIndex(idx)
+                self.tree_view.scrollTo(
+                    idx, QAbstractItemView.ScrollHint.PositionAtCenter)
+                self.tree_view.expand(idx)
+        elif os.path.isfile(abs_path):
+            self.file_double_clicked.emit(abs_path)
+            self.file_edit_requested.emit(abs_path)
 
     def _auto_refresh_tick(self):
         """60s 安全网：QFileSystemModel + FSEvents 已经处理大多数情况，
@@ -746,11 +941,10 @@ class ExplorerPanel(QWidget):
     def apply_language(self):
         """应用语言设置（刷新可翻译的 UI 文本）
 
-        ExplorerPanel 没有持久的文本标签（右键菜单每次创建时
-        会调用 t() 获取最新翻译），因此此方法目前无需额外操作。
-        保留此方法以便将来添加持久 UI 元素时使用。
+        右键菜单每次创建时会调用 t() 获取最新翻译，无需在此处理；
+        但常驻的搜索框 placeholder 需要在切换语言时更新。
         """
-        pass
+        self.search_edit.setPlaceholderText(t("search.placeholder"))
 
     def set_editing_file(self, file_path: str):
         """设置当前正在编辑的文件路径"""
