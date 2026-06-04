@@ -23,7 +23,7 @@ from PyQt6.QtWidgets import (
     QAbstractItemView, QDialog,
 )
 from PyQt6.QtCore import Qt, pyqtSignal, QTimer, QMimeData, QUrl, QSize
-from PyQt6.QtGui import QAction, QCursor, QDrag, QShortcut, QKeySequence, QColor, QBrush
+from PyQt6.QtGui import QAction, QCursor, QDrag, QShortcut, QKeySequence
 from PyQt6 import sip  # 用于检查 C++ 对象是否已被删除
 
 from i18n import t
@@ -427,9 +427,28 @@ class _RemoteItemDelegate(QStyledItemDelegate):
     """原地重命名时只把 entry.name 喂给编辑框，避免用户看到/编辑到 emoji 前缀；
     提交时绕过 model 直接走 SFTP rename，由 panel 在成功后刷新条目文本。"""
 
+    # 隐藏条目（含 emoji 图标 + 文字）整体降到此透明度，和本地 Explorer 的
+    # 隐藏图标透明度保持一致
+    HIDDEN_OPACITY = 0.45
+
     def __init__(self, panel, parent=None):
         super().__init__(parent)
         self._panel = panel
+
+    def paint(self, painter, option, index):
+        # 隐藏文件/文件夹（名字以点开头）整行变淡：emoji 是彩色字形，
+        # 无法用前景色染淡，只能靠降低绘制透明度让图标和文字一起变浅。
+        item = self._panel._tree.itemFromIndex(index) if index.isValid() else None
+        entry: Optional[RemoteEntry] = (
+            item.data(0, _ROLE_ENTRY) if item is not None else None
+        )
+        if entry is not None and entry.name.startswith('.'):
+            painter.save()
+            painter.setOpacity(self.HIDDEN_OPACITY)
+            super().paint(painter, option, index)
+            painter.restore()
+            return
+        super().paint(painter, option, index)
 
     def setEditorData(self, editor, index):
         item = self._panel._tree.itemFromIndex(index) if index.isValid() else None
@@ -1070,23 +1089,20 @@ class RemoteExplorerPanel(QWidget):
             self._top_level_ready.emit(entries)
         fut.add_done_callback(on_done)
 
-    # 隐藏条目（以点开头）的前景色，和本地 Explorer 保持一致
-    HIDDEN_COLOR = QColor("#888888")
-
     @classmethod
     def _make_item(cls, e: RemoteEntry) -> QTreeWidgetItem:
-        """根据一个远端条目构建树节点（含图标、隐藏文件浅灰、占位子项）。
+        """根据一个远端条目构建树节点（含图标、占位子项）。
 
         三处建项逻辑（顶层 / 展开子项 / 自动刷新新增）共用此方法，避免样式漏改。
+        隐藏文件（以点开头）的"变淡"由 _RemoteItemDelegate.paint 统一处理 ——
+        因为图标是彩色 emoji，setForeground 只能改文字颜色、改不动 emoji，
+        所以整行用降低透明度的方式让图标和文字一起变淡。
         """
         icon = "📁 " if e.is_dir else "📄 "
         item = QTreeWidgetItem([icon + e.name])
         item.setData(0, _ROLE_ENTRY, e)
         item.setData(0, _ROLE_LOADED, False)
         item.setFlags(item.flags() | Qt.ItemFlag.ItemIsEditable)
-        # 隐藏文件/文件夹（以点开头）以浅灰显示
-        if e.name.startswith('.'):
-            item.setForeground(0, QBrush(cls.HIDDEN_COLOR))
         if e.is_dir:
             # 占位让箭头出现，展开时才真正去 listdir
             item.addChild(QTreeWidgetItem(["…"]))
