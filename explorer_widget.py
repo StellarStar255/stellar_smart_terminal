@@ -803,6 +803,8 @@ class ExplorerPanel(QWidget):
         if not tokens:
             self._exit_search()
             return
+        # 每次发起都占一个唯一 generation，避免重复调用时两个后台线程同 gen 并行
+        self._search_gen += 1
         gen = self._search_gen
         root = self._current_path
         show_hidden = self._show_hidden

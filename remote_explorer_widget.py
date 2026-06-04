@@ -1786,7 +1786,16 @@ class RemoteExplorerPanel(QWidget):
         self._tree.setVisible(True)
 
     def _start_search(self):
-        """防抖结束 → 在 SSH 工作线程上递归扫描当前目录。"""
+        """防抖结束 → 在 SSH 工作线程上递归扫描当前目录（逐目录链式 submit）。
+
+        不再用一个大任务跑完整棵子树（那样会独占单工作线程，把导航/自动刷新/
+        下载等其它 SFTP 操作全堵在后面）。改为每次只提交「一个目录」的 listdir，
+        在它的回调里再提交下一个目录 —— 这样其它操作可以插在两次目录列举之间
+        执行，搜索不再独占会话。
+
+        注意：SSH 会话本身是单工作线程 + 全局锁，无法真正并发 SFTP 请求，所以
+        任何时刻只保持一个在途 listdir；这里要的是"让位"（interleave）而非"并发"。
+        """
         if self._session is None:
             return
         query = self._search_edit.text().strip()
@@ -1794,10 +1803,12 @@ class RemoteExplorerPanel(QWidget):
         if not tokens:
             self._exit_search()
             return
+        # 每次发起都占一个唯一 generation：万一本方法被重复调用，旧链条会因
+        # gen 失配自动停下，绝不会出现两条同 gen 链并行、重复列举/重复出结果。
+        self._search_gen += 1
         gen = self._search_gen
         sess = self._session
         root = self._current_path or "/"
-        show_hidden = self._show_hidden
         # 切到结果视图并给个「搜索中」占位
         self._tree.setVisible(False)
         self._search_results.setVisible(True)
@@ -1806,53 +1817,77 @@ class RemoteExplorerPanel(QWidget):
         placeholder.setFlags(Qt.ItemFlag.NoItemFlags)
         self._search_results.addItem(placeholder)
 
-        fut = sess.submit(self._remote_search_walk, gen, sess, root, tokens, show_hidden)
+        # 遍历状态通过参数显式贯穿各回调（不放 self.*），这样即便用户又发起了
+        # 新搜索，旧链条也只会改它自己那份 state，绝不会污染新搜索。
+        state = {
+            'queue': deque([(root, 0)]),
+            'results': [],
+            'dirs': 0,
+            'tokens': tokens,
+            'show_hidden': self._show_hidden,
+            'sess': sess,
+        }
+        self._search_step(gen, state)
 
-        def on_done(f):
-            try:
-                res = f.result()
-            except Exception:
-                res = None
-            if res is None:
-                return  # 已取消或出错
-            results, truncated = res
-            self._search_result_signal.emit(gen, results, truncated)
-        fut.add_done_callback(on_done)
+    def _search_step(self, gen, state):
+        """提交队列里下一个目录的 listdir；队列空则收尾。
 
-    def _remote_search_walk(self, gen, sess, root, tokens, show_hidden):
-        """在 SSH 工作线程里 BFS 递归 listdir，匹配文件名（多关键词 AND）。
+        可在 UI 线程（首次）或工作线程（回调里）调用 —— submit 会把任务排到单
+        工作线程队列尾部，因此期间排进来的导航/刷新任务会被先执行（让位）。"""
+        if gen != self._search_gen:
+            return  # 已被新搜索 / 导航 / 断开取消
+        queue = state['queue']
+        if not queue:
+            self._search_finalize(gen, state, False)
+            return
+        path, depth = queue.popleft()
+        sess = state['sess']
+        try:
+            fut = sess.submit(sess.listdir, path)
+        except Exception:
+            return  # 会话已关闭 / executor 已 shutdown → 直接停
+        fut.add_done_callback(
+            lambda f: self._on_dir_listed(f, gen, depth, state))
 
-        触顶（命中/目录数/深度）或查询变化即停。返回 (entries, truncated)，
-        若中途查询已变化则返回 None 让回调丢弃。"""
-        results: list[RemoteEntry] = []
-        dirs_scanned = 0
+    def _on_dir_listed(self, fut, gen, depth, state):
+        """单个目录 listdir 完成（工作线程回调）：匹配 + 入队子目录，再推进链条。
+
+        ThreadPoolExecutor 在工作线程里同步调用本回调；这里 submit 下一个目录后
+        立即返回，由 executor 取队列里的下一个任务执行 —— 不是嵌套调用，无栈增长。"""
+        if gen != self._search_gen:
+            return  # 已取消：在途的这次结果直接丢弃
+        try:
+            entries = fut.result()
+        except Exception:
+            entries = []
+        state['dirs'] += 1
+        results = state['results']
+        queue = state['queue']
+        tokens = state['tokens']
+        show_hidden = state['show_hidden']
         truncated = False
-        queue = deque([(root, 0)])  # deque.popleft() 是 O(1)，避免 list.pop(0) 的 O(n)
-        while queue:
-            if gen != self._search_gen:
-                return None  # 查询已变化 → 放弃本轮
-            path, depth = queue.popleft()
-            try:
-                entries = sess.listdir(path)
-            except Exception:
-                continue
-            dirs_scanned += 1
-            for e in entries:
-                if not show_hidden and e.name.startswith('.'):
-                    continue  # 既不匹配也不深入隐藏项
-                if name_matches_tokens(e.name, tokens):
-                    results.append(e)
-                    if len(results) >= self._SEARCH_MAX_RESULTS:
-                        truncated = True
-                        break
-                if e.is_dir and not e.is_link and depth < self._SEARCH_MAX_DEPTH:
-                    queue.append((e.path, depth + 1))
-            if truncated:
-                break
-            if dirs_scanned >= self._SEARCH_MAX_DIRS:
-                truncated = True
-                break
-        return results, truncated
+        for e in entries:
+            if not show_hidden and e.name.startswith('.'):
+                continue  # 既不匹配也不深入隐藏项
+            if name_matches_tokens(e.name, tokens):
+                results.append(e)
+                if len(results) >= self._SEARCH_MAX_RESULTS:
+                    truncated = True
+                    break
+            if e.is_dir and not e.is_link and depth < self._SEARCH_MAX_DEPTH:
+                queue.append((e.path, depth + 1))
+        if not truncated and state['dirs'] >= self._SEARCH_MAX_DIRS:
+            truncated = True
+        if truncated:
+            self._search_finalize(gen, state, True)
+        else:
+            self._search_step(gen, state)
+
+    def _search_finalize(self, gen, state, truncated):
+        """收尾：把结果发回 UI 线程（仅当仍是当前搜索）。每条链恰好调用一次。"""
+        if gen != self._search_gen:
+            return
+        self._search_result_signal.emit(gen, state['results'], truncated)
 
     def _on_search_results(self, gen: int, results: list, truncated: bool):
         """回到 UI 线程：把命中项填进结果列表。"""
