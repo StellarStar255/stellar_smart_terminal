@@ -23,7 +23,7 @@ from PyQt6.QtWidgets import (
     QAbstractItemView, QDialog,
 )
 from PyQt6.QtCore import Qt, pyqtSignal, QTimer, QMimeData, QUrl, QSize
-from PyQt6.QtGui import QAction, QCursor, QDrag, QShortcut, QKeySequence
+from PyQt6.QtGui import QAction, QCursor, QDrag, QShortcut, QKeySequence, QColor, QBrush
 from PyQt6 import sip  # 用于检查 C++ 对象是否已被删除
 
 from i18n import t
@@ -1070,6 +1070,28 @@ class RemoteExplorerPanel(QWidget):
             self._top_level_ready.emit(entries)
         fut.add_done_callback(on_done)
 
+    # 隐藏条目（以点开头）的前景色，和本地 Explorer 保持一致
+    HIDDEN_COLOR = QColor("#888888")
+
+    @classmethod
+    def _make_item(cls, e: RemoteEntry) -> QTreeWidgetItem:
+        """根据一个远端条目构建树节点（含图标、隐藏文件浅灰、占位子项）。
+
+        三处建项逻辑（顶层 / 展开子项 / 自动刷新新增）共用此方法，避免样式漏改。
+        """
+        icon = "📁 " if e.is_dir else "📄 "
+        item = QTreeWidgetItem([icon + e.name])
+        item.setData(0, _ROLE_ENTRY, e)
+        item.setData(0, _ROLE_LOADED, False)
+        item.setFlags(item.flags() | Qt.ItemFlag.ItemIsEditable)
+        # 隐藏文件/文件夹（以点开头）以浅灰显示
+        if e.name.startswith('.'):
+            item.setForeground(0, QBrush(cls.HIDDEN_COLOR))
+        if e.is_dir:
+            # 占位让箭头出现，展开时才真正去 listdir
+            item.addChild(QTreeWidgetItem(["…"]))
+        return item
+
     def _apply_top_level(self, entries: list[RemoteEntry]):
         """把目录内容直接放到树根（批量插入 + 关闭重绘减少卡顿）"""
         try:
@@ -1077,15 +1099,7 @@ class RemoteExplorerPanel(QWidget):
             self._tree.clear()
             items: list[QTreeWidgetItem] = []
             for e in entries:
-                icon = "📁 " if e.is_dir else "📄 "
-                item = QTreeWidgetItem([icon + e.name])
-                item.setData(0, _ROLE_ENTRY, e)
-                item.setData(0, _ROLE_LOADED, False)
-                item.setFlags(item.flags() | Qt.ItemFlag.ItemIsEditable)
-                if e.is_dir:
-                    # 占位让箭头出现，展开时才真正去 listdir
-                    item.addChild(QTreeWidgetItem(["…"]))
-                items.append(item)
+                items.append(self._make_item(e))
             if items:
                 self._tree.addTopLevelItems(items)
             # 把这次 populate 的内容立即记成自动刷新的基线 —— 否则下一次 poll
@@ -1244,13 +1258,7 @@ class RemoteExplorerPanel(QWidget):
         for e in entries:
             if e.name in existing_by_name:
                 continue
-            icon = "📁 " if e.is_dir else "📄 "
-            child = QTreeWidgetItem([icon + e.name])
-            child.setData(0, _ROLE_ENTRY, e)
-            child.setData(0, _ROLE_LOADED, False)
-            child.setFlags(child.flags() | Qt.ItemFlag.ItemIsEditable)
-            if e.is_dir:
-                child.addChild(QTreeWidgetItem(["…"]))
+            child = self._make_item(e)
             if parent_item is None:
                 self._tree.addTopLevelItem(child)
             else:
@@ -1392,14 +1400,7 @@ class RemoteExplorerPanel(QWidget):
             parent_item.takeChildren()
             children: list[QTreeWidgetItem] = []
             for e in entries:
-                icon = "📁 " if e.is_dir else "📄 "
-                child = QTreeWidgetItem([icon + e.name])
-                child.setData(0, _ROLE_ENTRY, e)
-                child.setData(0, _ROLE_LOADED, False)
-                child.setFlags(child.flags() | Qt.ItemFlag.ItemIsEditable)
-                if e.is_dir:
-                    child.addChild(QTreeWidgetItem(["…"]))
-                children.append(child)
+                children.append(self._make_item(e))
             if children:
                 parent_item.addChildren(children)
             # 同 _apply_top_level：把这次 populate 立刻当作自动刷新基线
