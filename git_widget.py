@@ -98,6 +98,12 @@ def _make_git_tool_icon(kind: str, color: str, px: int = 16) -> QIcon:
                        QPointF(ex + (tx * ca - ty * sa) * bl,
                                ey + (tx * sa + ty * ca) * bl))
 
+    elif kind == 'list':
+        # 三条横线：列表 / 返回主机列表
+        m = s * 0.26
+        for dy in (-m, 0.0, m):
+            p.drawLine(QPointF(cx - m, cy + dy), QPointF(cx + m, cy + dy))
+
     elif kind == 'gear':
         # 经典平顶齿 cog：每个齿用 内→外→外→内 四个顶点，齿顶是平的
         teeth = 8

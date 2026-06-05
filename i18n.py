@@ -513,6 +513,7 @@ TRANSLATIONS = {
     "remote.password_prompt": {"zh": "{host} 的密码:", "en": "Password for {host}:"},
     "remote.password_title": {"zh": "需要密码", "en": "Password Required"},
     "remote.disconnect": {"zh": "断开连接", "en": "Disconnect"},
+    "remote.hosts_view": {"zh": "主机列表 / 连接其它主机", "en": "Host list / connect another"},
     "remote.refresh": {"zh": "刷新", "en": "Refresh"},
     "remote.up": {"zh": "上一级", "en": "Up"},
     "remote.go_home": {"zh": "回到主目录", "en": "Go Home"},

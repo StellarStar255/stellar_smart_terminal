@@ -646,6 +646,15 @@ class RemoteExplorerPanel(QWidget):
         self._add_btn.clicked.connect(self._on_add_host_clicked)
         h_layout.addWidget(self._add_btn)
 
+        # 连接后切回主机列表，连接其它主机（不断开当前会话）
+        self._hosts_btn = QPushButton()
+        self._hosts_btn.setFixedSize(28, 28)
+        self._hosts_btn.setIconSize(QSize(16, 16))
+        self._hosts_btn.setToolTip(t("remote.hosts_view"))
+        self._hosts_btn.clicked.connect(self._toggle_hosts_view)
+        self._hosts_btn.hide()
+        h_layout.addWidget(self._hosts_btn)
+
         self._disconnect_btn = QPushButton()
         self._disconnect_btn.setFixedSize(28, 28)
         self._disconnect_btn.setIconSize(QSize(16, 16))
@@ -802,6 +811,7 @@ class RemoteExplorerPanel(QWidget):
         self._icon_color = text  # 书签按钮按收藏状态切换图标时复用
         self._reload_btn.setIcon(_make_git_tool_icon('refresh', text))
         self._add_btn.setIcon(_make_git_tool_icon('plus', text))
+        self._hosts_btn.setIcon(_make_git_tool_icon('list', text))
         self._disconnect_btn.setIcon(_make_git_tool_icon('close', text))
 
         # 文件树页的导航工具栏：同一套矢量图标 + 一致的悬停样式
@@ -966,7 +976,33 @@ class RemoteExplorerPanel(QWidget):
         host: HostConfig = item.data(_ROLE_ENTRY)
         if not host:
             return
+        # 已经连着这台、只是从主机列表切回来 → 直接回到文件树，不必重连
+        if (self._session is not None and self._session.is_connected()
+                and self._session.host_config.alias == host.alias):
+            self._show_tree_view()
+            return
         self._connect_to(host)
+
+    def _toggle_hosts_view(self):
+        """连接状态下，在「文件树」与「主机列表」间切换。
+
+        切到主机列表后可双击/右键连接其它主机（_connect_to 会先断开当前会话再连），
+        从而在不关闭已打开的 SSH 终端 tab 的情况下开启新的远程连接。
+        """
+        if self._session is None:
+            return
+        if self._stack.currentWidget() is self._tree_page:
+            self._stack.setCurrentWidget(self._hosts_page)
+            self._reload_btn.show()   # 主机列表态：可刷新 / 新增主机
+            self._add_btn.show()
+        else:
+            self._show_tree_view()
+
+    def _show_tree_view(self):
+        """回到当前会话的文件树页，并恢复对应的头部按钮可见性。"""
+        self._stack.setCurrentWidget(self._tree_page)
+        self._reload_btn.hide()
+        self._add_btn.hide()
 
     def _on_hosts_context_menu(self, pos):
         """主机列表右键菜单：连接 / 重命名（改别名，方便管理）。"""
@@ -1095,6 +1131,9 @@ class RemoteExplorerPanel(QWidget):
             return
         self._subtitle_label.setText(sess.host_config.alias)
         self._disconnect_btn.show()
+        self._hosts_btn.show()
+        self._reload_btn.hide()
+        self._add_btn.hide()
         self._stack.setCurrentWidget(self._tree_page)
         # 若为该主机设过默认启动目录就跳过去，否则回 home
         # （目录若已失效，_populate_tree_root 的 listdir 会通过 _error_signal 提示）
@@ -1119,6 +1158,7 @@ class RemoteExplorerPanel(QWidget):
         self._subtitle_label.setText("")
         self._add_btn.show()
         self._reload_btn.show()
+        self._hosts_btn.hide()
         self._session = None
 
     def _disconnect(self):
@@ -1143,6 +1183,7 @@ class RemoteExplorerPanel(QWidget):
         self._subtitle_label.setText("")
         self._add_btn.show()
         self._reload_btn.show()
+        self._hosts_btn.hide()
         self._disconnect_btn.hide()
 
     def closeEvent(self, event):
