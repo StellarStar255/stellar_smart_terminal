@@ -878,8 +878,28 @@ class WindowNavigatorPanel(QWidget):
                 self._manual_order.append(wid)
 
     def _toggle_compact_mode(self, state):
-        """切换简洁显示模式"""
-        self._compact_mode = (state == Qt.CheckState.Checked.value)
+        """切换简洁显示模式（所有窗口的导航面板共用此设置）"""
+        compact = (state == Qt.CheckState.Checked.value)
+        self._compact_mode = compact
+        self._force_refresh()
+        self._save_navigator_config()
+        # 广播到其它导航面板（浮动 + 各窗口内嵌），保持全局一致
+        for nav in MainWindow._iter_navigators():
+            if nav is self:
+                continue
+            try:
+                nav._apply_compact_mode(compact)
+            except Exception:
+                pass
+
+    def _apply_compact_mode(self, compact: bool):
+        """同步外部设置的简洁显示状态：更新复选框、内部标志并刷新列表。"""
+        if self._compact_mode == compact and self.compact_checkbox.isChecked() == compact:
+            return
+        self._compact_mode = compact
+        self.compact_checkbox.blockSignals(True)
+        self.compact_checkbox.setChecked(compact)
+        self.compact_checkbox.blockSignals(False)
         self._force_refresh()
 
     def _on_font_size_changed(self, _index=None):
@@ -1100,6 +1120,11 @@ class WindowNavigatorPanel(QWidget):
         self._last_window_info = current_info
         self._cached_windows = windows
 
+        # 记录当前选中（活动）窗口的 id，重建后据此恢复高亮，
+        # 否则像切换 Compact 这类强制刷新会把高亮重置到第一项
+        prev_item = self.window_list.currentItem()
+        prev_id = prev_item.data(Qt.ItemDataRole.UserRole) if prev_item else None
+
         # 阻止信号以避免不必要的 UI 更新
         self.window_list.blockSignals(True)
 
@@ -1133,9 +1158,16 @@ class WindowNavigatorPanel(QWidget):
 
         self.window_list.blockSignals(False)
 
-        # 选中第一项并设置颜色
+        # 恢复之前选中（活动）窗口的高亮，找不到时回退到第一项
         if self.window_list.count() > 0:
-            self.window_list.setCurrentRow(0)
+            target_row = 0
+            if prev_id is not None:
+                for i in range(self.window_list.count()):
+                    it = self.window_list.item(i)
+                    if it and it.data(Qt.ItemDataRole.UserRole) == prev_id:
+                        target_row = i
+                        break
+            self.window_list.setCurrentRow(target_row)
             current_item = self.window_list.currentItem()
             if current_item:
                 self._update_item_colors(current_item)
@@ -1430,6 +1462,7 @@ class WindowNavigatorPanel(QWidget):
                 existing['navigator_geometry'] = [self.x(), self.y(), self.width(), self.height()]
             existing['navigator_font_size'] = self._font_size
             existing['navigator_quick_close'] = bool(self._quick_close)
+            existing['navigator_compact'] = bool(self._compact_mode)
             atomic_write_json(config_file, existing)
         except Exception:
             pass
@@ -1457,6 +1490,12 @@ class WindowNavigatorPanel(QWidget):
                 self.quick_close_checkbox.blockSignals(True)
                 self.quick_close_checkbox.setChecked(quick_close)
                 self.quick_close_checkbox.blockSignals(False)
+                # 恢复简洁显示偏好（所有窗口共用，默认开启）
+                compact = bool(config.get('navigator_compact', True))
+                self._compact_mode = compact
+                self.compact_checkbox.blockSignals(True)
+                self.compact_checkbox.setChecked(compact)
+                self.compact_checkbox.blockSignals(False)
                 # 恢复窗口位置和大小（仅浮动模式）
                 geo = config.get('navigator_geometry')
                 if not self._embedded and geo and len(geo) == 4:
