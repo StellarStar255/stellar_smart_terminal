@@ -1322,9 +1322,30 @@ class WindowNavigatorPanel(QWidget):
             self._force_close_window(window, item.text())
 
     def _on_quick_close_changed(self, state):
-        """Quick Close 勾选状态变化：更新内部标志并保存配置"""
+        """Quick Close 勾选状态变化：更新内部标志、保存配置并广播到所有导航面板。
+
+        与 Compact 一样是全窗口公用的设置：内嵌模式下每个窗口各有一个导航面板，
+        必须广播，否则只有当前窗口的勾选会变。
+        """
         self._quick_close = self.quick_close_checkbox.isChecked()
         self._save_navigator_config()
+        # 广播到其它导航面板（浮动 + 各窗口内嵌），保持全局一致
+        for nav in MainWindow._iter_navigators():
+            if nav is self:
+                continue
+            try:
+                nav._apply_quick_close(self._quick_close)
+            except Exception:
+                pass
+
+    def _apply_quick_close(self, quick_close: bool):
+        """同步外部设置的 Quick Close 状态：更新复选框与内部标志。"""
+        if self._quick_close == quick_close and self.quick_close_checkbox.isChecked() == quick_close:
+            return
+        self._quick_close = quick_close
+        self.quick_close_checkbox.blockSignals(True)
+        self.quick_close_checkbox.setChecked(quick_close)
+        self.quick_close_checkbox.blockSignals(False)
 
     def _force_close_window(self, window, title):
         """对一个窗口执行强制关闭（自动保存）。
