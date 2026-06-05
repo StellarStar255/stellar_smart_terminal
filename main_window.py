@@ -5711,42 +5711,37 @@ class MainWindow(QMainWindow):
         # 初始化列表
         update_list()
 
-        # 显示弹出窗口 - 确保在主窗口内部
-        # 先隐藏窗口计算布局，避免在错误位置短暂显示
-        popup.setWindowOpacity(0)
-        popup.show()  # 需要先 show 才能正确计算大小
-        popup.adjustSize()
-        popup_size = popup.size()
-
-        # 获取按钮的全局位置
+        # 获取按钮的全局位置（用于把弹窗放到按钮下方）
         btn_global_pos = self.quick_launch_btn.mapToGlobal(QPoint(0, self.quick_launch_btn.height()))
-
-        # 获取主窗口的几何信息
         window_rect = self.geometry()
         window_global_pos = self.mapToGlobal(QPoint(0, 0))
 
-        # 计算弹出窗口位置，确保在窗口内
+        # 关键：先在显示前算好尺寸并放到「接近最终位置」，再一次性显示在最终位置。
+        # 之前的做法是 show() 在默认位置 → 再 move()，macOS 上若 setWindowOpacity(0)
+        # 在窗口原生化前未生效，第一帧会在默认位置画出一整块不透明窗口 = 闪一下。
+        # 先 move 到按钮下方再 show，即使有这一帧也落在最终位置附近，不再有位移闪烁。
+        popup.adjustSize()                      # 隐藏状态下用布局算出初步尺寸
+        popup.move(btn_global_pos.x(), btn_global_pos.y())
+        popup.setWindowOpacity(0)
+        popup.show()                            # 首次显示后尺寸才完全可靠
+        popup.adjustSize()
+        popup_size = popup.size()
+
+        # 用真实尺寸做边界修正
         x = btn_global_pos.x()
         y = btn_global_pos.y()
-
-        # 右边界检查：如果超出窗口右边界，向左调整
         right_edge = window_global_pos.x() + window_rect.width()
         if x + popup_size.width() > right_edge:
             x = right_edge - popup_size.width() - 10
-
-        # 下边界检查：如果超出窗口下边界，向上弹出
         bottom_edge = window_global_pos.y() + window_rect.height()
         if y + popup_size.height() > bottom_edge:
-            # 在按钮上方显示
             y = btn_global_pos.y() - self.quick_launch_btn.height() - popup_size.height()
-
-        # 确保不超出窗口左边界
         if x < window_global_pos.x():
             x = window_global_pos.x() + 10
 
-        # 移动到正确位置后再显示
+        # 移到最终位置并显示
         popup.move(x, y)
-        popup.setWindowOpacity(1)  # 现在显示窗口
+        popup.setWindowOpacity(1)
         popup.activateWindow()  # 激活窗口以获取键盘焦点
         popup.raise_()  # 确保在最前面
         search_input.setFocus(Qt.FocusReason.PopupFocusReason)  # 明确设置焦点原因
