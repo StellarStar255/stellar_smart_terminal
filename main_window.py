@@ -7111,7 +7111,15 @@ class MainWindow(QMainWindow):
             stopped_mark = t("status.tab_stopped")
             if f" {stopped_mark}" in tab_name:
                 tab_name = tab_name.replace(f" {stopped_mark}", "")
-            self.setWindowTitle(f"{tab_name} - Smart Terminal")
+            new_title = f"{tab_name} - Smart Terminal"
+            if new_title != self.windowTitle():
+                self.setWindowTitle(new_title)
+                # 立即刷新导航面板，让列表项即时跟随当前激活的 tab（本地/远程），
+                # 不必等 5 秒轮询。
+                try:
+                    MainWindow._broadcast_navigator_refresh()
+                except Exception:
+                    pass
 
     def _next_tab(self):
         """切换到下一个标签页"""
@@ -8275,6 +8283,9 @@ class MainWindow(QMainWindow):
         self.tab_widget.setCurrentIndex(idx)
         self.active_terminal = term
         term.setFocus()
+        # 复用当前 tab 时 currentChanged 不会触发，显式同步窗口标题 + 导航面板，
+        # 确保 Navigator 立即显示这台新连上的远程主机。
+        self._update_window_title_from_tab(idx)
         # 若用户刚在 Remote 面板里为该主机输入过密码，预置一次性自动回填，
         # 这样终端里的 ssh 密码提示就不用再输一遍。
         try:
