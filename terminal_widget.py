@@ -480,6 +480,7 @@ class TerminalWidget(QWidget):
 
         # 滚动支持
         self.scroll_offset = 0  # 向上滚动的行数（0表示在底部）
+        self._scroll_accum = 0.0  # 滚轮滚动的小数累加器（用于半行滚动）
         self._rendered_display_start = 0  # 上次实际渲染时使用的 display_start
 
         # 图片路径前缀设置（用于 Gemini 等需要 @ 前缀的工具）
@@ -2165,12 +2166,21 @@ class TerminalWidget(QWidget):
         max_scroll = history_lines
 
         old_offset = self.scroll_offset
+        # 每次滚轮事件滚动的行数（原为3，减半为1.5）
+        # 使用小数累加器，避免整数取整丢失半行
+        scroll_step = 1.5
         if delta > 0:
             # 向上滚动（查看历史）- 增加scroll_offset
-            self.scroll_offset = min(self.scroll_offset + 3, max_scroll)
+            self._scroll_accum += scroll_step
         else:
             # 向下滚动（回到最新）- 减少scroll_offset
-            self.scroll_offset = max(self.scroll_offset - 3, 0)
+            self._scroll_accum -= scroll_step
+
+        # 取整数部分应用到scroll_offset，保留小数部分到下次累加
+        lines = int(self._scroll_accum)
+        if lines != 0:
+            self._scroll_accum -= lines
+            self.scroll_offset = max(0, min(self.scroll_offset + lines, max_scroll))
 
         # 只有在滚动位置实际改变时才更新
         if old_offset != self.scroll_offset:
