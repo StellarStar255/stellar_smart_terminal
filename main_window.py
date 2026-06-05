@@ -4825,9 +4825,12 @@ class MainWindow(QMainWindow):
                 padding: 0;
             }
         """)
-        # 添加下拉箭头按钮（历史记录图标）
-        self.dir_dropdown_btn = QPushButton("🕘")
-        self.dir_dropdown_btn.setFixedSize(32, 28)
+        # 历史记录下拉按钮：矢量「历史」图标（逆时针箭头+表针），比时钟 emoji 更贴切，
+        # 也与工具栏其它矢量图标风格一致。高度与 Browse 对齐（见下方 setFixedHeight）。
+        self.dir_dropdown_btn = QPushButton()
+        self.dir_dropdown_btn.setIcon(_make_git_tool_icon('history', 'white'))
+        self.dir_dropdown_btn.setIconSize(QSize(16, 16))
+        self.dir_dropdown_btn.setFixedWidth(36)
         self.dir_dropdown_btn.setToolTip(t("status.dir_history_tooltip"))
         self.dir_dropdown_btn.setStyleSheet("""
             QPushButton {
@@ -4836,7 +4839,6 @@ class MainWindow(QMainWindow):
                 color: white;
                 border: none;
                 border-radius: 6px;
-                font-size: 14px;
                 padding: 2px;
             }
             QPushButton:hover {
@@ -4881,6 +4883,8 @@ class MainWindow(QMainWindow):
         """)
         self.browse_btn.clicked.connect(self._browse_working_dir)
         self.dir_toolbar.addWidget(self.browse_btn)
+        # 历史按钮高度与 Browse 对齐（Browse 高度由内容+padding 决定，取其 sizeHint）
+        self.dir_dropdown_btn.setFixedHeight(self.browse_btn.sizeHint().height())
 
         # 应用目录按钮
         self.apply_dir_btn = QPushButton(t("dir.switch"))

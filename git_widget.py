@@ -98,6 +98,26 @@ def _make_git_tool_icon(kind: str, color: str, px: int = 16) -> QIcon:
                        QPointF(ex + (tx * ca - ty * sa) * bl,
                                ey + (tx * sa + ty * ca) * bl))
 
+    elif kind == 'history':
+        # 逆时针圆弧箭头 + 表针：表示“历史 / 最近用过”
+        r = s * 0.30
+        rect = QRectF(cx - r, cy - r, 2 * r, 2 * r)
+        start_deg, span_deg = 70.0, 250.0   # 顶部留缺口给箭头
+        p.drawArc(rect, int(start_deg * 16), int(span_deg * 16))
+        # 弧末端补一个箭头（与 refresh 同一套切线+斜线做法），朝逆时针方向
+        end = math.radians(start_deg + span_deg)
+        ex, ey = cx + r * math.cos(end), cy - r * math.sin(end)
+        tx, ty = -math.sin(end), -math.cos(end)  # 逆时针切线方向
+        bl = s * 0.20
+        for a in (math.radians(145), math.radians(-145)):
+            ca, sa = math.cos(a), math.sin(a)
+            p.drawLine(QPointF(ex, ey),
+                       QPointF(ex + (tx * ca - ty * sa) * bl,
+                               ey + (tx * sa + ty * ca) * bl))
+        # 中心表针：时针朝上、分针朝右
+        p.drawLine(QPointF(cx, cy), QPointF(cx, cy - r * 0.46))
+        p.drawLine(QPointF(cx, cy), QPointF(cx + r * 0.38, cy))
+
     elif kind == 'list':
         # 三条横线：列表 / 返回主机列表
         m = s * 0.26
