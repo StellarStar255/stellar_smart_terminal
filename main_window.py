@@ -750,6 +750,27 @@ class WindowNavigatorPanel(QWidget):
         self.font_size_spin.valueChanged.connect(self._on_font_size_changed)
         compact_row.addWidget(self.font_size_spin)
 
+        # 设置按钮（小齿轮）：与 Compact/Quick Close/Embed/字号 同在一行，靠最右。
+        # 用矢量绘制的齿轮图标（_make_git_tool_icon），避免 macOS 上 ⚙ 字形被渲染成
+        # 彩色 emoji / 小点，保证清晰统一。
+        self.settings_btn = QPushButton()
+        self.settings_btn.setIcon(_make_git_tool_icon('gear', '#c8c8d8', 16))
+        self.settings_btn.setIconSize(QSize(16, 16))
+        self.settings_btn.setToolTip(t("window.settings_tooltip"))
+        self.settings_btn.setFixedSize(28, 24)
+        self.settings_btn.setStyleSheet("""
+            QPushButton {
+                background-color: #3d3d5c;
+                border: none;
+                border-radius: 4px;
+            }
+            QPushButton:hover {
+                background-color: #4d4d6c;
+            }
+        """)
+        self.settings_btn.clicked.connect(self._show_settings_menu)
+        compact_row.addWidget(self.settings_btn)
+
         layout.addLayout(compact_row)
 
         # 拖拽提示标签（默认隐藏）
@@ -758,29 +779,6 @@ class WindowNavigatorPanel(QWidget):
         self.drag_hint_label.setAlignment(Qt.AlignmentFlag.AlignCenter)
         self.drag_hint_label.setVisible(False)
         layout.addWidget(self.drag_hint_label)
-
-        # 底部设置按钮：小齿轮图标，把不常调整的「排序方式 / 刷新」收进菜单，保持面板简洁
-        settings_row = QHBoxLayout()
-        settings_row.setContentsMargins(0, 0, 0, 0)
-        settings_row.addStretch()
-        self.settings_btn = QPushButton("⚙")
-        self.settings_btn.setToolTip(t("window.settings_tooltip"))
-        self.settings_btn.setFixedSize(28, 24)
-        self.settings_btn.setStyleSheet("""
-            QPushButton {
-                background-color: #3d3d5c;
-                color: #eaeaea;
-                border: none;
-                border-radius: 4px;
-                font-size: 14px;
-            }
-            QPushButton:hover {
-                background-color: #4d4d6c;
-            }
-        """)
-        self.settings_btn.clicked.connect(self._show_settings_menu)
-        settings_row.addWidget(self.settings_btn)
-        layout.addLayout(settings_row)
 
     def _show_settings_menu(self):
         """弹出设置菜单：排序方式（时间/名称/手动）+ 刷新。"""
