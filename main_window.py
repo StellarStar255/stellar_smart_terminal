@@ -4825,10 +4825,10 @@ class MainWindow(QMainWindow):
                 padding: 0;
             }
         """)
-        # 历史记录下拉按钮：矢量「历史」图标（逆时针箭头+表针），比时钟 emoji 更贴切，
-        # 也与工具栏其它矢量图标风格一致。高度与 Browse 对齐（见下方 setFixedHeight）。
+        # 历史记录下拉按钮：简洁的向下箭头（下拉指示），与工具栏矢量图标风格一致。
+        # 高度与 Browse 对齐（见下方 setFixedHeight）。
         self.dir_dropdown_btn = QPushButton()
-        self.dir_dropdown_btn.setIcon(_make_git_tool_icon('history', 'white'))
+        self.dir_dropdown_btn.setIcon(_make_git_tool_icon('caret_down', 'white'))
         self.dir_dropdown_btn.setIconSize(QSize(16, 16))
         self.dir_dropdown_btn.setFixedWidth(36)
         self.dir_dropdown_btn.setToolTip(t("status.dir_history_tooltip"))
