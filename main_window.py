@@ -3870,10 +3870,13 @@ class MainWindow(QMainWindow):
 
         # 管理预设按钮
         self.manage_preset_btn = QPushButton(t("toolbar.manage_preset"))
+        # 显式 font-size 让它走与 Switch 等按钮一致的缩放（12px→GUI 字号），
+        # 否则会落到主窗口 QToolBar QPushButton 的 13px 默认值、与 Switch 不一致。
         self.manage_preset_btn.setStyleSheet("""
             QPushButton {
                 background-color: #3d3d5c;
                 padding: 8px 12px;
+                font-size: 12px;
             }
         """)
         self.manage_preset_btn.clicked.connect(self._manage_presets)
@@ -8618,6 +8621,13 @@ class MainWindow(QMainWindow):
 
         t = self.THEMES[theme_name]
 
+        # 主题会重写大量控件样式表。先把上次缩放过的控件还原成"未缩放基准"再清缓存：
+        # _scale_gui_font_sizes 缓存未命中时会把控件当前样式当基准，若此时还停在已缩放
+        # 的字号上，就会逐次放大（如 Switch 12→14→16）。先还原再清，保证下面重新缩放
+        # 始终从未缩放基准算起。
+        self._restore_original_styles()
+        self._original_widget_styles.clear()
+
         # 主窗口样式
         self.setStyleSheet(f"""
             QMainWindow {{
@@ -8903,7 +8913,7 @@ class MainWindow(QMainWindow):
                     color: {t['text']};
                     border: none;
                     border-radius: 6px;
-                    font-size: 14px;
+                    font-size: 12px;
                     padding: 4px 8px;
                 }}
                 QPushButton:hover {{
@@ -8921,7 +8931,7 @@ class MainWindow(QMainWindow):
                     color: white;
                     border: none;
                     border-radius: 6px;
-                    font-size: 14px;
+                    font-size: 12px;
                     padding: 4px 8px;
                 }}
                 QPushButton:hover {{
@@ -9185,13 +9195,8 @@ class MainWindow(QMainWindow):
         # 更新窗口和Dock图标（根据设置决定是否使用蒙版）
         self._update_app_icon_by_theme()
 
-        # 主题切换后重新应用 GUI 字体缩放（因为样式表被覆盖）
-        self._original_widget_styles.clear()
-        # 标题用的是窗口色而非主题色，_apply_theme 不会重建它；清缓存后必须重新
-        # 登记它的未缩放基准（13px），否则下面 _scale_gui_font_sizes 会把它当前
-        # 已缩放的样式误当基准，造成二次缩放。
-        if hasattr(self, 'title_label'):
-            self._update_title_label_color()
+        # 主题切换后重新应用 GUI 字体缩放（样式表已被主题覆盖；缓存已在方法开头
+        # 还原+清空，此时所有控件都处于未缩放基准，缩放不会复合放大）。
         if self._gui_font_size != 0 or self._global_zoom_delta != 0:
             self._scale_gui_font_sizes(self._gui_font_size, self._global_zoom_delta)
 
