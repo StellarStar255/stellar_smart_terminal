@@ -8179,6 +8179,8 @@ class MainWindow(QMainWindow):
         )
         # 右键 "在此处打开终端" → 同样开一个 SSH tab，且 cd 进指定目录
         self.remote_panel.open_terminal_at.connect(self._open_ssh_terminal_tab)
+        # 右键 "在新窗口中连接" → 新开一个独立窗口并 SSH 进该主机
+        self.remote_panel.open_in_new_window.connect(self._open_ssh_in_new_window)
 
         # 用竖直 QSplitter 包住远程树，以便上下分屏时把编辑器放到树下方
         # （编辑器 editor_area 为共享单例，按需在 remote_splitter / main_splitter 间移动）
@@ -8304,6 +8306,52 @@ class MainWindow(QMainWindow):
             term._start_and_execute([cmd_string])
         except Exception as e:
             self.statusbar.showMessage(f"Failed to start SSH: {e}", 5000)
+
+    def _open_ssh_in_new_window(self, host_config):
+        """新开一个独立窗口并 SSH 进该主机（Remote 右键「在新窗口中连接」）。
+
+        复用拖拽分离 tab 的建窗模式：新窗口自带一个空白 tab，待其初始化完成后
+        在该空白 tab 里跑 ssh（_open_ssh_terminal_tab 会复用未启动的空白终端）。
+        """
+        alias = getattr(host_config, 'alias', '') or 'SSH'
+        # 若当前面板已为该主机缓存过密码，带到新窗口里自动回填，省得再输一遍
+        cached_pw = None
+        try:
+            cached_pw = self.remote_panel.get_cached_password(alias)
+        except Exception:
+            cached_pw = None
+
+        MainWindow._window_counter += 1
+        window_title = (f"{t('remote.terminal_tab_name', host=alias)} "
+                        f"- Smart Terminal #{MainWindow._window_counter}")
+        # 不传 initial_tab_data → 新窗口自建一个空白（未启动）tab
+        new_window = MainWindow(window_title=window_title)
+
+        # 自动配色，方便和其它窗口区分
+        try:
+            new_window._set_window_color(self._get_available_window_color())
+        except Exception:
+            pass
+
+        # 相对当前窗口稍作偏移，避免完全盖住
+        new_window.move(self.x() + 48, self.y() + 48)
+        new_window.show()
+        new_window.raise_()
+        new_window.activateWindow()
+        self.detached_windows.append(new_window)
+
+        # 等窗口初始化 / 首次显示稳定后再跑 ssh
+        def _connect_after_init():
+            if sip.isdeleted(new_window):
+                return
+            new_window._open_ssh_terminal_tab(host_config, None)
+            # _open_ssh_terminal_tab 用的是新窗口自己的（空）密码缓存，这里补一次回填
+            if cached_pw and new_window.active_terminal is not None:
+                try:
+                    new_window.active_terminal.arm_password_autofill(cached_pw)
+                except Exception:
+                    pass
+        QTimer.singleShot(120, _connect_after_init)
 
     @staticmethod
     def _shell_quote(s: str) -> str:

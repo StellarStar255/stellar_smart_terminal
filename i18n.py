@@ -538,6 +538,7 @@ TRANSLATIONS = {
     "remote.add_host_cancel": {"zh": "取消", "en": "Cancel"},
     "remote.add_host_save_failed": {"zh": "无法写入 ~/.ssh/config（已仅本会话保留）：\n{error}", "en": "Couldn't write ~/.ssh/config (kept for this session only):\n{error}"},
     "remote.connect": {"zh": "连接", "en": "Connect"},
+    "remote.connect_in_new_window": {"zh": "在新窗口中连接", "en": "Connect in New Window"},
     "remote.rename_host": {"zh": "重命名…", "en": "Rename…"},
     "remote.rename_host_title": {"zh": "重命名主机", "en": "Rename Host"},
     "remote.rename_host_hint": {"zh": "给这台主机起个好记的名字（会写入 ~/.ssh/config 的 Host 别名）。", "en": "Give this host a memorable name (saved as the Host alias in ~/.ssh/config)."},

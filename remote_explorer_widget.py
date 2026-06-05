@@ -512,6 +512,9 @@ class RemoteExplorerPanel(QWidget):
     # 在指定远程目录打开 SSH 终端（右键菜单触发）
     # 参数: (HostConfig, remote_path)
     open_terminal_at = pyqtSignal(object, str)
+    # 在新独立窗口中连接该主机（右键菜单触发）
+    # 参数: HostConfig
+    open_in_new_window = pyqtSignal(object)
     # —— 内部信号：用于把 SSH 工作线程的结果安全派发回 UI 线程
     # （直接 QTimer.singleShot 在没有事件循环的工作线程里不会触发）
     _top_level_ready = pyqtSignal(list)
@@ -1028,6 +1031,9 @@ class RemoteExplorerPanel(QWidget):
         """)
         connect_act = menu.addAction(t("remote.connect"))
         connect_act.triggered.connect(lambda checked=False, h=host: self._connect_to(h))
+        new_win_act = menu.addAction(t("remote.connect_in_new_window"))
+        new_win_act.triggered.connect(lambda checked=False, h=host: self.open_in_new_window.emit(h))
+        menu.addSeparator()
         rename_act = menu.addAction(t("remote.rename_host"))
         rename_act.triggered.connect(lambda checked=False, h=host: self._rename_host(h))
         menu.exec(self._hosts_list.viewport().mapToGlobal(pos))
