@@ -3855,8 +3855,13 @@ class MainWindow(QMainWindow):
                 background-color: #667eea;
             }
         """)
-        # 同步全局导航面板状态
-        if MainWindow._global_window_navigator is not None and MainWindow._global_window_navigator.isVisible():
+        # 同步导航开关状态（新窗口与现有窗口联动）
+        if MainWindow._navigator_dock_mode == 'embed':
+            # 内嵌模式：跟随其它窗口是否已启用导航条（stateChanged 尚未连接，不会触发回调）
+            enabled = MainWindow._current_embed_enabled()
+            self.nav_embed_enabled = enabled
+            self.window_nav_checkbox.setChecked(enabled)
+        elif MainWindow._global_window_navigator is not None and MainWindow._global_window_navigator.isVisible():
             self.window_nav_checkbox.setChecked(True)
         self.window_nav_checkbox.stateChanged.connect(self._on_window_nav_changed)
 
@@ -9518,13 +9523,8 @@ class MainWindow(QMainWindow):
         checked = (state == Qt.CheckState.Checked.value)
         if MainWindow._navigator_dock_mode == 'embed':
             # 内嵌模式：勾选 = 启用左侧栏顶部的导航条；它只与 Explorer/Git/Remote 一起出现，
-            # 不会单独占满左侧栏（各窗口独立，不跨窗口同步）。
-            self.nav_embed_enabled = checked
-            self.main_splitter.setUpdatesEnabled(False)
-            self._sync_embedded_nav()
-            self._update_splitter_sizes()
-            self.main_splitter.setUpdatesEnabled(True)
-            QTimer.singleShot(0, self._flush_terminal_resizes)
+            # 不会单独占满左侧栏。该开关在所有窗口间联动（与浮动模式一致）。
+            MainWindow._set_embed_enabled_all(checked)
             return
         # 浮动模式（原行为）
         if checked:
@@ -9564,6 +9564,34 @@ class MainWindow(QMainWindow):
                 pass
 
     @staticmethod
+    def _set_embed_enabled_all(enabled: bool):
+        """内嵌模式下把「启用导航条」状态联动到所有窗口（开关、可见性、checkbox 一起更新）。"""
+        app = QApplication.instance()
+        wins = [w for w in (app.topLevelWidgets() if app else [])
+                if isinstance(w, MainWindow) and not sip.isdeleted(w)]
+        for w in wins:
+            w.nav_embed_enabled = enabled
+            w.main_splitter.setUpdatesEnabled(False)
+            w._sync_embedded_nav()
+            w._update_splitter_sizes()
+            w.main_splitter.setUpdatesEnabled(True)
+            if hasattr(w, 'window_nav_checkbox'):
+                w.window_nav_checkbox.blockSignals(True)
+                w.window_nav_checkbox.setChecked(enabled)
+                w.window_nav_checkbox.blockSignals(False)
+            QTimer.singleShot(0, w._flush_terminal_resizes)
+
+    @staticmethod
+    def _current_embed_enabled() -> bool:
+        """是否已有窗口启用了内嵌导航条（新窗口创建时据此联动初始状态）。"""
+        app = QApplication.instance()
+        if app:
+            for w in app.topLevelWidgets():
+                if isinstance(w, MainWindow) and getattr(w, 'nav_embed_enabled', False):
+                    return True
+        return False
+
+    @staticmethod
     def _set_navigator_dock_mode(mode: str):
         """切换导航面板停靠方式（'float' / 'embed'），并把选择写入配置自动记住。"""
         if mode not in ('float', 'embed'):
@@ -9585,29 +9613,14 @@ class MainWindow(QMainWindow):
                         g.deleteLater()
                 except Exception:
                     pass
-            # 原本开着导航的窗口启用内嵌导航条（它会与已打开的文件面板一起显示）
-            for w in wins:
-                was_on = floating_on or (hasattr(w, 'window_nav_checkbox')
-                                         and w.window_nav_checkbox.isChecked())
-                w.nav_embed_enabled = bool(was_on)
-                w.main_splitter.setUpdatesEnabled(False)
-                w._sync_embedded_nav()
-                w._update_splitter_sizes()
-                w.main_splitter.setUpdatesEnabled(True)
-                if hasattr(w, 'window_nav_checkbox'):
-                    w.window_nav_checkbox.blockSignals(True)
-                    w.window_nav_checkbox.setChecked(bool(was_on))
-                    w.window_nav_checkbox.blockSignals(False)
+            # 启用内嵌导航条（所有窗口联动；与已打开的文件面板一起显示）
+            was_on = floating_on or any(
+                hasattr(w, 'window_nav_checkbox') and w.window_nav_checkbox.isChecked()
+                for w in wins)
+            MainWindow._set_embed_enabled_all(bool(was_on))
         else:  # float
-            any_on = False
-            for w in wins:
-                if getattr(w, 'nav_embed_enabled', False):
-                    any_on = True
-                w.nav_embed_enabled = False
-                w.main_splitter.setUpdatesEnabled(False)
-                w._sync_embedded_nav()
-                w._update_splitter_sizes()
-                w.main_splitter.setUpdatesEnabled(True)
+            any_on = MainWindow._current_embed_enabled()
+            MainWindow._set_embed_enabled_all(False)
             if any_on:
                 if MainWindow._global_window_navigator is None:
                     MainWindow._global_window_navigator = WindowNavigatorPanel()
