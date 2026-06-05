@@ -727,12 +727,9 @@ class WindowNavigatorPanel(QWidget):
         self.font_size_spin.setMinimumPopupWidth(68)
         for _px in range(8, 25):
             self.font_size_spin.addItem(f"{_px}px", _px)
-        # 弹窗高度取选项总数的 2/3（其余项靠滚动条访问）。
+        # 弹窗高度取选项总数的 2/3（其余项靠滚轮/触控板滚动访问）。
         self.font_size_spin.setMaxVisibleItems(
             max(1, self.font_size_spin.count() * 2 // 3))
-        # macOS 默认的覆盖式滚动条会自动隐藏，强制常驻，方便没有滚轮时拖拽。
-        self.font_size_spin.view().setVerticalScrollBarPolicy(
-            Qt.ScrollBarPolicy.ScrollBarAlwaysOn)
         _fs_idx = self.font_size_spin.findData(self._font_size)
         self.font_size_spin.setCurrentIndex(_fs_idx if _fs_idx >= 0 else 0)
         self.font_size_spin.setStyleSheet("""
@@ -766,28 +763,6 @@ class WindowNavigatorPanel(QWidget):
                 min-height: 24px;
                 padding: 0px 6px;
                 border-radius: 4px;
-            }
-            QComboBox QAbstractItemView QScrollBar:vertical {
-                background: transparent;
-                width: 6px;
-                margin: 4px 2px 4px 0px;
-            }
-            QComboBox QAbstractItemView QScrollBar::handle:vertical {
-                background: rgba(255, 255, 255, 0.22);
-                border-radius: 3px;
-                min-height: 24px;
-            }
-            QComboBox QAbstractItemView QScrollBar::handle:vertical:hover {
-                background: rgba(255, 255, 255, 0.38);
-            }
-            QComboBox QAbstractItemView QScrollBar::add-line:vertical,
-            QComboBox QAbstractItemView QScrollBar::sub-line:vertical {
-                height: 0px;
-                width: 0px;
-            }
-            QComboBox QAbstractItemView QScrollBar::add-page:vertical,
-            QComboBox QAbstractItemView QScrollBar::sub-page:vertical {
-                background: transparent;
             }
         """)
         self.font_size_spin.currentIndexChanged.connect(self._on_font_size_changed)
