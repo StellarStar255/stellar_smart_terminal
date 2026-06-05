@@ -5569,7 +5569,9 @@ class MainWindow(QMainWindow):
             QListWidget::item:selected {
                 background-color: #667eea;
             }
-            QListWidget::item:hover {
+            /* 仅对「非选中项」应用悬停高亮：鼠标划过当前选中项时保持蓝色不变，
+               避免选中色(#667eea)与悬停色(#3d3d5c)互相覆盖造成闪烁。 */
+            QListWidget::item:hover:!selected {
                 background-color: #3d3d5c;
             }
         """)
