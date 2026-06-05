@@ -2845,21 +2845,17 @@ class TerminalWidget(QWidget):
             if is_soft:
                 resolved.append((text, 1))
                 continue
+            # 原则：尽量与屏幕所见一致，保留可见换行。只有「确实是同一逻辑行被拆开」的两种
+            # 情况才无缝拼接：① 终端软换行(上面已处理 wrap_type=1)；② 一个无内部空格的长 token
+            # （URL/路径/哈希）因宽度被从中间硬折断。其余（散文、列表项、缩进段落等）一律保留换行，
+            # 避免把多行内容拼成一行（如把项目符号列表压成一行）。
             wrap_type = 0
-            if can_h and last_col >= 0:
-                next_leading = rows[i + 1][3]
+            if can_h and last_col >= 0 and spaceless:
                 next_has_content = bool(rows[i + 1][0].strip())
-                fills_local = last_col >= run_max[i] - TOL  # 填满到本块的折行宽度 → 是被宽度折断的续行
-                if fills_local and last_col >= threshold_low and next_has_content:
-                    if spaceless:
-                        # 无内部空格的长 token 被折断（URL/路径/哈希）→ 无缝拼接
-                        wrap_type = 3
-                    else:
-                        # 散文填到折行宽度 → 按续行补回词间空格
-                        wrap_type = 2
-                elif last_col >= threshold_low and next_leading >= 1 and next_has_content:
-                    # 行占用过半且下一行带续行缩进 → 按词折行的应用层 wrap
-                    wrap_type = 2
+                next_spaceless_start = bool(rows[i + 1][0][:1].strip())  # 下一行以非空白开头（token 续接）
+                fills_local = last_col >= run_max[i] - TOL  # 填满到本块折行宽度 → 被宽度折断
+                if fills_local and last_col >= threshold_low and next_has_content and next_spaceless_start:
+                    wrap_type = 3
             resolved.append((text, wrap_type))
 
         # 组合结果
@@ -3015,8 +3011,8 @@ class TerminalWidget(QWidget):
                 run_max[k] = block_max
             i = j
 
-        # 用 look-ahead 决定换行类型：
-        #   0=硬换行, 1=终端软换行, 2=应用层散文折行（补词间空格）, 3=应用层 token 截断折行（无缝拼接）
+        # 决定换行类型：尽量与屏幕一致保留可见换行；只有「同一逻辑行被拆开」才无缝拼接：
+        #   1=终端软换行；3=无内部空格的长 token（URL/路径/哈希）被宽度硬折断。其余保留换行。
         threshold_low = max(8, int(columns * 0.40))
         TOL = 2
         resolved = []
@@ -3028,18 +3024,12 @@ class TerminalWidget(QWidget):
                 resolved.append((text, 1))
                 continue
             wrap_type = 0
-            if last_col >= 0:
-                next_leading = line_data[i + 1][3]
+            if last_col >= 0 and spaceless:
                 next_has_content = bool(line_data[i + 1][0].strip())
+                next_spaceless_start = bool(line_data[i + 1][0][:1].strip())
                 fills_local = last_col >= run_max[i] - TOL
-                if fills_local and last_col >= threshold_low and next_has_content:
-                    if spaceless:
-                        wrap_type = 3   # 长 token 被折断 → 无缝拼接
-                    else:
-                        wrap_type = 2   # 散文填到折行宽度 → 补词间空格
-                elif last_col >= threshold_low and next_leading >= 1 and next_has_content:
-                    # 行占用过半且下一行带续行缩进 → 按词折行的应用层 wrap
-                    wrap_type = 2
+                if fills_local and last_col >= threshold_low and next_has_content and next_spaceless_start:
+                    wrap_type = 3
             resolved.append((text, wrap_type))
 
         # 组合结果
