@@ -296,6 +296,10 @@ class TerminalWidget(QWidget):
         "white": "#ffffff",
     }
 
+    # 复制拼接时用于识别「新的结构行」（列表项/有序列表/标题/引用）。
+    # 这类行即使上一行被填满，也不应被并入上一行，必须保留换行。
+    _LIST_MARKER_RE = re.compile(r'^(?:[-*+•‣◦·]|\d{1,3}[.)]|[A-Za-z][.)]|#{1,6}|>)\s')
+
     # 预编译正则表达式（用于过滤不支持的转义序列）
     _RE_SYNC_OUTPUT = re.compile(r'\x1b\[\?2026[hl]')
     _RE_KITTY_KEYBOARD = re.compile(r'\x1b\[[\?<>=]+u')
@@ -2836,7 +2840,6 @@ class TerminalWidget(QWidget):
         #   3=应用层「token 截断」折行（一个长 token 被强行从中间截断，如 URL/路径/哈希 →
         #     必须无缝直接拼接，绝不能补空格，否则会把 URL 拦腰插入空格/换行导致登录失效）
         threshold_low = max(8, int(term_cols * 0.40))
-        TOL = 2
         resolved = []
         for i, (text, is_soft, last_col, _, can_h, spaceless) in enumerate(rows):
             if i == n - 1:
@@ -2845,17 +2848,26 @@ class TerminalWidget(QWidget):
             if is_soft:
                 resolved.append((text, 1))
                 continue
-            # 原则：尽量与屏幕所见一致，保留可见换行。只有「确实是同一逻辑行被拆开」的两种
-            # 情况才无缝拼接：① 终端软换行(上面已处理 wrap_type=1)；② 一个无内部空格的长 token
-            # （URL/路径/哈希）因宽度被从中间硬折断。其余（散文、列表项、缩进段落等）一律保留换行，
-            # 避免把多行内容拼成一行（如把项目符号列表压成一行）。
+            # 判断本行是「被宽度折断的续行」（拼接）还是「故意的新行」（保留换行）。
+            # 折行宽度用本块实测的 run_max（兼容应用按盒子边距比终端更窄折行的情况）。
+            #  · 无内部空格的长 token（URL/路径/哈希）：必须精确填满到 run_max 才算被折断，
+            #    这样长短不一的独立行（如 ls -1 的多条路径）不会被误并。
+            #  · 散文：用经典 unwrap 判据——下一行第一个词在本行放不下 → 是被折断的续行。
+            #    列表项/标题等结构行（_LIST_MARKER_RE）即使上一行填满也强制保留换行。
             wrap_type = 0
-            if can_h and last_col >= 0 and spaceless:
-                next_has_content = bool(rows[i + 1][0].strip())
-                next_spaceless_start = bool(rows[i + 1][0][:1].strip())  # 下一行以非空白开头（token 续接）
-                fills_local = last_col >= run_max[i] - TOL  # 填满到本块折行宽度 → 被宽度折断
-                if fills_local and last_col >= threshold_low and next_has_content and next_spaceless_start:
-                    wrap_type = 3
+            nxt = rows[i + 1][0] if can_h else ''
+            next_core = nxt.strip()
+            if (can_h and last_col >= 0 and next_core
+                    and run_max[i] >= threshold_low
+                    and not self._LIST_MARKER_RE.match(next_core)):
+                if spaceless:
+                    if last_col >= run_max[i] - 2 and not nxt[0].isspace():
+                        wrap_type = 3
+                else:
+                    first_word = next_core.split(None, 1)[0]
+                    gap = run_max[i] - last_col  # 本行尾部到折行宽度的剩余列数
+                    if gap <= len(first_word) + 1:
+                        wrap_type = 2
             resolved.append((text, wrap_type))
 
         # 组合结果
@@ -2864,16 +2876,11 @@ class TerminalWidget(QWidget):
             if i > 0:
                 prev_text, prev_wrap = resolved[i - 1]
                 if prev_wrap == 1 or prev_wrap == 3:
-                    # 终端软换行 / 填满到行尾的 token 折行：直接无缝拼接，不补空格
+                    # 终端软换行 / token 折断：直接无缝拼接，不补空格
                     pass
                 elif prev_wrap == 2:
-                    # 应用层散文折行：去除续行的相同缩进
-                    prev_indent = len(prev_text) - len(prev_text.lstrip())
-                    if prev_indent > 0:
-                        curr_indent = len(line_text) - len(line_text.lstrip())
-                        if curr_indent >= prev_indent:
-                            line_text = line_text[prev_indent:]
-                    # 恢复词边界的空格（rstrip 可能移除了换行点的空格）
+                    # 散文续行：把对齐缩进折叠掉，必要时补回一个词间空格
+                    line_text = line_text.lstrip()
                     if result and line_text:
                         last_ch = result[-1][-1] if result[-1] else ''
                         first_ch = line_text[0]
@@ -3011,10 +3018,10 @@ class TerminalWidget(QWidget):
                 run_max[k] = block_max
             i = j
 
-        # 决定换行类型：尽量与屏幕一致保留可见换行；只有「同一逻辑行被拆开」才无缝拼接：
-        #   1=终端软换行；3=无内部空格的长 token（URL/路径/哈希）被宽度硬折断。其余保留换行。
+        # 决定换行类型（与 _get_selected_text 一致）：用「下一行第一个词放得下吗」判断本行
+        # 是被宽度折断的续行(拼接) 还是故意换行(保留)。列表项/标题等结构行强制保留换行。
+        #   1=终端软换行；2=散文续行(补词间空格)；3=无内部空格长 token 续行(无缝拼接)；0=保留换行
         threshold_low = max(8, int(columns * 0.40))
-        TOL = 2
         resolved = []
         for i, (text, is_soft, last_col, _, spaceless) in enumerate(line_data):
             if i == n - 1:
@@ -3024,16 +3031,22 @@ class TerminalWidget(QWidget):
                 resolved.append((text, 1))
                 continue
             wrap_type = 0
-            if last_col >= 0 and spaceless:
-                next_has_content = bool(line_data[i + 1][0].strip())
-                next_spaceless_start = bool(line_data[i + 1][0][:1].strip())
-                fills_local = last_col >= run_max[i] - TOL
-                if fills_local and last_col >= threshold_low and next_has_content and next_spaceless_start:
-                    wrap_type = 3
+            nxt = line_data[i + 1][0]
+            next_core = nxt.strip()
+            if (last_col >= 0 and next_core
+                    and run_max[i] >= threshold_low
+                    and not self._LIST_MARKER_RE.match(next_core)):
+                if spaceless:
+                    if last_col >= run_max[i] - 2 and not nxt[0].isspace():
+                        wrap_type = 3
+                else:
+                    first_word = next_core.split(None, 1)[0]
+                    gap = run_max[i] - last_col
+                    if gap <= len(first_word) + 1:
+                        wrap_type = 2
             resolved.append((text, wrap_type))
 
         # 组合结果
-        need_space = self._need_boundary_space
         result = []
         for i, (text, wrap_type) in enumerate(resolved):
             if i > 0:
@@ -3041,17 +3054,12 @@ class TerminalWidget(QWidget):
                 if prev_wrap == 1 or prev_wrap == 3:
                     pass  # 终端软换行 / token 截断折行：直接无缝拼接
                 elif prev_wrap == 2:
-                    # 应用层软换行：去除续行的相同缩进
-                    prev_indent = len(prev_text) - len(prev_text.lstrip())
-                    if prev_indent > 0:
-                        curr_indent = len(text) - len(text.lstrip())
-                        if curr_indent >= prev_indent:
-                            text = text[prev_indent:]
-                    # 恢复词边界空格
+                    # 散文续行：折叠对齐缩进并补回一个词间空格
+                    text = text.lstrip()
                     if result and text:
                         last_ch = result[-1][-1] if result[-1] else ''
                         first_ch = text[0]
-                        if last_ch and first_ch and need_space(last_ch, first_ch):
+                        if last_ch and first_ch and self._need_boundary_space(last_ch, first_ch):
                             result.append(' ')
                 else:
                     result.append('\n')
