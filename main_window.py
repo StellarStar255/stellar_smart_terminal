@@ -634,9 +634,11 @@ class WindowNavigatorPanel(QWidget):
             }
         """)
         # 内嵌模式下让列表保持紧凑（顶部一小条），把纵向空间留给下方的文件面板；
-        # 窗口很多时列表内部滚动。
+        # 窗口很多时列表内部滚动。高度可由底部手柄拖拽调整（见 set_embedded_list_height）。
+        self.EMBED_LIST_MIN_H = 60
+        self._embedded_list_height = 180
         if self._embedded:
-            self.window_list.setMaximumHeight(180)
+            self.window_list.setFixedHeight(self._embedded_list_height)
         # 启用鼠标追踪以支持悬停效果
         self.window_list.setMouseTracking(True)
         self.window_list.itemEntered.connect(self._on_item_entered)
@@ -949,6 +951,18 @@ class WindowNavigatorPanel(QWidget):
         self._last_window_info = []
         self._cached_windows = []
         self._refresh_window_list()
+
+    def set_embedded_list_height(self, h):
+        """内嵌模式下设置窗口列表高度（拖拽手柄调用）。返回实际生效的高度。"""
+        if not self._embedded:
+            return self._embedded_list_height
+        h = max(self.EMBED_LIST_MIN_H, int(h))
+        self._embedded_list_height = h
+        self.window_list.setFixedHeight(h)
+        return h
+
+    def embedded_list_height(self):
+        return self._embedded_list_height
 
     def _check_and_refresh(self):
         """轻量级检查，只在必要时刷新"""
@@ -2585,6 +2599,45 @@ class _FlowSeparator(QWidget):
         p.end()
 
 
+class _NavResizeHandle(QWidget):
+    """内嵌导航面板底部的可拖拽手柄：上下拖动改变导航列表高度。
+    样式与 QSplitter::handle 一致（默认 #3d3d5c，hover/拖拽时 #667eea）。"""
+
+    def __init__(self, on_drag, on_release, parent=None):
+        super().__init__(parent)
+        self._on_drag = on_drag          # callback(delta_y:int)：实时调整高度
+        self._on_release = on_release    # callback()：拖拽结束后落盘
+        self.setFixedHeight(6)
+        self.setCursor(Qt.CursorShape.SizeVerCursor)
+        self.setStyleSheet("background-color: #3d3d5c;")
+        self._press_y = None
+
+    def enterEvent(self, event):
+        self.setStyleSheet("background-color: #667eea;")
+
+    def leaveEvent(self, event):
+        if self._press_y is None:
+            self.setStyleSheet("background-color: #3d3d5c;")
+
+    def mousePressEvent(self, event):
+        if event.button() == Qt.MouseButton.LeftButton:
+            self._press_y = event.globalPosition().y()
+
+    def mouseMoveEvent(self, event):
+        if self._press_y is not None:
+            y = event.globalPosition().y()
+            delta = int(y - self._press_y)
+            if delta:
+                self._press_y = y
+                self._on_drag(delta)
+
+    def mouseReleaseEvent(self, event):
+        if self._press_y is not None:
+            self._press_y = None
+            self.setStyleSheet("background-color: #3d3d5c;")
+            self._on_release()
+
+
 class MainWindow(QMainWindow):
     """主窗口"""
 
@@ -3439,6 +3492,14 @@ class MainWindow(QMainWindow):
         self.nav_panel = WindowNavigatorPanel(embedded=True)
         _nav_layout.addWidget(self.nav_panel)
         self.left_panel_layout.addWidget(self.nav_panel_container)
+        # 恢复上次拖拽记忆的导航列表高度
+        if isinstance(getattr(self, '_saved_nav_list_height', None), int):
+            self.nav_panel.set_embedded_list_height(self._saved_nav_list_height)
+        # 导航面板底部的可拖拽手柄：上下拖动改变列表高度并记住
+        self.nav_resize_handle = _NavResizeHandle(
+            self._on_nav_resize_drag, self._save_config)
+        self.left_panel_layout.addWidget(self.nav_resize_handle)
+        self.nav_resize_handle.hide()
         self.nav_panel_container.hide()
         self.nav_panel_visible = False
         self.nav_embed_enabled = False  # 内嵌导航条是否启用（勾选框控制，per-window）
@@ -9226,6 +9287,7 @@ class MainWindow(QMainWindow):
         self._saved_left_panel_width = None  # 仅左面板可见时的宽度（无编辑器场景）
         self._saved_git_commit_height = None  # Git 面板提交区高度（拖拽记忆，兼容旧版）
         self._saved_git_body_sizes = None     # Git 面板 body splitter 各栏尺寸（拖拽记忆）
+        self._saved_nav_list_height = None    # 内嵌导航列表高度（拖拽记忆）
         try:
             if self.CONFIG_FILE.exists():
                 with open(self.CONFIG_FILE, 'r', encoding='utf-8') as f:
@@ -9298,6 +9360,9 @@ class MainWindow(QMainWindow):
                     git_body_sizes = config.get('git_body_splitter_sizes', None)
                     if isinstance(git_body_sizes, list) and git_body_sizes and all(isinstance(s, int) and s >= 0 for s in git_body_sizes):
                         self._saved_git_body_sizes = git_body_sizes
+                    nav_list_h = config.get('nav_list_height', None)
+                    if isinstance(nav_list_h, int) and nav_list_h > 0:
+                        self._saved_nav_list_height = nav_list_h
         except Exception:
             self.presets = []
 
@@ -9480,6 +9545,7 @@ class MainWindow(QMainWindow):
                 'left_panel_width': getattr(self, '_saved_left_panel_width', None),
                 'git_commit_height': getattr(self, '_saved_git_commit_height', None),
                 'git_body_splitter_sizes': getattr(self, '_saved_git_body_sizes', None),
+                'nav_list_height': getattr(self, '_saved_nav_list_height', None),
             }
             # 保存窗口导航面板设置
             nav = MainWindow._global_window_navigator
@@ -9576,6 +9642,16 @@ class MainWindow(QMainWindow):
                 MainWindow._global_window_navigator.hide()
             MainWindow._sync_nav_checkbox_state(False)
 
+    def _on_nav_resize_drag(self, delta):
+        """拖拽导航面板底部手柄：按鼠标位移调整列表高度（上限留出下方面板空间）。"""
+        if not hasattr(self, 'nav_panel'):
+            return
+        cur = self.nav_panel.embedded_list_height()
+        # 上限：不超过左侧栏高度减去给下方文件面板预留的空间
+        max_h = max(120, self.left_panel_container.height() - 200)
+        new_h = min(cur + delta, max_h)
+        self._saved_nav_list_height = self.nav_panel.set_embedded_list_height(new_h)
+
     def _sync_embedded_nav(self):
         """内嵌模式下让导航条「只与 Explorer/Git/Remote 同时出现，不单独出现」。
 
@@ -9594,6 +9670,8 @@ class MainWindow(QMainWindow):
                 and file_panel_open)
         self.nav_panel_visible = show
         self.nav_panel_container.setVisible(show)
+        if hasattr(self, 'nav_resize_handle'):
+            self.nav_resize_handle.setVisible(show)
         if show:
             try:
                 self.nav_panel._force_refresh()
