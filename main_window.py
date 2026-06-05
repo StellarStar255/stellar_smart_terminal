@@ -756,17 +756,30 @@ class WindowNavigatorPanel(QWidget):
 
         layout.addLayout(btn_layout)
 
-        # 嵌入 / 弹出 切换按钮：浮动时显示「嵌入」，内嵌时显示「弹出」
-        self.dock_toggle_btn = QPushButton(
-            t("window.popout_btn") if self._embedded else t("window.embed_btn"))
-        self.dock_toggle_btn.setToolTip(
-            t("window.popout_tooltip") if self._embedded else t("window.embed_tooltip"))
-        self.dock_toggle_btn.clicked.connect(self._on_dock_toggle_clicked)
-        layout.addWidget(self.dock_toggle_btn)
+        # 「嵌入到侧栏」勾选框：勾选=内嵌到各窗口左侧栏；取消=独立浮动窗口。自动记住。
+        self.embed_checkbox = QCheckBox(t("window.embed_checkbox"))
+        self.embed_checkbox.setToolTip(t("window.embed_checkbox_tooltip"))
+        self.embed_checkbox.setStyleSheet("""
+            QCheckBox {
+                color: #aaaaaa;
+                font-size: 11px;
+                border: none;
+            }
+            QCheckBox::indicator {
+                width: 14px;
+                height: 14px;
+            }
+        """)
+        self.embed_checkbox.blockSignals(True)
+        self.embed_checkbox.setChecked(self._embedded)
+        self.embed_checkbox.blockSignals(False)
+        self.embed_checkbox.stateChanged.connect(self._on_embed_checkbox_changed)
+        layout.addWidget(self.embed_checkbox)
 
-    def _on_dock_toggle_clicked(self):
-        """点击「嵌入/弹出」：在浮动与内嵌之间切换导航面板停靠方式（全局，自动记住）。"""
-        MainWindow._set_navigator_dock_mode('float' if self._embedded else 'embed')
+    def _on_embed_checkbox_changed(self, state):
+        """勾选/取消「嵌入到侧栏」：在内嵌与浮动之间切换停靠方式（全局，自动记住）。"""
+        checked = (state == Qt.CheckState.Checked.value)
+        MainWindow._set_navigator_dock_mode('embed' if checked else 'float')
 
     def _toggle_sort_mode(self):
         """切换排序方式: 时间 -> 名称 -> 手动 -> 时间"""
