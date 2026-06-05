@@ -692,6 +692,26 @@ class WindowNavigatorPanel(QWidget):
         self.quick_close_checkbox.stateChanged.connect(self._on_quick_close_changed)
         compact_row.addWidget(self.quick_close_checkbox)
 
+        # 「嵌入到侧栏」勾选框：勾选=内嵌到各窗口左侧栏；取消=独立浮动窗口。自动记住。
+        self.embed_checkbox = QCheckBox(t("window.embed_checkbox"))
+        self.embed_checkbox.setToolTip(t("window.embed_checkbox_tooltip"))
+        self.embed_checkbox.setStyleSheet("""
+            QCheckBox {
+                color: #aaaaaa;
+                font-size: 11px;
+                border: none;
+            }
+            QCheckBox::indicator {
+                width: 14px;
+                height: 14px;
+            }
+        """)
+        self.embed_checkbox.blockSignals(True)
+        self.embed_checkbox.setChecked(self._embedded)
+        self.embed_checkbox.blockSignals(False)
+        self.embed_checkbox.stateChanged.connect(self._on_embed_checkbox_changed)
+        compact_row.addWidget(self.embed_checkbox)
+
         compact_row.addStretch()
 
         # 字体大小调节
@@ -755,26 +775,6 @@ class WindowNavigatorPanel(QWidget):
         btn_layout.addWidget(refresh_btn)
 
         layout.addLayout(btn_layout)
-
-        # 「嵌入到侧栏」勾选框：勾选=内嵌到各窗口左侧栏；取消=独立浮动窗口。自动记住。
-        self.embed_checkbox = QCheckBox(t("window.embed_checkbox"))
-        self.embed_checkbox.setToolTip(t("window.embed_checkbox_tooltip"))
-        self.embed_checkbox.setStyleSheet("""
-            QCheckBox {
-                color: #aaaaaa;
-                font-size: 11px;
-                border: none;
-            }
-            QCheckBox::indicator {
-                width: 14px;
-                height: 14px;
-            }
-        """)
-        self.embed_checkbox.blockSignals(True)
-        self.embed_checkbox.setChecked(self._embedded)
-        self.embed_checkbox.blockSignals(False)
-        self.embed_checkbox.stateChanged.connect(self._on_embed_checkbox_changed)
-        layout.addWidget(self.embed_checkbox)
 
     def _on_embed_checkbox_changed(self, state):
         """勾选/取消「嵌入到侧栏」：在内嵌与浮动之间切换停靠方式（全局，自动记住）。"""
