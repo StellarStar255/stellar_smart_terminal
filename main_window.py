@@ -534,11 +534,17 @@ class WindowNavigatorPanel(QWidget):
     window_switch_requested = pyqtSignal(object)  # 请求切换到某个窗口
     panel_closed = pyqtSignal()  # 面板关闭信号
 
-    def __init__(self, parent=None):
-        super().__init__(parent, Qt.WindowType.Window | Qt.WindowType.WindowStaysOnTopHint | Qt.WindowType.Tool)
-        self.setWindowTitle(t("window.navigator_title"))
-        self.setMinimumSize(200, 150)
-        self.resize(250, 300)
+    def __init__(self, parent=None, embedded=False):
+        # embedded=True：作为普通子控件嵌入到窗口左侧栏（无独立窗口标志、无标题栏）；
+        # embedded=False：原来的浮动置顶小窗口。
+        self._embedded = embedded
+        if embedded:
+            super().__init__(parent)
+        else:
+            super().__init__(parent, Qt.WindowType.Window | Qt.WindowType.WindowStaysOnTopHint | Qt.WindowType.Tool)
+            self.setWindowTitle(t("window.navigator_title"))
+            self.setMinimumSize(200, 150)
+            self.resize(250, 300)
 
         # 排序方式: 'time' (按创建时间) / 'name' (按名称) / 'manual' (手动排序)
         self._sort_mode = 'time'
@@ -627,6 +633,10 @@ class WindowNavigatorPanel(QWidget):
                 background-color: #2d2d44;
             }
         """)
+        # 内嵌模式下让列表保持紧凑（顶部一小条），把纵向空间留给下方的文件面板；
+        # 窗口很多时列表内部滚动。
+        if self._embedded:
+            self.window_list.setMaximumHeight(180)
         # 启用鼠标追踪以支持悬停效果
         self.window_list.setMouseTracking(True)
         self.window_list.itemEntered.connect(self._on_item_entered)
@@ -745,6 +755,18 @@ class WindowNavigatorPanel(QWidget):
         btn_layout.addWidget(refresh_btn)
 
         layout.addLayout(btn_layout)
+
+        # 嵌入 / 弹出 切换按钮：浮动时显示「嵌入」，内嵌时显示「弹出」
+        self.dock_toggle_btn = QPushButton(
+            t("window.popout_btn") if self._embedded else t("window.embed_btn"))
+        self.dock_toggle_btn.setToolTip(
+            t("window.popout_tooltip") if self._embedded else t("window.embed_tooltip"))
+        self.dock_toggle_btn.clicked.connect(self._on_dock_toggle_clicked)
+        layout.addWidget(self.dock_toggle_btn)
+
+    def _on_dock_toggle_clicked(self):
+        """点击「嵌入/弹出」：在浮动与内嵌之间切换导航面板停靠方式（全局，自动记住）。"""
+        MainWindow._set_navigator_dock_mode('float' if self._embedded else 'embed')
 
     def _toggle_sort_mode(self):
         """切换排序方式: 时间 -> 名称 -> 手动 -> 时间"""
@@ -1344,7 +1366,9 @@ class WindowNavigatorPanel(QWidget):
             # 否则会把对方的更改（如 git_proxy）当作"已损坏"全部覆盖掉。
             if not ok:
                 return
-            existing['navigator_geometry'] = [self.x(), self.y(), self.width(), self.height()]
+            # 内嵌模式下 self.x()/y() 是控件在父布局里的坐标，没有意义，不写几何
+            if not self._embedded:
+                existing['navigator_geometry'] = [self.x(), self.y(), self.width(), self.height()]
             existing['navigator_font_size'] = self._font_size
             existing['navigator_quick_close'] = bool(self._quick_close)
             atomic_write_json(config_file, existing)
@@ -1370,9 +1394,9 @@ class WindowNavigatorPanel(QWidget):
                 self.quick_close_checkbox.blockSignals(True)
                 self.quick_close_checkbox.setChecked(quick_close)
                 self.quick_close_checkbox.blockSignals(False)
-                # 恢复窗口位置和大小
+                # 恢复窗口位置和大小（仅浮动模式）
                 geo = config.get('navigator_geometry')
-                if geo and len(geo) == 4:
+                if not self._embedded and geo and len(geo) == 4:
                     x, y, w, h = geo
                     # 确保窗口在屏幕可见范围内
                     from PyQt6.QtWidgets import QApplication
@@ -2746,6 +2770,8 @@ class MainWindow(QMainWindow):
 
     # 全局共享的窗口导航面板
     _global_window_navigator = None
+    # 导航面板停靠方式：'float'=独立浮动窗口（默认）；'embed'=嵌入每个窗口左侧栏
+    _navigator_dock_mode = 'float'
 
     # QApplication 全局 stylesheet 原值快照（进程级共享，仅初始化一次）
     _original_app_stylesheet = None
@@ -2998,9 +3024,8 @@ class MainWindow(QMainWindow):
                     self._update_splitter_sizes()
             QTimer.singleShot(0, _reapply)
 
-        # 立即刷新窗口导航（新窗口建立时）
-        if MainWindow._global_window_navigator is not None:
-            MainWindow._global_window_navigator._refresh_window_list()
+        # 立即刷新窗口导航（新窗口建立时）—— 广播到浮动与所有内嵌面板
+        MainWindow._broadcast_navigator_refresh()
 
     def changeEvent(self, event):
         """窗口状态变化事件 - 优化窗口切换时的性能"""
@@ -3022,9 +3047,12 @@ class MainWindow(QMainWindow):
                                     t.resume_timers()
                             QTimer.singleShot(delay, resume_terminal_timers)
                             delay += 20
-                # 更新窗口导航面板的选中项
-                if MainWindow._global_window_navigator is not None:
-                    MainWindow._global_window_navigator.select_window(self)
+                # 更新所有导航面板（浮动 + 内嵌）的选中项
+                for nav in MainWindow._iter_navigators():
+                    try:
+                        nav.select_window(self)
+                    except Exception:
+                        pass
             else:
                 # 窗口失活时暂停日志刷新定时器（减少后台开销）
                 if hasattr(self, '_log_timer') and self._log_timer:
@@ -3346,6 +3374,21 @@ class MainWindow(QMainWindow):
         self.left_panel_layout = QVBoxLayout(self.left_panel_container)
         self.left_panel_layout.setContentsMargins(0, 0, 0, 0)
         self.left_panel_layout.setSpacing(0)
+
+        # 窗口导航面板（内嵌模式）容器：固定在左侧栏顶部，只与 Explorer/Git/Remote 一起出现，
+        # 自身保持紧凑（取内容高度，不抢占文件面板的纵向空间）。
+        self.nav_panel_container = QWidget()
+        self.nav_panel_container.setSizePolicy(
+            QSizePolicy.Policy.Preferred, QSizePolicy.Policy.Maximum)
+        _nav_layout = QVBoxLayout(self.nav_panel_container)
+        _nav_layout.setContentsMargins(0, 0, 0, 0)
+        _nav_layout.setSpacing(0)
+        self.nav_panel = WindowNavigatorPanel(embedded=True)
+        _nav_layout.addWidget(self.nav_panel)
+        self.left_panel_layout.addWidget(self.nav_panel_container)
+        self.nav_panel_container.hide()
+        self.nav_panel_visible = False
+        self.nav_embed_enabled = False  # 内嵌导航条是否启用（勾选框控制，per-window）
 
         # Explorer 面板容器
         self.explorer_panel_container = QWidget()
@@ -4759,10 +4802,8 @@ class MainWindow(QMainWindow):
         self._update_color_btn_style()
         if menu:
             menu.close()
-        # 触发窗口导航面板立即刷新
-        if MainWindow._global_window_navigator:
-            MainWindow._global_window_navigator._last_window_info = []  # 使缓存失效
-            MainWindow._global_window_navigator._refresh_window_list()  # 立即刷新
+        # 触发所有导航面板（浮动 + 内嵌）立即刷新（颜色/名称变化）
+        MainWindow._broadcast_navigator_refresh(invalidate_cache=True)
 
     def get_window_color(self) -> str:
         """获取窗口颜色"""
@@ -7561,6 +7602,8 @@ class MainWindow(QMainWindow):
 
             self._update_splitter_sizes()
 
+        # 内嵌导航条只与文件面板同时出现：随每次开关同步
+        self._sync_embedded_nav()
         # 先恢复绘制让 UI 立即呈现，终端 resize 延迟到下一事件循环
         self.left_panel_container.setUpdatesEnabled(True)
         self.main_splitter.setUpdatesEnabled(True)
@@ -7686,6 +7729,7 @@ class MainWindow(QMainWindow):
             if not self.explorer_panel_visible and not getattr(self, 'remote_panel_visible', False):
                 self.left_panel_container.hide()
 
+        self._sync_embedded_nav()
         self._update_splitter_sizes()
         self.main_splitter.setUpdatesEnabled(True)
         QTimer.singleShot(0, self._flush_terminal_resizes)
@@ -7806,6 +7850,7 @@ class MainWindow(QMainWindow):
             if not self.explorer_panel_visible and not self.git_panel_visible:
                 self.left_panel_container.hide()
 
+        self._sync_embedded_nav()
         self._update_splitter_sizes()
         self.main_splitter.setUpdatesEnabled(True)
         QTimer.singleShot(0, self._flush_terminal_resizes)
@@ -9165,6 +9210,10 @@ class MainWindow(QMainWindow):
                     # 加载左右分屏偏好（Explorer / Remote 各自记忆）
                     self._explorer_split_horizontal = config.get('explorer_split_horizontal', False)
                     self._remote_split_horizontal = config.get('remote_split_horizontal', False)
+                    # 加载导航面板停靠方式（'float' / 'embed'，全局记忆）
+                    _dock_mode = config.get('navigator_dock_mode', 'float')
+                    if _dock_mode in ('float', 'embed'):
+                        MainWindow._navigator_dock_mode = _dock_mode
                     # 加载语言设置
                     saved_lang = config.get('language', 'zh')
                     if saved_lang in ('zh', 'en'):
@@ -9452,34 +9501,159 @@ class MainWindow(QMainWindow):
         self._save_config()
 
     def _on_window_nav_changed(self, state):
-        """窗口快速导航选项变化"""
-        if state == Qt.CheckState.Checked.value:
-            # 创建或显示全局导航面板
+        """窗口快速导航选项变化（区分浮动 / 内嵌两种停靠方式）"""
+        checked = (state == Qt.CheckState.Checked.value)
+        if MainWindow._navigator_dock_mode == 'embed':
+            # 内嵌模式：勾选 = 启用左侧栏顶部的导航条；它只与 Explorer/Git/Remote 一起出现，
+            # 不会单独占满左侧栏（各窗口独立，不跨窗口同步）。
+            self.nav_embed_enabled = checked
+            self.main_splitter.setUpdatesEnabled(False)
+            self._sync_embedded_nav()
+            self._update_splitter_sizes()
+            self.main_splitter.setUpdatesEnabled(True)
+            QTimer.singleShot(0, self._flush_terminal_resizes)
+            return
+        # 浮动模式（原行为）
+        if checked:
             if MainWindow._global_window_navigator is None:
                 MainWindow._global_window_navigator = WindowNavigatorPanel()
-                # 监听导航面板关闭事件，同步所有窗口的 checkbox 状态
                 MainWindow._global_window_navigator.panel_closed.connect(MainWindow._on_navigator_closed_global)
             MainWindow._global_window_navigator.show()
             MainWindow._global_window_navigator.raise_()
-            # 同步所有窗口的 checkbox 状态为勾选
             MainWindow._sync_nav_checkbox_state(True)
         else:
-            # 隐藏导航面板
             if MainWindow._global_window_navigator is not None:
                 MainWindow._global_window_navigator.hide()
-            # 同步所有窗口的 checkbox 状态为取消勾选
             MainWindow._sync_nav_checkbox_state(False)
+
+    def _sync_embedded_nav(self):
+        """内嵌模式下让导航条「只与 Explorer/Git/Remote 同时出现，不单独出现」。
+
+        导航条可见 = 已启用(nav_embed_enabled) 且 左侧有文件面板(Explorer/Git/Remote)正显示。
+        其余情况一律隐藏，避免它单独占满整个左侧栏。
+        """
+        if not hasattr(self, 'nav_panel_container'):
+            return
+        file_panel_open = (
+            self.explorer_panel_visible
+            or self.git_panel_visible
+            or getattr(self, 'remote_panel_visible', False)
+        )
+        show = (MainWindow._navigator_dock_mode == 'embed'
+                and bool(getattr(self, 'nav_embed_enabled', False))
+                and file_panel_open)
+        self.nav_panel_visible = show
+        self.nav_panel_container.setVisible(show)
+        if show:
+            try:
+                self.nav_panel._force_refresh()
+            except Exception:
+                pass
+
+    @staticmethod
+    def _set_navigator_dock_mode(mode: str):
+        """切换导航面板停靠方式（'float' / 'embed'），并把选择写入配置自动记住。"""
+        if mode not in ('float', 'embed'):
+            return
+        MainWindow._navigator_dock_mode = mode
+        app = QApplication.instance()
+        wins = [w for w in (app.topLevelWidgets() if app else [])
+                if isinstance(w, MainWindow) and not sip.isdeleted(w)]
+        if mode == 'embed':
+            g = MainWindow._global_window_navigator
+            floating_on = (g is not None and not sip.isdeleted(g) and g.isVisible())
+            # 关闭浮动面板
+            if g is not None:
+                MainWindow._global_window_navigator = None
+                try:
+                    if not sip.isdeleted(g):
+                        g._save_navigator_config()
+                        g.close()
+                        g.deleteLater()
+                except Exception:
+                    pass
+            # 原本开着导航的窗口启用内嵌导航条（它会与已打开的文件面板一起显示）
+            for w in wins:
+                was_on = floating_on or (hasattr(w, 'window_nav_checkbox')
+                                         and w.window_nav_checkbox.isChecked())
+                w.nav_embed_enabled = bool(was_on)
+                w.main_splitter.setUpdatesEnabled(False)
+                w._sync_embedded_nav()
+                w._update_splitter_sizes()
+                w.main_splitter.setUpdatesEnabled(True)
+                if hasattr(w, 'window_nav_checkbox'):
+                    w.window_nav_checkbox.blockSignals(True)
+                    w.window_nav_checkbox.setChecked(bool(was_on))
+                    w.window_nav_checkbox.blockSignals(False)
+        else:  # float
+            any_on = False
+            for w in wins:
+                if getattr(w, 'nav_embed_enabled', False):
+                    any_on = True
+                w.nav_embed_enabled = False
+                w.main_splitter.setUpdatesEnabled(False)
+                w._sync_embedded_nav()
+                w._update_splitter_sizes()
+                w.main_splitter.setUpdatesEnabled(True)
+            if any_on:
+                if MainWindow._global_window_navigator is None:
+                    MainWindow._global_window_navigator = WindowNavigatorPanel()
+                    MainWindow._global_window_navigator.panel_closed.connect(MainWindow._on_navigator_closed_global)
+                MainWindow._global_window_navigator.show()
+                MainWindow._global_window_navigator.raise_()
+                MainWindow._sync_nav_checkbox_state(True)
+        MainWindow._persist_navigator_dock_mode()
+
+    @staticmethod
+    def _persist_navigator_dock_mode():
+        """把当前停靠方式写入主配置文件。"""
+        try:
+            existing, ok = read_config_json(MainWindow.CONFIG_FILE)
+            if not ok:
+                return
+            existing['navigator_dock_mode'] = MainWindow._navigator_dock_mode
+            atomic_write_json(MainWindow.CONFIG_FILE, existing)
+        except Exception:
+            pass
+
+    @staticmethod
+    def _iter_navigators():
+        """返回当前所有存活的导航面板（浮动 + 各窗口内嵌），用于广播刷新/选中。"""
+        navs = []
+        g = MainWindow._global_window_navigator
+        if g is not None and not sip.isdeleted(g):
+            navs.append(g)
+        app = QApplication.instance()
+        if app:
+            for w in app.topLevelWidgets():
+                if isinstance(w, MainWindow):
+                    nav = getattr(w, 'nav_panel', None)
+                    if nav is not None and not sip.isdeleted(nav):
+                        navs.append(nav)
+        return navs
+
+    @staticmethod
+    def _broadcast_navigator_refresh(invalidate_cache: bool = False):
+        """刷新所有导航面板的窗口列表。"""
+        for nav in MainWindow._iter_navigators():
+            try:
+                if invalidate_cache:
+                    nav._last_window_info = []
+                nav._refresh_window_list()
+            except Exception:
+                pass
 
     @staticmethod
     def _on_navigator_closed_global():
-        """导航面板被关闭时的全局回调"""
+        """浮动导航面板被关闭时的全局回调"""
         MainWindow._global_window_navigator = None
-        # 同步所有窗口的 checkbox 状态为取消勾选
-        MainWindow._sync_nav_checkbox_state(False)
+        # 仅浮动模式下需要同步取消勾选（内嵌模式 checkbox 由各窗口自己管理）
+        if MainWindow._navigator_dock_mode != 'embed':
+            MainWindow._sync_nav_checkbox_state(False)
 
     @staticmethod
     def _sync_nav_checkbox_state(checked: bool):
-        """同步所有 MainWindow 实例的窗口导航 checkbox 状态"""
+        """同步所有 MainWindow 实例的窗口导航 checkbox 状态（仅浮动模式使用）"""
         app = QApplication.instance()
         if not app:
             return
@@ -9783,20 +9957,16 @@ class MainWindow(QMainWindow):
         except Exception as e:
             print(f"[Close] save_config failed: {e}")
 
-        # 立即刷新窗口导航（窗口关闭时）
-        if MainWindow._global_window_navigator is not None:
-            navigator = MainWindow._global_window_navigator
-            def refresh_navigator():
-                # 安全检查：确保导航面板对象未被删除
-                try:
-                    if (MainWindow._global_window_navigator is not None
-                            and not sip.isdeleted(navigator)):
-                        navigator._refresh_window_list()
-                except RuntimeError:
-                    pass
-                except Exception as e:
-                    print(f"[Close] navigator refresh failed: {e}")
-            QTimer.singleShot(200, refresh_navigator)
+        # 立即刷新窗口导航（窗口关闭时）—— 广播到浮动与所有内嵌面板
+        # 延迟到本窗口真正从 topLevelWidgets 移除后再刷新，使列表不再含本窗口
+        def refresh_navigator():
+            try:
+                MainWindow._broadcast_navigator_refresh(invalidate_cache=True)
+            except RuntimeError:
+                pass
+            except Exception as e:
+                print(f"[Close] navigator refresh failed: {e}")
+        QTimer.singleShot(200, refresh_navigator)
 
         event.accept()
 
