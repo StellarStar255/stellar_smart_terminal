@@ -4842,10 +4842,25 @@ class MainWindow(QMainWindow):
         self._load_local_commands()
 
     def _update_title_label_color(self):
-        """更新标题标签颜色"""
-        self.title_label.setStyleSheet(
-            f"color: {self._window_color}; font-size: 13px; font-weight: bold;"
+        """更新标题标签颜色
+
+        字号必须跟随当前 GUI 字体缩放：本方法在改窗口颜色时会被重复调用，
+        若直接写死 13px 会把 _scale_gui_font_sizes 放大过的字号打回原形，
+        导致「改过颜色的窗口」和「没改过的窗口」标题字号不一致。
+        """
+        base_ss = f"color: {self._window_color}; font-size: 13px; font-weight: bold;"
+        scale = self._current_gui_font_scale()
+        scaled_ss = re.sub(
+            r'font-size:\s*(\d+)px',
+            lambda m: f'font-size: {max(7, round(int(m.group(1)) * scale))}px',
+            base_ss,
         )
+        self.title_label.setStyleSheet(scaled_ss)
+        # 同步缩放缓存：以未缩放的 base_ss 作基准，保证后续缩放仍从 13px 算起
+        if scale != 1.0:
+            self._original_widget_styles[id(self.title_label)] = (self.title_label, base_ss)
+        else:
+            self._original_widget_styles.pop(id(self.title_label), None)
 
     def _update_color_btn_style(self):
         """更新颜色按钮样式"""
@@ -5507,6 +5522,19 @@ class MainWindow(QMainWindow):
 
         # 保存缩放偏移到配置
         self._save_config()
+
+    def _current_gui_font_scale(self) -> float:
+        """当前 GUI 字体缩放比例（以 12px 为基准）。
+
+        与 _scale_gui_font_sizes 同一套公式，供需要单独重算某个控件字号的地方
+        （如 _update_title_label_color）复用，避免硬编码字号在重设样式时丢掉缩放。
+        """
+        base_px = 12
+        if self._gui_font_size > 0:
+            return self._gui_font_size / base_px
+        if self._global_zoom_delta != 0:
+            return (base_px + self._global_zoom_delta) / base_px
+        return 1.0
 
     def _scale_gui_font_sizes(self, gui_font_size: int, delta: int):
         """缩放所有 GUI 组件样式表中的 font-size 值"""
