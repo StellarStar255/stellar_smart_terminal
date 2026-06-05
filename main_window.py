@@ -3114,6 +3114,16 @@ class MainWindow(QMainWindow):
                 self._toggle_git_panel()
             if self._saved_log_panel_visible:
                 self._toggle_log_panel()
+            # 恢复 Window Navigator 开关状态：勾选复选框即触发 _on_window_nav_changed，
+            # 按浮动/内嵌模式打开对应导航。延迟到事件循环就绪后再开，避免浮动面板
+            # 在主窗口几何尚未稳定时定位异常。
+            if self._saved_navigator_enabled and hasattr(self, 'window_nav_checkbox'):
+                def _restore_nav():
+                    if sip.isdeleted(self) or not hasattr(self, 'window_nav_checkbox'):
+                        return
+                    if not self.window_nav_checkbox.isChecked():
+                        self.window_nav_checkbox.setChecked(True)
+                QTimer.singleShot(0, _restore_nav)
 
         # macOS 原生窗口标志（已在 __init__ 开头初始化）
 
@@ -9359,6 +9369,7 @@ class MainWindow(QMainWindow):
         self._saved_explorer_panel_visible = False  # Explorer 面板可见性
         self._saved_git_panel_visible = False  # Git 面板可见性
         self._saved_log_panel_visible = False  # 日志面板可见性
+        self._saved_navigator_enabled = False  # Window Navigator 开关状态
         # 记忆资源管理器/编辑器拖拽过的尺寸，避免每次重新打开都重置
         self._saved_explorer_main_sizes = None  # main_splitter 4 项尺寸（左右分屏）
         self._saved_explorer_internal_sizes = None  # explorer_splitter 2 项尺寸（上下分屏）
@@ -9420,6 +9431,7 @@ class MainWindow(QMainWindow):
                     self._saved_explorer_panel_visible = config.get('explorer_panel_visible', False)
                     self._saved_git_panel_visible = config.get('git_panel_visible', False)
                     self._saved_log_panel_visible = config.get('log_panel_visible', False)
+                    self._saved_navigator_enabled = config.get('navigator_enabled', False)
                     # 加载记忆的资源管理器/编辑器尺寸
                     main_sizes = config.get('explorer_main_splitter_sizes', None)
                     if isinstance(main_sizes, list) and len(main_sizes) == 4 and all(isinstance(s, int) and s >= 0 for s in main_sizes):
@@ -9618,6 +9630,8 @@ class MainWindow(QMainWindow):
                 'explorer_panel_visible': getattr(self, 'explorer_panel_visible', False),
                 'git_panel_visible': getattr(self, 'git_panel_visible', False),
                 'log_panel_visible': getattr(self, 'log_panel_visible', False),
+                'navigator_enabled': self._navigator_is_enabled(),  # 记忆 Window Navigator 开关状态
+
                 'explorer_main_splitter_sizes': getattr(self, '_saved_explorer_main_sizes', None),
                 'explorer_internal_splitter_sizes': getattr(self, '_saved_explorer_internal_sizes', None),
                 'remote_internal_splitter_sizes': getattr(self, '_saved_remote_internal_sizes', None),
@@ -9707,6 +9721,7 @@ class MainWindow(QMainWindow):
             # 内嵌模式：勾选 = 启用左侧栏顶部的导航条；它只与 Explorer/Git/Remote 一起出现，
             # 不会单独占满左侧栏。该开关在所有窗口间联动（与浮动模式一致）。
             MainWindow._set_embed_enabled_all(checked)
+            self._save_config()  # 记忆开关状态，下次启动恢复
             return
         # 浮动模式（原行为）
         if checked:
@@ -9720,6 +9735,7 @@ class MainWindow(QMainWindow):
             if MainWindow._global_window_navigator is not None:
                 MainWindow._global_window_navigator.hide()
             MainWindow._sync_nav_checkbox_state(False)
+        self._save_config()  # 记忆开关状态，下次启动恢复
 
     def _on_nav_resize_drag(self, delta):
         """拖拽导航面板底部手柄：按鼠标位移调整列表高度（上限留出下方面板空间）。"""
@@ -9785,6 +9801,14 @@ class MainWindow(QMainWindow):
                     return True
         return False
 
+    def _navigator_is_enabled(self) -> bool:
+        """当前 Window Navigator 是否开启（用于落盘记忆，下次启动恢复）。
+        内嵌模式看是否有窗口启用了导航条；浮动模式看全局浮动面板是否可见。"""
+        if MainWindow._navigator_dock_mode == 'embed':
+            return MainWindow._current_embed_enabled()
+        nav = MainWindow._global_window_navigator
+        return nav is not None and not sip.isdeleted(nav) and nav.isVisible()
+
     @staticmethod
     def _set_navigator_dock_mode(mode: str):
         """切换导航面板停靠方式（'float' / 'embed'），并把选择写入配置自动记住。"""
@@ -9837,6 +9861,18 @@ class MainWindow(QMainWindow):
             pass
 
     @staticmethod
+    def _persist_navigator_enabled(enabled: bool):
+        """把 Window Navigator 开关状态写入主配置文件（供下次启动恢复）。"""
+        try:
+            existing, ok = read_config_json(MainWindow.CONFIG_FILE)
+            if not ok:
+                return
+            existing['navigator_enabled'] = bool(enabled)
+            atomic_write_json(MainWindow.CONFIG_FILE, existing)
+        except Exception:
+            pass
+
+    @staticmethod
     def _iter_navigators():
         """返回当前所有存活的导航面板（浮动 + 各窗口内嵌），用于广播刷新/选中。"""
         navs = []
@@ -9870,6 +9906,9 @@ class MainWindow(QMainWindow):
         # 仅浮动模式下需要同步取消勾选（内嵌模式 checkbox 由各窗口自己管理）
         if MainWindow._navigator_dock_mode != 'embed':
             MainWindow._sync_nav_checkbox_state(False)
+            # 用关闭按钮关掉时 _sync 用了 blockSignals，不会触发 _save_config，
+            # 这里直接落盘记忆"关闭"状态，避免下次启动又自动打开。
+            MainWindow._persist_navigator_enabled(False)
 
     @staticmethod
     def _sync_nav_checkbox_state(checked: bool):
