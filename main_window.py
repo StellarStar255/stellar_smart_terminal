@@ -768,21 +768,26 @@ class WindowNavigatorPanel(QWidget):
                 border-radius: 4px;
             }
             QComboBox QAbstractItemView QScrollBar:vertical {
-                background: #16213e;
-                width: 8px;
-                margin: 2px;
+                background: transparent;
+                width: 6px;
+                margin: 4px 2px 4px 0px;
             }
             QComboBox QAbstractItemView QScrollBar::handle:vertical {
-                background: #3d3d5c;
-                border-radius: 4px;
-                min-height: 20px;
+                background: rgba(255, 255, 255, 0.22);
+                border-radius: 3px;
+                min-height: 24px;
             }
             QComboBox QAbstractItemView QScrollBar::handle:vertical:hover {
-                background: #667eea;
+                background: rgba(255, 255, 255, 0.38);
             }
             QComboBox QAbstractItemView QScrollBar::add-line:vertical,
             QComboBox QAbstractItemView QScrollBar::sub-line:vertical {
                 height: 0px;
+                width: 0px;
+            }
+            QComboBox QAbstractItemView QScrollBar::add-page:vertical,
+            QComboBox QAbstractItemView QScrollBar::sub-page:vertical {
+                background: transparent;
             }
         """)
         self.font_size_spin.currentIndexChanged.connect(self._on_font_size_changed)
