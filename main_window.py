@@ -727,6 +727,9 @@ class WindowNavigatorPanel(QWidget):
         self.font_size_spin.setMinimumPopupWidth(68)
         for _px in range(8, 25):
             self.font_size_spin.addItem(f"{_px}px", _px)
+        # 选项不多（17 个），一次性全显示，避免被默认 maxVisibleItems(10) 截断后
+        # 还要依赖 macOS 上时隐时现的滚动条才能选到 18–24px。
+        self.font_size_spin.setMaxVisibleItems(self.font_size_spin.count())
         _fs_idx = self.font_size_spin.findData(self._font_size)
         self.font_size_spin.setCurrentIndex(_fs_idx if _fs_idx >= 0 else 0)
         self.font_size_spin.setStyleSheet("""
@@ -760,6 +763,23 @@ class WindowNavigatorPanel(QWidget):
                 min-height: 24px;
                 padding: 0px 6px;
                 border-radius: 4px;
+            }
+            QComboBox QAbstractItemView QScrollBar:vertical {
+                background: #16213e;
+                width: 8px;
+                margin: 2px;
+            }
+            QComboBox QAbstractItemView QScrollBar::handle:vertical {
+                background: #3d3d5c;
+                border-radius: 4px;
+                min-height: 20px;
+            }
+            QComboBox QAbstractItemView QScrollBar::handle:vertical:hover {
+                background: #667eea;
+            }
+            QComboBox QAbstractItemView QScrollBar::add-line:vertical,
+            QComboBox QAbstractItemView QScrollBar::sub-line:vertical {
+                height: 0px;
             }
         """)
         self.font_size_spin.currentIndexChanged.connect(self._on_font_size_changed)
