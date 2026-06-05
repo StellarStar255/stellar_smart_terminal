@@ -2677,6 +2677,205 @@ class _NavResizeHandle(QWidget):
             self._on_release()
 
 
+class _ShortcutCaptureButton(QPushButton):
+    """显示一个快捷键；点击后进入录制态，按下组合键即捕获。
+
+    - 单独的修饰键会被忽略，直到按下真正的主键。
+    - Backspace / Delete 清空该项。
+    - Esc 取消本次录制，保留原值。
+    """
+    captured = pyqtSignal(str)  # 发出新的键序列（"" 表示清空）
+
+    _MOD_KEYS = (Qt.Key.Key_Control, Qt.Key.Key_Shift, Qt.Key.Key_Alt, Qt.Key.Key_Meta)
+
+    def __init__(self, seq="", parent=None):
+        super().__init__(parent)
+        self._seq = seq or ""
+        self._recording = False
+        self.setCheckable(True)
+        self.setMinimumWidth(180)
+        self.clicked.connect(self._toggle_record)
+        self._refresh()
+
+    def sequence(self):
+        return self._seq
+
+    def set_sequence(self, seq):
+        self._seq = seq or ""
+        self._refresh()
+
+    def _toggle_record(self):
+        if self.isChecked():
+            self._recording = True
+            self.setText(t("shortcuts.recording"))
+            self.grabKeyboard()
+        else:
+            self._stop_record()
+
+    def _stop_record(self):
+        self._recording = False
+        self.setChecked(False)
+        self.releaseKeyboard()
+        self._refresh()
+
+    def _refresh(self):
+        if self._recording:
+            return
+        if self._seq:
+            self.setText(QKeySequence(self._seq).toString(
+                QKeySequence.SequenceFormat.NativeText))
+        else:
+            self.setText(t("shortcuts.unset"))
+
+    def keyPressEvent(self, event):
+        if not self._recording:
+            super().keyPressEvent(event)
+            return
+        key = event.key()
+        if key in self._MOD_KEYS:
+            return  # 等待主键
+        if key == Qt.Key.Key_Escape:
+            self._stop_record()
+            return
+        if key in (Qt.Key.Key_Backspace, Qt.Key.Key_Delete):
+            self._seq = ""
+            self._stop_record()
+            self.captured.emit("")
+            return
+        mods = event.modifiers()
+        seq_text = QKeySequence(key | int(mods.value)).toString()
+        if seq_text:
+            self._seq = seq_text
+            self._stop_record()
+            self.captured.emit(self._seq)
+
+    def focusOutEvent(self, event):
+        if self._recording:
+            self._stop_record()
+        super().focusOutEvent(event)
+
+
+class ShortcutSettingsDialog(QDialog):
+    """键盘快捷键自定义对话框。
+
+    specs: [(action_id, default_seq, label_key, slot_name), ...]
+    current: {action_id: 当前生效的键序列}
+    """
+
+    def __init__(self, specs, current, parent=None):
+        super().__init__(parent)
+        self._specs = list(specs)
+        self._defaults = {s[0]: s[1] for s in self._specs}
+        self._labels = {s[0]: t(s[2]) for s in self._specs}
+        self._seqs = {s[0]: current.get(s[0], s[1]) for s in self._specs}
+        self._buttons = {}
+        self.setWindowTitle(t("shortcuts.dialog_title"))
+        self._setup_ui()
+        self._apply_style()
+
+    def _setup_ui(self):
+        layout = QVBoxLayout(self)
+        layout.setContentsMargins(16, 16, 16, 16)
+        layout.setSpacing(10)
+
+        hint = QLabel(t("shortcuts.hint"))
+        hint.setWordWrap(True)
+        hint.setObjectName("scHint")
+        layout.addWidget(hint)
+
+        # 表头
+        header = QHBoxLayout()
+        h_action = QLabel(t("shortcuts.col_action"))
+        h_action.setObjectName("scHeader")
+        h_seq = QLabel(t("shortcuts.col_shortcut"))
+        h_seq.setObjectName("scHeader")
+        header.addWidget(h_action, 1)
+        header.addWidget(h_seq, 0)
+        layout.addLayout(header)
+
+        # 每个操作一行
+        for action_id, _default, label_key, _slot in self._specs:
+            row = QHBoxLayout()
+            name = QLabel(t(label_key))
+            name.setObjectName("scName")
+            btn = _ShortcutCaptureButton(self._seqs.get(action_id, ""))
+            btn.captured.connect(lambda seq, a=action_id: self._on_captured(a, seq))
+            self._buttons[action_id] = btn
+            row.addWidget(name, 1)
+            row.addWidget(btn, 0)
+            layout.addLayout(row)
+
+        layout.addStretch(1)
+
+        # 底部按钮
+        btn_row = QHBoxLayout()
+        reset_btn = QPushButton(t("shortcuts.reset_all"))
+        reset_btn.setObjectName("scReset")
+        reset_btn.clicked.connect(self._reset_all)
+        btn_row.addWidget(reset_btn)
+        btn_row.addStretch(1)
+        cancel_btn = QPushButton(t("shortcuts.cancel"))
+        cancel_btn.clicked.connect(self.reject)
+        save_btn = QPushButton(t("shortcuts.save"))
+        save_btn.setObjectName("scSave")
+        save_btn.setDefault(True)
+        save_btn.clicked.connect(self.accept)
+        btn_row.addWidget(cancel_btn)
+        btn_row.addWidget(save_btn)
+        layout.addLayout(btn_row)
+
+    def _on_captured(self, action_id, seq):
+        # 冲突检测：与其它操作重复则警告并还原
+        if seq:
+            for other_id, other_seq in self._seqs.items():
+                if other_id != action_id and other_seq and other_seq == seq:
+                    QMessageBox.warning(
+                        self, t("shortcuts.dialog_title"),
+                        t("shortcuts.conflict",
+                          seq=QKeySequence(seq).toString(QKeySequence.SequenceFormat.NativeText),
+                          action=self._labels.get(other_id, other_id)))
+                    self._buttons[action_id].set_sequence(self._seqs.get(action_id, ""))
+                    return
+        self._seqs[action_id] = seq
+
+    def _reset_all(self):
+        for action_id, default_seq in self._defaults.items():
+            self._seqs[action_id] = default_seq
+            self._buttons[action_id].set_sequence(default_seq)
+
+    def get_shortcuts(self):
+        return dict(self._seqs)
+
+    def _apply_style(self):
+        self.setStyleSheet("""
+            QDialog { background-color: #1a1a2e; color: #eaeaea; }
+            QLabel { color: #eaeaea; }
+            QLabel#scHint { color: #9aa; }
+            QLabel#scHeader { color: #888; font-weight: bold; }
+            QLabel#scName { color: #eaeaea; }
+            QPushButton {
+                background-color: #16213e;
+                border: 1px solid #3d3d5c;
+                border-radius: 4px;
+                padding: 6px 12px;
+                color: #eaeaea;
+            }
+            QPushButton:hover { border-color: #667eea; }
+            QPushButton:checked {
+                background-color: #667eea;
+                border-color: #667eea;
+                color: white;
+            }
+            QPushButton#scSave {
+                background-color: #2563eb;
+                border: none;
+            }
+            QPushButton#scSave:hover { background-color: #3b76f0; }
+            QPushButton#scReset { background-color: #3d3d5c; border: none; }
+            QPushButton#scReset:hover { background-color: #4d4d6c; }
+        """)
+
+
 class MainWindow(QMainWindow):
     """主窗口"""
 
@@ -4369,7 +4568,7 @@ class MainWindow(QMainWindow):
                 background-color: #4d4d6c;
             }
         """)
-        self.toolbar_settings_btn.clicked.connect(self._show_toolbar_manager)
+        self.toolbar_settings_btn.clicked.connect(self._show_settings_popup_menu)
 
         # ===== 定义每组的按钮和默认顺序 =====
         self._group_button_dicts = {
@@ -5029,116 +5228,85 @@ class MainWindow(QMainWindow):
         self.setStatusBar(self.statusbar)
         self.statusbar.showMessage(t("status.ready"))
 
+    # 可在「键盘快捷键」设置里自定义的 GUI 快捷键。
+    # (action_id, 默认键序列, i18n标签key, 触发方法名)
+    _SHORTCUT_SPECS = [
+        ("export",          "Ctrl+Shift+E",   "shortcuts.act.export",          "_quick_export"),
+        ("history",         "Ctrl+Shift+H",   "shortcuts.act.history",         "_show_history"),
+        ("new_session",     "Ctrl+Shift+N",   "shortcuts.act.new_session",     "_start_session"),
+        ("new_tab",         "Ctrl+T",         "shortcuts.act.new_tab",         "_add_new_tab"),
+        ("close_tab",       "Ctrl+W",         "shortcuts.act.close_tab",       "_close_tab_or_window"),
+        ("next_tab",        "Ctrl+Tab",       "shortcuts.act.next_tab",        "_next_tab"),
+        ("prev_tab",        "Ctrl+Shift+Tab", "shortcuts.act.prev_tab",        "_prev_tab"),
+        ("split_h",         "Ctrl+Shift+S",   "shortcuts.act.split_h",         "_split_current_tab"),
+        ("split_v",         "Ctrl+Shift+V",   "shortcuts.act.split_v",         "_split_vertical_current_terminal"),
+        ("close_split",     "Ctrl+Shift+X",   "shortcuts.act.close_split",     "_close_current_split"),
+        ("toggle_explorer", "Ctrl+1",         "shortcuts.act.toggle_explorer", "_toggle_explorer_panel"),
+        ("toggle_git",      "Ctrl+2",         "shortcuts.act.toggle_git",      "_toggle_git_panel"),
+        ("toggle_remote",   "Ctrl+3",         "shortcuts.act.toggle_remote",   "_toggle_remote_panel"),
+        ("zoom_in",         "Ctrl+=",         "shortcuts.act.zoom_in",         "_global_zoom_in"),
+        ("zoom_out",        "Ctrl+-",         "shortcuts.act.zoom_out",        "_global_zoom_out"),
+        ("opacity_up",      "Ctrl+Shift+Up",  "shortcuts.act.opacity_up",      "_opacity_increase"),
+        ("opacity_down",    "Ctrl+Shift+Down","shortcuts.act.opacity_down",    "_opacity_decrease"),
+    ]
+
     def _setup_shortcuts(self):
-        """设置快捷键"""
-        # Ctrl+Shift+E 导出（避免和终端Ctrl+E冲突）
-        export_action = QAction(self)
-        export_action.setShortcut("Ctrl+Shift+E")
-        export_action.triggered.connect(self._quick_export)
-        self.addAction(export_action)
+        """设置快捷键（数据驱动，可在「键盘快捷键」设置里自定义）"""
+        self.shortcut_actions = {}
+        overrides = getattr(self, '_custom_shortcuts', None) or {}
+        for action_id, default_seq, _label_key, slot_name in self._SHORTCUT_SPECS:
+            seq = overrides.get(action_id, default_seq)
+            action = QAction(self)
+            if seq:  # 允许用户把某项清空（seq == ""）
+                action.setShortcut(QKeySequence(seq))
+            if action_id == "close_tab":
+                # Ctrl+W 用窗口级上下文，避免在子控件里被吞掉
+                action.setShortcutContext(Qt.ShortcutContext.WindowShortcut)
+            action.triggered.connect(getattr(self, slot_name))
+            self.addAction(action)
+            self.shortcut_actions[action_id] = action
 
-        # Ctrl+Shift+H 历史
-        history_action = QAction(self)
-        history_action.setShortcut("Ctrl+Shift+H")
-        history_action.triggered.connect(self._show_history)
-        self.addAction(history_action)
+        # Ctrl++ 作为「放大」的固定别名（无需按 Shift），不参与自定义
+        zoom_in_alias = QAction(self)
+        zoom_in_alias.setShortcut(QKeySequence("Ctrl++"))
+        zoom_in_alias.triggered.connect(self._global_zoom_in)
+        self.addAction(zoom_in_alias)
 
-        # Ctrl+Shift+N 新会话
-        new_action = QAction(self)
-        new_action.setShortcut("Ctrl+Shift+N")
-        new_action.triggered.connect(self._start_session)
-        self.addAction(new_action)
-
-        # Ctrl+Shift+D 调试特殊字符
+        # Ctrl+Shift+D 调试特殊字符（开发用，不在自定义列表中）
         debug_action = QAction(self)
         debug_action.setShortcut("Ctrl+Shift+D")
         debug_action.triggered.connect(self._debug_special_chars)
         self.addAction(debug_action)
 
-        # 标签页快捷键
-        new_tab_action = QAction(self)
-        new_tab_action.setShortcut("Ctrl+T")
-        new_tab_action.triggered.connect(self._add_new_tab)
-        self.addAction(new_tab_action)
+    def _effective_shortcut(self, action_id, default_seq):
+        """返回某操作当前生效的键序列（用户覆盖优先，否则默认）。"""
+        overrides = getattr(self, '_custom_shortcuts', None) or {}
+        return overrides.get(action_id, default_seq)
 
-        close_tab_action = QAction(self)
-        close_tab_action.setShortcut("Ctrl+W")
-        close_tab_action.setShortcutContext(Qt.ShortcutContext.WindowShortcut)
-        close_tab_action.triggered.connect(self._close_tab_or_window)
-        self.addAction(close_tab_action)
-
-        next_tab_action = QAction(self)
-        next_tab_action.setShortcut("Ctrl+Tab")
-        next_tab_action.triggered.connect(self._next_tab)
-        self.addAction(next_tab_action)
-
-        prev_tab_action = QAction(self)
-        prev_tab_action.setShortcut("Ctrl+Shift+Tab")
-        prev_tab_action.triggered.connect(self._prev_tab)
-        self.addAction(prev_tab_action)
-
-        # 分屏快捷键
-        split_action = QAction(self)
-        split_action.setShortcut("Ctrl+Shift+S")
-        split_action.triggered.connect(self._split_current_tab)
-        self.addAction(split_action)
-
-        # 关闭分屏快捷键
-        close_split_action = QAction(self)
-        close_split_action.setShortcut("Ctrl+Shift+X")
-        close_split_action.triggered.connect(self._close_current_split)
-        self.addAction(close_split_action)
-
-        # 垂直分屏快捷键
-        split_v_action = QAction(self)
-        split_v_action.setShortcut("Ctrl+Shift+V")
-        split_v_action.triggered.connect(self._split_vertical_current_terminal)
-        self.addAction(split_v_action)
-
-        # 切换 Explorer 面板（Cmd+1）
-        toggle_explorer_action = QAction(self)
-        toggle_explorer_action.setShortcut("Ctrl+1")
-        toggle_explorer_action.triggered.connect(self._toggle_explorer_panel)
-        self.addAction(toggle_explorer_action)
-
-        # 切换 Git 面板（Cmd+2）
-        toggle_git_action = QAction(self)
-        toggle_git_action.setShortcut("Ctrl+2")
-        toggle_git_action.triggered.connect(self._toggle_git_panel)
-        self.addAction(toggle_git_action)
-
-        # 切换 Remote 面板（Cmd+3）
-        toggle_remote_action = QAction(self)
-        toggle_remote_action.setShortcut("Ctrl+3")
-        toggle_remote_action.triggered.connect(self._toggle_remote_panel)
-        self.addAction(toggle_remote_action)
-
-        # 全局缩放快捷键 (Cmd+= 和 Cmd+Shift+= 都放大, Cmd+- 缩小)
-        zoom_in_action1 = QAction(self)
-        zoom_in_action1.setShortcut("Ctrl+=")
-        zoom_in_action1.triggered.connect(self._global_zoom_in)
-        self.addAction(zoom_in_action1)
-
-        zoom_in_action2 = QAction(self)
-        zoom_in_action2.setShortcut("Ctrl++")
-        zoom_in_action2.triggered.connect(self._global_zoom_in)
-        self.addAction(zoom_in_action2)
-
-        zoom_out_action = QAction(self)
-        zoom_out_action.setShortcut("Ctrl+-")
-        zoom_out_action.triggered.connect(self._global_zoom_out)
-
-        # 窗口透明度快捷键 (Ctrl+Shift+Up 增加, Ctrl+Shift+Down 减少)
-        opacity_up_action = QAction(self)
-        opacity_up_action.setShortcut("Ctrl+Shift+Up")
-        opacity_up_action.triggered.connect(self._opacity_increase)
-        self.addAction(opacity_up_action)
-
-        opacity_down_action = QAction(self)
-        opacity_down_action.setShortcut("Ctrl+Shift+Down")
-        opacity_down_action.triggered.connect(self._opacity_decrease)
-        self.addAction(opacity_down_action)
-        self.addAction(zoom_out_action)
+    def _show_shortcut_settings(self):
+        """打开「键盘快捷键」自定义对话框，保存后即时生效。"""
+        current = {
+            action_id: self._effective_shortcut(action_id, default_seq)
+            for action_id, default_seq, _lk, _slot in self._SHORTCUT_SPECS
+        }
+        dialog = ShortcutSettingsDialog(self._SHORTCUT_SPECS, current, self)
+        if dialog.exec() != QDialog.DialogCode.Accepted:
+            return
+        result = dialog.get_shortcuts()  # {action_id: seq}
+        # 只把和默认值不同的项记成覆盖，保持配置精简、默认值可随版本演进
+        overrides = {}
+        for action_id, default_seq, _lk, _slot in self._SHORTCUT_SPECS:
+            seq = result.get(action_id, default_seq)
+            if seq != default_seq:
+                overrides[action_id] = seq
+            # 运行时即时套用到已注册的 QAction
+            action = self.shortcut_actions.get(action_id)
+            if action is not None:
+                action.setShortcut(QKeySequence(seq) if seq else QKeySequence())
+        self._custom_shortcuts = overrides
+        self._shortcuts_modified = True
+        self._save_config()
+        self.statusbar.showMessage(t("shortcuts.saved"), 3000)
 
     # ==================== 全局字体缩放 ====================
 
@@ -8324,6 +8492,16 @@ class MainWindow(QMainWindow):
         except Exception as e:
             QMessageBox.warning(self, t("msg.open_failed"), t("msg.cursor_open_error", error=str(e)))
 
+    def _show_settings_popup_menu(self):
+        """⚙ 按钮弹出菜单：工具栏布局 / 键盘快捷键。"""
+        menu = QMenu(self)
+        toolbar_act = menu.addAction(t("shortcuts.toolbar_menu_item"))
+        toolbar_act.triggered.connect(self._show_toolbar_manager)
+        shortcuts_act = menu.addAction(t("shortcuts.menu_item"))
+        shortcuts_act.triggered.connect(self._show_shortcut_settings)
+        btn = self.toolbar_settings_btn
+        menu.exec(btn.mapToGlobal(QPoint(0, btn.height())))
+
     def _show_toolbar_manager(self):
         """显示工具栏管理对话框"""
         current_theme = self.THEMES.get(self.current_theme, self.THEMES["深蓝"])
@@ -9401,6 +9579,7 @@ class MainWindow(QMainWindow):
         self._saved_git_commit_height = None  # Git 面板提交区高度（拖拽记忆，兼容旧版）
         self._saved_git_body_sizes = None     # Git 面板 body splitter 各栏尺寸（拖拽记忆）
         self._saved_nav_list_height = None    # 内嵌导航列表高度（拖拽记忆）
+        self._custom_shortcuts = {}           # 用户自定义快捷键覆盖 {action_id: seq}
         try:
             if self.CONFIG_FILE.exists():
                 with open(self.CONFIG_FILE, 'r', encoding='utf-8') as f:
@@ -9444,6 +9623,12 @@ class MainWindow(QMainWindow):
                     _dock_mode = config.get('navigator_dock_mode', 'float')
                     if _dock_mode in ('float', 'embed'):
                         MainWindow._navigator_dock_mode = _dock_mode
+                    # 加载用户自定义快捷键覆盖
+                    ks = config.get('keyboard_shortcuts', {})
+                    if isinstance(ks, dict):
+                        self._custom_shortcuts = {
+                            str(k): str(v) for k, v in ks.items() if isinstance(v, str)
+                        }
                     # 加载语言设置
                     saved_lang = config.get('language', 'zh')
                     if saved_lang in ('zh', 'en'):
@@ -9628,6 +9813,13 @@ class MainWindow(QMainWindow):
                 llm_configs_to_save = existing_config.get('llm_configs', self.llm_configs)
                 default_llm_to_save = existing_config.get('default_llm_config', self.default_llm_config)
 
+            # 同理保护自定义快捷键：本窗口没改过就用磁盘最新值，避免覆盖其它窗口的改动
+            if getattr(self, '_shortcuts_modified', False):
+                shortcuts_to_save = getattr(self, '_custom_shortcuts', {})
+            else:
+                shortcuts_to_save = existing_config.get('keyboard_shortcuts',
+                                                        getattr(self, '_custom_shortcuts', {}))
+
             config = {
                 'presets': presets_to_save,
                 'last_preset_index': current_index,
@@ -9648,6 +9840,7 @@ class MainWindow(QMainWindow):
                 'explorer_split_horizontal': getattr(self, '_explorer_split_horizontal', False),  # 保存左右分屏偏好
                 'remote_split_horizontal': getattr(self, '_remote_split_horizontal', False),  # Remote 左右分屏偏好
                 'language': get_language(),  # 保存语言设置
+                'keyboard_shortcuts': shortcuts_to_save,  # 保存自定义快捷键（带多窗口防覆盖）
                 'window_geometry': [self.x(), self.y(), self.width(), self.height()],
                 'window_maximized': self.isMaximized(),
                 'explorer_panel_visible': getattr(self, 'explorer_panel_visible', False),
