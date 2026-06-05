@@ -2858,12 +2858,18 @@ class TerminalWidget(QWidget):
                     result.append('\n')
             result.append(line_text)
 
-        return ''.join(result)
+        # 软换行行会保留尾部空格（它们是续行的真实内容），但整段选区末尾的
+        # 尾部空白没有任何意义，且会污染剪贴板（例如复制登录 URL / 授权码时
+        # 末尾多出一个空格导致粘贴失效）。这里去除整体结果的尾部空白。
+        return ''.join(result).rstrip()
 
     def _copy_selection_to_clipboard(self):
         """复制选中内容到剪贴板"""
         if self._has_selection():
             text = self._get_selected_text()
+            # 兜底再去一次尾部空白：软换行行会保留尾部空格，整段末尾的空白
+            # 没有意义且会污染剪贴板（复制登录 URL / 授权码时末尾多空格会导致粘贴失效）
+            text = text.rstrip()
             if text:
                 clipboard = QApplication.clipboard()
                 clipboard.setText(text)
@@ -3007,7 +3013,8 @@ class TerminalWidget(QWidget):
                     result.append('\n')
             result.append(text)
 
-        return ''.join(result)
+        # 去除整体结果的尾部空白（软换行行保留的尾部空格在末尾无意义且污染剪贴板）
+        return ''.join(result).rstrip()
 
     def _clear_selection(self):
         """清除选择"""
