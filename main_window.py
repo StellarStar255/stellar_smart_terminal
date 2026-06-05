@@ -759,11 +759,28 @@ class WindowNavigatorPanel(QWidget):
         self.drag_hint_label.setVisible(False)
         layout.addWidget(self.drag_hint_label)
 
-        # 底部设置按钮：把不常调整的「排序方式 / 刷新」收进这里的菜单，保持面板简洁
-        self.settings_btn = QPushButton(t("window.settings_btn"))
+        # 底部设置按钮：小齿轮图标，把不常调整的「排序方式 / 刷新」收进菜单，保持面板简洁
+        settings_row = QHBoxLayout()
+        settings_row.setContentsMargins(0, 0, 0, 0)
+        settings_row.addStretch()
+        self.settings_btn = QPushButton("⚙")
         self.settings_btn.setToolTip(t("window.settings_tooltip"))
+        self.settings_btn.setFixedSize(28, 24)
+        self.settings_btn.setStyleSheet("""
+            QPushButton {
+                background-color: #3d3d5c;
+                color: #eaeaea;
+                border: none;
+                border-radius: 4px;
+                font-size: 14px;
+            }
+            QPushButton:hover {
+                background-color: #4d4d6c;
+            }
+        """)
         self.settings_btn.clicked.connect(self._show_settings_menu)
-        layout.addWidget(self.settings_btn)
+        settings_row.addWidget(self.settings_btn)
+        layout.addLayout(settings_row)
 
     def _show_settings_menu(self):
         """弹出设置菜单：排序方式（时间/名称/手动）+ 刷新。"""
