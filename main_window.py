@@ -727,9 +727,12 @@ class WindowNavigatorPanel(QWidget):
         self.font_size_spin.setMinimumPopupWidth(68)
         for _px in range(8, 25):
             self.font_size_spin.addItem(f"{_px}px", _px)
-        # 选项不多（17 个），一次性全显示，避免被默认 maxVisibleItems(10) 截断后
-        # 还要依赖 macOS 上时隐时现的滚动条才能选到 18–24px。
-        self.font_size_spin.setMaxVisibleItems(self.font_size_spin.count())
+        # 弹窗高度取选项总数的 2/3（其余项靠滚动条访问）。
+        self.font_size_spin.setMaxVisibleItems(
+            max(1, self.font_size_spin.count() * 2 // 3))
+        # macOS 默认的覆盖式滚动条会自动隐藏，强制常驻，方便没有滚轮时拖拽。
+        self.font_size_spin.view().setVerticalScrollBarPolicy(
+            Qt.ScrollBarPolicy.ScrollBarAlwaysOn)
         _fs_idx = self.font_size_spin.findData(self._font_size)
         self.font_size_spin.setCurrentIndex(_fs_idx if _fs_idx >= 0 else 0)
         self.font_size_spin.setStyleSheet("""
