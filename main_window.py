@@ -720,34 +720,49 @@ class WindowNavigatorPanel(QWidget):
         font_size_label.setStyleSheet("color: #aaaaaa; font-size: 11px; border: none;")
         compact_row.addWidget(font_size_label)
 
-        self.font_size_spin = QSpinBox()
-        self.font_size_spin.setRange(8, 24)
-        self.font_size_spin.setValue(self._font_size)
-        self.font_size_spin.setSuffix("px")
+        # 用下拉框（CenteredComboBox）代替 SpinBox：8–24px
+        self.font_size_spin = CenteredComboBox()
         self.font_size_spin.setToolTip(t("window.font_size_tooltip"))
         self.font_size_spin.setFixedWidth(68)
+        self.font_size_spin.setMinimumPopupWidth(68)
+        for _px in range(8, 25):
+            self.font_size_spin.addItem(f"{_px}px", _px)
+        _fs_idx = self.font_size_spin.findData(self._font_size)
+        self.font_size_spin.setCurrentIndex(_fs_idx if _fs_idx >= 0 else 0)
         self.font_size_spin.setStyleSheet("""
-            QSpinBox {
+            QComboBox {
                 background-color: #16213e;
                 border: 1px solid #3d3d5c;
                 border-radius: 3px;
-                padding: 1px 2px;
+                padding: 1px 6px;
                 color: #eaeaea;
                 font-size: 11px;
+                combobox-popup: 0;
             }
-            QSpinBox:hover {
+            QComboBox:hover {
                 border-color: #667eea;
             }
-            QSpinBox::up-button, QSpinBox::down-button {
-                width: 14px;
-                background-color: #2d2d44;
+            QComboBox::drop-down {
                 border: none;
+                width: 16px;
             }
-            QSpinBox::up-button:hover, QSpinBox::down-button:hover {
-                background-color: #3d3d5c;
+            QComboBox QAbstractItemView {
+                background-color: #16213e;
+                color: #eaeaea;
+                selection-background-color: #667eea;
+                selection-color: #ffffff;
+                border: 1px solid #3d3d5c;
+                border-radius: 4px;
+                outline: none;
+                padding: 4px;
+            }
+            QComboBox QAbstractItemView::item {
+                min-height: 24px;
+                padding: 0px 6px;
+                border-radius: 4px;
             }
         """)
-        self.font_size_spin.valueChanged.connect(self._on_font_size_changed)
+        self.font_size_spin.currentIndexChanged.connect(self._on_font_size_changed)
         compact_row.addWidget(self.font_size_spin)
 
         # 设置按钮（小齿轮）：与 Compact/Quick Close/Embed/字号 同在一行，靠最右。
@@ -862,8 +877,11 @@ class WindowNavigatorPanel(QWidget):
         self._compact_mode = (state == Qt.CheckState.Checked.value)
         self._force_refresh()
 
-    def _on_font_size_changed(self, size):
+    def _on_font_size_changed(self, _index=None):
         """字体大小变更"""
+        size = self.font_size_spin.currentData()
+        if size is None:
+            return
         self._font_size = size
         self._apply_list_font_size()
         self._save_navigator_config()
@@ -1410,7 +1428,11 @@ class WindowNavigatorPanel(QWidget):
                 font_size = config.get('navigator_font_size', 12)
                 if 8 <= font_size <= 24:
                     self._font_size = font_size
-                    self.font_size_spin.setValue(font_size)
+                    _idx = self.font_size_spin.findData(font_size)
+                    if _idx >= 0:
+                        self.font_size_spin.blockSignals(True)
+                        self.font_size_spin.setCurrentIndex(_idx)
+                        self.font_size_spin.blockSignals(False)
                     self._apply_list_font_size()
                 # 恢复 Quick Close 偏好
                 quick_close = bool(config.get('navigator_quick_close', False))
