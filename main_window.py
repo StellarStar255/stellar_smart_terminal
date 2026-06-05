@@ -3342,7 +3342,11 @@ class MainWindow(QMainWindow):
                 background-color: #5a6fd6;
             }
         """)
-        self.quick_launch_btn.clicked.connect(self._show_quick_launch_menu)
+        # 按下时记录时刻（与 macOS 失焦关闭弹窗几乎同刻），松开后据此做「恰好一次」开/关，
+        # 避免弹窗已开时再点 ⚡ 出现「关掉→又重开」的闪烁。
+        self.quick_launch_btn.pressed.connect(
+            lambda: setattr(self, '_ql_press_at', time.monotonic()))
+        self.quick_launch_btn.clicked.connect(self._toggle_quick_launch)
         new_tab_layout.addWidget(self.quick_launch_btn)
 
         self.new_tab_btn = QPushButton("+")
@@ -5506,6 +5510,32 @@ class MainWindow(QMainWindow):
         except Exception:
             pass
 
+    def _mark_quick_launch_closed(self, *args):
+        """记录快速启动弹窗关闭时刻并清空引用（供 ⚡ 的开/关判定使用）。"""
+        self._ql_hidden_at = time.monotonic()
+        self._quick_launch_popup = None
+
+    def _toggle_quick_launch(self):
+        """点击 ⚡：做「恰好一次」的开/关，避免弹窗已开时再点出现关→重开的闪烁。
+
+        - 弹窗此刻仍开着 → 干净地关掉它（不反弹重开）；
+        - 弹窗不可见，但它是被「本次点击」关掉的（macOS 点 ⚡ 会让 Tool 弹窗失焦自关）
+          → 什么都不做，避免立刻又重开；
+        - 否则 → 正常打开。
+        """
+        popup = getattr(self, '_quick_launch_popup', None)
+        if popup is not None and not sip.isdeleted(popup) and popup.isVisible():
+            self._mark_quick_launch_closed()
+            popup.setWindowOpacity(0)
+            popup.close()
+            return
+        press_at = getattr(self, '_ql_press_at', 0.0)
+        hidden_at = getattr(self, '_ql_hidden_at', 0.0)
+        if hidden_at >= press_at - 0.05:
+            # 弹窗刚被这次点击关掉 → 不要再重开
+            return
+        self._show_quick_launch_menu()
+
     def _show_quick_launch_menu(self):
         """显示快速启动菜单 - 支持搜索过滤"""
         # 从配置文件重新加载目录历史，确保多窗口间同步
@@ -5515,6 +5545,9 @@ class MainWindow(QMainWindow):
         popup = QDialog(self, Qt.WindowType.Tool | Qt.WindowType.FramelessWindowHint | Qt.WindowType.WindowStaysOnTopHint)
         popup.setAttribute(Qt.WidgetAttribute.WA_DeleteOnClose)  # 关闭时自动删除
         popup.setAttribute(Qt.WidgetAttribute.WA_TranslucentBackground)  # 支持透明背景，防止圆角闪烁
+        # 记录当前弹窗引用，供 ⚡ 的开/关切换判定；销毁时自动清空并记下关闭时刻
+        self._quick_launch_popup = popup
+        popup.destroyed.connect(self._mark_quick_launch_closed)
 
         # 使用内部容器来承载背景，因为WA_TranslucentBackground会使QDialog背景透明
         container = QWidget(popup)
@@ -5633,6 +5666,7 @@ class MainWindow(QMainWindow):
             """处理选项激活"""
             item_type, dir_path = item.data(Qt.ItemDataRole.UserRole)
             # 先隐藏弹出窗口防止关闭时闪烁
+            self._mark_quick_launch_closed()
             popup.setWindowOpacity(0)
             popup.close()
 
@@ -5659,6 +5693,7 @@ class MainWindow(QMainWindow):
                     is_path = True
             if is_path:
                 # 先隐藏弹出窗口防止关闭时闪烁
+                self._mark_quick_launch_closed()
                 popup.setWindowOpacity(0)
                 popup.close()
                 self._quick_launch_with_dir(text)
@@ -5676,6 +5711,7 @@ class MainWindow(QMainWindow):
             def eventFilter(self, obj, event):
                 # 处理窗口失去激活状态时关闭（仅在popup准备好后）
                 if event.type() == QEvent.Type.WindowDeactivate and popup_ready[0]:
+                    self._mark_quick_launch_closed()  # 记下关闭时刻（点 ⚡ 失焦关闭时据此不反弹重开）
                     popup.setWindowOpacity(0)  # 先隐藏防止闪烁
                     popup.close()
                     return True
@@ -5695,6 +5731,7 @@ class MainWindow(QMainWindow):
                             list_widget.setCurrentRow(current_row - 1)
                         return True
                     elif key == Qt.Key.Key_Escape:
+                        self._mark_quick_launch_closed()
                         popup.setWindowOpacity(0)  # 先隐藏防止闪烁
                         popup.close()
                         return True
