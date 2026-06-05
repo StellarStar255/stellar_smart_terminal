@@ -3135,7 +3135,7 @@ class MainWindow(QMainWindow):
                     self._update_flow_toolbar_height()
             QTimer.singleShot(0, _force_pinned_rows_visible)
 
-        # 启动后空闲预热 Explorer：把“首次 ⌘B 才触发”的目录扫描 + macOS 系统
+        # 启动后空闲预热 Explorer：把“首次 ⌘1 才触发”的目录扫描 + macOS 系统
         # 图标库初始化提前在后台做掉，使首次展开瞬开。若面板已恢复为打开状态则跳过。
         if not getattr(self, 'explorer_panel_visible', False):
             def _prewarm_explorer():
@@ -4085,7 +4085,7 @@ class MainWindow(QMainWindow):
         self.explorer_toggle_btn = QPushButton(t("toolbar.explorer"))
         self.explorer_toggle_btn.setObjectName("explorerToggleBtn")
         self.explorer_toggle_btn.setCheckable(True)
-        self.explorer_toggle_btn.setToolTip(t("toolbar.explorer_tooltip") + "  (⌘B)")
+        self.explorer_toggle_btn.setToolTip(t("toolbar.explorer_tooltip") + "  (⌘1)")
         self.explorer_toggle_btn.setStyleSheet("""
             QPushButton {
                 background-color: #22c55e;
@@ -4102,7 +4102,7 @@ class MainWindow(QMainWindow):
         self.git_toggle_btn = QPushButton("Git")
         self.git_toggle_btn.setObjectName("gitToggleBtn")
         self.git_toggle_btn.setCheckable(True)
-        self.git_toggle_btn.setToolTip("Git  (⌘G)")
+        self.git_toggle_btn.setToolTip("Git  (⌘2)")
         self.git_toggle_btn.setStyleSheet("""
             QPushButton {
                 background-color: #f97316;
@@ -4118,6 +4118,7 @@ class MainWindow(QMainWindow):
 
         self.remote_toggle_btn = QPushButton("Remote")
         self.remote_toggle_btn.setObjectName("remoteToggleBtn")
+        self.remote_toggle_btn.setToolTip("Remote  (⌘3)")
         self.remote_toggle_btn.setCheckable(True)
         self.remote_toggle_btn.setStyleSheet("""
             QPushButton {
@@ -5094,17 +5095,23 @@ class MainWindow(QMainWindow):
         split_v_action.triggered.connect(self._split_vertical_current_terminal)
         self.addAction(split_v_action)
 
-        # 切换 Explorer 面板（Cmd+B，同 VS Code 侧边栏）
+        # 切换 Explorer 面板（Cmd+1）
         toggle_explorer_action = QAction(self)
-        toggle_explorer_action.setShortcut("Ctrl+B")
+        toggle_explorer_action.setShortcut("Ctrl+1")
         toggle_explorer_action.triggered.connect(self._toggle_explorer_panel)
         self.addAction(toggle_explorer_action)
 
-        # 切换 Git 面板（Cmd+G）
+        # 切换 Git 面板（Cmd+2）
         toggle_git_action = QAction(self)
-        toggle_git_action.setShortcut("Ctrl+G")
+        toggle_git_action.setShortcut("Ctrl+2")
         toggle_git_action.triggered.connect(self._toggle_git_panel)
         self.addAction(toggle_git_action)
+
+        # 切换 Remote 面板（Cmd+3）
+        toggle_remote_action = QAction(self)
+        toggle_remote_action.setShortcut("Ctrl+3")
+        toggle_remote_action.triggered.connect(self._toggle_remote_panel)
+        self.addAction(toggle_remote_action)
 
         # 全局缩放快捷键 (Cmd+= 和 Cmd+Shift+= 都放大, Cmd+- 缩小)
         zoom_in_action1 = QAction(self)
@@ -8484,7 +8491,7 @@ class MainWindow(QMainWindow):
         # 面板与编辑器组
         if hasattr(self, 'explorer_toggle_btn'):
             self.explorer_toggle_btn.setText(t("toolbar.explorer"))
-            self.explorer_toggle_btn.setToolTip(t("toolbar.explorer_tooltip") + "  (⌘B)")
+            self.explorer_toggle_btn.setToolTip(t("toolbar.explorer_tooltip") + "  (⌘1)")
         if hasattr(self, 'git_toggle_btn'):
             self.git_toggle_btn.setText(t("toolbar.git"))
         if hasattr(self, 'vscode_open_btn'):
