@@ -759,54 +759,50 @@ class WindowNavigatorPanel(QWidget):
         self.drag_hint_label.setVisible(False)
         layout.addWidget(self.drag_hint_label)
 
-        # 底部按钮区域
-        btn_layout = QHBoxLayout()
-        btn_layout.setSpacing(4)
+        # 底部设置按钮：把不常调整的「排序方式 / 刷新」收进这里的菜单，保持面板简洁
+        self.settings_btn = QPushButton(t("window.settings_btn"))
+        self.settings_btn.setToolTip(t("window.settings_tooltip"))
+        self.settings_btn.clicked.connect(self._show_settings_menu)
+        layout.addWidget(self.settings_btn)
 
-        # 排序切换按钮
-        self.sort_btn = QPushButton(t("window.sort_time"))
-        self.sort_btn.setToolTip(t("window.sort_toggle_tooltip"))
-        self.sort_btn.clicked.connect(self._toggle_sort_mode)
-        btn_layout.addWidget(self.sort_btn)
-
-        # 刷新按钮
-        refresh_btn = QPushButton(t("window.refresh"))
-        refresh_btn.clicked.connect(self._force_refresh)
-        btn_layout.addWidget(refresh_btn)
-
-        layout.addLayout(btn_layout)
+    def _show_settings_menu(self):
+        """弹出设置菜单：排序方式（时间/名称/手动）+ 刷新。"""
+        menu = QMenu(self)
+        title = menu.addAction(t("window.sort_menu_label"))
+        title.setEnabled(False)
+        for mode, label in (
+            ('time', t("window.sort_time")),
+            ('name', t("window.sort_name")),
+            ('manual', t("window.sort_manual")),
+        ):
+            act = menu.addAction(label)
+            act.setCheckable(True)
+            act.setChecked(self._sort_mode == mode)
+            act.triggered.connect(lambda _checked=False, m=mode: self._set_sort_mode(m))
+        menu.addSeparator()
+        refresh_act = menu.addAction(t("window.refresh"))
+        refresh_act.triggered.connect(self._force_refresh)
+        menu.exec(self.settings_btn.mapToGlobal(QPoint(0, self.settings_btn.height())))
 
     def _on_embed_checkbox_changed(self, state):
         """勾选/取消「嵌入到侧栏」：在内嵌与浮动之间切换停靠方式（全局，自动记住）。"""
         checked = (state == Qt.CheckState.Checked.value)
         MainWindow._set_navigator_dock_mode('embed' if checked else 'float')
 
-    def _toggle_sort_mode(self):
-        """切换排序方式: 时间 -> 名称 -> 手动 -> 时间"""
-        if self._sort_mode == 'time':
-            self._sort_mode = 'name'
-            self.sort_btn.setText(t("window.sort_name"))
-            self.sort_btn.setToolTip(t("window.sort_tooltip_name"))
-            self.drag_hint_label.setVisible(False)
-        elif self._sort_mode == 'name':
-            self._sort_mode = 'manual'
-            self.sort_btn.setText(t("window.sort_manual"))
-            self.sort_btn.setToolTip(t("window.sort_tooltip_manual"))
-            self.drag_hint_label.setVisible(True)
+    def _set_sort_mode(self, mode: str):
+        """设置排序方式（时间/名称/手动），更新拖拽提示并刷新列表。"""
+        if mode not in ('time', 'name', 'manual'):
+            return
+        self._sort_mode = mode
+        self.drag_hint_label.setVisible(mode == 'manual')
+        if mode == 'manual':
             self._save_manual_order()
-        else:
-            self._sort_mode = 'time'
-            self.sort_btn.setText(t("window.sort_time"))
-            self.sort_btn.setToolTip(t("window.sort_tooltip_time"))
-            self.drag_hint_label.setVisible(False)
         self._force_refresh()
 
     def _on_rows_moved(self):
         """拖拽排序完成后自动切换到手动模式并保存顺序"""
         if self._sort_mode != 'manual':
             self._sort_mode = 'manual'
-            self.sort_btn.setText(t("window.sort_manual"))
-            self.sort_btn.setToolTip(t("window.sort_tooltip_manual"))
             self.drag_hint_label.setVisible(True)
         self._save_manual_order()
 
