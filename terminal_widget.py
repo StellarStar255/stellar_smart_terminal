@@ -2808,7 +2808,11 @@ class TerminalWidget(QWidget):
 
             rows.append((line_text, is_soft, last_content_col, leading_space_count, can_heuristic))
 
-        # 用 look-ahead 决定每行的换行类型：0=硬换行, 1=终端软换行, 2=应用层软换行
+        # 用 look-ahead 决定每行的换行类型：
+        #   0=硬换行, 1=终端软换行,
+        #   2=应用层「散文」折行（按词边界折，续行带缩进 → 拼接时需补回词间空格）
+        #   3=应用层「填满到行尾」折行（一个长 token 被强行从中间截断，如 URL/路径/哈希 →
+        #     必须无缝直接拼接，绝不能补空格，否则会把 URL 拦腰插入空格导致登录失效）
         threshold_high = max(int(term_cols * 0.85), term_cols - 6)
         threshold_low = max(8, int(term_cols * 0.40))
         n = len(rows)
@@ -2825,10 +2829,10 @@ class TerminalWidget(QWidget):
                 next_leading = rows[i + 1][3]
                 next_has_content = bool(rows[i + 1][0].strip())
                 if last_col >= threshold_high:
-                    # 高置信度：行内容直接占满到行尾附近 → 应用层 wrap
-                    wrap_type = 2
+                    # 高置信度：行内容直接占满到行尾 → token 被强行截断的应用层 wrap
+                    wrap_type = 3
                 elif last_col >= threshold_low and next_leading >= 1 and next_has_content:
-                    # 中等置信度：行占用过半且下一行带续行缩进 → 应用层 wrap
+                    # 中等置信度：行占用过半且下一行带续行缩进 → 按词折行的应用层 wrap
                     # 命中如 Claude Code 等渲染器按自己目标宽度（远小于终端列数）wrap 的场景
                     wrap_type = 2
             resolved.append((text, wrap_type))
@@ -2838,11 +2842,11 @@ class TerminalWidget(QWidget):
         for i, (line_text, wrap_type) in enumerate(resolved):
             if i > 0:
                 prev_text, prev_wrap = resolved[i - 1]
-                if prev_wrap == 1:
-                    # 终端软换行：直接拼接（无需处理缩进）
+                if prev_wrap == 1 or prev_wrap == 3:
+                    # 终端软换行 / 填满到行尾的 token 折行：直接无缝拼接，不补空格
                     pass
                 elif prev_wrap == 2:
-                    # 应用层软换行：去除续行的相同缩进
+                    # 应用层散文折行：去除续行的相同缩进
                     prev_indent = len(prev_text) - len(prev_text.lstrip())
                     if prev_indent > 0:
                         curr_indent = len(line_text) - len(line_text.lstrip())
@@ -2965,7 +2969,8 @@ class TerminalWidget(QWidget):
         while line_data and not line_data[-1][0]:
             line_data.pop()
 
-        # 用 look-ahead 决定换行类型：0=硬换行, 1=终端软换行, 2=应用层软换行
+        # 用 look-ahead 决定换行类型：
+        #   0=硬换行, 1=终端软换行, 2=应用层散文折行（补词间空格）, 3=应用层 token 截断折行（无缝拼接）
         threshold_high = max(int(columns * 0.85), columns - 6)
         threshold_low = max(8, int(columns * 0.40))
         n = len(line_data)
@@ -2982,9 +2987,10 @@ class TerminalWidget(QWidget):
                 next_leading = line_data[i + 1][3]
                 next_has_content = bool(line_data[i + 1][0].strip())
                 if last_col >= threshold_high:
-                    wrap_type = 2  # 高置信度：行内容直接占满到行尾附近
+                    # 高置信度：行内容填满到行尾 → token 被强行截断（URL/路径），无缝拼接不补空格
+                    wrap_type = 3
                 elif last_col >= threshold_low and next_leading >= 1 and next_has_content:
-                    # 中等置信度：行占用过半且下一行带续行缩进 → 应用层 wrap
+                    # 中等置信度：行占用过半且下一行带续行缩进 → 按词折行的应用层 wrap
                     wrap_type = 2
             resolved.append((text, wrap_type))
 
@@ -2994,8 +3000,8 @@ class TerminalWidget(QWidget):
         for i, (text, wrap_type) in enumerate(resolved):
             if i > 0:
                 prev_text, prev_wrap = resolved[i - 1]
-                if prev_wrap == 1:
-                    pass  # 终端软换行：直接拼接
+                if prev_wrap == 1 or prev_wrap == 3:
+                    pass  # 终端软换行 / token 截断折行：直接无缝拼接
                 elif prev_wrap == 2:
                     # 应用层软换行：去除续行的相同缩进
                     prev_indent = len(prev_text) - len(prev_text.lstrip())
