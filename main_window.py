@@ -5522,9 +5522,16 @@ class MainWindow(QMainWindow):
             pass
 
     def _mark_quick_launch_closed(self, *args):
-        """记录快速启动弹窗关闭时刻并清空引用（供 ⚡ 的开/关判定使用）。"""
+        """记录快速启动弹窗关闭时刻（供 ⚡ 的开/关判定使用）。弹窗复用，不销毁。"""
         self._ql_hidden_at = time.monotonic()
-        self._quick_launch_popup = None
+
+    def _ql_hide(self):
+        """隐藏快速启动弹窗（复用，不销毁），并记下关闭时刻。"""
+        self._mark_quick_launch_closed()
+        p = getattr(self, '_ql_popup', None)
+        if p is not None and not sip.isdeleted(p) and p.isVisible():
+            p.setWindowOpacity(0)
+            p.hide()
 
     def _toggle_quick_launch(self):
         """点击 ⚡：做「恰好一次」的开/关，避免弹窗已开时再点出现关→重开的闪烁。
@@ -5534,11 +5541,9 @@ class MainWindow(QMainWindow):
           → 什么都不做，避免立刻又重开；
         - 否则 → 正常打开。
         """
-        popup = getattr(self, '_quick_launch_popup', None)
-        if popup is not None and not sip.isdeleted(popup) and popup.isVisible():
-            self._mark_quick_launch_closed()
-            popup.setWindowOpacity(0)
-            popup.close()
+        p = getattr(self, '_ql_popup', None)
+        if p is not None and not sip.isdeleted(p) and p.isVisible():
+            self._ql_hide()
             return
         press_at = getattr(self, '_ql_press_at', 0.0)
         hidden_at = getattr(self, '_ql_hidden_at', 0.0)
@@ -5547,20 +5552,18 @@ class MainWindow(QMainWindow):
             return
         self._show_quick_launch_menu()
 
-    def _show_quick_launch_menu(self):
-        """显示快速启动菜单 - 支持搜索过滤"""
-        # 从配置文件重新加载目录历史，确保多窗口间同步
-        self._reload_dir_history_from_config()
+    def _ensure_quick_launch_popup(self):
+        """惰性创建快速启动弹窗（只建一次，之后复用）。
 
-        # 创建弹出窗口 - 使用Tool类型以支持键盘焦点
+        复用而非每次新建：新建一个 WA_TranslucentBackground 的 Tool 窗口在 macOS 上
+        有可感知的原生窗口创建 + 淡入延迟（表现为「点了 ⚡ 要等一下才出现」）；复用后
+        再次打开只是 hide→show，几乎瞬时，也不再有重建闪烁。
+        """
+        if getattr(self, '_ql_popup', None) is not None and not sip.isdeleted(self._ql_popup):
+            return
         popup = QDialog(self, Qt.WindowType.Tool | Qt.WindowType.FramelessWindowHint | Qt.WindowType.WindowStaysOnTopHint)
-        popup.setAttribute(Qt.WidgetAttribute.WA_DeleteOnClose)  # 关闭时自动删除
-        popup.setAttribute(Qt.WidgetAttribute.WA_TranslucentBackground)  # 支持透明背景，防止圆角闪烁
-        # 记录当前弹窗引用，供 ⚡ 的开/关切换判定；销毁时自动清空并记下关闭时刻
-        self._quick_launch_popup = popup
-        popup.destroyed.connect(self._mark_quick_launch_closed)
+        popup.setAttribute(Qt.WidgetAttribute.WA_TranslucentBackground)  # 透明背景，圆角不闪
 
-        # 使用内部容器来承载背景，因为WA_TranslucentBackground会使QDialog背景透明
         container = QWidget(popup)
         container.setStyleSheet("""
             QWidget {
@@ -5569,7 +5572,6 @@ class MainWindow(QMainWindow):
                 border-radius: 8px;
             }
         """)
-
         popup_layout = QVBoxLayout(popup)
         popup_layout.setContentsMargins(0, 0, 0, 0)
         popup_layout.addWidget(container)
@@ -5578,7 +5580,6 @@ class MainWindow(QMainWindow):
         layout.setContentsMargins(8, 8, 8, 8)
         layout.setSpacing(6)
 
-        # 搜索输入框
         search_input = QLineEdit()
         search_input.setPlaceholderText(t("quick_launch.placeholder"))
         search_input.setMinimumWidth(350)
@@ -5591,13 +5592,10 @@ class MainWindow(QMainWindow):
                 padding: 8px 12px;
                 font-size: 14px;
             }
-            QLineEdit:focus {
-                border-color: #667eea;
-            }
+            QLineEdit:focus { border-color: #667eea; }
         """)
         layout.addWidget(search_input)
 
-        # 目录列表
         list_widget = QListWidget()
         list_widget.setStyleSheet("""
             QListWidget {
@@ -5610,174 +5608,146 @@ class MainWindow(QMainWindow):
                 padding: 8px 12px;
                 border-radius: 4px;
             }
-            QListWidget::item:selected {
-                background-color: #667eea;
-            }
-            /* 仅对「非选中项」应用悬停高亮：鼠标划过当前选中项时保持蓝色不变，
-               避免选中色(#667eea)与悬停色(#3d3d5c)互相覆盖造成闪烁。 */
-            QListWidget::item:hover:!selected {
-                background-color: #3d3d5c;
-            }
+            QListWidget::item:selected { background-color: #667eea; }
+            /* 仅对「非选中项」应用悬停高亮：划过当前选中项保持蓝色不变，避免闪烁。 */
+            QListWidget::item:hover:!selected { background-color: #3d3d5c; }
         """)
         list_widget.setMaximumHeight(400)
         layout.addWidget(list_widget)
 
-        # 收集所有目录
-        current_dir = self._window_cwd
-        all_dirs = []
+        search_input.textChanged.connect(self._ql_update_list)
+        search_input.returnPressed.connect(self._ql_do_launch)
+        list_widget.itemClicked.connect(self._ql_on_item_activated)
 
-        # 当前目录
-        current_dir_name = os.path.basename(current_dir) or current_dir
-        all_dirs.append(("current", current_dir, t("quick_launch.current", name=current_dir_name)))
+        # 事件过滤器：失焦关闭 + 键盘上下/Esc
+        mw = self
 
-        # 历史目录（不检查 isdir 以避免阻塞，让用户选择时再验证）
-        for dir_path in self.working_dir_history:
-            if dir_path != current_dir:
-                dir_name = os.path.basename(dir_path) or dir_path
-                all_dirs.append(("history", dir_path, f"📁 {dir_name}"))
-
-        # 特殊选项
-        all_dirs.append(("browse", "", t("quick_launch.browse")))
-        all_dirs.append(("manage", "", t("quick_launch.manage_paths")))
-
-        def matches_search(dir_path: str, display: str, keywords: list) -> bool:
-            """检查目录是否匹配所有关键词"""
-            if not keywords:
-                return True
-            search_text = (dir_path + " " + display).lower()
-            return all(kw in search_text for kw in keywords)
-
-        def update_list(search_text: str = ""):
-            """更新列表显示"""
-            # 禁用更新以防止闪烁
-            list_widget.setUpdatesEnabled(False)
-            list_widget.clear()
-            keywords = [kw.lower() for kw in search_text.split() if kw]
-
-            for item_type, dir_path, display in all_dirs:
-                # 特殊选项始终显示（如果没有搜索词）
-                if item_type in ("browse", "manage"):
-                    if not keywords:
-                        item = QListWidgetItem(display)
-                        item.setData(Qt.ItemDataRole.UserRole, (item_type, dir_path))
-                        list_widget.addItem(item)
-                elif matches_search(dir_path, display, keywords):
-                    item = QListWidgetItem(display)
-                    item.setData(Qt.ItemDataRole.UserRole, (item_type, dir_path))
-                    item.setToolTip(dir_path)
-                    list_widget.addItem(item)
-
-            # 如果有匹配项，选中第一个
-            if list_widget.count() > 0:
-                list_widget.setCurrentRow(0)
-            # 重新启用更新
-            list_widget.setUpdatesEnabled(True)
-
-        def on_item_activated(item):
-            """处理选项激活"""
-            item_type, dir_path = item.data(Qt.ItemDataRole.UserRole)
-            # 先隐藏弹出窗口防止关闭时闪烁
-            self._mark_quick_launch_closed()
-            popup.setWindowOpacity(0)
-            popup.close()
-
-            if item_type == "browse":
-                self._quick_launch_browse()
-            elif item_type == "manage":
-                self._manage_quick_launch_dirs()
-            else:
-                self._quick_launch_with_dir(dir_path)
-
-        def do_launch():
-            """执行启动操作"""
-            text = search_input.text().strip()
-
-            # 如果输入的是路径，直接启动
-            # 支持: Unix路径(/xxx, ~/xxx), Windows路径(C:\xxx, \\server)
-            is_path = False
-            if text:
-                # Unix路径：包含 / 或以 ~ 开头
-                if '/' in text or text.startswith('~'):
-                    is_path = True
-                # Windows路径：包含 \ 或以驱动器字母开头(如 C:)
-                elif '\\' in text or (len(text) >= 2 and text[1] == ':' and text[0].isalpha()):
-                    is_path = True
-            if is_path:
-                # 先隐藏弹出窗口防止关闭时闪烁
-                self._mark_quick_launch_closed()
-                popup.setWindowOpacity(0)
-                popup.close()
-                self._quick_launch_with_dir(text)
-                return
-
-            # 否则激活当前选中的列表项
-            current_item = list_widget.currentItem()
-            if current_item:
-                on_item_activated(current_item)
-
-        # 安装事件过滤器处理键盘导航和窗口失焦
-        popup_ready = [False]  # 用列表包装以便在闭包中修改
-
-        class PopupEventFilter(QObject):
+        class _QuickLaunchFilter(QObject):
             def eventFilter(self, obj, event):
-                # 处理窗口失去激活状态时关闭（仅在popup准备好后）
-                if event.type() == QEvent.Type.WindowDeactivate and popup_ready[0]:
-                    self._mark_quick_launch_closed()  # 记下关闭时刻（点 ⚡ 失焦关闭时据此不反弹重开）
-                    popup.setWindowOpacity(0)  # 先隐藏防止闪烁
-                    popup.close()
+                if event.type() == QEvent.Type.WindowDeactivate and getattr(mw, '_ql_ready', False):
+                    mw._ql_hide()
                     return True
-
                 if event.type() == QEvent.Type.KeyPress:
                     key = event.key()
-
-                    # 上下键导航
+                    lst = mw._ql_list
                     if key == Qt.Key.Key_Down:
-                        current_row = list_widget.currentRow()
-                        if current_row < list_widget.count() - 1:
-                            list_widget.setCurrentRow(current_row + 1)
+                        r = lst.currentRow()
+                        if r < lst.count() - 1:
+                            lst.setCurrentRow(r + 1)
                         return True
                     elif key == Qt.Key.Key_Up:
-                        current_row = list_widget.currentRow()
-                        if current_row > 0:
-                            list_widget.setCurrentRow(current_row - 1)
+                        r = lst.currentRow()
+                        if r > 0:
+                            lst.setCurrentRow(r - 1)
                         return True
                     elif key == Qt.Key.Key_Escape:
-                        self._mark_quick_launch_closed()
-                        popup.setWindowOpacity(0)  # 先隐藏防止闪烁
-                        popup.close()
+                        mw._ql_hide()
                         return True
-
                 return False
 
-        popup_filter = PopupEventFilter(popup)
-        popup.installEventFilter(popup_filter)
-        search_input.installEventFilter(popup_filter)
+        filt = _QuickLaunchFilter(popup)
+        popup.installEventFilter(filt)
+        search_input.installEventFilter(filt)
 
-        # 连接信号
-        search_input.textChanged.connect(update_list)
-        search_input.returnPressed.connect(do_launch)  # 回车键执行（IME处理完成后才触发）
-        list_widget.itemClicked.connect(on_item_activated)  # 单击执行
+        self._ql_popup = popup
+        self._ql_search = search_input
+        self._ql_list = list_widget
+        self._ql_filter = filt
+        self._ql_dirs = []
+        self._ql_ready = False
 
-        # 初始化列表
-        update_list()
+    def _ql_rebuild_dirs(self):
+        """重建快速启动目录数据（当前目录 + 历史 + 特殊项）。"""
+        current_dir = self._window_cwd
+        dirs = []
+        name = os.path.basename(current_dir) or current_dir
+        dirs.append(("current", current_dir, t("quick_launch.current", name=name)))
+        for dir_path in self.working_dir_history:
+            if dir_path != current_dir:
+                dn = os.path.basename(dir_path) or dir_path
+                dirs.append(("history", dir_path, f"📁 {dn}"))
+        dirs.append(("browse", "", t("quick_launch.browse")))
+        dirs.append(("manage", "", t("quick_launch.manage_paths")))
+        self._ql_dirs = dirs
 
-        # 获取按钮的全局位置（用于把弹窗放到按钮下方）
+    def _ql_update_list(self, search_text: str = ""):
+        """按搜索词刷新快速启动列表。"""
+        lst = self._ql_list
+        lst.setUpdatesEnabled(False)
+        lst.clear()
+        keywords = [kw.lower() for kw in search_text.split() if kw]
+        for item_type, dir_path, display in getattr(self, '_ql_dirs', []):
+            if item_type in ("browse", "manage"):
+                if not keywords:
+                    it = QListWidgetItem(display)
+                    it.setData(Qt.ItemDataRole.UserRole, (item_type, dir_path))
+                    lst.addItem(it)
+            else:
+                txt = (dir_path + " " + display).lower()
+                if not keywords or all(kw in txt for kw in keywords):
+                    it = QListWidgetItem(display)
+                    it.setData(Qt.ItemDataRole.UserRole, (item_type, dir_path))
+                    it.setToolTip(dir_path)
+                    lst.addItem(it)
+        if lst.count() > 0:
+            lst.setCurrentRow(0)
+        lst.setUpdatesEnabled(True)
+
+    def _ql_on_item_activated(self, item):
+        """列表项被点击/回车选中。"""
+        item_type, dir_path = item.data(Qt.ItemDataRole.UserRole)
+        self._ql_hide()
+        if item_type == "browse":
+            self._quick_launch_browse()
+        elif item_type == "manage":
+            self._manage_quick_launch_dirs()
+        else:
+            self._quick_launch_with_dir(dir_path)
+
+    def _ql_do_launch(self):
+        """回车：输入是路径则直接启动，否则激活当前选中项。"""
+        text = self._ql_search.text().strip()
+        is_path = False
+        if text:
+            if '/' in text or text.startswith('~'):
+                is_path = True
+            elif '\\' in text or (len(text) >= 2 and text[1] == ':' and text[0].isalpha()):
+                is_path = True
+        if is_path:
+            self._ql_hide()
+            self._quick_launch_with_dir(text)
+            return
+        cur = self._ql_list.currentItem()
+        if cur:
+            self._ql_on_item_activated(cur)
+
+    def _show_quick_launch_menu(self):
+        """显示快速启动菜单（复用同一个弹窗，避免每次新建造成的延迟/闪烁）。"""
+        # 从配置文件重新加载目录历史，确保多窗口间同步
+        self._reload_dir_history_from_config()
+        self._ensure_quick_launch_popup()
+        popup = self._ql_popup
+
+        # 重建内容（当前目录可能已变）+ 清空搜索
+        self._ql_rebuild_dirs()
+        self._ql_search.blockSignals(True)
+        self._ql_search.clear()
+        self._ql_search.blockSignals(False)
+        self._ql_update_list()
+        self._ql_ready = False
+
+        # 定位到按钮下方（先算尺寸再定位，避免位移闪烁）
         btn_global_pos = self.quick_launch_btn.mapToGlobal(QPoint(0, self.quick_launch_btn.height()))
         window_rect = self.geometry()
         window_global_pos = self.mapToGlobal(QPoint(0, 0))
-
-        # 关键：先在显示前算好尺寸并放到「接近最终位置」，再一次性显示在最终位置。
-        # 之前的做法是 show() 在默认位置 → 再 move()，macOS 上若 setWindowOpacity(0)
-        # 在窗口原生化前未生效，第一帧会在默认位置画出一整块不透明窗口 = 闪一下。
-        # 先 move 到按钮下方再 show，即使有这一帧也落在最终位置附近，不再有位移闪烁。
-        popup.adjustSize()                      # 隐藏状态下用布局算出初步尺寸
+        popup.adjustSize()
         popup.move(btn_global_pos.x(), btn_global_pos.y())
-        popup.setWindowOpacity(0)
-        popup.show()                            # 首次显示后尺寸才完全可靠
+        if not popup.isVisible():
+            popup.setWindowOpacity(0)
+            popup.show()
         popup.adjustSize()
         popup_size = popup.size()
 
-        # 用真实尺寸做边界修正
         x = btn_global_pos.x()
         y = btn_global_pos.y()
         right_edge = window_global_pos.x() + window_rect.width()
@@ -5789,15 +5759,12 @@ class MainWindow(QMainWindow):
         if x < window_global_pos.x():
             x = window_global_pos.x() + 10
 
-        # 移到最终位置并显示
         popup.move(x, y)
         popup.setWindowOpacity(1)
-        popup.activateWindow()  # 激活窗口以获取键盘焦点
-        popup.raise_()  # 确保在最前面
-        search_input.setFocus(Qt.FocusReason.PopupFocusReason)  # 明确设置焦点原因
-
-        # 延迟启用失焦关闭，避免刚打开就触发关闭
-        QTimer.singleShot(100, lambda: popup_ready.__setitem__(0, True))
+        popup.activateWindow()
+        popup.raise_()
+        self._ql_search.setFocus(Qt.FocusReason.PopupFocusReason)
+        QTimer.singleShot(100, lambda: setattr(self, '_ql_ready', True))
 
     def _quick_launch_with_dir(self, dir_path: str):
         """以指定目录快速启动新终端标签页并自动启动预设
