@@ -877,6 +877,10 @@ class TerminalWidget(QWidget):
         try:
             text = self._utf8_decoder.decode(data)
 
+            # ssh 密码提示一次性自动回填（Remote 面板里已输入过该主机密码）
+            if getattr(self, '_pending_ssh_password', None):
+                self._maybe_autofill_password(text)
+
             # 发送原始输出信号（只有启用 API 服务器时才发射）
             if self._api_output_enabled:
                 self.raw_output_received.emit(text)
@@ -3143,6 +3147,34 @@ class TerminalWidget(QWidget):
         """窗口关闭事件 - 清理资源"""
         self.cleanup()
         super().closeEvent(event)
+
+    def arm_password_autofill(self, password: str, timeout: float = 30.0):
+        """为接下来的 ssh 密码提示预置一次性自动填充。
+
+        Remote 面板连接时用户已输入过该主机密码（见 RemoteExplorerPanel），
+        这里把它缓存到本终端，检测到 `password:` 提示就自动回填一次，避免重复输入。
+        密码只留在内存、一次性使用、超时即作废。
+        """
+        import time as _time
+        self._pending_ssh_password = password
+        self._pending_ssh_password_deadline = _time.monotonic() + timeout
+
+    # ssh 密码提示匹配：行尾出现 "password:" 或 "passphrase ...:"（忽略大小写）
+    _RE_SSH_PWD_PROMPT = re.compile(r"(?:password|passphrase[^:\n]*):\s*$", re.IGNORECASE)
+
+    def _maybe_autofill_password(self, text: str):
+        """检测到 ssh 密码提示则自动回填缓存的密码（一次性）。"""
+        pw = getattr(self, '_pending_ssh_password', None)
+        if not pw:
+            return
+        import time as _time
+        if _time.monotonic() > getattr(self, '_pending_ssh_password_deadline', 0):
+            self._pending_ssh_password = None
+            return
+        if self._RE_SSH_PWD_PROMPT.search(text):
+            # 先清除再发送，避免万一回包再次触发导致重复输入错误密码
+            self._pending_ssh_password = None
+            self._write_to_backend((pw + '\n').encode('utf-8'))
 
     def send_text(self, text: str):
         """发送文本到终端"""

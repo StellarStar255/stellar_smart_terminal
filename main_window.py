@@ -8049,6 +8049,14 @@ class MainWindow(QMainWindow):
         if not terms:
             return
         term = terms[0]
+        # 若用户刚在 Remote 面板里为该主机输入过密码，预置一次性自动回填，
+        # 这样终端里的 ssh 密码提示就不用再输一遍。
+        try:
+            cached_pw = self.remote_panel.get_cached_password(alias)
+            if cached_pw:
+                term.arm_password_autofill(cached_pw)
+        except Exception:
+            pass
         cmd_string = " ".join(self._shell_quote(a) for a in ssh_args)
         # 用 _start_and_execute：先起 shell，再回车跑 ssh；ssh 退出后用户回到本地 shell
         try:

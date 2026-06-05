@@ -543,6 +543,10 @@ class RemoteExplorerPanel(QWidget):
         # 同一会话只弹一次重连框（多个并发 future 都 fail 时不刷屏）
         self._reconnect_dialog_open: bool = False
         self._current_path: str = "/"
+        # 用户在「Password Required」对话框里输入的密码，按主机别名缓存在内存里，
+        # 供同一主机的 SSH 终端 tab 自动回填，避免二次输入。只存内存、不落盘、
+        # 断开连接即清除。
+        self._cached_passwords: dict[str, str] = {}
         self._hosts: list[HostConfig] = []
         # 主窗口可用 set_extra_hosts() 注入手工添加的主机
         self._extra_hosts: list[HostConfig] = []
@@ -1076,6 +1080,15 @@ class RemoteExplorerPanel(QWidget):
         )
         holder['value'] = text if ok else None
         holder['done'] = True
+        # 缓存密码（仅密码认证、非 passphrase 提示）：label 即主机别名时才存，
+        # 供同一主机的 SSH 终端 tab 一次性自动回填。
+        if ok and text:
+            self._cached_passwords[label] = text
+
+    def get_cached_password(self, alias: str) -> Optional[str]:
+        """返回某主机此前在「Password Required」里输入过的密码（无则 None）。
+        供主窗口打开 SSH 终端时自动回填，避免二次输入。"""
+        return self._cached_passwords.get(alias)
 
     def _on_session_connected(self, sess: SSHSession):
         if sess is not self._session:
@@ -1123,6 +1136,8 @@ class RemoteExplorerPanel(QWidget):
         self._auto_refresh_timer.stop()
         self._auto_refresh_fingerprints.clear()
         self._auto_refresh_pending = 0
+        # 断开即清空内存里的密码缓存，缩短敏感数据驻留时间
+        self._cached_passwords.clear()
         self._stack.setCurrentWidget(self._hosts_page)
         self._tree.clear()
         self._subtitle_label.setText("")
