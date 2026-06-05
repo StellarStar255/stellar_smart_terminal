@@ -2797,16 +2797,9 @@ class TerminalWidget(QWidget):
                     seen_non_space = True
                     last_content_col = c_col + (1 if self._is_wide_char(c_ch) else 0)
 
-            # 行尾连续非空白 run 长度（用于区分「长 token 被截断」与「散文恰好填到行尾」）
-            trailing_run = 0
-            seen_tail_content = False
-            for c_col, c_ch in reversed(chars):
-                if c_ch == ' ':
-                    if seen_tail_content:
-                        break
-                else:
-                    seen_tail_content = True
-                    trailing_run += 1
+            # 整行内容是否「无内部空格」（单一连续 token，如 URL/路径/哈希）
+            core = ''.join(c for _, c in chars).strip()
+            spaceless = bool(core) and (' ' not in core)
 
             is_soft = self.screen.is_soft_wrapped(buffer_line)
             can_heuristic = (col_start == 0 and col_end == term_cols - 1)
@@ -2817,19 +2810,35 @@ class TerminalWidget(QWidget):
             else:
                 line_text = ''.join(selected_chars).rstrip()
 
-            rows.append((line_text, is_soft, last_content_col, leading_space_count, can_heuristic, trailing_run))
+            rows.append((line_text, is_soft, last_content_col, leading_space_count, can_heuristic, spaceless))
+
+        # 估算每行所在「连续非软换行行块」的应用层折行宽度（块内最大内容列）。
+        # 这样即使应用（如 Claude Code 的盒子边距）按比终端更窄的宽度折行，也能正确识别折行点，
+        # 而不是依赖「填满到终端右边缘」这个会被边距破坏的假设。
+        n = len(rows)
+        run_max = [r[2] for r in rows]
+        i = 0
+        while i < n:
+            if rows[i][1]:  # 软换行行不参与应用层折行块
+                i += 1
+                continue
+            j = i
+            while j < n and not rows[j][1]:
+                j += 1
+            block_max = max((rows[k][2] for k in range(i, j)), default=-1)
+            for k in range(i, j):
+                run_max[k] = block_max
+            i = j
 
         # 用 look-ahead 决定每行的换行类型：
         #   0=硬换行, 1=终端软换行,
         #   2=应用层「散文」折行（按词边界折 → 拼接时需补回词间空格）
-        #   3=应用层「填满到行尾」折行（一个长 token 被强行从中间截断，如 URL/路径/哈希 →
-        #     必须无缝直接拼接，绝不能补空格，否则会把 URL 拦腰插入空格导致登录失效）
-        threshold_high = max(int(term_cols * 0.85), term_cols - 6)
+        #   3=应用层「token 截断」折行（一个长 token 被强行从中间截断，如 URL/路径/哈希 →
+        #     必须无缝直接拼接，绝不能补空格，否则会把 URL 拦腰插入空格/换行导致登录失效）
         threshold_low = max(8, int(term_cols * 0.40))
-        threshold_run = max(12, term_cols // 4)
-        n = len(rows)
+        TOL = 2
         resolved = []
-        for i, (text, is_soft, last_col, _, can_h, trailing_run) in enumerate(rows):
+        for i, (text, is_soft, last_col, _, can_h, spaceless) in enumerate(rows):
             if i == n - 1:
                 resolved.append((text, 0))
                 continue
@@ -2840,15 +2849,16 @@ class TerminalWidget(QWidget):
             if can_h and last_col >= 0:
                 next_leading = rows[i + 1][3]
                 next_has_content = bool(rows[i + 1][0].strip())
-                if last_col >= threshold_high and trailing_run >= threshold_run:
-                    # 行内容填满到行尾且行尾是长 token → 被强行截断的 URL/路径/哈希，无缝拼接
-                    wrap_type = 3
-                elif last_col >= threshold_high:
-                    # 填满到行尾但行尾只是个短词 → 散文恰好折到行尾，按续行补空格
-                    wrap_type = 2
+                fills_local = last_col >= run_max[i] - TOL  # 填满到本块的折行宽度 → 是被宽度折断的续行
+                if fills_local and last_col >= threshold_low and next_has_content:
+                    if spaceless:
+                        # 无内部空格的长 token 被折断（URL/路径/哈希）→ 无缝拼接
+                        wrap_type = 3
+                    else:
+                        # 散文填到折行宽度 → 按续行补回词间空格
+                        wrap_type = 2
                 elif last_col >= threshold_low and next_leading >= 1 and next_has_content:
-                    # 中等置信度：行占用过半且下一行带续行缩进 → 按词折行的应用层 wrap
-                    # 命中如 Claude Code 等渲染器按自己目标宽度（远小于终端列数）wrap 的场景
+                    # 行占用过半且下一行带续行缩进 → 按词折行的应用层 wrap
                     wrap_type = 2
             resolved.append((text, wrap_type))
 
@@ -2924,7 +2934,7 @@ class TerminalWidget(QWidget):
         screen = self.screen
 
         def extract_line(buffer_line):
-            """提取行内容，返回 (text, is_soft, last_content_col, leading_space_count, trailing_run)
+            """提取行内容，返回 (text, is_soft, last_content_col, leading_space_count, spaceless)
             最终换行类型在后续 look-ahead 阶段决定。
             """
             chars_with_col = []  # (col, char_data)
@@ -2961,16 +2971,9 @@ class TerminalWidget(QWidget):
                     seen_non_space = True
                     last_content_col = c_col + (1 if is_wide(c_ch) else 0)
 
-            # 行尾连续非空白 run 长度（区分「长 token 被截断」与「散文恰好填到行尾」）
-            trailing_run = 0
-            seen_tail_content = False
-            for c_col, c_ch in reversed(chars_with_col):
-                if c_ch == ' ':
-                    if seen_tail_content:
-                        break
-                else:
-                    seen_tail_content = True
-                    trailing_run += 1
+            # 整行内容是否「无内部空格」（单一连续 token，如 URL/路径/哈希）
+            core = ''.join(char_list).strip()
+            spaceless = bool(core) and (' ' not in core)
 
             is_soft = screen.is_soft_wrapped(buffer_line)
             if is_soft:
@@ -2978,7 +2981,7 @@ class TerminalWidget(QWidget):
             else:
                 text = ''.join(char_list).rstrip()
 
-            return text, is_soft, last_content_col, leading_space_count, trailing_run
+            return text, is_soft, last_content_col, leading_space_count, spaceless
 
         # 收集所有行
         line_data = []
@@ -2995,14 +2998,29 @@ class TerminalWidget(QWidget):
         while line_data and not line_data[-1][0]:
             line_data.pop()
 
+        # 估算每行所在「连续非软换行行块」的应用层折行宽度（块内最大内容列），
+        # 以正确识别按盒子边距（比终端更窄）折行的续行，而非依赖填满到终端右边缘。
+        n = len(line_data)
+        run_max = [r[2] for r in line_data]
+        i = 0
+        while i < n:
+            if line_data[i][1]:
+                i += 1
+                continue
+            j = i
+            while j < n and not line_data[j][1]:
+                j += 1
+            block_max = max((line_data[k][2] for k in range(i, j)), default=-1)
+            for k in range(i, j):
+                run_max[k] = block_max
+            i = j
+
         # 用 look-ahead 决定换行类型：
         #   0=硬换行, 1=终端软换行, 2=应用层散文折行（补词间空格）, 3=应用层 token 截断折行（无缝拼接）
-        threshold_high = max(int(columns * 0.85), columns - 6)
         threshold_low = max(8, int(columns * 0.40))
-        threshold_run = max(12, columns // 4)
-        n = len(line_data)
+        TOL = 2
         resolved = []
-        for i, (text, is_soft, last_col, _, trailing_run) in enumerate(line_data):
+        for i, (text, is_soft, last_col, _, spaceless) in enumerate(line_data):
             if i == n - 1:
                 resolved.append((text, 0))
                 continue
@@ -3013,14 +3031,14 @@ class TerminalWidget(QWidget):
             if last_col >= 0:
                 next_leading = line_data[i + 1][3]
                 next_has_content = bool(line_data[i + 1][0].strip())
-                if last_col >= threshold_high and trailing_run >= threshold_run:
-                    # 行尾是长 token → 被强行截断（URL/路径/哈希），无缝拼接不补空格
-                    wrap_type = 3
-                elif last_col >= threshold_high:
-                    # 填满到行尾但行尾只是短词 → 散文恰好折到行尾，按续行补空格
-                    wrap_type = 2
+                fills_local = last_col >= run_max[i] - TOL
+                if fills_local and last_col >= threshold_low and next_has_content:
+                    if spaceless:
+                        wrap_type = 3   # 长 token 被折断 → 无缝拼接
+                    else:
+                        wrap_type = 2   # 散文填到折行宽度 → 补词间空格
                 elif last_col >= threshold_low and next_leading >= 1 and next_has_content:
-                    # 中等置信度：行占用过半且下一行带续行缩进 → 按词折行的应用层 wrap
+                    # 行占用过半且下一行带续行缩进 → 按词折行的应用层 wrap
                     wrap_type = 2
             resolved.append((text, wrap_type))
 
@@ -3819,29 +3837,47 @@ if (hasFileURL) {{
         except Exception:
             return False
 
-    def _row_fills_to_edge(self, abs_row: int) -> bool:
-        """该绝对行的内容是否填满到行尾附近。
+    def _local_wrap_width(self, abs_row: int) -> int:
+        """估算 abs_row 所在「连续非空、非软换行行块」的应用层折行宽度（块内最大内容列+1）。
 
-        像 Claude Code(Ink) 这类 TUI 在窄窗口下会自己把超长 token（URL/路径/哈希）
-        硬折成多个独立的可见行（不是终端软换行，没有软换行标记）。这种被强行截断的行
-        会一直顶到行尾。双击/选词时据此把选区跨过这些硬折行，才能选中完整的 URL。
-        判定阈值与复制逻辑(_get_selected_text 的 threshold_high)保持一致。
+        像 Claude Code(Ink) 这类 TUI 会在盒子/边距内按比终端更窄的宽度折行，被折断的续行
+        填满的是这个折行宽度而非终端右边缘。用块内最大内容宽度来估算它，从而正确识别续行。
+        """
+        total = self._row_count_total()
+
+        def content_last_col(r):
+            return len(self._get_line_text(r).rstrip()) - 1
+
+        lo = abs_row
+        # 向上扩展到块首（上一行非空、非软换行）
+        while lo - 1 >= 0 and abs_row - lo < 80:
+            if self._is_row_soft_wrapped(lo - 1) or content_last_col(lo - 1) < 0:
+                break
+            lo -= 1
+        hi = abs_row
+        # 向下扩展到块尾（本行非软换行且下一行非空）
+        while hi + 1 < total and hi - abs_row < 80:
+            if self._is_row_soft_wrapped(hi) or content_last_col(hi + 1) < 0:
+                break
+            hi += 1
+        return max((content_last_col(r) for r in range(lo, hi + 1)), default=-1) + 1
+
+    def _row_fills_to_edge(self, abs_row: int) -> bool:
+        """该绝对行是否是「被宽度折断的长 token 续行」（如 Claude Code 窄窗口下的 URL）。
+
+        判定：行内容无内部空格（单一连续 token），且填满到本行块的应用层折行宽度。
+        双击/选词时据此把选区跨过这些硬折行，才能选中完整的 URL。
         """
         text = self._get_line_text(abs_row)
-        stripped = text.rstrip()
-        if not stripped:
+        core = text.strip()
+        if not core or ' ' in core:
+            return False  # 空行或含内部空格（散文）→ 不是单一长 token
+        last_col = len(text.rstrip()) - 1
+        threshold_low = max(8, int(self.term_cols * 0.40))
+        if last_col < threshold_low:
             return False
-        last_col = len(stripped) - 1
-        threshold_high = max(int(self.term_cols * 0.85), self.term_cols - 6)
-        if last_col < threshold_high:
-            return False
-        # 行尾连续非空白 run 必须足够长，才认定是被截断的长 token（而非散文恰好填到行尾的短词）
-        i = len(stripped)
-        while i > 0 and not stripped[i - 1].isspace():
-            i -= 1
-        trailing_run = len(stripped) - i
-        threshold_run = max(12, self.term_cols // 4)
-        return trailing_run >= threshold_run
+        wrap_width = self._local_wrap_width(abs_row)
+        return last_col >= wrap_width - 2
 
     # 双击用的「宽」单词字符集：纳入路径/URL 常见字符（/ . : ~ @ % + = , - 以及查询串 ? & # ;），
     # 这样双击一条完整路径或 URL 能整体选中，而不是停在第一个 / . 或 ? 处。
@@ -3888,8 +3924,9 @@ if (hasFileURL) {{
             return self._is_row_soft_wrapped(r) or self._row_fills_to_edge(r)
 
         # 向上扩展：单词顶到行首且上一行是被折行的续行 → 接到上一行末尾的单词部分
+        # 用 rstrip() 去掉行尾填充空格（应用层按盒子边距折行时，内容并不顶到终端右边缘）
         while start_col == 0 and start_row > 0 and _is_continuation(start_row - 1):
-            prev_text = self._get_line_text(start_row - 1).rstrip('\x00')
+            prev_text = self._get_line_text(start_row - 1).rstrip()
             if not prev_text or prev_text[-1] not in word_chars:
                 break
             s = len(prev_text)
@@ -3910,12 +3947,14 @@ if (hasFileURL) {{
             next_text = self._get_line_text(end_row + 1)
             if not next_text or next_text[0] not in word_chars:
                 break
+            next_content_end = len(next_text.rstrip()) - 1  # 下一行内容末列（非填充空格）
             e = 0
             while e < len(next_text) and next_text[e] in word_chars:
                 e += 1
             end_row += 1
             end_col = e - 1
-            if end_col != len(next_text) - 1:
+            # 词没填满下一行的内容宽度 → 它就是 token 的最后一段，停止
+            if end_col != next_content_end:
                 break
 
         self._selection_start = (start_row, start_col)
