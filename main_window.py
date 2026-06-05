@@ -4856,11 +4856,10 @@ class MainWindow(QMainWindow):
             base_ss,
         )
         self.title_label.setStyleSheet(scaled_ss)
-        # 同步缩放缓存：以未缩放的 base_ss 作基准，保证后续缩放仍从 13px 算起
-        if scale != 1.0:
-            self._original_widget_styles[id(self.title_label)] = (self.title_label, base_ss)
-        else:
-            self._original_widget_styles.pop(id(self.title_label), None)
+        # 始终把"未缩放"的 base_ss 登记为缩放基准：_scale_gui_font_sizes 命中缓存时
+        # 会用 base_ss（13px）而非当前已缩放的样式去算，避免 _apply_theme 清缓存后
+        # 把已缩放值（15px）误当基准导致二次缩放（15→18px）。
+        self._original_widget_styles[id(self.title_label)] = (self.title_label, base_ss)
 
     def _update_color_btn_style(self):
         """更新颜色按钮样式"""
@@ -9178,6 +9177,11 @@ class MainWindow(QMainWindow):
 
         # 主题切换后重新应用 GUI 字体缩放（因为样式表被覆盖）
         self._original_widget_styles.clear()
+        # 标题用的是窗口色而非主题色，_apply_theme 不会重建它；清缓存后必须重新
+        # 登记它的未缩放基准（13px），否则下面 _scale_gui_font_sizes 会把它当前
+        # 已缩放的样式误当基准，造成二次缩放。
+        if hasattr(self, 'title_label'):
+            self._update_title_label_color()
         if self._gui_font_size != 0 or self._global_zoom_delta != 0:
             self._scale_gui_font_sizes(self._gui_font_size, self._global_zoom_delta)
 
