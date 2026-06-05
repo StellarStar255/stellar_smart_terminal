@@ -8081,14 +8081,25 @@ class MainWindow(QMainWindow):
             # 兜底远端未设置 $SHELL 的情况。
             ssh_args.extend(["-t", f"cd {self._shell_quote(remote_cd_path)} && exec ${{SHELL:-/bin/bash}} -l"])
 
-        # 新 tab，标签名标记 SSH host
+        # 标签名标记 SSH host
         tab_name = t("remote.terminal_tab_name", host=alias)
-        idx = self._add_new_tab(tab_name=tab_name)
+        # 若当前 tab 只有一个、且 shell 还没真正启动的空白终端，直接复用它，
+        # 避免每次远程连接都新建一个 tab 造成浪费；否则新开一个 tab。
+        cur_idx = self.tab_widget.currentIndex()
+        cur_terms = self.tab_terminals.get(cur_idx, [])
+        if cur_idx >= 0 and len(cur_terms) == 1 and not cur_terms[0].has_started():
+            idx = cur_idx
+            self.tab_widget.setTabText(idx, tab_name)
+        else:
+            idx = self._add_new_tab(tab_name=tab_name)
         # 获取这个 tab 的第一个终端，启动 ssh
         terms = self.tab_terminals.get(idx, [])
         if not terms:
             return
         term = terms[0]
+        self.tab_widget.setCurrentIndex(idx)
+        self.active_terminal = term
+        term.setFocus()
         # 若用户刚在 Remote 面板里为该主机输入过密码，预置一次性自动回填，
         # 这样终端里的 ssh 密码提示就不用再输一遍。
         try:

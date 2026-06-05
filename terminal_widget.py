@@ -3246,6 +3246,13 @@ class TerminalWidget(QWidget):
         """检查是否有进程在运行"""
         return self._backend is not None and self._backend.is_running
 
+    def has_started(self) -> bool:
+        """该终端是否曾经真正启动过 shell（backend 已创建）。
+
+        新建但未启动的空白终端返回 False，可被复用（如远程 SSH 复用空闲终端）。
+        """
+        return self._backend is not None
+
     def pause_timers(self):
         """暂停/降速定时器（用于窗口失活时减少开销）"""
         if hasattr(self, 'cursor_timer') and self.cursor_timer:
