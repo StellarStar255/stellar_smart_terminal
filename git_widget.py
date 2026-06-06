@@ -1994,13 +1994,16 @@ class GitPanel(QWidget):
         self.body_splitter.setHandleWidth(6)
 
         self.changes_widget = GitChangesWidget(self.theme)
+        self.changes_widget.setMinimumHeight(120)
         self.body_splitter.addWidget(self.changes_widget)
 
         self.commit_widget = GitCommitWidget(self.theme)
+        self.commit_widget.setMinimumHeight(150)
         self.body_splitter.addWidget(self.commit_widget)
 
         # 提交历史 graph（仿 VS Code）放在最下方，可拖拽分隔条调整高度
         self.graph_widget = GitGraphWidget(self.theme)
+        self.graph_widget.setMinimumHeight(140)
         self.graph_widget.commit_clicked.connect(self._on_commit_clicked)
         self.graph_widget.revert_requested.connect(self._on_revert_commit)
         self.graph_widget.reset_requested.connect(self._on_reset_commit)
@@ -2015,7 +2018,15 @@ class GitPanel(QWidget):
         # 记忆用户拖拽过的提交区高度
         self.body_splitter.splitterMoved.connect(self._on_splitter_moved)
 
-        layout.addWidget(self.body_splitter, 1)
+        # 把分隔器放进竖直滚动区：屏幕不够高时各栏会维持各自的最小高度，
+        # 整体溢出则出现竖直滚动条，避免提交框 / graph 被挤到看不见。
+        self.body_scroll = QScrollArea()
+        self.body_scroll.setWidgetResizable(True)
+        self.body_scroll.setFrameShape(QFrame.Shape.NoFrame)
+        self.body_scroll.setHorizontalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAlwaysOff)
+        self.body_scroll.setVerticalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAsNeeded)
+        self.body_scroll.setWidget(self.body_splitter)
+        layout.addWidget(self.body_scroll, 1)
 
         # 无仓库提示
         self.no_repo_label = QLabel(t("git.no_repo"))
