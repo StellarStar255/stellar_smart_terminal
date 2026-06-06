@@ -39,7 +39,7 @@ from PyQt6.QtWidgets import (
     QStackedWidget
 )
 from PyQt6 import sip  # 用于检查 C++ 对象是否已被删除
-from PyQt6.QtCore import Qt, QTimer, QEvent, QPoint, QMimeData, pyqtSignal, QObject, QSize
+from PyQt6.QtCore import Qt, QTimer, QEvent, QPoint, QMimeData, pyqtSignal, QObject, QSize, QRectF
 from PyQt6.QtGui import QAction, QActionGroup, QIcon, QFont, QColor, QPixmap, QPainter, QPainterPath, QPen, QDrag, QCursor, QBrush, QPalette, QShortcut, QKeySequence
 from PyQt6.QtWidgets import QWidgetAction, QStylePainter, QStyleOptionComboBox
 
@@ -2660,28 +2660,53 @@ class _FlowSeparator(QWidget):
 
 
 class _NavResizeHandle(QWidget):
-    """内嵌导航面板底部的可拖拽手柄：上下拖动改变导航列表高度。
-    样式与 QSplitter::handle 一致（默认 #3d3d5c，hover/拖拽时 #667eea）。"""
+    """内嵌导航面板与下方 Explorer/Git/Remote 之间的可拖拽分隔条：
+    上下拖动改变导航列表高度（即调整二者相对高度）。
+
+    外观仿 Git graph 上方的 QSplitter 分隔条：中间画一条带圆角的「抓手」
+    （默认 #3d3d5c，hover/拖拽时高亮 #667eea），比单纯一条细线更易识别可拖拽。"""
+
+    _IDLE = "#3d3d5c"
+    _ACTIVE = "#667eea"
 
     def __init__(self, on_drag, on_release, parent=None):
         super().__init__(parent)
         self._on_drag = on_drag          # callback(delta_y:int)：实时调整高度
         self._on_release = on_release    # callback()：拖拽结束后落盘
-        self.setFixedHeight(6)
+        self.setFixedHeight(10)
         self.setCursor(Qt.CursorShape.SizeVerCursor)
-        self.setStyleSheet("background-color: #3d3d5c;")
         self._press_y = None
+        self._hover = False
+
+    def _color(self):
+        return self._ACTIVE if (self._hover or self._press_y is not None) else self._IDLE
+
+    def paintEvent(self, event):
+        painter = QPainter(self)
+        painter.setRenderHint(QPainter.RenderHint.Antialiasing, True)
+        w, h = self.width(), self.height()
+        # 居中画一条圆角抓手，左右各留 8px 边距（与 Git 分隔条 margin 一致）
+        grip_h = 4
+        x = 8
+        y = (h - grip_h) / 2
+        rect = QRectF(x, y, max(0, w - 2 * x), grip_h)
+        painter.setPen(Qt.PenStyle.NoPen)
+        painter.setBrush(QColor(self._color()))
+        painter.drawRoundedRect(rect, grip_h / 2, grip_h / 2)
 
     def enterEvent(self, event):
-        self.setStyleSheet("background-color: #667eea;")
+        self._hover = True
+        self.update()
 
     def leaveEvent(self, event):
+        self._hover = False
         if self._press_y is None:
-            self.setStyleSheet("background-color: #3d3d5c;")
+            self.update()
 
     def mousePressEvent(self, event):
         if event.button() == Qt.MouseButton.LeftButton:
             self._press_y = event.globalPosition().y()
+            self.update()
 
     def mouseMoveEvent(self, event):
         if self._press_y is not None:
@@ -2694,7 +2719,7 @@ class _NavResizeHandle(QWidget):
     def mouseReleaseEvent(self, event):
         if self._press_y is not None:
             self._press_y = None
-            self.setStyleSheet("background-color: #3d3d5c;")
+            self.update()
             self._on_release()
 
 
