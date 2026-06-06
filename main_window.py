@@ -2674,7 +2674,8 @@ class _NavResizeHandle(QWidget):
         self._on_drag = on_drag          # callback(delta_y:int)：实时调整高度
         self._on_release = on_release    # callback()：拖拽结束后落盘
         self.setFixedHeight(10)
-        self.setCursor(Qt.CursorShape.SizeVerCursor)
+        # 用 QSplitter 同款「上下分隔条」光标，悬停时一眼能看出可拖拽
+        self.setCursor(Qt.CursorShape.SplitVCursor)
         self._press_y = None
         self._hover = False
 
