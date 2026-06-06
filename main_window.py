@@ -7824,10 +7824,51 @@ class MainWindow(QMainWindow):
             # 4 widget: 左面板 + 编辑器 + 终端 + 日志
             if msizes[0] > 0 and msizes[1] > 0 and msizes[2] > 0:
                 self._saved_explorer_main_sizes = list(msizes)
-                self._saved_left_panel_width = msizes[0]
+                self._set_left_panel_width(msizes[0])
         elif (not editor_in_main) and left_visible and len(msizes) >= 3 and msizes[0] > 0:
             # 3 widget: 左面板 + 终端 + 日志（无编辑器）
-            self._saved_left_panel_width = msizes[0]
+            self._set_left_panel_width(msizes[0])
+
+    def _set_left_panel_width(self, width):
+        """记录左侧栏宽度（进程级共享）并在拖动时实时联动到其它已打开窗口。
+
+        拖动本窗口的左侧栏分隔条会经 splitterMoved → _capture_explorer_layout
+        进到这里：宽度有变化时立刻推给其它展开了侧边栏的窗口，让它们同步变宽，
+        减少窗口间切换的认知负担。被其它窗口同步过来时（_applying_shared_left_width）
+        不再回传，避免来回触发。
+        """
+        if not isinstance(width, int) or width <= 0:
+            return
+        changed = (MainWindow._shared_left_panel_width != width)
+        self._saved_left_panel_width = width
+        if changed and not getattr(self, '_applying_shared_left_width', False):
+            self._broadcast_left_panel_width(width)
+
+    def _broadcast_left_panel_width(self, width):
+        """把左侧栏宽度实时应用到其它所有已打开窗口。"""
+        app = QApplication.instance()
+        if app is None:
+            return
+        for w in app.topLevelWidgets():
+            if w is self or not isinstance(w, MainWindow) or sip.isdeleted(w):
+                continue
+            w._apply_shared_left_panel_width(width)
+
+    def _apply_shared_left_panel_width(self, width):
+        """收到其它窗口同步过来的左侧栏宽度：仅当本窗口已展开侧边栏时实时重排。"""
+        left_visible = (
+            getattr(self, 'explorer_panel_visible', False)
+            or getattr(self, 'git_panel_visible', False)
+            or getattr(self, 'remote_panel_visible', False)
+        )
+        if not left_visible or not hasattr(self, 'main_splitter'):
+            return
+        # 标记「正在被同步」，使本窗口因 setSizes 触发的 splitterMoved 不再回传
+        self._applying_shared_left_width = True
+        try:
+            self._update_splitter_sizes()
+        finally:
+            self._applying_shared_left_width = False
 
     def _resolve_main_splitter_sizes_with_editor(self):
         """计算编辑器在 main_splitter 中时的目标尺寸（优先使用记忆值）
@@ -9776,8 +9817,11 @@ class MainWindow(QMainWindow):
                     remote_internal = config.get('remote_internal_splitter_sizes', None)
                     if isinstance(remote_internal, list) and len(remote_internal) == 2 and all(isinstance(s, int) and s >= 0 for s in remote_internal):
                         self._saved_remote_internal_sizes = remote_internal
+                    # 左侧栏宽度是进程级共享的：只让第一个窗口从磁盘播种，之后开的
+                    # 窗口沿用已有的实时共享值，避免用磁盘上的旧值覆盖别的窗口刚拖出的新宽度。
                     left_width = config.get('left_panel_width', None)
-                    if isinstance(left_width, int) and left_width > 0:
+                    if (isinstance(left_width, int) and left_width > 0
+                            and MainWindow._shared_left_panel_width is None):
                         self._saved_left_panel_width = left_width
                     git_commit_h = config.get('git_commit_height', None)
                     if isinstance(git_commit_h, int) and git_commit_h > 0:

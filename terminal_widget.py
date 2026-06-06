@@ -2158,6 +2158,9 @@ class TerminalWidget(QWidget):
     def wheelEvent(self, event):
         """鼠标滚轮事件 - 滚动历史"""
         delta = event.angleDelta().y()
+        if delta == 0:
+            event.accept()
+            return
 
         # 计算可滚动的最大行数
         # 历史记录 + 当前屏幕缓冲区的总行数
@@ -2165,11 +2168,26 @@ class TerminalWidget(QWidget):
         # 最大scroll_offset应该是历史记录的行数（这样可以滚动到最顶部）
         max_scroll = history_lines
 
+        going_up = delta > 0
+        at_top = self.scroll_offset >= max_scroll
+        at_bottom = self.scroll_offset <= 0
+
+        # 触控板惯性（momentum）撞墙处理：macOS 在滑到顶/底后会继续发送一串
+        # 惯性滚动事件，并伴随橡皮筋回弹（方向来回反复）。若照常按固定 1.5 行
+        # 累加，就会在边界处被反复整数化成「上一行又下一行」的来回抖动。
+        # 已经顶到墙且仍是惯性阶段时直接吞掉事件，并清空小数累加器。
+        if event.phase() == Qt.ScrollPhase.ScrollMomentum and (
+            (going_up and at_top) or (not going_up and at_bottom)
+        ):
+            self._scroll_accum = 0.0
+            event.accept()
+            return
+
         old_offset = self.scroll_offset
         # 每次滚轮事件滚动的行数（原为3，减半为1.5）
         # 使用小数累加器，避免整数取整丢失半行
         scroll_step = 1.5
-        if delta > 0:
+        if going_up:
             # 向上滚动（查看历史）- 增加scroll_offset
             self._scroll_accum += scroll_step
         else:
@@ -2181,6 +2199,11 @@ class TerminalWidget(QWidget):
         if lines != 0:
             self._scroll_accum -= lines
             self.scroll_offset = max(0, min(self.scroll_offset + lines, max_scroll))
+
+        # 撞到顶/底边界后丢弃残留的小数部分：否则上次累积的半行会在下次反向
+        # 滚动时抢跑一行，造成边界处的轻微抽动。
+        if self.scroll_offset >= max_scroll or self.scroll_offset <= 0:
+            self._scroll_accum = 0.0
 
         # 只有在滚动位置实际改变时才更新
         if old_offset != self.scroll_offset:
