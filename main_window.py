@@ -3821,6 +3821,10 @@ class MainWindow(QMainWindow):
         self.remote_panel_visible = False
 
         self.main_splitter.addWidget(self.left_panel_container)
+        # 左侧栏不允许被拖拽折叠到 0：往左拖到极限时停在最小宽度而不是「啪」地消失，
+        # 要彻底隐藏请用面板右上角的 × 关闭按钮（更可控，状态也不会错乱）。
+        self.left_panel_container.setMinimumWidth(200)
+        self.main_splitter.setCollapsible(0, False)
         self.left_panel_container.hide()  # 默认隐藏
 
         # 主内容区用堆叠：第 0 页是终端，第 1 页是 Git 的左右并排 diff
