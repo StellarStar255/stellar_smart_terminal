@@ -3160,8 +3160,22 @@ class MainWindow(QMainWindow):
     # 导航面板停靠方式：'float'=独立浮动窗口（默认）；'embed'=嵌入每个窗口左侧栏
     _navigator_dock_mode = 'float'
 
+    # 左侧栏宽度（进程级共享）：只要打开侧边栏，所有窗口共用同一宽度，
+    # 在一个窗口里拖动调宽，其它已打开窗口下次展开侧边栏时也用这个宽度，
+    # 减轻窗口间切换的认知负担。通过 _saved_left_panel_width 属性读写。
+    _shared_left_panel_width = None
+
     # QApplication 全局 stylesheet 原值快照（进程级共享，仅初始化一次）
     _original_app_stylesheet = None
+
+    @property
+    def _saved_left_panel_width(self):
+        """左侧栏记忆宽度：所有窗口共用同一份（进程级），见 _shared_left_panel_width。"""
+        return MainWindow._shared_left_panel_width
+
+    @_saved_left_panel_width.setter
+    def _saved_left_panel_width(self, value):
+        MainWindow._shared_left_panel_width = value
 
     def __init__(self, initial_tab_data=None, window_title=None):
         """初始化主窗口
@@ -9684,7 +9698,10 @@ class MainWindow(QMainWindow):
         self._saved_explorer_main_sizes = None  # main_splitter 4 项尺寸（左右分屏）
         self._saved_explorer_internal_sizes = None  # explorer_splitter 2 项尺寸（上下分屏）
         self._saved_remote_internal_sizes = None  # remote_splitter 2 项尺寸（上下分屏）
-        self._saved_left_panel_width = None  # 仅左面板可见时的宽度（无编辑器场景）
+        # 左侧栏宽度是进程级共享的（见 _shared_left_panel_width）：新窗口初始化时
+        # 不要把已打开窗口设过的宽度清成 None，仅在还没有任何窗口设过时才置默认。
+        if MainWindow._shared_left_panel_width is None:
+            self._saved_left_panel_width = None  # 仅左面板可见时的宽度（无编辑器场景）
         self._saved_git_commit_height = None  # Git 面板提交区高度（拖拽记忆，兼容旧版）
         self._saved_git_body_sizes = None     # Git 面板 body splitter 各栏尺寸（拖拽记忆）
         self._saved_nav_list_height = None    # 内嵌导航列表高度（拖拽记忆）
