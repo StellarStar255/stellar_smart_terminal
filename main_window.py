@@ -8007,9 +8007,16 @@ class MainWindow(QMainWindow):
     SPRING_INACTIVE_MIN = 220
 
     def _on_spring_mode_toggled(self, state):
-        """弹簧模式开关。"""
+        """弹簧模式开关（Explorer 与 Remote 两处复选框共用，保持同步）。"""
         enabled = (state == Qt.CheckState.Checked.value)
         self._spring_mode_enabled = enabled
+        # 同步另一处复选框，避免两个面板状态不一致
+        for cb in (getattr(self, '_spring_checkbox', None),
+                   getattr(self, '_remote_spring_checkbox', None)):
+            if cb is not None and cb.isChecked() != enabled:
+                cb.blockSignals(True)
+                cb.setChecked(enabled)
+                cb.blockSignals(False)
         if enabled:
             # 立即按当前焦点展开一侧；焦点不在两区时默认展开编辑器
             target = self._spring_target_for_widget(QApplication.focusWidget()) or 'editor'
@@ -8022,12 +8029,15 @@ class MainWindow(QMainWindow):
         self._save_config()
 
     def _spring_applicable(self) -> bool:
-        """仅当编辑器与终端在 main_splitter 中左右并排、且都可见时弹簧才生效。"""
+        """仅当编辑器与终端在 main_splitter 中左右并排、且都可见时弹簧才生效。
+
+        编辑器是否在 main_splitter 由「左右分屏」决定，本地 Explorer 与 Remote
+        共用同一个 editor_area / 同一条放置路径，故这里只看 splitter 归属即可，
+        Explorer / Remote 两种来源都自动适用。
+        """
         if not getattr(self, '_spring_mode_enabled', False):
             return False
         if not hasattr(self, 'editor_area') or not self.editor_area.isVisible():
-            return False
-        if not getattr(self, '_explorer_split_horizontal', False):
             return False
         if self.main_splitter.indexOf(self.editor_area) < 0:
             return False
@@ -8415,6 +8425,14 @@ class MainWindow(QMainWindow):
         self._remote_split_checkbox.stateChanged.connect(self._on_remote_split_orientation_changed)
         rh_layout.addWidget(self._remote_split_checkbox)
 
+        # 弹簧模式 checkbox（与 Explorer 共用同一个全局开关，两处自动同步）
+        self._remote_spring_checkbox = QCheckBox(t("explorer.spring_mode"))
+        self._remote_spring_checkbox.setToolTip(t("explorer.spring_tooltip"))
+        self._remote_spring_checkbox.setStyleSheet(self._remote_split_checkbox.styleSheet())
+        self._remote_spring_checkbox.setChecked(bool(getattr(self, '_spring_mode_enabled', False)))
+        self._remote_spring_checkbox.stateChanged.connect(self._on_spring_mode_toggled)
+        rh_layout.addWidget(self._remote_spring_checkbox)
+
         hide_btn = QPushButton("×")
         hide_btn.setFixedSize(24, 24)
         hide_btn.setStyleSheet("""
@@ -8662,6 +8680,10 @@ class MainWindow(QMainWindow):
                 self._place_editor_in_main_splitter()
             else:
                 self._place_editor_in_remote_splitter()
+
+        # 弹簧模式下打开远程文件：自动把编辑器展宽（与本地 Explorer 一致）
+        if self._spring_applicable():
+            self._apply_spring('editor')
 
     def _update_splitter_sizes(self):
         """更新分割器大小"""
@@ -9087,6 +9109,9 @@ class MainWindow(QMainWindow):
         if hasattr(self, '_remote_split_checkbox'):
             self._remote_split_checkbox.setText(t("explorer.left_right_split"))
             self._remote_split_checkbox.setToolTip(t("explorer.split_tooltip"))
+        if hasattr(self, '_remote_spring_checkbox'):
+            self._remote_spring_checkbox.setText(t("explorer.spring_mode"))
+            self._remote_spring_checkbox.setToolTip(t("explorer.spring_tooltip"))
 
         # Git 面板标题
         if hasattr(self, '_git_title'):
