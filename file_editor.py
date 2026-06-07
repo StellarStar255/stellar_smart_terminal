@@ -1768,6 +1768,14 @@ class FileEditorWidget(QWidget):
         ext = Path(self._current_file).suffix.lower()
         name = Path(self._current_file).name.lower()
 
+        # 点文件（无扩展名，suffix 为空）需按文件名匹配
+        # 例如 .env / .env.local / .gitignore / .dockerignore
+        if name == '.env' or name.startswith('.env.'):
+            return '#'
+        if name in ('.gitignore', '.dockerignore', '.gitattributes',
+                    '.npmignore', '.editorconfig'):
+            return '#'
+
         if ext == '.py':
             return '#'
         if ext in ('.sh', '.bash', '.zsh', '.ksh', '.fish') or \
@@ -1782,7 +1790,7 @@ class FileEditorWidget(QWidget):
         if name in ('makefile', 'gnumakefile', 'bsdmakefile') or \
                 name.startswith('makefile.') or ext in ('.mk', '.make'):
             return '#'
-        if ext in ('.rb', '.r', '.pl', '.pm', '.tcl', '.awk', '.gitignore', '.dockerignore'):
+        if ext in ('.rb', '.r', '.pl', '.pm', '.tcl', '.awk'):
             return '#'
         if ext in ('.js', '.jsx', '.mjs', '.cjs', '.ts', '.tsx',
                    '.c', '.cpp', '.cc', '.cxx', '.h', '.hpp', '.hh',
