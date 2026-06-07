@@ -2468,33 +2468,39 @@ class GitPanel(QWidget):
         menu.addAction(act_new_branch)
         menu.addSeparator()
 
+        # 所有 proxy 相关项收进一个 "Proxy" 子菜单，保持顶层菜单简洁
+        proxy_menu = menu.addMenu(t("git.menu_proxy"))
+        proxy_menu.setStyleSheet(menu.styleSheet())
+        # 当前选中的代理显示在子菜单标题旁，不展开也能看到
+        proxy_menu.setTitle(t("git.menu_proxy") + (f"  ({active})" if active else ""))
+
         # (No proxy) 项
         act_none = QAction(t("git.proxy_none"), self)
         act_none.setCheckable(True)
         act_none.setChecked(active == '')
         act_none.triggered.connect(lambda: self._apply_proxy_choice(''))
-        menu.addAction(act_none)
+        proxy_menu.addAction(act_none)
 
         # 历史代理
         if history:
-            menu.addSeparator()
+            proxy_menu.addSeparator()
             for url in history:
                 act = QAction(url, self)
                 act.setCheckable(True)
                 act.setChecked(url == active)
                 act.triggered.connect(lambda _checked, u=url: self._apply_proxy_choice(u))
-                menu.addAction(act)
+                proxy_menu.addAction(act)
 
         # 添加 / 管理
-        menu.addSeparator()
+        proxy_menu.addSeparator()
         act_add = QAction(t("git.proxy_add_new"), self)
         act_add.triggered.connect(self._add_new_proxy)
-        menu.addAction(act_add)
+        proxy_menu.addAction(act_add)
 
         if history:
             act_manage = QAction(t("git.proxy_manage"), self)
             act_manage.triggered.connect(self._manage_proxies)
-            menu.addAction(act_manage)
+            proxy_menu.addAction(act_manage)
 
         # 紧贴齿轮按钮下方弹出
         btn = self.header.settings_btn
