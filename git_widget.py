@@ -1675,7 +1675,6 @@ class GitHeaderWidget(QFrame):
     ref_changed = pyqtSignal(str, str)            # (kind, name)；kind ∈ {'local','remote','tag'}
     refresh_clicked = pyqtSignal()
     settings_clicked = pyqtSignal()
-    create_branch_clicked = pyqtSignal()
     delete_branch_requested = pyqtSignal(str)     # 用户右键菜单确认删除本地分支
 
     def __init__(self, theme: dict = None, parent=None):
@@ -1733,20 +1732,14 @@ class GitHeaderWidget(QFrame):
         view.customContextMenuRequested.connect(self._on_branch_combo_context_menu)
         layout.addWidget(self.branch_combo)
 
-        # 刷新 / 新建分支 / 设置：三个统一风格的线条图标按钮（图标在 _update_style 里按主题色绘制）
+        # 刷新 / 设置：两个统一风格的线条图标按钮（图标在 _update_style 里按主题色绘制）
+        # 「新建分支」已移入设置菜单，避免它紧挨刷新按钮时被误点而意外建分支。
         self.refresh_btn = QPushButton()
         self.refresh_btn.setToolTip(t("git.refresh_tooltip"))
         self.refresh_btn.setFixedSize(28, 28)
         self.refresh_btn.setIconSize(QSize(16, 16))
         self.refresh_btn.clicked.connect(self.refresh_clicked.emit)
         layout.addWidget(self.refresh_btn)
-
-        self.create_branch_btn = QPushButton()
-        self.create_branch_btn.setToolTip(t("git.create_branch_tooltip"))
-        self.create_branch_btn.setFixedSize(28, 28)
-        self.create_branch_btn.setIconSize(QSize(16, 16))
-        self.create_branch_btn.clicked.connect(self.create_branch_clicked.emit)
-        layout.addWidget(self.create_branch_btn)
 
         self.settings_btn = QPushButton()
         self.settings_btn.setToolTip(t("git.settings_tooltip"))
@@ -1925,12 +1918,10 @@ class GitHeaderWidget(QFrame):
         """
         self.refresh_btn.setStyleSheet(btn_style)
         self.settings_btn.setStyleSheet(btn_style)
-        self.create_branch_btn.setStyleSheet(btn_style)
 
-        # 用主题前景色重绘三个线条图标，保证大小/粗细/对齐一致
+        # 用主题前景色重绘线条图标，保证大小/粗细/对齐一致
         icon_color = theme.get('text', '#eaeaea')
         self.refresh_btn.setIcon(_make_git_tool_icon('refresh', icon_color))
-        self.create_branch_btn.setIcon(_make_git_tool_icon('plus', icon_color))
         self.settings_btn.setIcon(_make_git_tool_icon('gear', icon_color))
 
     def apply_language(self):
@@ -1938,7 +1929,6 @@ class GitHeaderWidget(QFrame):
         self.title_label.setText(t("git.source_control"))
         self.refresh_btn.setToolTip(t("git.refresh_tooltip"))
         self.settings_btn.setToolTip(t("git.settings_tooltip"))
-        self.create_branch_btn.setToolTip(t("git.create_branch_tooltip"))
 
 
 class GitPanel(QWidget):
@@ -2144,7 +2134,6 @@ class GitPanel(QWidget):
         self.header.ref_changed.connect(self._on_ref_changed)
         self.header.refresh_clicked.connect(self._on_refresh_clicked)
         self.header.settings_clicked.connect(self._on_settings_clicked)
-        self.header.create_branch_clicked.connect(self._on_create_branch)
         self.header.delete_branch_requested.connect(self._on_delete_branch)
 
         # 变更列表信号
@@ -2472,6 +2461,12 @@ class GitPanel(QWidget):
                 background-color: {self.theme.get('accent', '#667eea')};
             }}
         """)
+
+        # 新建分支（从 header 的 + 按钮移到这里，避免误点意外建分支）
+        act_new_branch = QAction(t("git.menu_create_branch"), self)
+        act_new_branch.triggered.connect(self._on_create_branch)
+        menu.addAction(act_new_branch)
+        menu.addSeparator()
 
         # (No proxy) 项
         act_none = QAction(t("git.proxy_none"), self)

@@ -414,6 +414,7 @@ TRANSLATIONS = {
     "git.proxy_remove_btn": {"zh": "删除", "en": "Remove"},
     "git.proxy_close_btn": {"zh": "关闭", "en": "Close"},
     "git.create_branch_tooltip": {"zh": "创建新分支（从当前 HEAD）", "en": "Create New Branch (from current HEAD)"},
+    "git.menu_create_branch": {"zh": "新建分支…（从当前 HEAD）", "en": "New Branch… (from current HEAD)"},
     "git.create_branch_title": {"zh": "创建新分支", "en": "Create New Branch"},
     "git.create_branch_prompt": {"zh": "新分支名（将基于当前 HEAD 创建并切换过去）", "en": "New branch name (created from current HEAD and switched to)"},
     "git.delete_branch_menu": {"zh": "删除分支 \"{name}\"", "en": "Delete branch \"{name}\""},
