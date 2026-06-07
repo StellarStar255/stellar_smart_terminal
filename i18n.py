@@ -331,6 +331,8 @@ TRANSLATIONS = {
     "explorer.open_in_editor_failed": {"zh": "无法在 {editor} 中打开: {error}", "en": "Cannot open in {editor}: {error}"},
     "explorer.left_right_split": {"zh": "左右分屏", "en": "Side by Side"},
     "explorer.split_tooltip": {"zh": "勾选：文件编辑器在右侧（左右分屏）\n不勾选：文件编辑器在下方（上下分屏）", "en": "Checked: editor on right (horizontal split)\nUnchecked: editor below (vertical split)"},
+    "explorer.spring_mode": {"zh": "弹簧", "en": "Spring"},
+    "explorer.spring_tooltip": {"zh": "弹簧模式（左右分屏时生效）：点击编辑器则编辑器自动展宽、终端收窄；点击终端则反之。\n两侧都不会收起，方便在有限屏幕里快速切换焦点。", "en": "Spring mode (only in Side-by-Side): click the editor to expand it and shrink the terminal; click the terminal to do the reverse.\nNeither side collapses — quickly shift focus on a small screen."},
     "explorer.refresh_tooltip": {"zh": "刷新", "en": "Refresh"},
     "explorer.settings_tooltip": {"zh": "视图设置", "en": "View settings"},
     "explorer.show_hidden_files": {"zh": "显示隐藏文件", "en": "Show hidden files"},

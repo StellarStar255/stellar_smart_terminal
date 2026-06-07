@@ -39,7 +39,7 @@ from PyQt6.QtWidgets import (
     QStackedWidget
 )
 from PyQt6 import sip  # 用于检查 C++ 对象是否已被删除
-from PyQt6.QtCore import Qt, QTimer, QEvent, QPoint, QMimeData, pyqtSignal, QObject, QSize, QRectF
+from PyQt6.QtCore import Qt, QTimer, QEvent, QPoint, QMimeData, pyqtSignal, QObject, QSize, QRectF, QVariantAnimation, QEasingCurve
 from PyQt6.QtGui import QAction, QActionGroup, QIcon, QFont, QColor, QPixmap, QPainter, QPainterPath, QPen, QDrag, QCursor, QBrush, QPalette, QShortcut, QKeySequence
 from PyQt6.QtWidgets import QWidgetAction, QStylePainter, QStyleOptionComboBox
 
@@ -3908,6 +3908,11 @@ class MainWindow(QMainWindow):
             lambda *_: self._capture_explorer_layout()
         )
 
+        # 弹簧模式：监听全局焦点变化，点击编辑器/终端时自动展宽对应一侧
+        _app = QApplication.instance()
+        if _app is not None:
+            _app.focusChanged.connect(self._on_focus_changed_for_spring)
+
         # 日志面板默认隐藏
         self.log_panel_visible = False
         self.log_panel_container.hide()
@@ -7586,6 +7591,14 @@ class MainWindow(QMainWindow):
         self._explorer_split_checkbox.stateChanged.connect(self._on_explorer_split_orientation_changed)
         explorer_header_layout.addWidget(self._explorer_split_checkbox)
 
+        # 弹簧模式 checkbox：编辑器与终端左右并排时，点哪边哪边自动展宽
+        self._spring_checkbox = QCheckBox(t("explorer.spring_mode"))
+        self._spring_checkbox.setToolTip(t("explorer.spring_tooltip"))
+        self._spring_checkbox.setStyleSheet(self._explorer_split_checkbox.styleSheet())
+        self._spring_checkbox.setChecked(bool(getattr(self, '_spring_mode_enabled', False)))
+        self._spring_checkbox.stateChanged.connect(self._on_spring_mode_toggled)
+        explorer_header_layout.addWidget(self._spring_checkbox)
+
         # 视图设置按钮（齿轮）：弹出菜单，含"显示隐藏文件"开关
         self._explorer_settings_btn = QPushButton()
         self._explorer_settings_btn.setFixedSize(24, 24)
@@ -7793,6 +7806,10 @@ class MainWindow(QMainWindow):
                 # 上下分屏：编辑器在 explorer_splitter 中（默认行为）
                 self._place_editor_in_explorer_splitter()
 
+        # 弹簧模式下打开文件：自动把编辑器展宽（用户刚要看这个文件）
+        if self._spring_applicable():
+            self._apply_spring('editor')
+
     def _capture_explorer_layout(self):
         """记录当前资源管理器/编辑器的尺寸用于下次还原
 
@@ -7801,6 +7818,10 @@ class MainWindow(QMainWindow):
           但目标布局各项均 > 0，记录无害
         """
         if not hasattr(self, 'editor_area'):
+            return
+
+        # 弹簧动画/程序性设置尺寸期间不记忆，避免把临时的偏置布局写进记忆值
+        if getattr(self, '_applying_spring', False):
             return
 
         editor_in_main = self.main_splitter.indexOf(self.editor_area) >= 0
@@ -7975,6 +7996,136 @@ class MainWindow(QMainWindow):
                 self._place_editor_in_main_splitter()
             else:
                 self._place_editor_in_explorer_splitter()
+        # 切回上下分屏时弹簧失去意义，重置已展开侧标记
+        if not horizontal:
+            self._spring_current_side = None
+
+    # ---------- 弹簧模式：编辑器 / 终端 左右并排时点哪边哪边展宽 ----------
+    # 比例：被聚焦的一侧占编辑器+终端合计宽度的大头，另一侧收窄但保留约 30%
+    # （并设最小像素，避免在大屏上收得过窄、小屏上又超出合计宽度）。
+    SPRING_INACTIVE_RATIO = 0.30
+    SPRING_INACTIVE_MIN = 220
+
+    def _on_spring_mode_toggled(self, state):
+        """弹簧模式开关。"""
+        enabled = (state == Qt.CheckState.Checked.value)
+        self._spring_mode_enabled = enabled
+        if enabled:
+            # 立即按当前焦点展开一侧；焦点不在两区时默认展开编辑器
+            target = self._spring_target_for_widget(QApplication.focusWidget()) or 'editor'
+            self._apply_spring(target)
+        else:
+            # 关闭：恢复记忆中的均衡尺寸
+            self._spring_current_side = None
+            if self._spring_applicable():
+                self._animate_main_sizes(self._resolve_main_splitter_sizes_with_editor())
+        self._save_config()
+
+    def _spring_applicable(self) -> bool:
+        """仅当编辑器与终端在 main_splitter 中左右并排、且都可见时弹簧才生效。"""
+        if not getattr(self, '_spring_mode_enabled', False):
+            return False
+        if not hasattr(self, 'editor_area') or not self.editor_area.isVisible():
+            return False
+        if not getattr(self, '_explorer_split_horizontal', False):
+            return False
+        if self.main_splitter.indexOf(self.editor_area) < 0:
+            return False
+        if self.main_splitter.indexOf(self._main_content_stack) < 0:
+            return False
+        return True
+
+    def _spring_target_for_widget(self, w):
+        """判断焦点落在哪一区：返回 'editor' / 'terminal' / None。"""
+        if w is None or not hasattr(self, 'editor_area'):
+            return None
+        if self.editor_area is w or self.editor_area.isAncestorOf(w):
+            return 'editor'
+        stack = getattr(self, '_main_content_stack', None)
+        if stack is not None and (stack is w or stack.isAncestorOf(w)):
+            return 'terminal'
+        return None
+
+    def _on_focus_changed_for_spring(self, old, new):
+        """焦点在编辑器与终端之间切换时，自动展宽被点击的一侧。"""
+        if not self._spring_applicable():
+            return
+        target = self._spring_target_for_widget(new)
+        if target is None or target == self._spring_current_side:
+            return
+        self._apply_spring(target)
+
+    def _apply_spring(self, target, animate=True):
+        """把 main_splitter 中编辑器/终端的合计宽度按弹簧比例分配给指定一侧。"""
+        if not self._spring_applicable():
+            return
+        sizes = self.main_splitter.sizes()
+        ed_idx = self.main_splitter.indexOf(self.editor_area)
+        term_idx = self.main_splitter.indexOf(self._main_content_stack)
+        if ed_idx < 0 or term_idx < 0 or max(ed_idx, term_idx) >= len(sizes):
+            return
+        combined = sizes[ed_idx] + sizes[term_idx]
+        if combined <= 0:
+            return
+        inactive = min(max(self.SPRING_INACTIVE_MIN, int(combined * self.SPRING_INACTIVE_RATIO)),
+                       combined - self.SPRING_INACTIVE_MIN)
+        if inactive < 1:
+            inactive = combined // 3  # 合计太窄时退化为均分式分配
+        active = combined - inactive
+
+        new_sizes = list(sizes)
+        if target == 'editor':
+            new_sizes[ed_idx], new_sizes[term_idx] = active, inactive
+        else:
+            new_sizes[ed_idx], new_sizes[term_idx] = inactive, active
+
+        self._spring_current_side = target
+        if animate:
+            self._animate_main_sizes(new_sizes)
+        else:
+            self._applying_spring = True
+            try:
+                self.main_splitter.setSizes(new_sizes)
+            finally:
+                self._applying_spring = False
+
+    def _animate_main_sizes(self, target_sizes):
+        """平滑过渡 main_splitter 到目标尺寸（弹簧手感），期间不记忆尺寸。"""
+        start = self.main_splitter.sizes()
+        if len(start) != len(target_sizes):
+            self.main_splitter.setSizes(target_sizes)
+            return
+        # 停止上一段未完成的动画
+        if self._spring_anim is not None:
+            self._spring_anim.stop()
+            self._spring_anim = None
+
+        anim = QVariantAnimation(self)
+        anim.setStartValue(0.0)
+        anim.setEndValue(1.0)
+        anim.setDuration(170)
+        anim.setEasingCurve(QEasingCurve.Type.OutCubic)
+
+        def _on_val(t):
+            cur = [int(round(s + (e - s) * t)) for s, e in zip(start, target_sizes)]
+            self._applying_spring = True
+            try:
+                self.main_splitter.setSizes(cur)
+            finally:
+                self._applying_spring = False
+
+        def _on_done():
+            self._applying_spring = True
+            try:
+                self.main_splitter.setSizes(target_sizes)
+            finally:
+                self._applying_spring = False
+            self._spring_anim = None
+
+        anim.valueChanged.connect(_on_val)
+        anim.finished.connect(_on_done)
+        self._spring_anim = anim
+        anim.start()
 
     # ---------- Remote 面板的分屏（与 Explorer 行为一致） ----------
 
@@ -8930,6 +9081,9 @@ class MainWindow(QMainWindow):
         if hasattr(self, '_explorer_split_checkbox'):
             self._explorer_split_checkbox.setText(t("explorer.left_right_split"))
             self._explorer_split_checkbox.setToolTip(t("explorer.split_tooltip"))
+        if hasattr(self, '_spring_checkbox'):
+            self._spring_checkbox.setText(t("explorer.spring_mode"))
+            self._spring_checkbox.setToolTip(t("explorer.spring_tooltip"))
         if hasattr(self, '_remote_split_checkbox'):
             self._remote_split_checkbox.setText(t("explorer.left_right_split"))
             self._remote_split_checkbox.setToolTip(t("explorer.split_tooltip"))
@@ -9738,6 +9892,11 @@ class MainWindow(QMainWindow):
         # 记忆资源管理器/编辑器拖拽过的尺寸，避免每次重新打开都重置
         self._saved_explorer_main_sizes = None  # main_splitter 4 项尺寸（左右分屏）
         self._saved_explorer_internal_sizes = None  # explorer_splitter 2 项尺寸（上下分屏）
+        # 弹簧模式：编辑器与终端左右并排时，点哪边哪边自动变宽，另一边收窄但不收起
+        self._spring_mode_enabled = False
+        self._spring_current_side = None   # 'editor' / 'terminal'，当前已展开的一侧
+        self._applying_spring = False      # setSizes 期间置位，避免污染记忆尺寸
+        self._spring_anim = None           # 进行中的尺寸过渡动画（持引用防 GC）
         self._saved_remote_internal_sizes = None  # remote_splitter 2 项尺寸（上下分屏）
         # 左侧栏宽度是进程级共享的（见 _shared_left_panel_width）：新窗口初始化时
         # 不要把已打开窗口设过的宽度清成 None，仅在还没有任何窗口设过时才置默认。
@@ -9786,6 +9945,8 @@ class MainWindow(QMainWindow):
                     # 加载左右分屏偏好（Explorer / Remote 各自记忆）
                     self._explorer_split_horizontal = config.get('explorer_split_horizontal', False)
                     self._remote_split_horizontal = config.get('remote_split_horizontal', False)
+                    # 加载弹簧模式偏好
+                    self._spring_mode_enabled = config.get('spring_mode_enabled', False)
                     # 加载导航面板停靠方式（'float' / 'embed'，全局记忆）
                     _dock_mode = config.get('navigator_dock_mode', 'float')
                     if _dock_mode in ('float', 'embed'):
@@ -10009,6 +10170,7 @@ class MainWindow(QMainWindow):
                 'window_opacity': self._window_opacity,  # 保存窗口透明度
                 'explorer_split_horizontal': getattr(self, '_explorer_split_horizontal', False),  # 保存左右分屏偏好
                 'remote_split_horizontal': getattr(self, '_remote_split_horizontal', False),  # Remote 左右分屏偏好
+                'spring_mode_enabled': getattr(self, '_spring_mode_enabled', False),  # 保存弹簧模式偏好
                 'language': get_language(),  # 保存语言设置
                 'keyboard_shortcuts': shortcuts_to_save,  # 保存自定义快捷键（带多窗口防覆盖）
                 'window_geometry': [self.x(), self.y(), self.width(), self.height()],
