@@ -7074,6 +7074,27 @@ class MainWindow(QMainWindow):
             # 没有标签页了，关闭整个窗口
             self.close()
 
+    @staticmethod
+    def _clamp_window_pos(x, y, w, h, ref_point):
+        """把窗口左上角 (x, y) 限制在 ref_point 所在屏幕的可视区内，确保 w×h 的窗口
+        完整可见。否则窗口越界部分会被 macOS 裁掉，导致「与父窗口同尺寸」的新窗口被压小。
+        若窗口比屏幕还大，则贴住可视区左上角。"""
+        try:
+            from PyQt6.QtWidgets import QApplication
+            scr = QApplication.screenAt(ref_point) or QApplication.primaryScreen()
+            avail = scr.availableGeometry()
+            if w >= avail.width():
+                x = avail.left()
+            else:
+                x = max(avail.left(), min(x, avail.right() - w + 1))
+            if h >= avail.height():
+                y = avail.top()
+            else:
+                y = max(avail.top(), min(y, avail.bottom() - h + 1))
+        except Exception:
+            pass
+        return x, y
+
     def _detach_tab(self, index, global_pos):
         """将标签页分离为独立窗口（创建完整的 MainWindow）"""
         # 至少保留一个标签页
@@ -7154,6 +7175,13 @@ class MainWindow(QMainWindow):
         available_color = self._get_available_window_color()
         new_window._set_window_color(available_color)
 
+        # 新窗口初始尺寸继承产生它的父窗口（拖拽过程中作为可移动窗口跟随光标，
+        # 故不沿用最大化状态，只复制像素尺寸）
+        try:
+            new_window.resize(self.size())
+        except Exception:
+            pass
+
         # 调整窗口位置让鼠标正好在标题栏上
         # X: 鼠标在窗口内约 200px 处（标题栏中间偏左）
         # Y: 鼠标在标题栏中间（约 15px 处）
@@ -7161,6 +7189,10 @@ class MainWindow(QMainWindow):
         drag_offset_y = 15
         window_x = global_pos.x() - drag_offset_x
         window_y = global_pos.y() - drag_offset_y
+        # 保证窗口完整留在屏幕内：否则越界部分会被 macOS 裁掉，使「与父窗口同尺寸」的
+        # 新窗口被压窄变小。
+        window_x, window_y = MainWindow._clamp_window_pos(
+            window_x, window_y, self.width(), self.height(), global_pos)
 
         new_window.move(window_x, window_y)
         new_window.show()
@@ -7187,10 +7219,11 @@ class MainWindow(QMainWindow):
             buttons = QApplication.mouseButtons()
             if buttons & Qt.MouseButton.LeftButton:
                 cursor_pos = QCursor.pos()
-                new_window.move(
+                mx, my = MainWindow._clamp_window_pos(
                     cursor_pos.x() - drag_offset_x,
-                    cursor_pos.y() - drag_offset_y
-                )
+                    cursor_pos.y() - drag_offset_y,
+                    new_window.width(), new_window.height(), cursor_pos)
+                new_window.move(mx, my)
             else:
                 # 鼠标释放，停止拖拽跟随
                 drag_timer.stop()
