@@ -3436,6 +3436,13 @@ class MainWindow(QMainWindow):
                         or getattr(self, 'log_panel_visible', False)):
                     self._update_splitter_sizes()
             QTimer.singleShot(0, _reapply)
+            # 跨窗口左侧栏联动：延迟到窗口最大化/布局稳定后再对齐共享宽度。
+            # singleShot(0) 时窗口往往尚未铺到最终尺寸，此刻 setSizes 会被当成比例
+            # 缩放，导致各窗口左侧栏绝对像素不一致（正是「要先拖一下才联动」的根因）。
+            def _prime_delayed():
+                if not sip.isdeleted(self):
+                    self._prime_left_panel_sync()
+            QTimer.singleShot(300, _prime_delayed)
 
         # 立即刷新窗口导航（新窗口建立时）—— 广播到浮动与所有内嵌面板
         MainWindow._broadcast_navigator_refresh()
@@ -3466,6 +3473,18 @@ class MainWindow(QMainWindow):
                         nav.select_window(self)
                     except Exception:
                         pass
+                # 跨窗口左侧栏联动：激活时窗口已铺满稳定，按共享宽度对齐一次。
+                # 修正启动时因窗口尚未到最终尺寸、setSizes 被当成比例缩放而导致各
+                # 窗口左侧栏宽度不一致的问题（无需用户先手动拖一次才联动）。
+                # 仅在确有偏差(>2px)时应用，避免稳态下无谓跳动。
+                try:
+                    sw = MainWindow._shared_left_panel_width
+                    if isinstance(sw, int) and sw > 0 and hasattr(self, 'main_splitter'):
+                        sizes = self.main_splitter.sizes()
+                        if sizes and sizes[0] > 0 and abs(sizes[0] - sw) > 2:
+                            self._apply_shared_left_panel_width(sw)
+                except Exception:
+                    pass
             else:
                 # 窗口失活时暂停日志刷新定时器（减少后台开销）
                 if hasattr(self, '_log_timer') and self._log_timer:
@@ -7994,6 +8013,39 @@ class MainWindow(QMainWindow):
             self._update_splitter_sizes()
         finally:
             self._applying_shared_left_width = False
+
+    def _prime_left_panel_sync(self):
+        """启动/显示后主动建立跨窗口左侧栏联动，无需用户先手动拖一次才生效。
+
+        若已存在进程级共享宽度（其它窗口确立的），本窗口直接采用；否则把本窗口当前
+        左面板宽度确立为共享值，并强制广播给其它已展开侧栏的窗口，使各窗口立即对齐。
+        强制广播绕开 _set_left_panel_width 里「宽度无变化则跳过」的判断——启动时各窗口
+        宽度往往本就相同，那条判断会使首次广播被跳过，正是「要先拖一下才联动」的根因。
+        """
+        if not hasattr(self, 'main_splitter'):
+            return
+        left_visible = (
+            getattr(self, 'explorer_panel_visible', False)
+            or getattr(self, 'git_panel_visible', False)
+            or getattr(self, 'remote_panel_visible', False)
+        )
+        if not left_visible:
+            return
+        shared = MainWindow._shared_left_panel_width
+        if isinstance(shared, int) and shared > 0:
+            # 采用其它窗口已确立的共享宽度
+            self._applying_shared_left_width = True
+            try:
+                self._update_splitter_sizes()
+            finally:
+                self._applying_shared_left_width = False
+        else:
+            # 本窗口作为种子：确立共享宽度并强制广播
+            sizes = self.main_splitter.sizes()
+            left_width = sizes[0] if sizes else 0
+            if left_width > 0:
+                MainWindow._shared_left_panel_width = left_width
+                self._broadcast_left_panel_width(left_width)
 
     def _resolve_main_splitter_sizes_with_editor(self):
         """计算编辑器在 main_splitter 中时的目标尺寸（优先使用记忆值）
