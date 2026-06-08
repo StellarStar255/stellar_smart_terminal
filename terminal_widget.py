@@ -1864,6 +1864,20 @@ class TerminalWidget(QWidget):
                 event.accept()
                 return
 
+        # Cmd+E (macOS) / Ctrl+E: 收起/展开文件编辑区 — 委托给主窗口
+        # 注意：只匹配 Cmd(ControlModifier)，物理 Ctrl+E(MetaModifier) 仍发送到
+        # 终端（readline 的「跳到行尾」\x05），二者互不干扰。
+        if (modifiers & Qt.KeyboardModifier.ControlModifier
+                and not (modifiers & (Qt.KeyboardModifier.MetaModifier
+                                       | Qt.KeyboardModifier.AltModifier
+                                       | Qt.KeyboardModifier.ShiftModifier))
+                and key == Qt.Key.Key_E):
+            main_win = self.window()
+            if hasattr(main_win, '_toggle_editor_collapsed'):
+                main_win._toggle_editor_collapsed()
+                event.accept()
+                return
+
         # Ctrl+Plus/Minus/= 字体缩放 — 委托给主窗口全局缩放
         if modifiers & Qt.KeyboardModifier.ControlModifier:
             if key in (Qt.Key.Key_Plus, Qt.Key.Key_Equal):
