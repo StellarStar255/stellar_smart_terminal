@@ -12,7 +12,7 @@
 
 快捷键:
 - Ctrl+N: 新建会话
-- Ctrl+E: 快速导出
+- Ctrl+E: 收起/展开文件区
 - Ctrl+H: 查看历史
 """
 import sys

@@ -25,7 +25,7 @@ TRANSLATIONS = {
     "shortcuts.conflict": {"zh": "“{seq}” 已被“{action}”占用", "en": "“{seq}” is already used by “{action}”"},
     "shortcuts.saved": {"zh": "快捷键已保存", "en": "Shortcuts saved"},
     # 各操作的可读名称
-    "shortcuts.act.export": {"zh": "导出会话", "en": "Export Session"},
+    "shortcuts.act.toggle_editor": {"zh": "收起/展开文件区", "en": "Collapse/Expand Editor"},
     "shortcuts.act.history": {"zh": "历史记录", "en": "History"},
     "shortcuts.act.new_session": {"zh": "新建会话", "en": "New Session"},
     "shortcuts.act.new_tab": {"zh": "新建标签页", "en": "New Tab"},
@@ -698,6 +698,7 @@ TRANSLATIONS = {
     "status.not_started": {"zh": "未启动", "en": "Not Started"},
     "status.entries": {"zh": "记录: {n}", "en": "Entries: {n}"},
     "status.files": {"zh": "文件: {n}", "en": "Files: {n}"},
+    "status.editor_no_file": {"zh": "没有已打开的文件可收起/展开", "en": "No open file to collapse/expand"},
     "status.ready": {"zh": "就绪 - 输入命令并点击「启动」开始", "en": "Ready - Enter command and click Start"},
     "status.running": {"zh": "运行中", "en": "Running"},
     "status.running_session": {"zh": "运行中 - {session_id}", "en": "Running - {session_id}"},

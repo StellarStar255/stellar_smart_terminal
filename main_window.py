@@ -5326,7 +5326,7 @@ class MainWindow(QMainWindow):
     # 可在「键盘快捷键」设置里自定义的 GUI 快捷键。
     # (action_id, 默认键序列, i18n标签key, 触发方法名)
     _SHORTCUT_SPECS = [
-        ("export",          "Ctrl+Shift+E",   "shortcuts.act.export",          "_quick_export"),
+        ("toggle_editor",   "Ctrl+E",         "shortcuts.act.toggle_editor",   "_toggle_editor_collapsed"),
         ("history",         "Ctrl+Shift+H",   "shortcuts.act.history",         "_show_history"),
         ("new_session",     "Ctrl+Shift+N",   "shortcuts.act.new_session",     "_start_session"),
         ("new_tab",         "Ctrl+T",         "shortcuts.act.new_tab",         "_add_new_tab"),
@@ -8181,6 +8181,37 @@ class MainWindow(QMainWindow):
         # 清除资源管理器中的编辑文件标记
         if hasattr(self, 'explorer_panel'):
             self.explorer_panel.clear_editing_file()
+
+    def _toggle_editor_collapsed(self):
+        """收起 / 展开已打开的文件区（Ctrl+E，可在「键盘快捷键」里改）。
+
+        与「关闭」不同：收起只是隐藏 editor_area 腾出屏幕空间，已打开的文件和
+        split 分屏结构仍保留在内存中，再次触发即原样展开。没有任何已打开文件
+        时不做切换，仅在状态栏提示。
+        """
+        if not hasattr(self, 'editor_area'):
+            return
+        if not self._editor_has_any_file():
+            self.statusbar.showMessage(t("status.editor_no_file"), 2000)
+            return
+
+        if self.editor_area.isVisible():
+            # 收起：隐藏并把空间还给资源管理器/终端（保留文件，不清除编辑标记）
+            self.editor_area.hide()
+            if self.explorer_splitter.indexOf(self.editor_area) < 0:
+                self.editor_area.setParent(None)
+                self.explorer_splitter.addWidget(self.editor_area)
+                self.editor_area.hide()
+            self.explorer_splitter.setSizes([400, 0])
+            self._update_splitter_sizes()
+        else:
+            # 展开：按当前分屏方向重新放置并显示
+            if self._explorer_split_horizontal:
+                self._place_editor_in_main_splitter()
+            else:
+                self._place_editor_in_explorer_splitter()
+            if self._spring_applicable():
+                self._apply_spring('editor')
 
     def _on_explorer_split_orientation_changed(self, state):
         """切换资源管理器与编辑器的分屏方向"""
