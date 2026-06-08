@@ -1776,20 +1776,6 @@ class TerminalWidget(QWidget):
         modifiers = event.modifiers()
         text = event.text()
 
-        # [临时诊断] 记录终端收到的反引号按键。若 cmd+` 被 macOS 原生窗口循环处理，
-        # 终端不会收到；只有被终端吃掉的那次"空按"才会进到这里。
-        if key == Qt.Key.Key_QuoteLeft or key == Qt.Key.Key_Agrave:
-            try:
-                import os as _os
-                with open(_os.path.join(_os.path.dirname(_os.path.abspath(__file__)),
-                                        "cmd_backtick_debug.log"), "a", encoding="utf-8") as _f:
-                    win = self.window()
-                    _f.write(f"keyPress  key={key} mods={int(modifiers)} text={text!r} "
-                             f"hasFocus={self.hasFocus()} "
-                             f"activeWin={win.isActiveWindow() if win else '?'}\n")
-            except Exception:
-                pass
-
         # 调试：Ctrl+Shift+D 导出 pyte 缓冲区到文件
         if (key == Qt.Key.Key_D and
             modifiers == (Qt.KeyboardModifier.ControlModifier | Qt.KeyboardModifier.ShiftModifier)):
@@ -1800,14 +1786,6 @@ class TerminalWidget(QWidget):
         if (key == Qt.Key.Key_R and
             modifiers == (Qt.KeyboardModifier.ControlModifier | Qt.KeyboardModifier.ShiftModifier)):
             self.toggle_debug_capture()
-            return
-
-        # [临时诊断] Cmd+Shift+G：导出所有 NSApp 窗口及 Cmd+` 循环位，用于定位幽灵窗口
-        if (key == Qt.Key.Key_G and
-            modifiers == (Qt.KeyboardModifier.ControlModifier | Qt.KeyboardModifier.ShiftModifier)):
-            mw = self.window()
-            if hasattr(mw, '_dump_window_cycle_debug'):
-                mw._dump_window_cycle_debug()
             return
 
         # 物理 Ctrl+C 发送中断信号到终端（优先级最高）
@@ -2062,13 +2040,6 @@ class TerminalWidget(QWidget):
         elif key == Qt.Key.Key_F4:
             data = b'\x1bOS'
         elif text:
-            # macOS: 物理 Cmd 键映射为 ControlModifier。Cmd+符号（如 Cmd+`）属于
-            # 系统/GUI 快捷键（已处理的 Cmd+C/V/W/T/B 在上方提前返回），其余不应
-            # 输入终端，否则会把字符打进 shell 并 accept 掉事件，吞掉 macOS 原生
-            # 的 Cmd+` 窗口循环。这里上抛事件交给系统处理。
-            if sys.platform == 'darwin' and (modifiers & Qt.KeyboardModifier.ControlModifier):
-                event.ignore()
-                return
             data = text.encode('utf-8')
             self.input_buffer += text
 
@@ -2111,18 +2082,6 @@ class TerminalWidget(QWidget):
             key_event = event
             key = key_event.key()
             modifiers = key_event.modifiers()
-
-            # [临时诊断] 记录终端收到的反引号 ShortcutOverride
-            if key == Qt.Key.Key_QuoteLeft or key == Qt.Key.Key_Agrave:
-                try:
-                    import os as _os
-                    with open(_os.path.join(_os.path.dirname(_os.path.abspath(__file__)),
-                                            "cmd_backtick_debug.log"), "a", encoding="utf-8") as _f:
-                        win = self.window()
-                        _f.write(f"shortcutOverride key={key} mods={int(modifiers)} "
-                                 f"activeWin={win.isActiveWindow() if win else '?'}\n")
-                except Exception:
-                    pass
 
             # Ctrl+字母键 需要发送到终端，不能被 Qt 快捷键系统拦截
             # 注意：macOS 上 Qt 会交换 Control 和 Command 键

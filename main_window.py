@@ -3301,6 +3301,8 @@ class MainWindow(QMainWindow):
         self._setup_toolbar()
         self._setup_statusbar()
         self._setup_shortcuts()
+        self._setup_window_menu()
+        MainWindow._install_backtick_monitor()  # AppKit 级截获 Cmd+`，覆盖系统不稳定的原生循环
         self._connect_signals()
 
         # 恢复上次的工作目录
@@ -3529,73 +3531,6 @@ class MainWindow(QMainWindow):
 
         except Exception as e:
             print(f"应用 macOS 窗口行为失败: {e}")
-
-    def _dump_window_cycle_debug(self):
-        """[临时诊断] 把当前 NSApp 所有窗口及其 Cmd+` 循环位写入文件，用于定位幽灵窗口。"""
-        if not MACOS_NATIVE_AVAILABLE:
-            return
-        try:
-            import os
-            from PyQt6.QtWidgets import QApplication
-            # Qt 侧：当前所有 MainWindow 的标题 + 是否可见（导航列表口径）
-            qt_lines = []
-            app = QApplication.instance()
-            if app:
-                for qw in app.topLevelWidgets():
-                    if isinstance(qw, MainWindow):
-                        try:
-                            qt_lines.append(
-                                f"  qtVisible={qw.isVisible()!s:5} "
-                                f"closing={getattr(qw, '_closing_in_progress', False)!s:5} "
-                                f"forceClosing={getattr(qw, '_force_closing', False)!s:5} "
-                                f"title={qw.windowTitle()!r}"
-                            )
-                        except Exception:
-                            qt_lines.append("  <qt window read error>")
-            lines = []
-            for w in NSApp.windows():
-                try:
-                    title = w.title()
-                except Exception:
-                    title = "<no-title>"
-                try:
-                    behavior = int(w.collectionBehavior())
-                except Exception:
-                    behavior = -1
-                in_cycle = bool(behavior & int(NSWindowCollectionBehaviorParticipatesInCycle))
-                try:
-                    visible = bool(w.isVisible())
-                except Exception:
-                    visible = None
-                try:
-                    can_key = bool(w.canBecomeKeyWindow())
-                except Exception:
-                    can_key = None
-                try:
-                    cls = w.className()
-                except Exception:
-                    cls = "?"
-                try:
-                    f = w.frame()
-                    frame = f"({int(f.origin.x)},{int(f.origin.y)} {int(f.size.width)}x{int(f.size.height)})"
-                except Exception:
-                    frame = "?"
-                try:
-                    on_active_space = bool(w.isOnActiveSpace())
-                except Exception:
-                    on_active_space = None
-                lines.append(
-                    f"  cycle={in_cycle!s:5} visible={visible!s:5} canKey={can_key!s:5} "
-                    f"space={on_active_space!s:5} frame={frame:22} cls={cls:24} title={title!r}"
-                )
-            path = os.path.join(os.path.dirname(os.path.abspath(__file__)), "window_cycle_debug.log")
-            with open(path, "w", encoding="utf-8") as f:
-                f.write(f"=== Qt MainWindows (navigator 口径) count = {len(qt_lines)} ===\n")
-                f.write("\n".join(qt_lines) + "\n")
-                f.write(f"=== NSApp.windows() count = {len(lines)} ===\n")
-                f.write("\n".join(lines) + "\n")
-        except Exception as e:
-            print(f"[debug] dump window cycle failed: {e}")
 
     def _check_initial_running_state(self):
         """检查初始化后是否有正在运行的终端，并更新状态"""
@@ -5418,6 +5353,108 @@ class MainWindow(QMainWindow):
         debug_action.setShortcut("Ctrl+Shift+D")
         debug_action.triggered.connect(self._debug_special_chars)
         self.addAction(debug_action)
+
+    def _setup_window_menu(self):
+        """原生「窗口」菜单：可点击的「下一个/上一个窗口」，并展示 Cmd+` / Cmd+Shift+`。
+
+        说明：实际的 Cmd+` 按键处理由 _install_backtick_monitor 的 AppKit 级 keyDown
+        监听器完成（见那里的说明）——菜单项这里主要用于可发现性与鼠标点击触发。
+        注意菜单项的快捷键本身不会拦截系统的 Cmd+`：macOS 的「移动焦点到下一窗口」是
+        系统级保留快捷键，优先级高于应用菜单/QShortcut，需用户在「系统设置 → 键盘 →
+        键盘快捷键 → 键盘」中禁用后，Cmd+` 才会落到我们的监听器里稳定切换。
+        """
+        menubar = self.menuBar()
+        window_menu = menubar.addMenu(t("window.menu"))
+
+        next_action = QAction(t("window.next_window"), self)
+        next_action.setShortcut(QKeySequence("Ctrl+`"))  # macOS 上 Qt 自动映射为 Cmd+`
+        next_action.setShortcutContext(Qt.ShortcutContext.ApplicationShortcut)
+        next_action.triggered.connect(lambda: self._cycle_to_window(1))
+        window_menu.addAction(next_action)
+
+        prev_action = QAction(t("window.prev_window"), self)
+        prev_action.setShortcut(QKeySequence("Ctrl+Shift+`"))  # Cmd+Shift+`
+        prev_action.setShortcutContext(Qt.ShortcutContext.ApplicationShortcut)
+        prev_action.triggered.connect(lambda: self._cycle_to_window(-1))
+        window_menu.addAction(prev_action)
+
+        self._window_menu_actions = (next_action, prev_action)  # 防 GC
+
+    def _cycle_to_window(self, direction):
+        """菜单点击入口：委托给类级的窗口循环实现。"""
+        MainWindow._cycle_windows(direction)
+
+    @classmethod
+    def _cycle_windows(cls, direction):
+        """在所有可见 MainWindow 之间按稳定顺序（创建时间）循环切换。
+
+        direction: +1 下一个 / -1 上一个。由 NSEvent 监听器（Cmd+`）或菜单触发，
+        绕开 macOS 原生 Cmd+` 的间歇性失灵。
+        """
+        from PyQt6.QtWidgets import QApplication
+        app = QApplication.instance()
+        if not app:
+            return
+        wins = [w for w in app.topLevelWidgets()
+                if isinstance(w, MainWindow) and not sip.isdeleted(w) and w.isVisible()]
+        if len(wins) < 2:
+            return
+        try:
+            wins.sort(key=lambda w: w.get_created_time())
+        except Exception:
+            pass
+        active_idx = [i for i, w in enumerate(wins) if w.isActiveWindow()]
+        cur = active_idx[0] if active_idx else 0
+        target = wins[(cur + direction) % len(wins)]
+        if sip.isdeleted(target):
+            return
+        if target.isMinimized():
+            target.showNormal()
+        target.raise_()
+        target.activateWindow()
+
+    _backtick_monitor = None  # NSEvent 本地监听器句柄（防 GC）
+
+    @classmethod
+    def _install_backtick_monitor(cls):
+        """安装 AppKit 级 keyDown 监听器，截获 Cmd+`（及 Cmd+Shift+`）。
+
+        macOS 原生「移动焦点到下一窗口」(Cmd+`) 在多窗口下会间歇性失灵，且其优先级
+        高于应用菜单快捷键（QAction 根本不触发）。NSEvent 本地监听器在事件分发到窗口/
+        原生处理【之前】就能拿到 keyDown，处理后返回 None 吞掉事件，从而用我们自己的
+        _cycle_windows 稳定替换系统那条不稳定的循环。只装一次（全应用共享）。
+        """
+        if not MACOS_NATIVE_AVAILABLE or cls._backtick_monitor is not None:
+            return
+        try:
+            from AppKit import NSEvent, NSEventMaskKeyDown
+            try:
+                from AppKit import NSEventModifierFlagCommand, NSEventModifierFlagShift
+            except ImportError:  # 旧版 pyobjc 常量名
+                from AppKit import NSCommandKeyMask as NSEventModifierFlagCommand
+                from AppKit import NSShiftKeyMask as NSEventModifierFlagShift
+        except Exception as e:
+            print(f"[backtick] 监听器导入失败: {e}")
+            return
+
+        def _handler(event):
+            try:
+                # keyCode 50 = kVK_ANSI_Grave（` 键的物理位置，与键盘布局无关）
+                if event.keyCode() == 50:
+                    flags = int(event.modifierFlags())
+                    if flags & int(NSEventModifierFlagCommand):
+                        direction = -1 if (flags & int(NSEventModifierFlagShift)) else 1
+                        cls._cycle_windows(direction)
+                        return None  # 吞掉，阻止系统原生 Cmd+` 再处理一次
+            except Exception:
+                pass
+            return event
+
+        try:
+            cls._backtick_monitor = NSEvent.addLocalMonitorForEventsMatchingMask_handler_(
+                NSEventMaskKeyDown, _handler)
+        except Exception as e:
+            print(f"[backtick] 监听器安装失败: {e}")
 
     def _effective_shortcut(self, action_id, default_seq):
         """返回某操作当前生效的键序列（用户覆盖优先，否则默认）。"""

@@ -46,6 +46,9 @@ TRANSLATIONS = {
     # ===== main_window.py - 窗口标题/基础 =====
     "window.title": {"zh": "智能终端 - Smart Terminal", "en": "Smart Terminal"},
     "window.detached_status": {"zh": "独立窗口", "en": "Detached Window"},
+    "window.menu": {"zh": "窗口", "en": "Window"},
+    "window.next_window": {"zh": "下一个窗口", "en": "Next Window"},
+    "window.prev_window": {"zh": "上一个窗口", "en": "Previous Window"},
     "window.navigator_title": {"zh": "窗口导航", "en": "Window Navigator"},
     "window.navigator_list_title": {"zh": "终端窗口列表", "en": "Terminal Window List"},
     "window.settings_btn": {"zh": "⚙ 设置", "en": "⚙ Settings"},
