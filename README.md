@@ -6,6 +6,13 @@ A PyQt6-based smart terminal with file explorer, Git GUI, LLM proxy, and VS Code
 
 <img src="assets/smart_terminal.png" width="300" />
 
+## Screenshot / 界面预览
+
+![Stellar Smart Terminal 界面预览](assets/smart_terminal_example1.png)
+
+> 多面板布局：文件管理 / Git、代码编辑器与多标签终端集成在一个窗口中。
+> Multi-pane layout: file explorer / Git, code editor, and multi-tab terminal in one window.
+
 ## Features / 功能
 
 - **Multi-tab Terminal / 多标签终端** — session management / 会话管理
