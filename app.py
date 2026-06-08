@@ -237,6 +237,33 @@ def main():
 
     # 创建应用
     app = QApplication(sys.argv)
+
+    # [临时诊断] 应用级事件过滤器：记录任何控件收到的反引号按键（用于定位 cmd+` 空按）
+    from PyQt6.QtCore import QObject, QEvent
+    from PyQt6.QtGui import QKeyEvent
+    class _BacktickProbe(QObject):
+        def eventFilter(self, obj, event):
+            try:
+                et = event.type()
+                if et in (QEvent.Type.KeyPress, QEvent.Type.ShortcutOverride, QEvent.Type.KeyRelease):
+                    if isinstance(event, QKeyEvent):
+                        k = event.key()
+                        if k in (0x60, 0x300, 0x1000060):  # QuoteLeft / Dead_Grave / Agrave
+                            from PyQt6.QtWidgets import QApplication as _QA
+                            fw = _QA.focusWidget()
+                            fwcls = type(fw).__name__ if fw else None
+                            aw = _QA.activeWindow()
+                            awt = aw.windowTitle() if aw else None
+                            with open(os.path.join(Path(__file__).parent, "cmd_backtick_debug.log"),
+                                      "a", encoding="utf-8") as f:
+                                f.write(f"{et.name:16} key={k} mods={int(event.modifiers())} "
+                                        f"focus={fwcls} activeWin={awt!r}\n")
+            except Exception:
+                pass
+            return False
+    app._backtick_probe = _BacktickProbe()
+    app.installEventFilter(app._backtick_probe)
+
     app.setApplicationName(t("app.name"))
     app.setApplicationDisplayName("Smart Terminal")
     app.setOrganizationName("SmartTerminal")

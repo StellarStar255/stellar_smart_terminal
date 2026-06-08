@@ -3530,6 +3530,73 @@ class MainWindow(QMainWindow):
         except Exception as e:
             print(f"应用 macOS 窗口行为失败: {e}")
 
+    def _dump_window_cycle_debug(self):
+        """[临时诊断] 把当前 NSApp 所有窗口及其 Cmd+` 循环位写入文件，用于定位幽灵窗口。"""
+        if not MACOS_NATIVE_AVAILABLE:
+            return
+        try:
+            import os
+            from PyQt6.QtWidgets import QApplication
+            # Qt 侧：当前所有 MainWindow 的标题 + 是否可见（导航列表口径）
+            qt_lines = []
+            app = QApplication.instance()
+            if app:
+                for qw in app.topLevelWidgets():
+                    if isinstance(qw, MainWindow):
+                        try:
+                            qt_lines.append(
+                                f"  qtVisible={qw.isVisible()!s:5} "
+                                f"closing={getattr(qw, '_closing_in_progress', False)!s:5} "
+                                f"forceClosing={getattr(qw, '_force_closing', False)!s:5} "
+                                f"title={qw.windowTitle()!r}"
+                            )
+                        except Exception:
+                            qt_lines.append("  <qt window read error>")
+            lines = []
+            for w in NSApp.windows():
+                try:
+                    title = w.title()
+                except Exception:
+                    title = "<no-title>"
+                try:
+                    behavior = int(w.collectionBehavior())
+                except Exception:
+                    behavior = -1
+                in_cycle = bool(behavior & int(NSWindowCollectionBehaviorParticipatesInCycle))
+                try:
+                    visible = bool(w.isVisible())
+                except Exception:
+                    visible = None
+                try:
+                    can_key = bool(w.canBecomeKeyWindow())
+                except Exception:
+                    can_key = None
+                try:
+                    cls = w.className()
+                except Exception:
+                    cls = "?"
+                try:
+                    f = w.frame()
+                    frame = f"({int(f.origin.x)},{int(f.origin.y)} {int(f.size.width)}x{int(f.size.height)})"
+                except Exception:
+                    frame = "?"
+                try:
+                    on_active_space = bool(w.isOnActiveSpace())
+                except Exception:
+                    on_active_space = None
+                lines.append(
+                    f"  cycle={in_cycle!s:5} visible={visible!s:5} canKey={can_key!s:5} "
+                    f"space={on_active_space!s:5} frame={frame:22} cls={cls:24} title={title!r}"
+                )
+            path = os.path.join(os.path.dirname(os.path.abspath(__file__)), "window_cycle_debug.log")
+            with open(path, "w", encoding="utf-8") as f:
+                f.write(f"=== Qt MainWindows (navigator 口径) count = {len(qt_lines)} ===\n")
+                f.write("\n".join(qt_lines) + "\n")
+                f.write(f"=== NSApp.windows() count = {len(lines)} ===\n")
+                f.write("\n".join(lines) + "\n")
+        except Exception as e:
+            print(f"[debug] dump window cycle failed: {e}")
+
     def _check_initial_running_state(self):
         """检查初始化后是否有正在运行的终端，并更新状态"""
         current_idx = self.tab_widget.currentIndex()
