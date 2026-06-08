@@ -5462,7 +5462,8 @@ class MainWindow(QMainWindow):
                 if event.keyCode() == 50:
                     flags = int(event.modifierFlags())
                     if flags & int(NSEventModifierFlagCommand):
-                        direction = -1 if (flags & int(NSEventModifierFlagShift)) else 1
+                        # Cmd+` 切到上一个、Cmd+Shift+` 切到下一个（与系统原生方向一致）
+                        direction = 1 if (flags & int(NSEventModifierFlagShift)) else -1
                         cls._cycle_windows(direction)
                         return None  # 吞掉，阻止系统原生 Cmd+` 再处理一次
             except Exception:
