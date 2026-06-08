@@ -7298,6 +7298,7 @@ class MainWindow(QMainWindow):
         if not tab_cwd:
             tab_cwd = getattr(self, '_window_cwd', None)
         if tab_cwd and os.path.isdir(tab_cwd):
+            cwd_changed = (tab_cwd != getattr(self, '_window_cwd', None))
             self._window_cwd = tab_cwd
             if hasattr(self, 'current_dir_label'):
                 self.current_dir_label.setText(t("dir.current", cwd=tab_cwd))
@@ -7312,6 +7313,12 @@ class MainWindow(QMainWindow):
                 self.explorer_panel.set_root_path(tab_cwd)
             if hasattr(self, 'git_panel') and self.git_panel_visible:
                 self.git_panel.set_repository(tab_cwd)
+            # 本地命令是「目录级」的：tab 切到不同目录时必须重载，否则 local_presets
+            # 仍是上一个目录的内容，而保存路径已指向当前目录 → 跨文件夹串写/覆盖。
+            # （local_presets 始终是「磁盘加载」或「刚保存」的状态，无未落盘的内存修改，
+            #   故重载是安全的，不会丢失编辑。）
+            if cwd_changed:
+                self._load_local_commands()
 
     def _on_tab_session_ended(self, terminal):
         """某个标签页的会话结束"""
