@@ -462,6 +462,9 @@ class TerminalWidget(QWidget):
         self._resize_timer.timeout.connect(self._do_resize_update)
         self._resize_pending = False  # 是否有待处理的 resize
         self._last_resize_size = None  # 记录最后的窗口大小
+        # 弹簧/动画等「连续 resize」期间：只把旧缓存缩放贴图，不每帧重建整屏，
+        # 避免全屏字符重绘造成的卡顿。动画结束由 set_fast_resize(False) 触发一次重建。
+        self._fast_resize = False
 
         # 设置
         self.setFocusPolicy(Qt.FocusPolicy.StrongFocus)
@@ -812,6 +815,21 @@ class TerminalWidget(QWidget):
 
         self._resize_pending = False
         self._update_terminal_size()
+
+    def set_fast_resize(self, on: bool):
+        """开启/关闭「快速 resize」模式。
+
+        开启时 paintEvent 不再每帧重建整屏，而是把上一帧的缓存缩放贴到当前尺寸
+        （便宜很多），用于弹簧/动画等连续 resize 场景，避免卡顿。关闭时立即让缓存
+        失效并重绘一次，按最终尺寸渲染出清晰文本。期间 PTY 尺寸不变（SIGWINCH 由
+        150ms 防抖在动画结束后才发），故缩放仅为临时显示、不影响内容。
+        """
+        on = bool(on)
+        if on == self._fast_resize:
+            return
+        self._fast_resize = on
+        if not on:
+            self._invalidate_render_cache()
 
     def flush_resize(self):
         """立即处理待定的 resize，跳过防抖定时器"""
@@ -1334,16 +1352,24 @@ class TerminalWidget(QWidget):
         # cache pixmap 是按 size*DPR 创建的物理像素 pixmap；与 widget logical size
         # 比较时要乘 DPR 才一致。
         dpr = self.devicePixelRatioF()
-        need_rebuild = (
-            self._cache_pixmap is None or
-            self._cache_pixmap.isNull() or
-            not self._cache_valid or
-            self._cache_pixmap.size() != self.size() * dpr or
-            self._cache_pixmap.devicePixelRatio() != dpr
+        # 快速 resize 模式（弹簧/动画期间）：只要有可用的旧缓存，就直接缩放贴图，
+        # 跳过每帧整屏重建，避免卡顿。无缓存时退回正常重建路径。
+        fast_scale = (
+            self._fast_resize
+            and self._cache_pixmap is not None
+            and not self._cache_pixmap.isNull()
         )
+        if not fast_scale:
+            need_rebuild = (
+                self._cache_pixmap is None or
+                self._cache_pixmap.isNull() or
+                not self._cache_valid or
+                self._cache_pixmap.size() != self.size() * dpr or
+                self._cache_pixmap.devicePixelRatio() != dpr
+            )
 
-        if need_rebuild:
-            self._rebuild_cache()
+            if need_rebuild:
+                self._rebuild_cache()
 
         opaque_bg = QColor(self.bg_color)
         opaque_bg.setAlpha(255)
@@ -1353,7 +1379,12 @@ class TerminalWidget(QWidget):
         painter.setCompositionMode(QPainter.CompositionMode.CompositionMode_Source)
         painter.fillRect(self.rect(), opaque_bg)
         if self._cache_pixmap and not self._cache_pixmap.isNull():
-            painter.drawPixmap(0, 0, self._cache_pixmap)
+            if fast_scale:
+                # 把旧缓存按当前控件尺寸缩放贴满（快速过渡，文本略有拉伸，动画结束
+                # 后 set_fast_resize(False) 会重建为清晰文本）
+                painter.drawPixmap(self.rect(), self._cache_pixmap)
+            else:
+                painter.drawPixmap(0, 0, self._cache_pixmap)
         painter.setCompositionMode(QPainter.CompositionMode.CompositionMode_SourceOver)
 
         # 选区高亮单独绘制（不在缓存中，避免拖动时重建缓存）

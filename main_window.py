@@ -8210,15 +8210,19 @@ class MainWindow(QMainWindow):
                 self._place_editor_in_main_splitter()
             else:
                 self._place_editor_in_explorer_splitter()
+            # 先弹宽编辑器，再移焦点。顺序很重要：_apply_spring 会先把
+            # _spring_current_side 置为 'editor'，这样紧接着 setFocus 触发的
+            # focusChanged → _on_focus_changed_for_spring 会因「目标侧已是 editor」
+            # 提前返回，不会再 stop/重启一次动画（否则动画「起步即被打断」会卡一下）。
+            if self._spring_applicable():
+                self._apply_spring('editor')
             # 把键盘焦点移到编辑器活动窗格。否则从终端用 Cmd+E 展开后焦点仍留在
             # 终端，与「编辑器被弹宽」的状态不一致：随后点击终端因焦点未变化而不
-            # 触发 focusChanged，弹簧无法把终端展宽。聚焦编辑器后，状态一致，再点
+            # 触发 focusChanged，弹簧无法把终端展宽。聚焦编辑器后状态一致，再点
             # 终端会正常 focusChanged → 弹宽终端。
             pane = self.editor_area.active_pane
             if pane is not None:
                 pane.editor.setFocus()
-            if self._spring_applicable():
-                self._apply_spring('editor')
 
     def _on_explorer_split_orientation_changed(self, state):
         """切换资源管理器与编辑器的分屏方向"""
@@ -8334,6 +8338,13 @@ class MainWindow(QMainWindow):
             finally:
                 self._applying_spring = False
 
+    def _set_terminals_fast_resize(self, on: bool):
+        """弹簧动画期间让 main_splitter 里的终端走「缩放旧缓存」而非每帧整屏重建，
+        消除连续 resize 的卡顿；动画结束再恢复并重建为清晰文本。"""
+        for term in self.main_splitter.findChildren(TerminalWidget):
+            if hasattr(term, 'set_fast_resize'):
+                term.set_fast_resize(on)
+
     def _animate_main_sizes(self, target_sizes):
         """平滑过渡 main_splitter 到目标尺寸（弹簧手感），期间不记忆尺寸。"""
         start = self.main_splitter.sizes()
@@ -8344,6 +8355,9 @@ class MainWindow(QMainWindow):
         if self._spring_anim is not None:
             self._spring_anim.stop()
             self._spring_anim = None
+
+        # 动画期间终端只缩放旧缓存，避免每帧重建整屏导致卡顿
+        self._set_terminals_fast_resize(True)
 
         anim = QVariantAnimation(self)
         anim.setStartValue(0.0)
@@ -8366,6 +8380,8 @@ class MainWindow(QMainWindow):
             finally:
                 self._applying_spring = False
             self._spring_anim = None
+            # 恢复终端正常渲染并按最终尺寸重建一次（清晰文本）
+            self._set_terminals_fast_resize(False)
 
         anim.valueChanged.connect(_on_val)
         anim.finished.connect(_on_done)
