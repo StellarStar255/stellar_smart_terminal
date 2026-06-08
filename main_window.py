@@ -10813,6 +10813,7 @@ class MainWindow(QMainWindow):
             self.local_presets = dialog.get_presets()
             if self._save_local_commands():
                 self.statusbar.showMessage(t("status.local_preset_saved"), 3000)
+                self._broadcast_local_commands_reload()
 
     def _add_new_local_preset(self):
         """添加新本地预设"""
@@ -10821,6 +10822,26 @@ class MainWindow(QMainWindow):
             self.local_presets = dialog.get_presets()
             if self._save_local_commands():
                 self.statusbar.showMessage(t("status.local_preset_saved"), 3000)
+                self._broadcast_local_commands_reload()
+
+    def _broadcast_local_commands_reload(self):
+        """保存本地命令后，通知其它「当前工作目录相同」的窗口重新加载，避免它们用过期
+        的内存数据在之后保存时覆盖刚写入的内容（多窗口同目录并发竞争）。"""
+        from PyQt6.QtWidgets import QApplication
+        app = QApplication.instance()
+        if app is None:
+            return
+        my_cwd = getattr(self, '_window_cwd', None)
+        if not my_cwd:
+            return
+        for w in app.topLevelWidgets():
+            if w is self or not isinstance(w, MainWindow) or sip.isdeleted(w):
+                continue
+            if getattr(w, '_window_cwd', None) == my_cwd:
+                try:
+                    w._load_local_commands()
+                except Exception:
+                    pass
 
     # ==================== 本地快速命令相关方法结束 ====================
 
