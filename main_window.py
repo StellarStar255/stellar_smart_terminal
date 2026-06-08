@@ -5111,6 +5111,13 @@ class MainWindow(QMainWindow):
             self.working_dir_combo.setCurrentText(self.last_working_dir)
             self.current_dir_label.setText(t("dir.current", cwd=self.last_working_dir))
             self.current_dir_label.setToolTip(self.last_working_dir)
+            # 首个 tab 在 _setup_ui() 里先于本方法创建，其 tab_cwds 记录的是启动时的
+            # os.getcwd()（即 app.py 所在目录）。这里恢复成实际工作目录后必须同步覆盖，
+            # 否则切换/分离 tab 时 _on_tab_changed 会读到这条陈旧记录，把窗口目录拉回
+            # 启动目录。
+            cur_idx = self.tab_widget.currentIndex()
+            if cur_idx >= 0:
+                self.tab_cwds[cur_idx] = self.last_working_dir
 
     def _apply_working_dir(self):
         """应用选中的工作目录（窗口级别，不影响其他窗口）"""
@@ -5145,6 +5152,11 @@ class MainWindow(QMainWindow):
         if current_tab in self.tab_terminals:
             for terminal in self.tab_terminals[current_tab]:
                 terminal.set_working_dir(dir_path)
+
+        # 同步当前 tab 的工作目录记录，否则切换/分离 tab 时 _on_tab_changed 会读到
+        # 陈旧的 tab_cwds，把刚手动设置的目录覆盖掉。
+        if current_tab >= 0:
+            self.tab_cwds[current_tab] = dir_path
 
         # 加载新目录的本地快速命令
         self._load_local_commands()
