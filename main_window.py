@@ -8210,6 +8210,13 @@ class MainWindow(QMainWindow):
                 self._place_editor_in_main_splitter()
             else:
                 self._place_editor_in_explorer_splitter()
+            # 把键盘焦点移到编辑器活动窗格。否则从终端用 Cmd+E 展开后焦点仍留在
+            # 终端，与「编辑器被弹宽」的状态不一致：随后点击终端因焦点未变化而不
+            # 触发 focusChanged，弹簧无法把终端展宽。聚焦编辑器后，状态一致，再点
+            # 终端会正常 focusChanged → 弹宽终端。
+            pane = self.editor_area.active_pane
+            if pane is not None:
+                pane.editor.setFocus()
             if self._spring_applicable():
                 self._apply_spring('editor')
 
