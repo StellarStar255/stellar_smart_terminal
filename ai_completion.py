@@ -14,9 +14,10 @@ from PyQt6.QtCore import Qt, QObject, QThread, QTimer, pyqtSignal
 from PyQt6.QtGui import QColor, QTextCursor
 
 
-# 单次请求上下文上限（字符数），避免把整份大文件塞进去浪费 token
+# 单次请求上下文上限（字符数），避免把整份大文件塞进去浪费 token。
+# suffix 不宜过长：弱模型常把 suffix 里的代码原样抄回来当“补全”。
 _PREFIX_LIMIT = 4000
-_SUFFIX_LIMIT = 1500
+_SUFFIX_LIMIT = 600
 
 
 class CompletionWorker(QThread):
@@ -54,19 +55,23 @@ class CompletionWorker(QThread):
                 headers['Authorization'] = f'Bearer {key}'
 
             system = (
-                "You are an inline code completion engine, similar to GitHub Copilot. "
-                "You are given the code before the cursor (<PREFIX>) and after the cursor "
-                "(<SUFFIX>). Output ONLY the raw text that should be inserted at the cursor "
-                "to continue the code naturally. Do NOT repeat the prefix or the suffix, do "
-                "NOT add explanations, and do NOT wrap the output in markdown code fences. "
-                "Keep the indentation consistent with the surrounding code. If no completion "
-                "is appropriate, output nothing."
+                "You are a code completion engine. Continue the user's code exactly at the "
+                "cursor, which sits between <PREFIX> and <SUFFIX>.\n"
+                "Hard rules:\n"
+                "1. Output ONLY the raw characters to insert at the cursor — no prose, no "
+                "explanation, no markdown code fences, no <think> tags.\n"
+                "2. Be SHORT: normally just finish the current line, or at most a few lines. "
+                "Never emit a large block of code.\n"
+                "3. NEVER repeat code that already appears in <PREFIX> or <SUFFIX>; if you "
+                "would only be echoing existing code, output nothing.\n"
+                "4. If the cursor is inside a comment, docstring or plain prose, either finish "
+                "that sentence briefly or output nothing — do not invent unrelated code.\n"
+                "5. Keep indentation consistent with the surrounding lines."
             )
             user = (
                 f"Language: {self._language}\n\n"
-                f"<PREFIX>\n{self._prefix}\n</PREFIX>\n"
-                f"<SUFFIX>\n{self._suffix}\n</SUFFIX>\n\n"
-                "Insertion text at the cursor:"
+                f"<PREFIX>{self._prefix}<SUFFIX>{self._suffix}\n\n"
+                "Text to insert at the cursor (between PREFIX and SUFFIX):"
             )
 
             payload = {
@@ -83,7 +88,8 @@ class CompletionWorker(QThread):
                 mt = int(mt) if mt else 0
             except (TypeError, ValueError):
                 mt = 0
-            payload['max_tokens'] = min(mt, 256) if mt > 0 else 256
+            # 补全要短：上限压到 120 token，弱模型不容易跑题成大段
+            payload['max_tokens'] = min(mt, 120) if mt > 0 else 120
 
             proxy = (cfg.get('proxy') or '').strip()
             proxies = {'http': proxy, 'https': proxy} if proxy else None
@@ -236,6 +242,7 @@ class InlineCompletionController(QObject):
         self._gen += 1
         gen = self._gen
         self._anchor_pos = pos
+        self._req_suffix = suffix  # 用于在结果里识别“抄 suffix”的回声
 
         worker = CompletionWorker(cfg, prefix, suffix, language, gen, self)
         worker.done.connect(self._on_done)
@@ -265,8 +272,21 @@ class InlineCompletionController(QObject):
         cleaned = self._clean(text)
         if not cleaned:
             return
+        # 反回声：若建议只是把光标后的 suffix 原样抄回来，丢弃（弱模型常见失败）
+        if self._is_echo(cleaned, getattr(self, '_req_suffix', '')):
+            return
         self._suggestion = cleaned
         ed.viewport().update()
+
+    @staticmethod
+    def _is_echo(cand: str, suffix: str) -> bool:
+        c = cand.strip()
+        s = (suffix or '').lstrip()
+        if not c or not s:
+            return False
+        head = c[:40]
+        # suffix 紧接着就是这段建议，或建议开头大段出现在 suffix 前部 → 判为回声
+        return s.startswith(head) or (len(head) >= 12 and head in s[:300])
 
     # 单条建议最多展示/插入的行数，避免模型偶尔长篇大论盖满屏幕
     MAX_LINES = 12
