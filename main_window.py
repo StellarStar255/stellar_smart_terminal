@@ -8285,17 +8285,40 @@ class MainWindow(QMainWindow):
     SPRING_INACTIVE_RATIO = 0.30
     SPRING_INACTIVE_MIN = 220
 
-    def _on_spring_mode_toggled(self, state):
-        """弹簧模式开关（Explorer 与 Remote 两处复选框共用，保持同步）。"""
-        enabled = (state == Qt.CheckState.Checked.value)
-        self._spring_mode_enabled = enabled
-        # 同步另一处复选框，避免两个面板状态不一致
+    def _set_spring_checkboxes(self, enabled: bool):
+        """把本窗口两处弹簧复选框设为指定状态（屏蔽信号，避免回环触发）。"""
         for cb in (getattr(self, '_spring_checkbox', None),
                    getattr(self, '_remote_spring_checkbox', None)):
             if cb is not None and cb.isChecked() != enabled:
                 cb.blockSignals(True)
                 cb.setChecked(enabled)
                 cb.blockSignals(False)
+
+    def _broadcast_spring_state(self):
+        """把弹簧模式开关同步到所有 MainWindow 窗口。
+
+        常开多窗口时，若只改当前窗口，其它"旧"窗口仍持有旧值，等它们退出/保存
+        配置时会把 spring_mode_enabled 覆盖回旧值，导致"下次启动没记住"。这里像
+        排序/透明度一样把状态广播到每个窗口（含其复选框），保证配置落盘一致。
+        """
+        enabled = self._spring_mode_enabled
+        app = QApplication.instance()
+        if not app:
+            return
+        for widget in app.topLevelWidgets():
+            if widget is self or not isinstance(widget, MainWindow):
+                continue
+            widget._spring_mode_enabled = enabled
+            widget._set_spring_checkboxes(enabled)
+
+    def _on_spring_mode_toggled(self, state):
+        """弹簧模式开关（Explorer 与 Remote 两处复选框共用，保持同步）。"""
+        enabled = (state == Qt.CheckState.Checked.value)
+        self._spring_mode_enabled = enabled
+        # 同步另一处复选框，避免两个面板状态不一致
+        self._set_spring_checkboxes(enabled)
+        # 同步到所有其它窗口，避免旧窗口退出时把配置覆盖回旧值
+        self._broadcast_spring_state()
         if enabled:
             # 立即按当前焦点展开一侧；焦点不在两区时默认展开编辑器
             target = self._spring_target_for_widget(QApplication.focusWidget()) or 'editor'
