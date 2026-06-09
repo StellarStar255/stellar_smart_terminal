@@ -386,10 +386,41 @@ class CenteredComboBox(QComboBox):
         painter.fillPath(path, QColor("#cfd6ff"))
 
 
+class InlineRenameEdit(QLineEdit):
+    """就地重命名用的小输入框：回车/失焦提交，Esc 取消。"""
+
+    committed = pyqtSignal(str)   # 提交，参数为输入文本
+    cancelled = pyqtSignal()      # 取消（Esc）
+
+    def __init__(self, parent=None):
+        super().__init__(parent)
+        self._done = False
+        self.returnPressed.connect(self._commit)
+
+    def _commit(self):
+        if self._done:
+            return
+        self._done = True
+        self.committed.emit(self.text())
+
+    def keyPressEvent(self, event):
+        if event.key() == Qt.Key.Key_Escape:
+            if not self._done:
+                self._done = True
+                self.cancelled.emit()
+            return
+        super().keyPressEvent(event)
+
+    def focusOutEvent(self, event):
+        super().focusOutEvent(event)
+        self._commit()
+
+
 class DetachableTabBar(QTabBar):
     """可拖拽分离的标签栏"""
 
     tab_detach_requested = pyqtSignal(int, QPoint)  # 发送要分离的tab索引和全局坐标
+    tab_rename_requested = pyqtSignal(int)          # 双击某个 tab 请求就地重命名
 
     def __init__(self, parent=None):
         super().__init__(parent)
@@ -398,6 +429,16 @@ class DetachableTabBar(QTabBar):
         self._is_dragging = False
         self._detach_threshold = 50  # 拖拽分离的距离阈值
         self._original_cursor = None
+
+    def mouseDoubleClickEvent(self, event):
+        # 双击标签 → 就地重命名（双击空白处不处理）
+        if event.button() == Qt.MouseButton.LeftButton:
+            idx = self.tabAt(event.pos())
+            if idx >= 0:
+                self._reset_drag_state()
+                self.tab_rename_requested.emit(idx)
+                return
+        super().mouseDoubleClickEvent(event)
 
     def mousePressEvent(self, event):
         if event.button() == Qt.MouseButton.LeftButton:
@@ -3771,6 +3812,7 @@ class MainWindow(QMainWindow):
         self.detachable_tab_bar = DetachableTabBar(self.tab_widget)
         self.tab_widget.setTabBar(self.detachable_tab_bar)
         self.detachable_tab_bar.tab_detach_requested.connect(self._detach_tab)
+        self.detachable_tab_bar.tab_rename_requested.connect(self._begin_inline_tab_rename)
 
         self.tab_widget.setTabsClosable(False)  # 禁用内置关闭按钮，使用自定义
         self.tab_widget.setMovable(True)
@@ -11420,8 +11462,27 @@ class MainWindow(QMainWindow):
                 out.append(n)
         return out[:30]
 
+    def _apply_tab_name(self, index, name):
+        """统一应用标签名：非空则「锁定」为自定义名，留空则解除锁定恢复默认编号。"""
+        if index < 0 or index >= self.tab_widget.count():
+            return
+        name = (name or "").strip()
+        page = self.tab_widget.widget(index)
+        if name:
+            if page is not None:
+                page._custom_tab_name = name  # 锁定标记：存在该属性即视为用户自定义
+            self.tab_widget.setTabText(index, name)
+            self._remember_label_name(name)
+        else:
+            # 清除自定义名 → 解除锁定，恢复默认编号命名
+            if page is not None:
+                page._custom_tab_name = None
+            self.tab_widget.setTabText(index, t("terminal.default_name", n=index + 1))
+        self._update_window_title_from_tab(index)
+        self._save_config()
+
     def _rename_tab(self, index):
-        """重命名标签页。名称非空时「锁定」，不再被自动改名覆盖；留空恢复默认。"""
+        """通过对话框重命名标签页（右键菜单入口，可从历史复用名称）。"""
         if index < 0 or index >= self.tab_widget.count():
             return
         page = self.tab_widget.widget(index)
@@ -11429,20 +11490,49 @@ class MainWindow(QMainWindow):
         name, ok = self._prompt_label_name(t("tab.rename_title"), t("tab.rename_prompt"), current)
         if not ok:
             return
-        name = (name or "").strip()
-        if name:
-            if page is not None:
-                page._custom_tab_name = name  # 锁定标记：存在该属性即视为用户自定义
-            self.tab_widget.setTabText(index, name)
-            self._remember_label_name(name)
-            self._update_window_title_from_tab(index)
-        else:
-            # 清除自定义名 → 解除锁定，恢复默认编号命名
-            if page is not None:
-                page._custom_tab_name = None
-            self.tab_widget.setTabText(index, t("terminal.default_name", n=index + 1))
-            self._update_window_title_from_tab(index)
-        self._save_config()
+        self._apply_tab_name(index, name)
+
+    def _begin_inline_tab_rename(self, index):
+        """双击标签 → 在标签上就地弹出输入框直接编辑。"""
+        if index < 0 or index >= self.tab_widget.count():
+            return
+        # 已有正在编辑的输入框先收掉，避免重叠
+        self._discard_inline_tab_rename()
+        tab_bar = self.tab_widget.tabBar()
+        page = self.tab_widget.widget(index)
+        current = getattr(page, '_custom_tab_name', None) or tab_bar.tabText(index)
+
+        editor = InlineRenameEdit(tab_bar)
+        editor.setText(current)
+        editor.selectAll()
+        rect = tab_bar.tabRect(index)
+        # 右侧留出关闭按钮的空间
+        editor.setGeometry(rect.adjusted(4, 3, -26, -3))
+        editor.setStyleSheet(
+            "QLineEdit{background:#282c34;color:#ffffff;border:1px solid #667eea;"
+            "border-radius:3px;padding:0px 4px;font-weight:bold;}"
+        )
+        editor.committed.connect(lambda text, i=index: self._finish_inline_tab_rename(i, text))
+        editor.cancelled.connect(self._discard_inline_tab_rename)
+        self._tab_rename_editor = editor
+        editor.show()
+        editor.raise_()
+        editor.setFocus()
+
+    def _finish_inline_tab_rename(self, index, text):
+        """就地编辑提交"""
+        ed = getattr(self, '_tab_rename_editor', None)
+        self._tab_rename_editor = None
+        if ed is not None:
+            ed.deleteLater()
+        self._apply_tab_name(index, text)
+
+    def _discard_inline_tab_rename(self):
+        """取消就地编辑（Esc 或被新的编辑取代）"""
+        ed = getattr(self, '_tab_rename_editor', None)
+        self._tab_rename_editor = None
+        if ed is not None:
+            ed.deleteLater()
 
     def _rename_split(self, terminal):
         """重命名某个分屏（窗格）。名称非空时在窗格顶部显示标题栏，留空则清除。"""
