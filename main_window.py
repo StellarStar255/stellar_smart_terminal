@@ -5921,14 +5921,10 @@ class MainWindow(QMainWindow):
         self._scale_gui_font_sizes(gui_font_size, delta)
         self._apply_application_font(effective_px)
 
-        # 3. 文件编辑器 (默认13pt, 范围6-48) — 跟随终端缩放，不受 GUI 字号影响
-        if hasattr(self, 'editor_area') and self.editor_area.active_pane is not None:
-            target_size = max(6, min(48, 13 + delta))
-            font = self.editor_area.active_pane.editor.font()
-            if font.pointSize() != target_size:
-                font.setPointSize(target_size)
-                # 所有分屏窗格统一字号
-                self.editor_area.apply_font(font)
+        # 3. 文件编辑器 — 与终端字号完全联动（同一字号、同一范围 8-32），不受 GUI 字号影响
+        if hasattr(self, 'editor_area') and self.editor_area is not None:
+            target_size = max(8, min(32, 12 + delta))
+            self.editor_area.set_editor_font_size(target_size)
 
         # 4. 资源管理器文件树 (默认13pt, 范围8-28) — 跟随终端缩放，不受 GUI 字号影响
         if hasattr(self, 'explorer_panel') and self.explorer_panel is not None:

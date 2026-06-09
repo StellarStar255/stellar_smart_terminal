@@ -619,6 +619,24 @@ class CodeEditor(QPlainTextEdit):
         self._update_viewport_margin()
         self._apply_extra_selections()
 
+    def wheelEvent(self, event):
+        """Ctrl/Cmd + 滚轮：委托给主窗口的全局缩放，保证编辑器与终端字号联动。
+
+        QPlainTextEdit 自带的 Ctrl+滚轮缩放只改本编辑器字号，会与终端脱钩；
+        这里拦截后改走全局缩放（同时缩放终端与所有编辑窗格）。没有主窗口全局缩放
+        时直接吞掉，避免编辑器单独缩放。
+        """
+        if event.modifiers() & Qt.KeyboardModifier.ControlModifier:
+            main_win = self.window()
+            delta = event.angleDelta().y()
+            if delta > 0 and hasattr(main_win, '_global_zoom_in'):
+                main_win._global_zoom_in()
+            elif delta < 0 and hasattr(main_win, '_global_zoom_out'):
+                main_win._global_zoom_out()
+            event.accept()
+            return
+        super().wheelEvent(event)
+
     def contextMenuEvent(self, event):
         """在默认编辑菜单（撤销/剪切/复制/粘贴…）末尾追加分屏项。"""
         menu = self.createStandardContextMenu()
@@ -1643,8 +1661,8 @@ class FileEditorWidget(QWidget):
         self.editor.move_left_requested.connect(self.move_left_requested.emit)
         self.editor.move_up_requested.connect(self.move_up_requested.emit)
 
-        # 设置等宽字体
-        font = QFont("Menlo", 13)
+        # 设置等宽字体；默认字号与终端一致（12pt），保证两者字号联动
+        font = QFont("Menlo", 12)
         font.setStyleHint(QFont.StyleHint.Monospace)
         self.editor.setFont(font)
 
@@ -2562,6 +2580,8 @@ class EditorArea(QWidget):
         self.theme = theme or {}
         self._panes: list[FileEditorWidget] = []
         self._active: FileEditorWidget | None = None
+        # 统一字号（与终端联动）；新建窗格——含初始/分屏/重开——都继承它
+        self._editor_point_size: int = 12
 
         self._layout = QVBoxLayout(self)
         self._layout.setContentsMargins(0, 0, 0, 0)
@@ -2585,7 +2605,25 @@ class EditorArea(QWidget):
         pane.pane_focused.connect(lambda p=pane: self._set_active(p))
         pane.file_saved.connect(self.file_saved)
         self._panes.append(pane)
+        # 新窗格继承当前统一字号，保证与终端字号联动
+        self._apply_point_size_to_pane(pane, self._editor_point_size)
         return pane
+
+    def _apply_point_size_to_pane(self, pane: 'FileEditorWidget', point_size: int):
+        font = pane.editor.font()
+        if font.pointSize() != point_size:
+            font.setPointSize(point_size)
+            pane.editor.setFont(font)
+            pane.editor.setTabStopDistance(
+                4 * pane.editor.fontMetrics().horizontalAdvance(' ')
+            )
+
+    def set_editor_font_size(self, point_size: int):
+        """统一设置所有窗格字号并记住它，使后续新建窗格继承同一字号——
+        这是「编辑器与终端字号联动」的单一入口，由主窗口的全局缩放驱动。"""
+        self._editor_point_size = point_size
+        for p in self._panes:
+            self._apply_point_size_to_pane(p, point_size)
 
     def _set_active(self, pane: FileEditorWidget):
         if pane is self._active or pane not in self._panes:
