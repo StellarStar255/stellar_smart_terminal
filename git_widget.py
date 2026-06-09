@@ -2737,7 +2737,13 @@ class GitPanel(QWidget):
             return
 
         main_window = self._find_main_window()
-        config = main_window.get_llm_config() if main_window is not None else None
+        # 优先用「设为 Git 模型」指派的配置，否则回退默认配置
+        config = None
+        if main_window is not None:
+            if hasattr(main_window, 'get_git_llm_config'):
+                config = main_window.get_git_llm_config()
+            else:
+                config = main_window.get_llm_config()
         if not config or not config.get('api_base') or not config.get('model'):
             QMessageBox.warning(
                 self, t("git.generate_no_config_title"),

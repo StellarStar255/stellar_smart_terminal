@@ -1959,6 +1959,18 @@ class LLMConfigDialog(QDialog):
         self.set_default_btn.clicked.connect(self._set_as_default)
         left_layout.addWidget(self.set_default_btn)
 
+        # 角色指派：分别指定「补全」和「Git」用哪个配置（再次点击取消）
+        role_btn_layout = QHBoxLayout()
+        self.set_completion_btn = QPushButton(t("llm.set_completion"))
+        self.set_completion_btn.setToolTip(t("llm.set_completion_tooltip"))
+        self.set_completion_btn.clicked.connect(self._set_as_completion)
+        self.set_git_btn = QPushButton(t("llm.set_git"))
+        self.set_git_btn.setToolTip(t("llm.set_git_tooltip"))
+        self.set_git_btn.clicked.connect(self._set_as_git)
+        role_btn_layout.addWidget(self.set_completion_btn)
+        role_btn_layout.addWidget(self.set_git_btn)
+        left_layout.addLayout(role_btn_layout)
+
         # JSON 导入/导出按钮组
         json_btn_layout = QHBoxLayout()
         self.copy_json_btn = QPushButton(t("llm.copy_json"))
@@ -2120,18 +2132,54 @@ class LLMConfigDialog(QDialog):
             }
         """)
 
+    def _item_label(self, config) -> str:
+        """列表项文字：名字 + 角色标记（默认/补全/Git）。"""
+        name = config.get('name', t("llm.unnamed"))
+        try:
+            idx = self.configs.index(config)
+        except ValueError:
+            idx = -1
+        tags = []
+        if idx == self.default_index:
+            tags.append('★' + t("llm.tag_default"))
+        if config.get('for_completion'):
+            tags.append('✎' + t("llm.tag_completion"))
+        if config.get('for_git'):
+            tags.append('⎇' + t("llm.tag_git"))
+        return f"{name}   [{'  '.join(tags)}]" if tags else name
+
     def _populate_list(self):
         self.config_list.clear()
-        for i, config in enumerate(self.configs):
-            name = config.get('name', t("llm.unnamed"))
-            # 标记默认配置
-            if i == self.default_index:
-                name = f"★ {name}"
-            item = QListWidgetItem(name)
+        for config in self.configs:
+            item = QListWidgetItem(self._item_label(config))
             item.setData(Qt.ItemDataRole.UserRole, config.get('_id'))
             self.config_list.addItem(item)
         if self.configs:
             self.config_list.setCurrentRow(0)
+
+    def _set_role(self, role_key: str):
+        """把当前选中配置指派为某角色（for_completion / for_git），独占；
+        再次点击已是该角色的配置则取消该角色（回退到默认配置）。"""
+        row = self.config_list.currentRow()
+        item = self.config_list.item(row) if row >= 0 else None
+        cid = item.data(Qt.ItemDataRole.UserRole) if item else None
+        target = self._get_config_by_id(cid) if cid else None
+        if not target:
+            return
+        already = bool(target.get(role_key))
+        for c in self.configs:
+            c.pop(role_key, None)
+        if not already:
+            target[role_key] = True
+        self._populate_list()
+        if 0 <= row < self.config_list.count():
+            self.config_list.setCurrentRow(row)
+
+    def _set_as_completion(self):
+        self._set_role('for_completion')
+
+    def _set_as_git(self):
+        self._set_role('for_git')
 
     def _on_selection_changed(self, row):
         if self._closing:
@@ -2192,11 +2240,8 @@ class LLMConfigDialog(QDialog):
         config = self._get_config_by_id(cid) if cid else None
         if config:
             config['name'] = text
-            # 更新列表显示（保留默认标记）
-            display_name = text
-            if self.configs.index(config) == self.default_index:
-                display_name = f"★ {text}"
-            item.setText(display_name)
+            # 更新列表显示（保留默认/补全/Git 标记）
+            item.setText(self._item_label(config))
 
     def _on_field_changed(self):
         """同步当前编辑的字段到配置"""
@@ -10618,19 +10663,30 @@ class MainWindow(QMainWindow):
                 return config.copy()
         return None
 
-    # 专给 AI 行内补全用的配置名（命中任一即用它，便于给补全单独指定快模型）
+    # 兼容旧约定：名字叫 completion / 补全 等的配置也当作补全配置
     _COMPLETION_CONFIG_NAMES = {'completion', '补全', 'autocomplete', 'complete', 'copilot'}
 
     def get_completion_llm_config(self) -> dict:
         """AI 行内补全用的 LLM 配置。
 
-        优先用名字叫 completion / 补全 / autocomplete 等的配置——这样你可以保留
-        M2.7 当默认，单独给补全配一个**快**模型（如 M3 / 代码模型），体验才好。
-        没有这样的配置则回退到默认配置。
+        优先级：① 在 ✨ 里用「设为补全模型」显式指派(for_completion) →
+        ② 兼容旧约定：名字叫 completion/补全 等 → ③ 回退默认配置。
         """
         if self.llm_configs:
             for config in self.llm_configs:
+                if config.get('for_completion'):
+                    return config.copy()
+            for config in self.llm_configs:
                 if (config.get('name') or '').strip().lower() in self._COMPLETION_CONFIG_NAMES:
+                    return config.copy()
+        return self.get_llm_config()
+
+    def get_git_llm_config(self) -> dict:
+        """Git 提交信息生成用的 LLM 配置：
+        优先用「设为 Git 模型」显式指派(for_git)，否则回退默认配置。"""
+        if self.llm_configs:
+            for config in self.llm_configs:
+                if config.get('for_git'):
                     return config.copy()
         return self.get_llm_config()
 
