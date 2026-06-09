@@ -523,6 +523,13 @@ class TerminalWidget(QWidget):
 
         # 设置鼠标光标为文本选择样式
         self.setCursor(Qt.CursorShape.IBeamCursor)
+        # 启用鼠标跟踪，使按住修饰键悬停在 URL 上时能显示手型光标
+        self.setMouseTracking(True)
+        self._hover_cursor_on = False  # 当前是否处于 URL 手型悬停状态
+        # 打开 URL 的修饰键：macOS 上 ControlModifier 对应 ⌘(Cmd)，再额外支持 Alt/Option
+        self._URL_CLICK_MODIFIERS = (
+            Qt.KeyboardModifier.ControlModifier | Qt.KeyboardModifier.AltModifier
+        )
 
         # 搜索相关
         self._search_bar = None
@@ -2387,8 +2394,8 @@ class TerminalWidget(QWidget):
             self._last_click_time = current_time
             self._last_click_pos = cell
 
-            # Cmd+点击检测URL并打开
-            if event.modifiers() & Qt.KeyboardModifier.ControlModifier:
+            # Cmd/Alt+点击检测URL并打开
+            if event.modifiers() & self._URL_CLICK_MODIFIERS:
                 url = self._get_url_at_pos(cell)
                 if url:
                     self._open_url(url)
@@ -2424,6 +2431,19 @@ class TerminalWidget(QWidget):
 
     def mouseMoveEvent(self, event: QMouseEvent):
         """鼠标移动 - 更新选择区域（使用绝对坐标），支持拖动时自动滚动"""
+        # 悬停反馈：未按下按钮且按住 Cmd/Alt 悬停在 URL 上时显示手型光标
+        if not event.buttons():
+            hovering_url = bool(
+                (event.modifiers() & self._URL_CLICK_MODIFIERS)
+                and self._get_url_at_pos(self._pos_to_cell(event.pos()))
+            )
+            if hovering_url != self._hover_cursor_on:
+                self._hover_cursor_on = hovering_url
+                self.setCursor(
+                    Qt.CursorShape.PointingHandCursor if hovering_url
+                    else Qt.CursorShape.IBeamCursor
+                )
+
         # Shift 键或回滚历史时强制使用本地选择模式
         force_local_selection = (event.modifiers() & Qt.KeyboardModifier.ShiftModifier) or self.scroll_offset > 0
 
