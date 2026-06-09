@@ -610,6 +610,10 @@ class TerminalWidget(QWidget):
         # 窗口显示后重新计算，这时DPI等信息更准确
         self._calculate_char_size()
         self._update_terminal_size()
+        # 分屏时新窗格可能在 splitter 布局完成前就收到首个 paintEvent（此时尺寸仍为 0，
+        # paintEvent 会提前 return 而不填背景）；由于设了 WA_OpaquePaintEvent，未填的区域
+        # 会透出桌面。这里在布局稳定后再强制重绘一次兜底——只是一次额外 paint，绝对安全。
+        QTimer.singleShot(0, self.update)
 
     def sizeHint(self):
         """返回固定的默认大小建议，不依赖当前 term_cols/term_rows。
