@@ -17,7 +17,7 @@ from PyQt6.QtCore import Qt, pyqtSignal, QRect, QSize, QFileSystemWatcher, QTime
 from PyQt6.QtGui import (
     QFont, QFontMetrics, QColor, QTextCharFormat, QSyntaxHighlighter,
     QKeySequence, QPalette, QShortcut, QPainter, QTextCursor,
-    QPixmap, QImageReader, QCursor, QGuiApplication, QIcon,
+    QPixmap, QImageReader, QCursor, QGuiApplication, QIcon, QWheelEvent,
 )
 
 
@@ -665,6 +665,10 @@ class CodeEditor(QPlainTextEdit):
         if self._ai is not None:
             self._ai.set_color(color)
 
+    def set_ai_ghost_bg(self, color):
+        if self._ai is not None:
+            self._ai.set_bg_color(color)
+
     def ai_get_config(self):
         """向上找主窗口拿默认 LLM 配置（OpenAI 兼容）。"""
         win = self.window()
@@ -698,19 +702,21 @@ class CodeEditor(QPlainTextEdit):
         return _AI_LANG_BY_EXT.get(ext, ext.lstrip('.') or 'text')
 
     def wheelEvent(self, event):
-        """Ctrl/Cmd + 滚轮：委托给主窗口的全局缩放，保证编辑器与终端字号联动。
+        """按住 Cmd/Ctrl 滚轮：当作普通滚动，绝不缩放字体。
 
-        QPlainTextEdit 自带的 Ctrl+滚轮缩放只改本编辑器字号，会与终端脱钩；
-        这里拦截后改走全局缩放（同时缩放终端与所有编辑窗格）。没有主窗口全局缩放
-        时直接吞掉，避免编辑器单独缩放。
+        QPlainTextEdit 自带「Ctrl+滚轮缩放字体」，触控板上极易误触。这里把按住
+        修饰键的滚轮事件改写成「无修饰键」后再交给基类，从而保留原生滚动（含触控板
+        惯性），但不会触发字体缩放。需要缩放请用 Cmd +/-。
         """
-        if event.modifiers() & Qt.KeyboardModifier.ControlModifier:
-            main_win = self.window()
-            delta = event.angleDelta().y()
-            if delta > 0 and hasattr(main_win, '_global_zoom_in'):
-                main_win._global_zoom_in()
-            elif delta < 0 and hasattr(main_win, '_global_zoom_out'):
-                main_win._global_zoom_out()
+        if event.modifiers() & (Qt.KeyboardModifier.ControlModifier
+                                | Qt.KeyboardModifier.MetaModifier):
+            stripped = QWheelEvent(
+                event.position(), event.globalPosition(),
+                event.pixelDelta(), event.angleDelta(),
+                event.buttons(), Qt.KeyboardModifier.NoModifier,
+                event.phase(), event.inverted(),
+            )
+            super().wheelEvent(stripped)
             event.accept()
             return
         super().wheelEvent(event)
@@ -2177,8 +2183,9 @@ class FileEditorWidget(QWidget):
             }}
         """)
 
-        # AI 灰字建议用暗色文字，跟随主题
+        # AI 灰字建议用暗色文字 + 编辑器背景作底色（盖住下方真实文字），跟随主题
         self.editor.set_ai_ghost_color(QColor(self.theme.get('text_dim', '#6a737d')))
+        self.editor.set_ai_ghost_bg(QColor(editor_bg))
 
         # 行号条配色：默认用稍暗的 bg + 暗灰 fg，浅色主题则反向
         gutter_bg = self.theme.get('editor_gutter_bg')

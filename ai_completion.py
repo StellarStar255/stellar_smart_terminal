@@ -8,6 +8,8 @@
 本模块只依赖 PyQt6 与 requests，不反向依赖 file_editor，便于复用与测试。
 """
 
+import re
+
 from PyQt6.QtCore import Qt, QObject, QThread, QTimer, pyqtSignal
 from PyQt6.QtGui import QColor, QTextCursor
 
@@ -117,6 +119,7 @@ class InlineCompletionController(QObject):
         self._anchor_pos = -1          # 建议锚定的光标绝对位置
         self._gen = 0                  # generation：过期结果作废
         self._color = QColor('#6a737d')
+        self._bg_color = QColor('#282c34')  # 灰字底色（= 编辑器背景），用于盖住下方真实文字
         self._workers = []             # 持有运行中的 worker，防止被 GC
 
         self._timer = QTimer(self)
@@ -137,6 +140,10 @@ class InlineCompletionController(QObject):
     def set_color(self, color: QColor):
         if color is not None:
             self._color = QColor(color)
+
+    def set_bg_color(self, color: QColor):
+        if color is not None:
+            self._bg_color = QColor(color)
 
     # ---------- 建议状态 ----------
 
@@ -261,13 +268,19 @@ class InlineCompletionController(QObject):
         self._suggestion = cleaned
         ed.viewport().update()
 
+    # 单条建议最多展示/插入的行数，避免模型偶尔长篇大论盖满屏幕
+    MAX_LINES = 12
+
     @staticmethod
     def _clean(text: str) -> str:
         if not text:
             return ''
         t = text
+        # 1) 去掉推理模型的 <think>...</think> 块（含未闭合：截断时只剩开标签）
+        t = re.sub(r'(?is)<think>.*?</think>', '', t)
+        t = re.sub(r'(?is)<think>.*$', '', t)
+        # 2) 去掉整段 ``` 代码围栏
         s = t.strip()
-        # 去掉整段 ``` 代码围栏
         if s.startswith('```'):
             nl = s.find('\n')
             if nl != -1:
@@ -276,8 +289,12 @@ class InlineCompletionController(QObject):
             if s.endswith('```'):
                 s = s[:-3]
             t = s
-        # 去掉首尾多余换行，但保留内部换行与行首缩进
+        # 3) 去掉首尾多余换行，但保留内部换行与行首缩进
         t = t.strip('\n')
+        # 4) 限制行数，过长的多半是模型跑题，截断更安全
+        lines = t.split('\n')
+        if len(lines) > InlineCompletionController.MAX_LINES:
+            t = '\n'.join(lines[:InlineCompletionController.MAX_LINES])
         return t
 
     # ---------- 渲染灰字 ----------
@@ -293,19 +310,24 @@ class InlineCompletionController(QObject):
         fm = ed.fontMetrics()
         cr = ed.cursorRect(cursor)
         ascent = fm.ascent()
+        line_h = fm.lineSpacing()
+        # 续行起点 x（行首列），对齐文本左边界
+        bc = QTextCursor(cursor)
+        bc.movePosition(QTextCursor.MoveOperation.StartOfBlock)
+        left_x = ed.cursorRect(bc).left()
 
         painter.save()
-        painter.setPen(self._color)
         painter.setFont(ed.font())
-        # 第一行：紧接光标
-        painter.drawText(cr.left(), cr.top() + ascent, lines[0])
-        if len(lines) > 1:
-            # 续行从“行首列”开始，对齐文本左边界
-            bc = QTextCursor(cursor)
-            bc.movePosition(QTextCursor.MoveOperation.StartOfBlock)
-            left_x = ed.cursorRect(bc).left()
-            line_h = fm.lineSpacing()
-            base_y = cr.top() + ascent
-            for i, ln in enumerate(lines[1:], start=1):
-                painter.drawText(left_x, base_y + i * line_h, ln)
+        for i, ln in enumerate(lines):
+            if i == 0:
+                x = cr.left()       # 第一行紧接光标（仅在行尾触发，右侧无文字）
+                top = cr.top()
+            else:
+                x = left_x          # 续行从行首列开始
+                top = cr.top() + i * line_h
+            w = fm.horizontalAdvance(ln) if ln else fm.horizontalAdvance(' ')
+            # 关键：先用不透明底色盖住下方真实文字，再画灰字，避免与已有代码重叠看不清
+            painter.fillRect(int(x), int(top), int(w) + 4, int(line_h), self._bg_color)
+            painter.setPen(self._color)
+            painter.drawText(int(x), int(top + ascent), ln)
         painter.restore()
