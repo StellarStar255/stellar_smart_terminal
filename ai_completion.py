@@ -57,80 +57,84 @@ class CompletionWorker(QThread):
             if not api_base:
                 self.failed.emit(self._gen, 'no api_base')
                 return
-            url = api_base + '/chat/completions'
-
             headers = {'Content-Type': 'application/json'}
             key = (cfg.get('api_key') or '').strip()
             if key:
                 headers['Authorization'] = f'Bearer {key}'
 
-            m = _CURSOR_MARKER
-            system = (
-                "You are an inline code autocomplete engine, like GitHub Copilot. "
-                f"The user's file is shown with a {m} marker at the caret. "
-                f"Reply with ONLY the exact characters to insert at {m}, as if you were the "
-                "user's very next keystrokes.\n"
-                "Rules:\n"
-                "- Output raw text only: no explanation, no markdown fences, no quotes, no "
-                "<think>.\n"
-                f"- Continue from the characters right before {m}; never restate them.\n"
-                f"- NEVER reproduce text that already appears right after {m} — that code "
-                "already exists; if you would only be echoing it, reply with nothing.\n"
-                "- Keep it short: the rest of the current line, or a few lines, then stop at a "
-                "natural boundary. Never dump a large block.\n"
-                "- Inside a comment / string / docstring, briefly continue that prose instead "
-                "of writing code.\n"
-                "- If nothing sensible can be added, reply with an empty string."
-            )
-
-            # 把光标位置用单个 marker 放进真实代码里——比 PREFIX/SUFFIX 标签更贴近
-            # chat 模型的直觉；再配两个 few-shot 例子，明确「续写、别抄后文」。
-            context = f"Language: {self._language}\n\n{self._prefix}{m}{self._suffix}"
-            messages = [
-                {'role': 'system', 'content': system},
-                # 例1：行尾续写
-                {'role': 'user',
-                 'content': f"Language: python\n\ndef add(a, b):\n    return {m}"},
-                {'role': 'assistant', 'content': 'a + b'},
-                # 例2：光标在已有后文之前——只补该补的，不抄后面的 `:` 行
-                {'role': 'user',
-                 'content': f"Language: python\n\nitems = [1, 2, 3]\nfor x in {m}:\n    print(x)"},
-                {'role': 'assistant', 'content': 'items'},
-                # 例3：光标在注释/docstring 里——续写文字，而不是写代码
-                {'role': 'user',
-                 'content': f"Language: python\n\n\"\"\"\n计算两个数的{m}\n\"\"\"\ndef add(a, b):"},
-                {'role': 'assistant', 'content': '和'},
-                # 真正要补全的内容
-                {'role': 'user', 'content': context},
-            ]
-
-            payload = {
-                'model': cfg.get('model') or 'gpt-4',
-                'messages': messages,
-                'temperature': 0.1,
-                'stream': True,   # 流式：边收边显示，避免等整段返回才出现
-            }
             mt = cfg.get('max_tokens')
             try:
                 mt = int(mt) if mt else 0
             except (TypeError, ValueError):
                 mt = 0
 
+            api_l = api_base.lower()
             model_l = (cfg.get('model') or '').lower()
-            if 'minimax' in api_base.lower():
-                if 'm3' in model_l:
-                    # MiniMax M3 支持关思考：直接作答，快，最适合补全
-                    payload['thinking'] = {'type': 'disabled'}
-                    payload['max_tokens'] = min(mt, 120) if mt > 0 else 120
-                else:
-                    # M2.x 无法关思考；reasoning_split=true 让思考走单独的
-                    # reasoning_content 字段，content 里是干净答案（否则混入 <think>），
-                    # 思考会吃 token，给足额度，否则只思考没答案。
-                    payload['reasoning_split'] = True
-                    payload['max_tokens'] = min(mt, 1024) if mt > 0 else 1024
+
+            if 'deepseek' in api_l:
+                # DeepSeek 原生 FIM（fill-in-the-middle）：专为补全、非思考模式、最准最快。
+                # 端点固定在 /beta/completions（不在 /v1 下），用 prompt+suffix，不走 chat。
+                root = re.match(r'(https?://[^/]+)', api_base)
+                base_root = root.group(1) if root else api_base
+                url = base_root + '/beta/completions'
+                payload = {
+                    'model': cfg.get('model') or 'deepseek-chat',
+                    'prompt': self._prefix,
+                    'suffix': self._suffix,
+                    'temperature': 0.1,
+                    'max_tokens': min(mt, 256) if mt > 0 else 256,  # FIM 上限 4K，补全压短
+                    'stream': True,
+                }
             else:
-                # 普通模型：补全要短，上限压到 120 token，不容易跑题成大段
-                payload['max_tokens'] = min(mt, 120) if mt > 0 else 120
+                # 其它厂商：用 chat 接口模拟 FIM —— 光标 marker + few-shot 示范。
+                url = api_base + '/chat/completions'
+                m = _CURSOR_MARKER
+                system = (
+                    "You are an inline code autocomplete engine, like GitHub Copilot. "
+                    f"The user's file is shown with a {m} marker at the caret. "
+                    f"Reply with ONLY the exact characters to insert at {m}, as if you were "
+                    "the user's very next keystrokes.\n"
+                    "Rules:\n"
+                    "- Output raw text only: no explanation, no markdown fences, no quotes, "
+                    "no <think>.\n"
+                    f"- Continue from the characters right before {m}; never restate them.\n"
+                    f"- NEVER reproduce text that already appears right after {m} — that code "
+                    "already exists; if you would only be echoing it, reply with nothing.\n"
+                    "- Keep it short: the rest of the current line, or a few lines, then stop "
+                    "at a natural boundary. Never dump a large block.\n"
+                    "- Inside a comment / string / docstring, briefly continue that prose "
+                    "instead of writing code.\n"
+                    "- If nothing sensible can be added, reply with an empty string."
+                )
+                context = f"Language: {self._language}\n\n{self._prefix}{m}{self._suffix}"
+                messages = [
+                    {'role': 'system', 'content': system},
+                    {'role': 'user',
+                     'content': f"Language: python\n\ndef add(a, b):\n    return {m}"},
+                    {'role': 'assistant', 'content': 'a + b'},
+                    {'role': 'user',
+                     'content': f"Language: python\n\nitems = [1, 2, 3]\nfor x in {m}:\n    print(x)"},
+                    {'role': 'assistant', 'content': 'items'},
+                    {'role': 'user',
+                     'content': f"Language: python\n\n\"\"\"\n计算两个数的{m}\n\"\"\"\ndef add(a, b):"},
+                    {'role': 'assistant', 'content': '和'},
+                    {'role': 'user', 'content': context},
+                ]
+                payload = {
+                    'model': cfg.get('model') or 'gpt-4',
+                    'messages': messages,
+                    'temperature': 0.1,
+                    'stream': True,
+                }
+                if 'minimax' in api_l:
+                    if 'm3' in model_l:
+                        payload['thinking'] = {'type': 'disabled'}
+                        payload['max_tokens'] = min(mt, 120) if mt > 0 else 120
+                    else:
+                        payload['reasoning_split'] = True
+                        payload['max_tokens'] = min(mt, 1024) if mt > 0 else 1024
+                else:
+                    payload['max_tokens'] = min(mt, 120) if mt > 0 else 120
 
             proxy = (cfg.get('proxy') or '').strip()
             proxies = {'http': proxy, 'https': proxy} if proxy else None
@@ -170,7 +174,10 @@ class CompletionWorker(QThread):
                         continue
                     ch = (obj.get('choices') or [{}])[0]
                     delta = ch.get('delta') or {}
+                    # chat 流式在 delta.content；FIM/completions 流式在 choices[].text
                     piece = delta.get('content')
+                    if piece is None:
+                        piece = ch.get('text')
                     if piece is None and ch.get('message'):
                         piece = ch['message'].get('content')
                     if piece:
@@ -184,8 +191,9 @@ class CompletionWorker(QThread):
             if not got_delta and raw_lines:
                 try:
                     obj = json.loads('\n'.join(raw_lines))
-                    acc = (obj.get('choices') or [{}])[0].get(
-                        'message', {}).get('content', '') or ''
+                    ch0 = (obj.get('choices') or [{}])[0]
+                    acc = (ch0.get('text')
+                           or ch0.get('message', {}).get('content', '') or '')
                 except Exception:
                     pass
 
