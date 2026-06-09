@@ -1828,7 +1828,11 @@ class FileEditorWidget(QWidget):
     def _setup_shortcuts(self):
         """设置快捷键"""
         # Cmd+S / Ctrl+S 保存
+        # 必须限定为 WidgetWithChildrenShortcut：否则多窗格分屏时每个窗格都注册一个
+        # 窗口级 Save 快捷键，Qt 判为「歧义」(activatedAmbiguously) 而不触发 save，
+        # 表现为 Cmd+S 在分屏后失效。限定到本窗格焦点即只存当前编辑的窗格。
         save_shortcut = QShortcut(QKeySequence.StandardKey.Save, self)
+        save_shortcut.setContext(Qt.ShortcutContext.WidgetWithChildrenShortcut)
         save_shortcut.activated.connect(self.save_file)
 
         # Cmd+/ / Ctrl+/ 切换注释（仅在编辑器获焦时触发）
