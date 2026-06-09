@@ -2645,6 +2645,7 @@ class TerminalWidget(QWidget):
 
         # 使用窗口作为父对象，确保菜单与正确的顶级窗口关联
         menu = QMenu(window if window else self)
+        menu.setToolTipsVisible(True)
         menu.setStyleSheet("""
             QMenu {
                 background-color: #2d2d44;
@@ -2769,6 +2770,7 @@ class TerminalWidget(QWidget):
 
         # 刷新终端：强制重绘 + 给 PTY 重发尺寸（SIGWINCH），修复偶发花屏/错位
         refresh_action = QAction(t("ctx.refresh"), self)
+        refresh_action.setToolTip(t("ctx.refresh.tip"))
         refresh_action.triggered.connect(self.refresh_terminal)
         menu.addAction(refresh_action)
 

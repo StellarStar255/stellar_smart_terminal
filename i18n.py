@@ -666,6 +666,10 @@ TRANSLATIONS = {
     "ctx.open_current_dir": {"zh": "打开当前目录", "en": "Open Current Directory"},
     "ctx.copy_current_dir": {"zh": "复制当前路径", "en": "Copy Current Path"},
     "ctx.refresh": {"zh": "刷新终端", "en": "Refresh Terminal"},
+    "ctx.refresh.tip": {
+        "zh": "重绘当前屏幕并通知前台程序重画（不影响已滚出的历史）",
+        "en": "Redraw the current screen and notify the foreground app (does not affect scrolled-back history)",
+    },
     "ctx.select_all": {"zh": "全选", "en": "Select All"},
     "ctx.clear_selection": {"zh": "清除选择", "en": "Clear Selection"},
     "ctx.split_horizontal": {"zh": "左右分屏", "en": "Split Horizontal"},
