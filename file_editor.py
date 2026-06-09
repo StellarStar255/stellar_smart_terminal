@@ -15,7 +15,7 @@ from PyQt6.QtWidgets import (
 )
 from PyQt6.QtCore import Qt, pyqtSignal, QRect, QSize, QFileSystemWatcher, QTimer, QEvent
 from PyQt6.QtGui import (
-    QFont, QColor, QTextCharFormat, QSyntaxHighlighter,
+    QFont, QFontMetrics, QColor, QTextCharFormat, QSyntaxHighlighter,
     QKeySequence, QPalette, QShortcut, QPainter, QTextCursor,
     QPixmap, QImageReader, QCursor, QGuiApplication, QIcon,
 )
@@ -1576,6 +1576,10 @@ class FileEditorWidget(QWidget):
         # 多窗格分屏：是否高亮当前活动窗格（仅在 >1 窗格时由 EditorArea 打开）
         self._is_active = False
         self._show_active_indicator = False
+        # 编辑器字号（pt）。与终端联动，由 EditorArea.set_editor_font_size 统一驱动。
+        # 注意：必须写进编辑器自己的 QSS（见 _apply_theme），否则会被主窗口 GUI 字号的
+        # app 级 `QWidget { font-size }` 样式表盖过——QSS 字号优先级高于 setFont()。
+        self._editor_point_size = 12
 
         # --- 外部文件变更检测 ---
         self._file_watcher = QFileSystemWatcher(self)
@@ -1930,23 +1934,30 @@ class FileEditorWidget(QWidget):
             new_cursor.setPosition(new_start_block.position() + col)
         editor.setTextCursor(new_cursor)
 
+    def set_editor_point_size(self, point_size: int):
+        """设置编辑器字号（pt）并落到 QSS，保证不被 GUI 字号的 app 级样式表盖过。
+
+        同时更新 QFont（让 fontMetrics / tab 宽度等正确）与编辑器 QSS 的 font-size。
+        由 EditorArea 统一调用，使所有窗格字号与终端联动。
+        """
+        point_size = max(6, min(48, int(point_size)))
+        self._editor_point_size = point_size
+        font = self.editor.font()
+        if font.pointSize() != point_size:
+            font.setPointSize(point_size)
+            self.editor.setFont(font)
+        # 重新套用编辑器 QSS（含 font-size），并按新字号重算 tab 宽度
+        self._apply_theme()
+        fm = QFontMetrics(font)
+        self.editor.setTabStopDistance(4 * fm.horizontalAdvance(' '))
+
     def _zoom_in(self):
         """放大字体"""
-        font = self.editor.font()
-        size = font.pointSize()
-        if size < 48:
-            font.setPointSize(size + 1)
-            self.editor.setFont(font)
-            self.editor.setTabStopDistance(4 * self.editor.fontMetrics().horizontalAdvance(' '))
+        self.set_editor_point_size(self._editor_point_size + 1)
 
     def _zoom_out(self):
         """缩小字体"""
-        font = self.editor.font()
-        size = font.pointSize()
-        if size > 6:
-            font.setPointSize(size - 1)
-            self.editor.setFont(font)
-            self.editor.setTabStopDistance(4 * self.editor.fontMetrics().horizontalAdvance(' '))
+        self.set_editor_point_size(self._editor_point_size - 1)
 
     def _apply_theme(self):
         """应用主题"""
@@ -2028,12 +2039,15 @@ class FileEditorWidget(QWidget):
         editor_bg = self.theme.get('terminal_bg', '#282c34')
         editor_fg = self.theme.get('terminal_fg', '#abb2bf')
 
+        # font-size 必须写在这里：它是编辑器自己的 QSS，优先级高于主窗口 GUI 字号的
+        # app 级 `QWidget { font-size }`，从而保证编辑器字号跟随终端而非被 GUI 字号钉死。
         self.editor.setStyleSheet(f"""
             QPlainTextEdit {{
                 background-color: {editor_bg};
                 color: {editor_fg};
                 border: none;
                 padding: 4px 12px 4px 8px;
+                font-size: {self._editor_point_size}pt;
                 selection-background-color: {accent};
                 selection-color: white;
             }}
@@ -2610,13 +2624,7 @@ class EditorArea(QWidget):
         return pane
 
     def _apply_point_size_to_pane(self, pane: 'FileEditorWidget', point_size: int):
-        font = pane.editor.font()
-        if font.pointSize() != point_size:
-            font.setPointSize(point_size)
-            pane.editor.setFont(font)
-            pane.editor.setTabStopDistance(
-                4 * pane.editor.fontMetrics().horizontalAdvance(' ')
-            )
+        pane.set_editor_point_size(point_size)
 
     def set_editor_font_size(self, point_size: int):
         """统一设置所有窗格字号并记住它，使后续新建窗格继承同一字号——
@@ -2675,12 +2683,8 @@ class EditorArea(QWidget):
         if pane not in self._panes:
             return
         new_pane = self._create_pane()
-        # 继承源窗格的字号（用户可能已缩放过编辑器）
-        src_font = pane.editor.font()
-        new_pane.editor.setFont(src_font)
-        new_pane.editor.setTabStopDistance(
-            4 * new_pane.editor.fontMetrics().horizontalAdvance(' ')
-        )
+        # _create_pane 已让新窗格继承当前统一字号（含 font-size 样式表），
+        # 与终端及其它窗格保持联动，无需再单独复制字号。
         if pane.get_current_file():
             new_pane.open_file(pane.get_current_file())
 
