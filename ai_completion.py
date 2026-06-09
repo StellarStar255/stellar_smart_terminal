@@ -88,8 +88,16 @@ class CompletionWorker(QThread):
                 mt = int(mt) if mt else 0
             except (TypeError, ValueError):
                 mt = 0
-            # 补全要短：上限压到 120 token，弱模型不容易跑题成大段
-            payload['max_tokens'] = min(mt, 120) if mt > 0 else 120
+
+            if 'minimax' in api_base.lower():
+                # MiniMax M2.x 无法关闭思考；reasoning_split=true 让思考走单独的
+                # reasoning_content 字段，content 里就是干净答案（否则混入 <think>）。
+                # 思考会吃 token，给足额度，否则只思考没答案。
+                payload['reasoning_split'] = True
+                payload['max_tokens'] = min(mt, 1024) if mt > 0 else 1024
+            else:
+                # 普通模型：补全要短，上限压到 120 token，不容易跑题成大段
+                payload['max_tokens'] = min(mt, 120) if mt > 0 else 120
 
             proxy = (cfg.get('proxy') or '').strip()
             proxies = {'http': proxy, 'https': proxy} if proxy else None

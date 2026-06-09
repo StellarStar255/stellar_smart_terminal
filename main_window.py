@@ -10618,6 +10618,22 @@ class MainWindow(QMainWindow):
                 return config.copy()
         return None
 
+    # 专给 AI 行内补全用的配置名（命中任一即用它，便于给补全单独指定快模型）
+    _COMPLETION_CONFIG_NAMES = {'completion', '补全', 'autocomplete', 'complete', 'copilot'}
+
+    def get_completion_llm_config(self) -> dict:
+        """AI 行内补全用的 LLM 配置。
+
+        优先用名字叫 completion / 补全 / autocomplete 等的配置——这样你可以保留
+        M2.7 当默认，单独给补全配一个**快**模型（如 M3 / 代码模型），体验才好。
+        没有这样的配置则回退到默认配置。
+        """
+        if self.llm_configs:
+            for config in self.llm_configs:
+                if (config.get('name') or '').strip().lower() in self._COMPLETION_CONFIG_NAMES:
+                    return config.copy()
+        return self.get_llm_config()
+
     def get_all_llm_configs(self) -> list:
         """获取所有 LLM 配置列表
 

@@ -670,9 +670,11 @@ class CodeEditor(QPlainTextEdit):
             self._ai.set_bg_color(color)
 
     def ai_get_config(self):
-        """向上找主窗口拿默认 LLM 配置（OpenAI 兼容）。"""
+        """向上找主窗口拿补全用的 LLM 配置（优先专用「completion/补全」配置，
+        否则回退默认配置；均为 OpenAI 兼容）。"""
         win = self.window()
-        getter = getattr(win, 'get_llm_config', None)
+        getter = (getattr(win, 'get_completion_llm_config', None)
+                  or getattr(win, 'get_llm_config', None))
         if getter is None:
             return None
         try:
