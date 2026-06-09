@@ -451,6 +451,7 @@ TRANSLATIONS = {
 
     # ===== 文件编辑器 =====
     "editor.no_file": {"zh": "未打开文件", "en": "No file open"},
+    "editor.ai_toggle_tooltip": {"zh": "AI 行内补全（输入停顿后出现灰字建议；Tab 接受，Esc 取消，Alt+\\ 手动触发）。使用 ✨ 里配置的默认 LLM API。", "en": "AI inline completion (ghost suggestion after you pause typing; Tab to accept, Esc to dismiss, Alt+\\ to trigger). Uses the default LLM API configured under ✨."},
     "editor.close_tooltip": {"zh": "关闭编辑器", "en": "Close Editor"},
     "editor.split_h_tooltip": {"zh": "左右分屏 ⌘\\（并排查看另一个文件）", "en": "Split editor right ⌘\\ (view another file side by side)"},
     "editor.split_v_tooltip": {"zh": "上下分屏 ⌘⇧\\（堆叠查看另一个文件）", "en": "Split editor down ⌘⇧\\ (view another file stacked)"},
@@ -699,6 +700,7 @@ TRANSLATIONS = {
     "status.entries": {"zh": "记录: {n}", "en": "Entries: {n}"},
     "status.files": {"zh": "文件: {n}", "en": "Files: {n}"},
     "status.editor_no_file": {"zh": "没有已打开的文件可收起/展开", "en": "No open file to collapse/expand"},
+    "status.ai_need_llm_config": {"zh": "AI 补全已开启，但还没配置 LLM API —— 请点 ✨ 配置后再用", "en": "AI completion enabled, but no LLM API configured — set it up via ✨ first"},
     "status.ready": {"zh": "就绪 - 输入命令并点击「启动」开始", "en": "Ready - Enter command and click Start"},
     "status.running": {"zh": "运行中", "en": "Running"},
     "status.running_session": {"zh": "运行中 - {session_id}", "en": "Running - {session_id}"},

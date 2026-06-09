@@ -7885,6 +7885,9 @@ class MainWindow(QMainWindow):
         self.editor_area = EditorArea(theme=current_theme)
         self.editor_area.all_closed.connect(self._on_editor_closed)
         self.editor_area.active_changed.connect(self._on_active_pane_changed)
+        self.editor_area.ai_completion_toggled.connect(self._on_ai_completion_toggled)
+        # 应用已记忆的 AI 补全开关到编辑器
+        self.editor_area.set_ai_completion_enabled(getattr(self, '_ai_completion_enabled', False))
         self.editor_area.hide()  # 默认隐藏
         self.explorer_splitter.addWidget(self.editor_area)
 
@@ -8310,6 +8313,42 @@ class MainWindow(QMainWindow):
                 continue
             widget._spring_mode_enabled = enabled
             widget._set_spring_checkboxes(enabled)
+
+    def _on_ai_completion_toggled(self, enabled: bool):
+        """编辑器标题栏切换 AI 行内补全：应用到本窗口所有窗格、广播、落盘。"""
+        enabled = bool(enabled)
+        self._ai_completion_enabled = enabled
+        if hasattr(self, 'editor_area') and self.editor_area is not None:
+            self.editor_area.set_ai_completion_enabled(enabled)
+        self._broadcast_ai_completion_state()
+        self._save_config()
+        # 开启但没有可用的 LLM 配置时，提示去配置（不阻断）
+        if enabled:
+            cfg = None
+            try:
+                cfg = self.get_llm_config()
+            except Exception:
+                cfg = None
+            if not cfg or not (cfg.get('api_key') or '').strip():
+                try:
+                    self.statusBar().showMessage(
+                        t("status.ai_need_llm_config"), 6000)
+                except Exception:
+                    pass
+
+    def _broadcast_ai_completion_state(self):
+        """把 AI 补全开关同步到所有 MainWindow 窗口（含其编辑器窗格），
+        避免多窗口下旧窗口退出时把 ai_completion_enabled 覆盖回旧值。"""
+        enabled = self._ai_completion_enabled
+        app = QApplication.instance()
+        if not app:
+            return
+        for widget in app.topLevelWidgets():
+            if widget is self or not isinstance(widget, MainWindow):
+                continue
+            widget._ai_completion_enabled = enabled
+            if hasattr(widget, 'editor_area') and widget.editor_area is not None:
+                widget.editor_area.set_ai_completion_enabled(enabled)
 
     def _on_spring_mode_toggled(self, state):
         """弹簧模式开关（Explorer 与 Remote 两处复选框共用，保持同步）。"""
@@ -10222,6 +10261,7 @@ class MainWindow(QMainWindow):
         self.toolbar_config = None  # 工具栏配置
         self.llm_configs = []  # LLM API 配置列表
         self.default_llm_config = 0  # 默认 LLM 配置索引
+        self._ai_completion_enabled = False  # AI 行内补全开关（默认关闭）
         self._saved_window_geometry = None  # 窗口位置和大小 [x, y, w, h]
         self._saved_window_maximized = False  # 窗口是否最大化
         self._saved_explorer_panel_visible = False  # Explorer 面板可见性
@@ -10286,6 +10326,8 @@ class MainWindow(QMainWindow):
                     self._remote_split_horizontal = config.get('remote_split_horizontal', False)
                     # 加载弹簧模式偏好
                     self._spring_mode_enabled = config.get('spring_mode_enabled', False)
+                    # 加载 AI 行内补全开关
+                    self._ai_completion_enabled = config.get('ai_completion_enabled', False)
                     # 加载导航面板停靠方式（'float' / 'embed'，全局记忆）
                     _dock_mode = config.get('navigator_dock_mode', 'float')
                     if _dock_mode in ('float', 'embed'):
@@ -10510,6 +10552,7 @@ class MainWindow(QMainWindow):
                 'explorer_split_horizontal': getattr(self, '_explorer_split_horizontal', False),  # 保存左右分屏偏好
                 'remote_split_horizontal': getattr(self, '_remote_split_horizontal', False),  # Remote 左右分屏偏好
                 'spring_mode_enabled': getattr(self, '_spring_mode_enabled', False),  # 保存弹簧模式偏好
+                'ai_completion_enabled': getattr(self, '_ai_completion_enabled', False),  # 保存 AI 行内补全开关
                 'language': get_language(),  # 保存语言设置
                 'keyboard_shortcuts': shortcuts_to_save,  # 保存自定义快捷键（带多窗口防覆盖）
                 'window_geometry': [self.x(), self.y(), self.width(), self.height()],

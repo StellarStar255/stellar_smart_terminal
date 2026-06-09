@@ -26,6 +26,21 @@ _IMAGE_EXTENSIONS = {
     '.png', '.jpg', '.jpeg', '.gif', '.bmp', '.webp', '.tif', '.tiff',
     '.ico', '.svg', '.heic', '.heif',
 }
+
+# AI 补全：文件扩展名 → 语言名（用于给模型的提示词上下文）
+_AI_LANG_BY_EXT = {
+    '.py': 'python', '.js': 'javascript', '.jsx': 'javascript',
+    '.mjs': 'javascript', '.cjs': 'javascript', '.ts': 'typescript',
+    '.tsx': 'typescript', '.sh': 'bash', '.bash': 'bash', '.zsh': 'bash',
+    '.json': 'json', '.yml': 'yaml', '.yaml': 'yaml', '.md': 'markdown',
+    '.markdown': 'markdown', '.toml': 'toml', '.ini': 'ini', '.conf': 'ini',
+    '.cfg': 'ini', '.html': 'html', '.css': 'css', '.c': 'c', '.h': 'c',
+    '.cpp': 'cpp', '.cc': 'cpp', '.hpp': 'cpp', '.go': 'go', '.rs': 'rust',
+    '.java': 'java', '.rb': 'ruby', '.php': 'php', '.sql': 'sql',
+    '.xml': 'xml', '.lua': 'lua', '.swift': 'swift', '.kt': 'kotlin',
+}
+
+from ai_completion import InlineCompletionController
 from i18n import t
 
 
@@ -619,6 +634,69 @@ class CodeEditor(QPlainTextEdit):
         self._update_viewport_margin()
         self._apply_extra_selections()
 
+        # AI 行内补全（灰字建议）。默认关闭，由编辑器标题栏的 🤖 开关启用。
+        self._ai = InlineCompletionController(self)
+        self.textChanged.connect(self._ai.on_text_changed)
+        self.cursorPositionChanged.connect(self._ai.on_cursor_moved)
+
+    # ---------- AI 行内补全 ----------
+
+    def paintEvent(self, event):
+        """在正常文本之上叠加灰字建议。"""
+        super().paintEvent(event)
+        if self._ai is not None and self._ai.has_suggestion():
+            painter = QPainter(self.viewport())
+            try:
+                self._ai.paint(painter)
+            finally:
+                painter.end()
+
+    def focusOutEvent(self, event):
+        # 失焦时撤掉灰字建议，避免残留
+        if self._ai is not None:
+            self._ai.dismiss()
+        super().focusOutEvent(event)
+
+    def set_ai_completion_enabled(self, enabled: bool):
+        if self._ai is not None:
+            self._ai.set_enabled(bool(enabled))
+
+    def set_ai_ghost_color(self, color):
+        if self._ai is not None:
+            self._ai.set_color(color)
+
+    def ai_get_config(self):
+        """向上找主窗口拿默认 LLM 配置（OpenAI 兼容）。"""
+        win = self.window()
+        getter = getattr(win, 'get_llm_config', None)
+        if getter is None:
+            return None
+        try:
+            return getter()
+        except Exception:
+            return None
+
+    def ai_get_language(self) -> str:
+        """根据当前文件扩展名推断语言，供提示词使用。"""
+        w = self.parent()
+        while w is not None and not hasattr(w, 'get_current_file'):
+            w = w.parent()
+        fp = None
+        if w is not None:
+            try:
+                fp = w.get_current_file()
+            except Exception:
+                fp = None
+        if not fp:
+            return 'text'
+        name = Path(fp).name.lower()
+        if name == 'dockerfile':
+            return 'dockerfile'
+        if name == 'makefile':
+            return 'makefile'
+        ext = Path(fp).suffix.lower()
+        return _AI_LANG_BY_EXT.get(ext, ext.lstrip('.') or 'text')
+
     def wheelEvent(self, event):
         """Ctrl/Cmd + 滚轮：委托给主窗口的全局缩放，保证编辑器与终端字号联动。
 
@@ -824,6 +902,23 @@ class CodeEditor(QPlainTextEdit):
                     | Qt.KeyboardModifier.MetaModifier
                     | Qt.KeyboardModifier.AltModifier)
         )
+
+        # AI 行内补全：有灰字建议时 Tab 接受 / Esc 取消（优先于缩进等逻辑）
+        if self._ai is not None and self._ai.has_suggestion():
+            if key == Qt.Key.Key_Tab and plain_modifier:
+                if self._ai.accept():
+                    event.accept()
+                    return
+            if key == Qt.Key.Key_Escape:
+                self._ai.dismiss()
+                event.accept()
+                return
+        # AI 手动触发：Alt+\
+        if (self._ai is not None and key == Qt.Key.Key_Backslash
+                and (mods & Qt.KeyboardModifier.AltModifier)):
+            self._ai.request_now()
+            event.accept()
+            return
 
         # 自动配对：开括号 / 引号
         if plain_modifier and text in self._AUTO_PAIRS:
@@ -1564,6 +1659,7 @@ class FileEditorWidget(QWidget):
     move_left_requested = pyqtSignal()  # 与左侧窗格交换位置
     move_up_requested = pyqtSignal()  # 与上方窗格交换位置
     pane_focused = pyqtSignal()  # 本窗格获得焦点 / 被点击
+    ai_completion_toggled = pyqtSignal(bool)  # 用户在标题栏切换 AI 补全开关
 
     def __init__(self, theme: dict = None, parent=None):
         super().__init__(parent)
@@ -1626,6 +1722,16 @@ class FileEditorWidget(QWidget):
         header_layout.addWidget(self.modified_label)
 
         # 不再 addStretch：file_label 已用 stretch=1 占满中间空间，按钮自然靠右。
+
+        # AI 行内补全开关（灰字建议，Tab 接受 / Esc 取消）
+        self.ai_btn = QPushButton("🤖")
+        self.ai_btn.setFixedSize(26, 26)
+        self.ai_btn.setCheckable(True)
+        self.ai_btn.setToolTip(t("editor.ai_toggle_tooltip"))
+        self.ai_btn.clicked.connect(
+            lambda checked: self.ai_completion_toggled.emit(bool(checked))
+        )
+        header_layout.addWidget(self.ai_btn)
 
         # 左右分屏按钮（并排查看不同文件）
         self.split_h_btn = QPushButton("◫")
@@ -2021,6 +2127,24 @@ class FileEditorWidget(QWidget):
         self.split_h_btn.setStyleSheet(split_btn_style)
         self.split_v_btn.setStyleSheet(split_btn_style)
 
+        # AI 补全开关：透明底；hover/选中（开启）时显示 accent
+        self.ai_btn.setStyleSheet(f"""
+            QPushButton {{
+                background-color: transparent;
+                color: {text_dim};
+                font-size: 14px;
+                border-radius: 4px;
+            }}
+            QPushButton:hover {{
+                background-color: {accent};
+                color: white;
+            }}
+            QPushButton:checked {{
+                background-color: {accent};
+                color: white;
+            }}
+        """)
+
         # 关闭按钮特殊样式
         self.close_btn.setStyleSheet(f"""
             QPushButton {{
@@ -2053,6 +2177,9 @@ class FileEditorWidget(QWidget):
             }}
         """)
 
+        # AI 灰字建议用暗色文字，跟随主题
+        self.editor.set_ai_ghost_color(QColor(self.theme.get('text_dim', '#6a737d')))
+
         # 行号条配色：默认用稍暗的 bg + 暗灰 fg，浅色主题则反向
         gutter_bg = self.theme.get('editor_gutter_bg')
         gutter_fg = self.theme.get('editor_gutter_fg')
@@ -2079,10 +2206,21 @@ class FileEditorWidget(QWidget):
         self.close_btn.setToolTip(t("editor.close_tooltip"))
         self.split_h_btn.setToolTip(t("editor.split_h_tooltip"))
         self.split_v_btn.setToolTip(t("editor.split_v_tooltip"))
+        if hasattr(self, 'ai_btn'):
+            self.ai_btn.setToolTip(t("editor.ai_toggle_tooltip"))
         if not self._current_file:
             self.file_label.setText(t("editor.no_file"))
         if hasattr(self, 'search_bar'):
             self.search_bar.apply_language()
+
+    def set_ai_completion_enabled(self, enabled: bool):
+        """设置本窗格 AI 补全开关，并同步标题栏按钮状态。"""
+        enabled = bool(enabled)
+        if hasattr(self, 'ai_btn') and self.ai_btn.isChecked() != enabled:
+            self.ai_btn.blockSignals(True)
+            self.ai_btn.setChecked(enabled)
+            self.ai_btn.blockSignals(False)
+        self.editor.set_ai_completion_enabled(enabled)
 
     def eventFilter(self, obj, event):
         """点击 / 聚焦本窗格的编辑区时，通知 EditorArea 把本窗格设为活动窗格。"""
@@ -2588,6 +2726,7 @@ class EditorArea(QWidget):
     all_closed = pyqtSignal()       # 最后一个窗格被关闭
     active_changed = pyqtSignal()   # 活动窗格发生变化
     file_saved = pyqtSignal(str)    # 任一窗格保存文件（转发）
+    ai_completion_toggled = pyqtSignal(bool)  # 任一窗格切换 AI 补全（转发给主窗口）
 
     def __init__(self, theme: dict = None, parent=None):
         super().__init__(parent)
@@ -2596,6 +2735,8 @@ class EditorArea(QWidget):
         self._active: FileEditorWidget | None = None
         # 统一字号（与终端联动）；新建窗格——含初始/分屏/重开——都继承它
         self._editor_point_size: int = 12
+        # AI 补全开关（全局一致）；新建窗格继承它
+        self._ai_completion_enabled: bool = False
 
         self._layout = QVBoxLayout(self)
         self._layout.setContentsMargins(0, 0, 0, 0)
@@ -2618,10 +2759,19 @@ class EditorArea(QWidget):
         pane.editor_closed.connect(lambda p=pane: self._on_pane_close_requested(p))
         pane.pane_focused.connect(lambda p=pane: self._set_active(p))
         pane.file_saved.connect(self.file_saved)
+        pane.ai_completion_toggled.connect(self.ai_completion_toggled)
         self._panes.append(pane)
         # 新窗格继承当前统一字号，保证与终端字号联动
         self._apply_point_size_to_pane(pane, self._editor_point_size)
+        # 新窗格继承当前 AI 补全开关
+        pane.set_ai_completion_enabled(self._ai_completion_enabled)
         return pane
+
+    def set_ai_completion_enabled(self, enabled: bool):
+        """统一设置所有窗格的 AI 补全开关，并记住它供新窗格继承。"""
+        self._ai_completion_enabled = bool(enabled)
+        for p in self._panes:
+            p.set_ai_completion_enabled(self._ai_completion_enabled)
 
     def _apply_point_size_to_pane(self, pane: 'FileEditorWidget', point_size: int):
         pane.set_editor_point_size(point_size)
