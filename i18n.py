@@ -451,6 +451,7 @@ TRANSLATIONS = {
 
     # ===== 文件编辑器 =====
     "editor.no_file": {"zh": "未打开文件", "en": "No file open"},
+    "editor.save_menu": {"zh": "保存  ⌘S", "en": "Save  ⌘S"},
     "editor.ai_toggle_tooltip": {"zh": "AI 行内补全（输入停顿后出现灰字建议；Tab 接受，Esc 取消，Alt+\\ 手动触发）。使用 ✨ 里配置的默认 LLM API。", "en": "AI inline completion (ghost suggestion after you pause typing; Tab to accept, Esc to dismiss, Alt+\\ to trigger). Uses the default LLM API configured under ✨."},
     "editor.close_tooltip": {"zh": "关闭编辑器", "en": "Close Editor"},
     "editor.split_h_tooltip": {"zh": "左右分屏 ⌘\\（并排查看另一个文件）", "en": "Split editor right ⌘\\ (view another file side by side)"},

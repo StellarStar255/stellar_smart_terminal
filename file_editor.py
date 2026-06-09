@@ -741,6 +741,12 @@ class CodeEditor(QPlainTextEdit):
         menu.addSeparator()
         # 用菜单当前文字色绘制图标，自动适配深/浅主题
         icon_color = menu.palette().color(QPalette.ColorRole.WindowText)
+        # 保存当前文件（与 Cmd+S 一致），仅在有打开文件时可用
+        act_save = menu.addAction(self._split_menu_icon('save', icon_color), t("editor.save_menu"))
+        pane_for_save = self._find_pane()
+        act_save.setEnabled(bool(pane_for_save and pane_for_save.get_current_file()))
+        act_save.triggered.connect(self._context_save)
+        menu.addSeparator()
         act_h = menu.addAction(self._split_menu_icon('h', icon_color), t("editor.split_h_menu"))
         act_h.triggered.connect(self.split_h_requested.emit)
         act_v = menu.addAction(self._split_menu_icon('v', icon_color), t("editor.split_v_menu"))
@@ -790,6 +796,10 @@ class CodeEditor(QPlainTextEdit):
             painter.drawLine(8, 4, 8, 12)
             painter.drawLine(8, 4, 4, 8)
             painter.drawLine(8, 4, 12, 8)
+        elif kind == 'save':                        # 软盘（保存）
+            painter.drawRoundedRect(QRect(3, 3, 10, 10), 1, 1)  # 外壳
+            painter.drawRect(QRect(5, 3, 6, 3))                 # 顶部滑片
+            painter.drawRect(QRect(6, 9, 4, 3))                 # 底部标签
         painter.end()
         return QIcon(pm)
 
@@ -810,6 +820,12 @@ class CodeEditor(QPlainTextEdit):
                 return p
             p = p.parent()
         return None
+
+    def _context_save(self):
+        """右键菜单「保存」：存当前编辑器所属窗格的文件。"""
+        pane = self._find_pane()
+        if pane is not None:
+            pane.save_file()
 
     def line_number_area_width(self) -> int:
         digits = max(3, len(str(max(1, self.blockCount()))))
