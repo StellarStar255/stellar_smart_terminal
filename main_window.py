@@ -11432,6 +11432,12 @@ class MainWindow(QMainWindow):
 
         menu.addSeparator()
 
+        # 切换工作目录到该 tab 终端的当前路径
+        switch_path_action = menu.addAction(t("tab.switch_to_path"))
+        switch_path_action.triggered.connect(lambda: self._switch_dir_to_tab_path(tab_index))
+
+        menu.addSeparator()
+
         # 重命名标签页（可复用历史名称）
         rename_action = menu.addAction(t("tab.rename"))
         rename_action.triggered.connect(lambda: self._rename_tab(tab_index))
@@ -11506,6 +11512,25 @@ class MainWindow(QMainWindow):
             self.tab_widget.setTabText(index, t("terminal.default_name", n=index + 1))
         self._update_window_title_from_tab(index)
         self._save_config()
+
+    def _switch_dir_to_tab_path(self, index):
+        """把工作目录切换到该 tab 终端进程的当前路径（右键菜单入口）。"""
+        if index < 0 or index >= self.tab_widget.count():
+            return
+        terminals = self.tab_terminals.get(index, [])
+        # 优先用该 tab 内当前激活的终端，否则退回第一个
+        terminal = None
+        if self.active_terminal and self.active_terminal in terminals:
+            terminal = self.active_terminal
+        elif terminals:
+            terminal = terminals[0]
+        cwd = terminal.get_cwd() if terminal else None
+        if not cwd or not os.path.isdir(cwd):
+            self.statusbar.showMessage(t("tab.switch_to_path_unavailable"), 3000)
+            return
+        # 复用现有切换逻辑：填入输入框后应用
+        self.working_dir_combo.setCurrentText(cwd)
+        self._apply_working_dir()
 
     def _rename_tab(self, index):
         """通过对话框重命名标签页（右键菜单入口，可从历史复用名称）。"""

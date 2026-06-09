@@ -689,6 +689,8 @@ TRANSLATIONS = {
     "tab.rename_title": {"zh": "重命名标签页", "en": "Rename Tab"},
     "tab.rename_prompt": {"zh": "输入新名称:", "en": "Enter new name:"},
     "tab.detach": {"zh": "分离为独立窗口", "en": "Detach to Window"},
+    "tab.switch_to_path": {"zh": "切换到当前终端路径", "en": "Switch to This Path"},
+    "tab.switch_to_path_unavailable": {"zh": "无法获取当前终端路径", "en": "Cannot determine terminal path"},
     "tab.close": {"zh": "关闭标签页", "en": "Close Tab"},
     "tab.close_others": {"zh": "关闭其他标签页", "en": "Close Other Tabs"},
 
