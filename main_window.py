@@ -566,6 +566,19 @@ class WindowNavigatorPanel(QWidget):
         self._apply_style()
         self._load_navigator_config()
 
+        # 新建面板时继承当前已存在面板的排序模式与手动顺序，
+        # 使多窗口列表保持一致（_manual_order 存 id(window)，跨窗口可直接复用）。
+        try:
+            for nav in MainWindow._iter_navigators():
+                if nav is self:
+                    continue
+                self._sort_mode = nav._sort_mode
+                self._manual_order = list(nav._manual_order)
+                self.drag_hint_label.setVisible(self._sort_mode == 'manual')
+                break
+        except Exception:
+            pass
+
         # 缓存上次的窗口信息，避免不必要的刷新
         self._last_window_info = []  # [(title, color), ...]
         self._cached_windows = []  # 缓存窗口引用
@@ -832,7 +845,8 @@ class WindowNavigatorPanel(QWidget):
         self.drag_hint_label.setVisible(mode == 'manual')
         if mode == 'manual':
             self._save_manual_order()
-        self._force_refresh()
+        # 同步排序模式到所有窗口的导航面板并刷新（_broadcast_sort_state 也会刷新自身）
+        self._broadcast_sort_state()
 
     def _on_rows_moved(self):
         """拖拽排序完成后自动切换到手动模式并保存顺序"""
@@ -840,6 +854,24 @@ class WindowNavigatorPanel(QWidget):
             self._sort_mode = 'manual'
             self.drag_hint_label.setVisible(True)
         self._save_manual_order()
+        # 同步到所有窗口的导航面板（含自身，用于刷新序号前缀）。
+        # 延迟到事件循环下一拍执行，避免在 rowsMoved 回调内 clear/重建模型导致重入。
+        QTimer.singleShot(0, self._broadcast_sort_state)
+
+    def _broadcast_sort_state(self):
+        """把当前排序模式 + 手动顺序同步到所有导航面板并刷新，使多窗口列表保持一致。"""
+        for nav in MainWindow._iter_navigators():
+            try:
+                if nav is not self:
+                    nav._sort_mode = self._sort_mode
+                    nav._manual_order = list(self._manual_order)
+                    try:
+                        nav.drag_hint_label.setVisible(self._sort_mode == 'manual')
+                    except Exception:
+                        pass
+                nav._force_refresh()
+            except Exception:
+                pass
 
     def _resolve_window(self, item):
         """从 QListWidgetItem 安全地拿回对应的 MainWindow。
