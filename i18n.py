@@ -673,6 +673,10 @@ TRANSLATIONS = {
     "ctx.close_split": {"zh": "关闭当前分屏", "en": "Close Current Split"},
     "ctx.move_split_left": {"zh": "向左移动", "en": "Move Left"},
     "ctx.move_split_up": {"zh": "向上移动", "en": "Move Up"},
+    "ctx.rename_split": {"zh": "重命名分屏...", "en": "Rename Split..."},
+    "split.rename_title": {"zh": "重命名分屏", "en": "Rename Split"},
+    "split.rename_prompt": {"zh": "输入分屏名称（留空清除）:", "en": "Split name (empty to clear):"},
+    "split.clear_name": {"zh": "清除名称", "en": "Clear name"},
 
     # ===== 状态栏/通用 =====
     "status.dir_history_tooltip": {"zh": "历史目录", "en": "Directory History"},

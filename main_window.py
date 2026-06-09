@@ -6489,6 +6489,7 @@ class MainWindow(QMainWindow):
                     terminal.close_split_requested.disconnect()
                     terminal.split_horizontal_requested.disconnect()
                     terminal.split_vertical_requested.disconnect()
+                    terminal.rename_split_requested.disconnect()
                 except (TypeError, RuntimeError):
                     pass  # Signal may already be disconnected
 
@@ -6508,6 +6509,7 @@ class MainWindow(QMainWindow):
                 terminal.split_vertical_requested.connect(lambda: self._split_vertical_current_terminal(self._shift_held()))
                 terminal.move_split_left_requested.connect(self._move_split_left)
                 terminal.move_split_up_requested.connect(self._move_split_up)
+                terminal.rename_split_requested.connect(lambda t=terminal: self._rename_split(t))
                 terminal.installEventFilter(self)
 
                 # 重新设置快速命令提供者，指向当前窗口的预设
@@ -6629,6 +6631,7 @@ class MainWindow(QMainWindow):
         terminal.split_vertical_requested.connect(lambda: self._split_vertical_current_terminal(self._shift_held()))
         terminal.move_split_left_requested.connect(self._move_split_left)
         terminal.move_split_up_requested.connect(self._move_split_up)
+        terminal.rename_split_requested.connect(lambda t=terminal: self._rename_split(t))
 
         # 设置工作目录（用于自动启动时）
         terminal.set_working_dir(self._window_cwd)
@@ -7523,7 +7526,10 @@ class MainWindow(QMainWindow):
         preset_name = preset.get('name', shell_cmd)
         folder_name = os.path.basename(working_dir)
         tab_title = f"{preset_name}-{folder_name}"
-        self.tab_widget.setTabText(tab_idx, tab_title)
+        # 用户自定义命名的标签不被自动改名覆盖
+        _page = self.tab_widget.widget(tab_idx)
+        if not getattr(_page, '_custom_tab_name', None):
+            self.tab_widget.setTabText(tab_idx, tab_title)
         # 同步更新窗口标题
         self._update_window_title_from_tab(tab_idx)
 
@@ -8951,7 +8957,9 @@ class MainWindow(QMainWindow):
         cur_terms = self.tab_terminals.get(cur_idx, [])
         if cur_idx >= 0 and len(cur_terms) == 1 and not cur_terms[0].has_started():
             idx = cur_idx
-            self.tab_widget.setTabText(idx, tab_name)
+            _page = self.tab_widget.widget(idx)
+            if not getattr(_page, '_custom_tab_name', None):
+                self.tab_widget.setTabText(idx, tab_name)
         else:
             idx = self._add_new_tab(tab_name=tab_name)
         # 获取这个 tab 的第一个终端，启动 ssh
@@ -10330,6 +10338,7 @@ class MainWindow(QMainWindow):
         self._saved_git_body_sizes = None     # Git 面板 body splitter 各栏尺寸（拖拽记忆）
         self._saved_nav_list_height = None    # 内嵌导航列表高度（拖拽记忆）
         self._custom_shortcuts = {}           # 用户自定义快捷键覆盖 {action_id: seq}
+        self.used_label_names = []            # 用过的 标签/分屏 名称历史（可复用）
         try:
             if self.CONFIG_FILE.exists():
                 with open(self.CONFIG_FILE, 'r', encoding='utf-8') as f:
@@ -10338,6 +10347,7 @@ class MainWindow(QMainWindow):
                     self.last_preset_index = config.get('last_preset_index', 0)
                     self.image_prefix_enabled = config.get('image_prefix_enabled', False)
                     self.image_save_local = config.get('image_save_local', True)
+                    self.used_label_names = config.get('used_label_names', [])
                     self.working_dir_history = config.get('working_dir_history', [])
                     self._working_dir_freq = config.get('working_dir_freq', {})
                     # 兼容旧配置：为没有频率记录的历史路径补默认值
@@ -10583,6 +10593,7 @@ class MainWindow(QMainWindow):
                 'image_prefix_enabled': image_prefix,
                 'image_save_local': image_local,
                 'working_dir_history': dir_history,
+                'used_label_names': self._merged_label_names(existing_config),
                 'working_dir_freq': self._working_dir_freq if hasattr(self, '_working_dir_freq') else {},
                 'last_working_dir': last_cwd,
                 'theme': self.current_theme,  # 保存主题设置
@@ -11353,11 +11364,99 @@ class MainWindow(QMainWindow):
 
         menu.addSeparator()
 
+        # 重命名标签页（可复用历史名称）
+        rename_action = menu.addAction(t("tab.rename"))
+        rename_action.triggered.connect(lambda: self._rename_tab(tab_index))
+
+        menu.addSeparator()
+
         # 关闭标签页
         close_action = menu.addAction(t("tab.close"))
         close_action.triggered.connect(lambda: self._close_tab(tab_index))
 
         menu.exec(tab_bar.mapToGlobal(pos))
+
+    # ==================== 标签 / 分屏自定义命名 ====================
+
+    def _prompt_label_name(self, title, prompt, current=""):
+        """弹出名称输入框，下拉列表为历史用过的名称（便于快速复用）。
+
+        返回 (name, ok)。name 可能为空串（表示清除/恢复默认）。
+        """
+        cur = (current or "").strip()
+        # 历史名称去重，把当前名置顶
+        items = []
+        if cur:
+            items.append(cur)
+        for n in getattr(self, 'used_label_names', []):
+            if n and n not in items:
+                items.append(n)
+        if items:
+            # 可编辑下拉框：既能从历史里选，也能直接输入新名
+            name, ok = QInputDialog.getItem(self, title, prompt, items, 0, True)
+        else:
+            name, ok = QInputDialog.getText(self, title, prompt, text=cur)
+        return (name, ok)
+
+    def _remember_label_name(self, name):
+        """把刚用过的名称记入历史（最近优先，去重，上限 30）"""
+        name = (name or "").strip()
+        if not name:
+            return
+        lst = getattr(self, 'used_label_names', None)
+        if lst is None:
+            lst = self.used_label_names = []
+        if name in lst:
+            lst.remove(name)
+        lst.insert(0, name)
+        del lst[30:]
+
+    def _merged_label_names(self, existing_config):
+        """合并磁盘与内存里的历史名称（多窗口共用配置时不互相覆盖）"""
+        disk = existing_config.get('used_label_names', []) if existing_config else []
+        out = []
+        for n in list(getattr(self, 'used_label_names', [])) + list(disk):
+            if n and n not in out:
+                out.append(n)
+        return out[:30]
+
+    def _rename_tab(self, index):
+        """重命名标签页。名称非空时「锁定」，不再被自动改名覆盖；留空恢复默认。"""
+        if index < 0 or index >= self.tab_widget.count():
+            return
+        page = self.tab_widget.widget(index)
+        current = getattr(page, '_custom_tab_name', None) or self.tab_widget.tabText(index)
+        name, ok = self._prompt_label_name(t("tab.rename_title"), t("tab.rename_prompt"), current)
+        if not ok:
+            return
+        name = (name or "").strip()
+        if name:
+            if page is not None:
+                page._custom_tab_name = name  # 锁定标记：存在该属性即视为用户自定义
+            self.tab_widget.setTabText(index, name)
+            self._remember_label_name(name)
+            self._update_window_title_from_tab(index)
+        else:
+            # 清除自定义名 → 解除锁定，恢复默认编号命名
+            if page is not None:
+                page._custom_tab_name = None
+            self.tab_widget.setTabText(index, t("terminal.default_name", n=index + 1))
+            self._update_window_title_from_tab(index)
+        self._save_config()
+
+    def _rename_split(self, terminal):
+        """重命名某个分屏（窗格）。名称非空时在窗格顶部显示标题栏，留空则清除。"""
+        if terminal is None:
+            return
+        current = terminal.get_split_label() or ""
+        name, ok = self._prompt_label_name(t("split.rename_title"), t("split.rename_prompt"), current)
+        if not ok:
+            return
+        name = (name or "").strip()
+        terminal.set_split_label(name)
+        if name:
+            self._remember_label_name(name)
+        self._save_config()
 
     def _show_openai_server_dialog(self, tab_index: int):
         """显示 OpenAI 服务器配置对话框"""

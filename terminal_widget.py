@@ -269,6 +269,7 @@ class TerminalWidget(QWidget):
     close_split_requested = pyqtSignal()  # 请求关闭当前分屏
     move_split_left_requested = pyqtSignal()  # 请求将当前分屏向左移动
     move_split_up_requested = pyqtSignal()  # 请求将当前分屏向上移动
+    rename_split_requested = pyqtSignal()  # 请求重命名当前分屏（显示/修改顶部标题栏）
 
     # 鲜艳的终端颜色 - One Dark Pro 风格
     DEFAULT_COLORS = {
@@ -324,6 +325,9 @@ class TerminalWidget(QWidget):
     # 终端内容边距（像素），左右各 PADDING，上下各 PADDING
     PADDING = 8
 
+    # 分屏自定义标题栏高度（仅在用户设置了名称后才占用此高度，默认 0）
+    HEADER_HEIGHT = 22
+
     # 原始输出诊断捕获（调试用）
     _debug_capture_enabled = False
     _debug_capture_file = None
@@ -342,6 +346,12 @@ class TerminalWidget(QWidget):
 
         # 工作目录（用于自动启动终端时）
         self._working_dir: Optional[str] = None
+
+        # 分屏自定义标签：None 表示未命名（默认不显示标题栏，不占用顶部空间）
+        self._split_label: Optional[str] = None
+        self._header_h = 0           # 顶部标题栏当前占用的像素高度（0 = 隐藏）
+        self._header_bar = None      # 标题栏 overlay 控件（首次命名时才创建）
+        self._header_label = None
 
         # 终端尺寸（限制行数减少空白）
         self.term_cols = 120
@@ -706,8 +716,8 @@ class TerminalWidget(QWidget):
         available_width = self.width() - p2
         # 允许更小的列数以支持分屏（最小 20 列）
         new_cols = max(20, int(available_width / self.char_width))
-        # 使用实际窗口计算的行数
-        available_height = self.height() - p2
+        # 使用实际窗口计算的行数（顶部标题栏会额外占用 _header_h）
+        available_height = self.height() - p2 - self._header_h
         # 允许更小的行数以支持分屏（最小 5 行）
         new_rows = max(5, int(available_height / self.char_height))
 
@@ -807,6 +817,10 @@ class TerminalWidget(QWidget):
         # 重新定位搜索栏（这个可以立即执行，很轻量）
         if hasattr(self, '_search_bar') and self._search_bar:
             self._position_search_bar()
+
+        # 重新定位分屏标题栏
+        if self._header_bar is not None and self._header_h:
+            self._position_header_bar()
 
         # 记录当前大小
         self._last_resize_size = self.size()
@@ -1337,8 +1351,9 @@ class TerminalWidget(QWidget):
         每隔几行多 1px 缝隙，导致带背景色的连续行看起来像断开的方块。
         用「下一格起点 - 当前格起点」算高度可保证逐行无缝。
         """
-        y_start = int(self.PADDING + row * self.char_height)
-        y_end = int(self.PADDING + (row + count) * self.char_height)
+        top = self.PADDING + self._header_h
+        y_start = int(top + row * self.char_height)
+        y_end = int(top + (row + count) * self.char_height)
         return y_start, y_end - y_start
 
     def _col_tile(self, col, count=1):
@@ -1582,11 +1597,12 @@ class TerminalWidget(QWidget):
         char_height = self.char_height
         bg_default = opaque_bg
         last_fg_color = None  # 缓存上一个前景色，减少 setPen 调用
-        padding = self.PADDING  # 局部变量加速
+        padding = self.PADDING  # 局部变量加速（横向用）
+        pad_top = self.PADDING + self._header_h  # 纵向起点（含标题栏占用）
         for display_row, buffer_line in enumerate(display_lines):
-            row_y = int(padding + display_row * char_height)
+            row_y = int(pad_top + display_row * char_height)
             # 用下一行起点减去本行起点作为本行高度，防止分数像素累计造成行间空隙
-            row_h = int(padding + (display_row + 1) * char_height) - row_y
+            row_h = int(pad_top + (display_row + 1) * char_height) - row_y
             text_y = int(row_y + self.char_ascent)
             row_cells = []
 
@@ -2172,7 +2188,7 @@ class TerminalWidget(QWidget):
                 cx = self.screen.cursor.x
                 cy = self.screen.cursor.y
                 x = int(self.PADDING + cx * self.char_width)
-                y = int(self.PADDING + cy * self.char_height)
+                y = int(self.PADDING + self._header_h + cy * self.char_height)
                 return QRect(x, y, int(self.char_width), int(self.char_height))
         elif query == Qt.InputMethodQuery.ImFont:
             # 返回当前字体，用于输入法渲染
@@ -2312,7 +2328,7 @@ class TerminalWidget(QWidget):
     def _pos_to_cell(self, pos: QPoint) -> tuple:
         """将鼠标位置转换为终端单元格坐标 (row, col) - 返回显示区域内的相对行号"""
         x = pos.x() - self.PADDING
-        y = pos.y() - self.PADDING
+        y = pos.y() - self.PADDING - self._header_h
 
         col = max(0, min(int(x / self.char_width), self.term_cols - 1))
         row = max(0, min(int(y / self.char_height), self.term_rows - 1))
@@ -2326,7 +2342,7 @@ class TerminalWidget(QWidget):
         避免因新输出导致 history_count 变化而产生偏移。
         """
         x = pos.x() - self.PADDING
-        y = pos.y() - self.PADDING
+        y = pos.y() - self.PADDING - self._header_h
 
         col = max(0, min(int(x / self.char_width), self.term_cols - 1))
         display_row = max(0, min(int(y / self.char_height), self.term_rows - 1))
@@ -2759,6 +2775,11 @@ class TerminalWidget(QWidget):
         move_up_action = QAction(t("ctx.move_split_up"), self)
         move_up_action.triggered.connect(self.move_split_up_requested.emit)
         menu.addAction(move_up_action)
+
+        # 重命名/清除分屏标签
+        rename_split_action = QAction(t("ctx.rename_split"), self)
+        rename_split_action.triggered.connect(self.rename_split_requested.emit)
+        menu.addAction(rename_split_action)
 
         menu.exec(event.globalPos())
 
@@ -3766,6 +3787,80 @@ if (hasFileURL) {{
             lines.pop()
 
         return '\n'.join(lines)
+
+    # ==================== 分屏自定义标签 ====================
+
+    def get_split_label(self):
+        """返回当前分屏的自定义名称（未命名时为 None）"""
+        return self._split_label
+
+    def set_split_label(self, name):
+        """设置或清除分屏自定义名称。
+
+        传入非空字符串：在窗格顶部显示一条标题栏（占据布局空间，内容相应下移）。
+        传入 None 或空串：隐藏标题栏，恢复默认的「无标签」状态。
+        """
+        name = (name or "").strip()
+        self._split_label = name or None
+        if self._split_label:
+            if self._header_bar is None:
+                self._create_header_bar()
+            self._header_label.setText(self._split_label)
+            self._header_bar.setToolTip(self._split_label)
+            self._header_h = self.HEADER_HEIGHT
+            self._position_header_bar()
+            self._header_bar.show()
+            self._header_bar.raise_()
+        else:
+            self._header_h = 0
+            if self._header_bar is not None:
+                self._header_bar.hide()
+        # 顶部留白变化 → 重算行数并整屏重绘
+        self._invalidate_render_cache()
+        self._update_terminal_size()
+        self.update()
+
+    def _create_header_bar(self):
+        """创建分屏标题栏 overlay（带名称文字 + 清除按钮）"""
+        self._header_bar = QWidget(self)
+        lay = QHBoxLayout(self._header_bar)
+        lay.setContentsMargins(8, 0, 4, 0)
+        lay.setSpacing(4)
+
+        self._header_label = QLabel("")
+        self._header_label.setStyleSheet(
+            "color:#eaeaea;background:transparent;font-size:12px;font-weight:bold;"
+        )
+
+        rename_btn = QPushButton("✎")
+        rename_btn.setFixedSize(18, 18)
+        rename_btn.setToolTip(t("ctx.rename_split"))
+        rename_btn.setStyleSheet(
+            "QPushButton{color:#cfcfe6;background:transparent;border:none;font-size:12px;}"
+            "QPushButton:hover{color:#667eea;}"
+        )
+        rename_btn.clicked.connect(self.rename_split_requested.emit)
+
+        clear_btn = QPushButton("×")
+        clear_btn.setFixedSize(18, 18)
+        clear_btn.setToolTip(t("split.clear_name"))
+        clear_btn.setStyleSheet(
+            "QPushButton{color:#cfcfe6;background:transparent;border:none;font-size:15px;}"
+            "QPushButton:hover{color:#ff6b6b;}"
+        )
+        clear_btn.clicked.connect(lambda: self.set_split_label(None))
+
+        lay.addWidget(self._header_label)
+        lay.addStretch(1)
+        lay.addWidget(rename_btn)
+        lay.addWidget(clear_btn)
+
+        self._header_bar.setStyleSheet("QWidget{background-color:#3d3d5c;}")
+
+    def _position_header_bar(self):
+        """把标题栏铺满窗格顶部"""
+        if self._header_bar is not None:
+            self._header_bar.setGeometry(0, 0, self.width(), self.HEADER_HEIGHT)
 
     # ==================== 搜索功能 ====================
 
