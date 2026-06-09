@@ -551,6 +551,10 @@ class DetachedWindow(QMainWindow):
         super().closeEvent(event)
 
 
+# 导航条目的「执行完毕」提醒标记角色（绿点）
+NAV_ATTENTION_ROLE = Qt.ItemDataRole.UserRole + 1
+
+
 class NoHighlightDelegate(QStyledItemDelegate):
     """自定义 delegate，禁用默认的选中高亮，使用 item 的背景色"""
 
@@ -567,6 +571,19 @@ class NoHighlightDelegate(QStyledItemDelegate):
 
         # 绘制文本和其他内容
         super().paint(painter, opt, index)
+
+        # 「执行完毕」提醒：在条目右侧画一个绿色小圆点
+        if index.data(NAV_ATTENTION_ROLE):
+            r = option.rect
+            d = 8
+            cx = r.right() - d - 6
+            cy = r.center().y()
+            painter.save()
+            painter.setRenderHint(QPainter.RenderHint.Antialiasing, True)
+            painter.setPen(Qt.PenStyle.NoPen)
+            painter.setBrush(QColor('#2ecc71'))
+            painter.drawEllipse(QPoint(cx, cy), d // 2, d // 2)
+            painter.restore()
 
 
 class WindowNavigatorPanel(QWidget):
@@ -1181,7 +1198,7 @@ class WindowNavigatorPanel(QWidget):
 
         # 检查是否有变化（标题或颜色）
         try:
-            current_info = [(w.windowTitle(), w.get_window_color()) for w in windows]
+            current_info = [(w.windowTitle(), w.get_window_color(), bool(getattr(w, '_nav_attention', False))) for w in windows]
         except Exception:
             # 窗口在遍历过程中被删除，重新刷新
             self._last_window_info = []
@@ -1222,6 +1239,7 @@ class WindowNavigatorPanel(QWidget):
                 wid = id(window)
                 # 只把 id（Python int）塞进 UserRole；真正的对象通过 weakref 解
                 item.setData(Qt.ItemDataRole.UserRole, wid)
+                item.setData(NAV_ATTENTION_ROLE, bool(getattr(window, '_nav_attention', False)))
                 new_refs[wid] = _weakref.ref(window)
                 item.setForeground(QColor(color))
                 self.window_list.addItem(item)
@@ -3570,6 +3588,8 @@ class MainWindow(QMainWindow):
         super().changeEvent(event)
         if event.type() == QEvent.Type.ActivationChange:
             if self.isActiveWindow():
+                # 用户切到本窗口 → 视为已查看，清除导航提醒小标
+                self._clear_nav_attention()
                 # 窗口激活时恢复定时器
                 if hasattr(self, '_log_timer') and self._log_timer:
                     self._log_timer.start(200)
@@ -6532,6 +6552,7 @@ class MainWindow(QMainWindow):
                     terminal.split_horizontal_requested.disconnect()
                     terminal.split_vertical_requested.disconnect()
                     terminal.rename_split_requested.disconnect()
+                    terminal.attention_requested.disconnect()
                 except (TypeError, RuntimeError):
                     pass  # Signal may already be disconnected
 
@@ -6552,6 +6573,7 @@ class MainWindow(QMainWindow):
                 terminal.move_split_left_requested.connect(self._move_split_left)
                 terminal.move_split_up_requested.connect(self._move_split_up)
                 terminal.rename_split_requested.connect(lambda t=terminal: self._rename_split(t))
+                terminal.attention_requested.connect(lambda t=terminal: self._on_terminal_attention(t))
                 terminal.installEventFilter(self)
 
                 # 重新设置快速命令提供者，指向当前窗口的预设
@@ -6674,6 +6696,7 @@ class MainWindow(QMainWindow):
         terminal.move_split_left_requested.connect(self._move_split_left)
         terminal.move_split_up_requested.connect(self._move_split_up)
         terminal.rename_split_requested.connect(lambda t=terminal: self._rename_split(t))
+        terminal.attention_requested.connect(lambda t=terminal: self._on_terminal_attention(t))
 
         # 设置工作目录（用于自动启动时）
         terminal.set_working_dir(self._window_cwd)
@@ -7408,6 +7431,9 @@ class MainWindow(QMainWindow):
 
     def _on_tab_changed(self, index):
         """标签页切换时的回调"""
+        # 切到别的 tab 也算"已查看"，清除提醒小标
+        if self.isActiveWindow():
+            self._clear_nav_attention()
         terminals = self.tab_terminals.get(index, [])
         if terminals:
             # 设置第一个终端为活动终端
@@ -11547,6 +11573,30 @@ class MainWindow(QMainWindow):
         if name:
             self._remember_label_name(name)
         self._save_config()
+
+    # ==================== 导航提醒小标（Claude/命令执行完毕） ====================
+
+    def _on_terminal_attention(self, terminal):
+        """某个终端疑似执行完毕。若该终端不是你正在看的活动终端，就在导航条目上打绿点。"""
+        # 正在前台看着的活动终端不打扰
+        if self.isActiveWindow() and terminal is self.active_terminal:
+            return
+        if getattr(self, '_nav_attention', False):
+            return  # 已经在提醒，避免重复刷新
+        self._nav_attention = True
+        try:
+            MainWindow._broadcast_navigator_refresh(invalidate_cache=True)
+        except Exception:
+            pass
+
+    def _clear_nav_attention(self):
+        """清除本窗口的导航提醒小标（用户已查看）"""
+        if getattr(self, '_nav_attention', False):
+            self._nav_attention = False
+            try:
+                MainWindow._broadcast_navigator_refresh(invalidate_cache=True)
+            except Exception:
+                pass
 
     def _show_openai_server_dialog(self, tab_index: int):
         """显示 OpenAI 服务器配置对话框"""

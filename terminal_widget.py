@@ -270,6 +270,7 @@ class TerminalWidget(QWidget):
     move_split_left_requested = pyqtSignal()  # 请求将当前分屏向左移动
     move_split_up_requested = pyqtSignal()  # 请求将当前分屏向上移动
     rename_split_requested = pyqtSignal()  # 请求重命名当前分屏（显示/修改顶部标题栏）
+    attention_requested = pyqtSignal()  # 疑似本轮命令/Claude 执行完毕（输出停顿或响铃），请求导航提醒
 
     # 鲜艳的终端颜色 - One Dark Pro 风格
     DEFAULT_COLORS = {
@@ -475,6 +476,16 @@ class TerminalWidget(QWidget):
         # 弹簧/动画等「连续 resize」期间：只把旧缓存缩放贴图，不每帧重建整屏，
         # 避免全屏字符重绘造成的卡顿。动画结束由 set_fast_resize(False) 触发一次重建。
         self._fast_resize = False
+
+        # 「执行完毕」检测：输出持续一阵后停顿 ≥ IDLE_MS 视为本轮命令/Claude 执行完毕。
+        # Claude 思考/工作时 spinner 会持续刷新输出 → 计时器不断重置，不会误判；
+        # 真正停下来才触发。响铃（BEL）则即时触发（见 _on_output）。
+        self._activity_idle_timer = QTimer()
+        self._activity_idle_timer.setSingleShot(True)
+        self._activity_idle_timer.timeout.connect(self._on_activity_settled)
+        self._had_output_activity = False
+        self._activity_bytes = 0
+        self._ACTIVITY_IDLE_MS = 1500
 
         # 设置
         self.setFocusPolicy(Qt.FocusPolicy.StrongFocus)
@@ -990,6 +1001,11 @@ class TerminalWidget(QWidget):
             text = self._RE_OSC_TITLE.sub('', text)         # OSC 0,1,2 标题
             text = self._RE_OSC_OTHER.sub('', text)         # 其他 OSC 序列 (7, 133 等)
 
+            # 终端响铃（BEL）：Claude Code / CLI 完成一轮或需要注意时常会响铃。
+            # 此时 OSC 序列里作为终止符的 BEL 已被上面剥掉，残留的 \x07 即真正的响铃 → 即时提醒。
+            if '\x07' in text:
+                self.attention_requested.emit()
+
             # pyte 不支持的字符串序列（内容会泄漏到显示缓冲区）
             text = self._RE_DCS.sub('', text)               # DCS 设备控制字符串
             text = self._RE_APC.sub('', text)               # APC 应用程序命令
@@ -1045,6 +1061,12 @@ class TerminalWidget(QWidget):
 
             # 缓冲输出，由定时器统一发送（避免高频输出时的信号风暴）
             self._output_buffer.append(text)
+
+            # 记录输出活动并重置空闲计时器：停顿超过阈值即视为本轮执行完毕
+            if text:
+                self._had_output_activity = True
+                self._activity_bytes += len(text)
+                self._activity_idle_timer.start(self._ACTIVITY_IDLE_MS)
         except Exception as e:
             import traceback
             print(f"Output error: {e}")
@@ -1065,6 +1087,20 @@ class TerminalWidget(QWidget):
             self._debug_capture_file = open(capture_path, 'w', encoding='utf-8')
             self._debug_capture_enabled = True
             print(f"[Terminal] Debug capture ENABLED → {capture_path}")
+
+    def _on_activity_settled(self):
+        """输出停顿超过阈值：疑似本轮命令/Claude 执行完毕 → 请求导航提醒。
+
+        是否真正打标由 MainWindow 决定（正在看的活动终端不打扰）。这里只在确有
+        一定量输出后才上报，过滤掉纯按键回显这类微小活动。
+        """
+        if not self._had_output_activity:
+            return
+        substantial = self._activity_bytes >= 4
+        self._had_output_activity = False
+        self._activity_bytes = 0
+        if substantial:
+            self.attention_requested.emit()
 
     def _on_process_finished(self, status: int):
         """进程结束"""
