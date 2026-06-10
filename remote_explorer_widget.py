@@ -40,6 +40,9 @@ from utils import (
     read_config_json, atomic_write_json,
     parse_search_tokens, name_matches_tokens,
 )
+from app_logging import get_logger
+
+logger = get_logger(__name__)
 
 
 # 子项的 UserRole 数据键
@@ -1266,7 +1269,7 @@ class RemoteExplorerPanel(QWidget):
                 try:
                     sess.disconnect()
                 except Exception as e:
-                    print(f"[RemoteExplorerPanel] async disconnect failed: {e}")
+                    logger.warning(f"[RemoteExplorerPanel] async disconnect failed: {e}")
             threading.Thread(target=_bg_disconnect, name="ssh-bg-disconnect", daemon=True).start()
         super().closeEvent(event)
 

@@ -17,6 +17,10 @@ from PyQt6.QtWidgets import (
     QHBoxLayout, QFrame, QApplication
 )
 
+from app_logging import get_logger
+
+logger = get_logger(__name__)
+
 
 @dataclass
 class Command:
@@ -370,7 +374,7 @@ class CommandPalette(QWidget):
             cmd.run()
         except Exception as e:
             # 失败信息打到控制台即可；UI 不弹窗以免干扰
-            print(f"[CommandPalette] command failed: {cmd.title}: {e}")
+            logger.warning(f"[CommandPalette] command failed: {cmd.title}: {e}")
 
     def eventFilter(self, obj, ev):
         # 列表视口的 hover：让光标所在项成为当前项，高亮自然跟随鼠标。

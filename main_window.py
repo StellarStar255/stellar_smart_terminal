@@ -57,6 +57,9 @@ from file_editor import FileEditorWidget, EditorArea
 from i18n import t, set_language, get_language
 from flow_layout import FlowLayout
 from utils import read_config_json, atomic_write_json
+from app_logging import get_logger
+
+logger = get_logger(__name__)
 import shutil
 import subprocess
 from widgets import (
@@ -1038,7 +1041,7 @@ class WindowNavigatorPanel(QWidget):
                 # 窗口已被销毁
                 pass
             except Exception as e:
-                print(f"[ForceClose] do_close failed: {e}")
+                logger.warning(f"[ForceClose] do_close failed: {e}")
             # 关闭完成后再刷新列表（navigator 仍存活时）
             def safe_refresh():
                 nav = nav_ref()
@@ -1755,7 +1758,7 @@ class MainWindow(QMainWindow):
                     # 通过标题匹配
                     if ns_window.title() == window_title:
                         self._apply_macos_window_behavior(ns_window)
-                        print(f"已设置窗口属性: {window_title}")
+                        logger.debug(f"已设置窗口属性: {window_title}")
                         return
                 except Exception:
                     continue
@@ -1770,7 +1773,7 @@ class MainWindow(QMainWindow):
                     continue
 
         except Exception as e:
-            print(f"设置 macOS 窗口属性失败: {e}")
+            logger.warning(f"设置 macOS 窗口属性失败: {e}")
 
     def _apply_macos_window_behavior(self, ns_window):
         """应用 macOS 窗口行为设置"""
@@ -1795,7 +1798,7 @@ class MainWindow(QMainWindow):
                 ns_window.setCanBecomeMainWindow_(True)
 
         except Exception as e:
-            print(f"应用 macOS 窗口行为失败: {e}")
+            logger.warning(f"应用 macOS 窗口行为失败: {e}")
 
     def _check_initial_running_state(self):
         """检查初始化后是否有正在运行的终端，并更新状态"""
@@ -3714,7 +3717,7 @@ class MainWindow(QMainWindow):
                 from AppKit import NSCommandKeyMask as NSEventModifierFlagCommand
                 from AppKit import NSShiftKeyMask as NSEventModifierFlagShift
         except Exception as e:
-            print(f"[backtick] 监听器导入失败: {e}")
+            logger.warning(f"[backtick] 监听器导入失败: {e}")
             return
 
         def _handler(event):
@@ -3735,7 +3738,7 @@ class MainWindow(QMainWindow):
             cls._backtick_monitor = NSEvent.addLocalMonitorForEventsMatchingMask_handler_(
                 NSEventMaskKeyDown, _handler)
         except Exception as e:
-            print(f"[backtick] 监听器安装失败: {e}")
+            logger.warning(f"[backtick] 监听器安装失败: {e}")
 
     def _effective_shortcut(self, action_id, default_seq):
         """返回某操作当前生效的键序列（用户覆盖优先，否则默认）。"""
@@ -9386,19 +9389,19 @@ class MainWindow(QMainWindow):
                 try:
                     self.session_manager.auto_save()
                 except Exception as e:
-                    print(f"[ForceClose] session auto_save failed: {e}")
+                    logger.warning(f"[ForceClose] session auto_save failed: {e}")
             try:
                 self._save_config()
             except Exception as e:
-                print(f"[ForceClose] _save_config failed: {e}")
+                logger.warning(f"[ForceClose] _save_config failed: {e}")
         except Exception as e:
-            print(f"[ForceClose] save phase failed: {e}")
+            logger.warning(f"[ForceClose] save phase failed: {e}")
 
         # 2) 立刻隐藏窗口：让 macOS / 导航面板都不再看到它
         try:
             self.hide()
         except Exception as e:
-            print(f"[ForceClose] hide failed: {e}")
+            logger.warning(f"[ForceClose] hide failed: {e}")
 
         # 3) 推迟真正的 close() 到下一拍事件循环
         def _do_close():
@@ -9408,7 +9411,7 @@ class MainWindow(QMainWindow):
             except RuntimeError:
                 pass
             except Exception as e:
-                print(f"[ForceClose] close failed: {e}")
+                logger.warning(f"[ForceClose] close failed: {e}")
         QTimer.singleShot(0, _do_close)
 
     def closeEvent(self, event):
@@ -9487,7 +9490,7 @@ class MainWindow(QMainWindow):
         try:
             self.openai_server_manager.stop_all()
         except Exception as e:
-            print(f"[Close] stop openai servers failed: {e}")
+            logger.warning(f"[Close] stop openai servers failed: {e}")
 
         # 停止定时器
         try:
@@ -9505,7 +9508,7 @@ class MainWindow(QMainWindow):
             if hasattr(self, 'git_panel') and self.git_panel is not None:
                 self.git_panel.shutdown()
         except Exception as e:
-            print(f"[Close] git panel shutdown failed: {e}")
+            logger.warning(f"[Close] git panel shutdown failed: {e}")
 
         # 完整清理所有终端资源
         # 注意：terminal.cleanup() 内部会 join 后端 reader thread (最长 2s)，
@@ -9517,15 +9520,15 @@ class MainWindow(QMainWindow):
                     try:
                         terminal.cleanup()
                     except Exception as e:
-                        print(f"[Close] terminal cleanup failed: {e}")
+                        logger.warning(f"[Close] terminal cleanup failed: {e}")
         except Exception as e:
-            print(f"[Close] terminal cleanup loop failed: {e}")
+            logger.warning(f"[Close] terminal cleanup loop failed: {e}")
 
         # 保存配置（包括最后选中的预设）
         try:
             self._save_config()
         except Exception as e:
-            print(f"[Close] save_config failed: {e}")
+            logger.warning(f"[Close] save_config failed: {e}")
 
         # 立即刷新窗口导航（窗口关闭时）—— 广播到浮动与所有内嵌面板
         # 延迟到本窗口真正从 topLevelWidgets 移除后再刷新，使列表不再含本窗口
@@ -9535,7 +9538,7 @@ class MainWindow(QMainWindow):
             except RuntimeError:
                 pass
             except Exception as e:
-                print(f"[Close] navigator refresh failed: {e}")
+                logger.warning(f"[Close] navigator refresh failed: {e}")
         QTimer.singleShot(200, refresh_navigator)
 
         event.accept()
@@ -9582,7 +9585,7 @@ class MainWindow(QMainWindow):
             QTimer.singleShot(0, app.quit)
         except Exception as e:
             # closeEvent 内异常绝不能逃逸到 Qt C++ 侧（否则可能 abort）
-            print(f"[Close] quit-if-last check failed: {e}")
+            logger.warning(f"[Close] quit-if-last check failed: {e}")
 
     # ================== OpenAI API 服务器相关方法 ==================
 

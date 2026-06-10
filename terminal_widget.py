@@ -17,6 +17,9 @@ import pyte
 
 from terminal_backend import create_backend, TerminalBackend
 from i18n import t
+from app_logging import get_logger
+
+logger = get_logger(__name__)
 
 
 # pyte 0.8 未实现 REP (CSI Pn b) —— 把前一个图形字符重复 N 次。
@@ -834,7 +837,7 @@ class TerminalWidget(QWidget):
             or abs(real_ch - self.char_height) > 0.5
             or abs(real_ascent - self.char_ascent) > 0.5
         ):
-            print(
+            logger.debug(
                 f"[Terminal] DPI/CJK metrics fix: "
                 f"{self.char_width:.1f}x{self.char_height:.1f} -> {real_cw:.1f}x{real_ch:.1f}"
             )
@@ -874,7 +877,7 @@ class TerminalWidget(QWidget):
             # 但这种情况极少且很快被新重绘覆盖，远好于内容完全消失。
 
             self._invalidate_render_cache()
-            print(f"[Terminal] Size: {old_cols}x{old_rows} -> {new_cols}x{new_rows} (widget: {self.width()}x{self.height()}, char_w: {self.char_width:.1f})")
+            logger.debug(f"[Terminal] Size: {old_cols}x{old_rows} -> {new_cols}x{new_rows} (widget: {self.width()}x{self.height()}, char_w: {self.char_width:.1f})")
 
     def _reflow_idle_prompt_to_top(self):
         """缩小终端后，若光标处于空闲提示符（其下方没有任何内容），但上方残留若干空行，
@@ -930,7 +933,7 @@ class TerminalWidget(QWidget):
         try:
             self._backend.resize(self.term_cols, self.term_rows)
         except Exception as e:
-            print(f"[Terminal] Error updating PTY size: {e}")
+            logger.warning(f"[Terminal] Error updating PTY size: {e}")
 
     def _write_to_backend(self, data: bytes) -> bool:
         """写入数据到终端后端"""
@@ -1046,7 +1049,7 @@ class TerminalWidget(QWidget):
             QTimer.singleShot(100, self._update_terminal_size)
             QTimer.singleShot(500, self._update_terminal_size)
         else:
-            print("[Terminal] Failed to start process")
+            logger.error("[Terminal] Failed to start process")
             self._backend = None
             self._signal_bridge = None
 
@@ -1161,7 +1164,7 @@ class TerminalWidget(QWidget):
                 self.stream.feed(text)
             except Exception as feed_err:
                 # pyte 处理异常时尝试逐字符恢复，避免丢失整块数据
-                print(f"[Terminal] stream.feed error: {feed_err}, attempting char-by-char recovery")
+                logger.warning(f"[Terminal] stream.feed error: {feed_err}, attempting char-by-char recovery")
                 if self._debug_capture_enabled and self._debug_capture_file:
                     self._debug_capture_file.write(f"FEED ERROR: {feed_err}\n")
                 for ch in text:
@@ -1191,9 +1194,7 @@ class TerminalWidget(QWidget):
                 self._activity_bytes += len(text)
                 self._activity_idle_timer.start(self._ACTIVITY_IDLE_MS)
         except Exception as e:
-            import traceback
-            print(f"Output error: {e}")
-            traceback.print_exc()
+            logger.exception(f"Output error: {e}")
 
     def toggle_debug_capture(self):
         """切换原始输出诊断捕获（用于排查内容过滤问题）"""
@@ -1203,13 +1204,13 @@ class TerminalWidget(QWidget):
             if self._debug_capture_file:
                 self._debug_capture_file.close()
                 self._debug_capture_file = None
-            print("[Terminal] Debug capture DISABLED")
+            logger.info("[Terminal] Debug capture DISABLED")
         else:
             # 开启捕获
             capture_path = os.path.join(os.path.dirname(__file__), 'terminal_raw_capture.log')
             self._debug_capture_file = open(capture_path, 'w', encoding='utf-8')
             self._debug_capture_enabled = True
-            print(f"[Terminal] Debug capture ENABLED → {capture_path}")
+            logger.info(f"[Terminal] Debug capture ENABLED → {capture_path}")
 
     def _on_activity_settled(self):
         """输出停顿超过阈值：疑似本轮命令/Claude 执行完毕 → 请求导航提醒。
@@ -1415,15 +1416,15 @@ class TerminalWidget(QWidget):
                         for ln in _cell_detail(row_obj, cols):
                             f.write(ln + "\n")
 
-        print(f"[Terminal] Buffer dumped to {dump_path}")
+        logger.info(f"[Terminal] Buffer dumped to {dump_path}")
 
         cache_png = self._debug_save_cache_pixmap()
         if cache_png:
-            print(f"[Terminal] Cache pixmap saved to {cache_png}")
+            logger.info(f"[Terminal] Cache pixmap saved to {cache_png}")
 
         screen_png = self._debug_save_widget_screenshot()
         if screen_png:
-            print(f"[Terminal] Widget screenshot saved to {screen_png}")
+            logger.info(f"[Terminal] Widget screenshot saved to {screen_png}")
 
     def _calibrate_char_width(self, painter: QPainter):
         """通过实际渲染校准字符宽度"""
@@ -1441,7 +1442,7 @@ class TerminalWidget(QWidget):
             self.char_width = painter_width
             self.char_height = painter_height
             self.char_ascent = painter_ascent
-            print(
+            logger.debug(
                 f"[Terminal] Calibration: "
                 f"{old_cw:.1f}x{old_ch:.1f} -> {self.char_width:.1f}x{self.char_height:.1f}"
             )
@@ -3550,7 +3551,7 @@ class TerminalWidget(QWidget):
                 # 不是提交，只是追加到缓冲区
                 self.input_buffer += text
         except Exception as e:
-            print(f"Send text error: {e}")
+            logger.warning(f"Send text error: {e}")
 
     def clear_screen(self):
         """清屏"""
@@ -3583,7 +3584,7 @@ class TerminalWidget(QWidget):
             else:
                 self._update_pty_size()
         except Exception as e:
-            print(f"[Terminal] refresh resize error: {e}")
+            logger.warning(f"[Terminal] refresh resize error: {e}")
 
     def _restore_pty_size_after_refresh(self):
         """refresh_terminal 抖动后把 PTY 尺寸恢复到当前实际值，并再重绘一次。"""
@@ -3592,7 +3593,7 @@ class TerminalWidget(QWidget):
         try:
             self._backend.resize(self.term_cols, self.term_rows)
         except Exception as e:
-            print(f"[Terminal] refresh restore error: {e}")
+            logger.warning(f"[Terminal] refresh restore error: {e}")
         self._invalidate_render_cache()
 
     def is_running(self) -> bool:
@@ -4691,7 +4692,7 @@ if (hasFileURL) {{
                 with open(file_path, 'w', encoding='utf-8') as f:
                     f.write(content)
             except Exception as e:
-                print(f"Save error: {e}")
+                logger.error(f"Save error: {e}")
 
     # ==================== 清屏 ====================
 

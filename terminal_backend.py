@@ -8,6 +8,10 @@ import threading
 from abc import ABC, abstractmethod
 from typing import Optional, List, Callable
 
+from app_logging import get_logger
+
+logger = get_logger(__name__)
+
 # 平台检测
 IS_WINDOWS = sys.platform == 'win32'
 
@@ -296,10 +300,10 @@ if IS_WINDOWS:
                 )
                 if hr == 0:
                     passthrough_ok = True
-                    print("[WindowsBackend] *** ConPTY PASSTHROUGH mode enabled ***")
+                    logger.info("[WindowsBackend] *** ConPTY PASSTHROUGH mode enabled ***")
                 else:
                     # Passthrough 不可用，回退到普通模式
-                    print(f"[WindowsBackend] *** Passthrough FAILED (hr=0x{hr:08x}), falling back to normal ConPTY ***")
+                    logger.warning(f"[WindowsBackend] *** Passthrough FAILED (hr=0x{hr:08x}), falling back to normal ConPTY ***")
                     hr = kernel32.CreatePseudoConsole(
                         size,
                         wintypes.HANDLE(self._pipe_in_read),
@@ -309,7 +313,7 @@ if IS_WINDOWS:
                     )
                     if hr != 0:
                         raise OSError(f"CreatePseudoConsole failed: HRESULT 0x{hr:08x}")
-                    print("[WindowsBackend] Normal ConPTY mode (no passthrough)")
+                    logger.info("[WindowsBackend] Normal ConPTY mode (no passthrough)")
 
                 self._hpc = hpc.value
 
@@ -416,7 +420,7 @@ if IS_WINDOWS:
                 return True
 
             except Exception as e:
-                print(f"[WindowsBackend] Error starting process: {e}")
+                logger.error(f"[WindowsBackend] Error starting process: {e}")
                 import traceback
                 traceback.print_exc()
                 self._cleanup()
@@ -446,7 +450,7 @@ if IS_WINDOWS:
                         break
                 except Exception as e:
                     if self._running:
-                        print(f"[WindowsBackend] Read error: {e}")
+                        logger.warning(f"[WindowsBackend] Read error: {e}")
                     break
 
             # 进程结束处理
@@ -484,7 +488,7 @@ if IS_WINDOWS:
                 )
                 return bool(success)
             except Exception as e:
-                print(f"[WindowsBackend] Write error: {e}")
+                logger.warning(f"[WindowsBackend] Write error: {e}")
                 return False
 
         def resize(self, cols: int, rows: int) -> bool:
@@ -497,7 +501,7 @@ if IS_WINDOWS:
                 )
                 return hr == 0
             except Exception as e:
-                print(f"[WindowsBackend] Resize error: {e}")
+                logger.warning(f"[WindowsBackend] Resize error: {e}")
                 return False
 
         def stop(self) -> None:
@@ -703,7 +707,7 @@ else:
                     return True
 
             except Exception as e:
-                print(f"[UnixBackend] Error starting process: {e}")
+                logger.error(f"[UnixBackend] Error starting process: {e}")
                 self._cleanup()
                 return False
 
@@ -790,7 +794,7 @@ else:
                 os.write(self._master_fd, data)
                 return True
             except Exception as e:
-                print(f"[UnixBackend] Write error: {e}")
+                logger.warning(f"[UnixBackend] Write error: {e}")
                 return False
 
         def resize(self, cols: int, rows: int) -> bool:
@@ -812,7 +816,7 @@ else:
                             pass
                 return True
             except Exception as e:
-                print(f"[UnixBackend] Resize error: {e}")
+                logger.warning(f"[UnixBackend] Resize error: {e}")
                 return False
 
         def stop(self) -> None:

@@ -39,8 +39,11 @@ from PyQt6.QtWidgets import QApplication
 from PyQt6.QtGui import QFont, QPalette, QColor, QIcon, QPixmap
 from PyQt6.QtCore import Qt, QSize
 
+from app_logging import setup_logging, get_logger
 from main_window import MainWindow
 from i18n import t
+
+logger = get_logger(__name__)
 
 
 def install_global_excepthook():
@@ -85,6 +88,14 @@ def install_global_excepthook():
             with open(log_path, "a", encoding="utf-8") as f:
                 f.write(f"\n===== {datetime.now().isoformat()} =====\n")
                 f.write(tb_text)
+        except Exception:
+            pass
+        # 同步记录到统一日志系统
+        try:
+            logger.error(
+                "Uncaught exception",
+                exc_info=(exc_type, exc_value, exc_tb),
+            )
         except Exception:
             pass
 
@@ -226,6 +237,9 @@ StartupWMClass=smart-terminal
 
 def main():
     """主函数"""
+    # 尽早初始化日志系统，保证后续所有模块的 logger 输出有处可去
+    setup_logging()
+
     # 尽早安装全局异常钩子：把 Qt 回调中的未捕获异常从“闪退(abort)”降级为
     # “记录日志并继续运行”，必须在创建 QApplication / 进入事件循环之前完成。
     install_global_excepthook()
