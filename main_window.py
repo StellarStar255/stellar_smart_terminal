@@ -8414,9 +8414,10 @@ class MainWindow(QMainWindow):
     # 合计窄于 ENABLE → spring 生效；宽于 DISABLE → spring 失效（恢复均分）；两阈值之间维持现状。
     # 用合计宽度而非整窗宽度：① 排除左侧栏，更贴近「两边能否都铺得舒服」；
     # ② spring 只在两者间挪分界、合计恒定，故不会反馈震荡。
-    # 取值按每边可读宽度估（14pt 下 80 列 ≈ 640px）：合计 <1200 每边偏挤、>1450 每边约 85~90 列够用。
-    SPRING_WIDTH_ENABLE = 1200
-    SPRING_WIDTH_DISABLE = 1450
+    # 取值适配超宽屏（如 3440 宽）常态窗口：合计 ≈1430 的半屏窗口仍算「窄」、应让 spring 生效；
+    # 只有合计 >2000（每边 ~1000，两边都能舒服铺开）才自动失效恢复均衡。
+    SPRING_WIDTH_ENABLE = 1800
+    SPRING_WIDTH_DISABLE = 2000
 
     def _set_spring_checkboxes(self, enabled: bool):
         """把本窗口两处弹簧复选框设为指定状态（屏蔽信号，避免回环触发）。"""
@@ -8525,6 +8526,10 @@ class MainWindow(QMainWindow):
             new_gate = w <= self.SPRING_WIDTH_DISABLE   # 宽于 DISABLE 才关闭
         else:
             new_gate = w < self.SPRING_WIDTH_ENABLE     # 窄于 ENABLE 才重新允许
+        # TEMP 调试：打印代码实际看到的合计宽度与门控决策，用真实逻辑像素调阈值
+        print(f"[Spring] combined_w={w} enable<{self.SPRING_WIDTH_ENABLE} "
+              f"disable>{self.SPRING_WIDTH_DISABLE} gate={old_gate}->{new_gate} "
+              f"spring_on={getattr(self, '_spring_mode_enabled', False)}")
         if new_gate == old_gate:
             return
         self._spring_width_gate = new_gate
