@@ -15,7 +15,7 @@ from typing import Optional
 from i18n import t
 import explorer_clipboard
 from utils import (
-    read_config_json, atomic_write_json,
+    read_config_json, atomic_write_json, get_config_path,
     parse_search_tokens, name_matches_tokens,
 )
 
@@ -368,7 +368,7 @@ class ExplorerPanel(QWidget):
 
     def _config_file_path(self) -> Path:
         """主配置文件位置（与 main_window / git_widget 共用）。"""
-        return Path(__file__).parent / ".smart_terminal_config.json"
+        return get_config_path()
 
     def _load_show_hidden(self) -> bool:
         cfg, _ok = read_config_json(self._config_file_path())

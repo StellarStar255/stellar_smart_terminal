@@ -12,8 +12,10 @@ import threading
 from pathlib import Path
 from typing import Optional
 
+from utils import get_data_dir
 
-_PATH = Path(__file__).parent / ".smart_terminal_remote_bookmarks.json"
+
+_PATH = get_data_dir() / ".smart_terminal_remote_bookmarks.json"
 _lock = threading.Lock()
 _cache: Optional[dict[str, list[str]]] = None
 

@@ -62,8 +62,9 @@ def install_global_excepthook():
     """
     import traceback
     from datetime import datetime
+    from utils import get_data_dir
 
-    log_path = Path(__file__).parent / ".smart_terminal_crash.log"
+    log_path = get_data_dir() / ".smart_terminal_crash.log"
     default_hook = sys.excepthook
 
     def _hook(exc_type, exc_value, exc_tb):

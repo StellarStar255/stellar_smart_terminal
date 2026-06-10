@@ -16,6 +16,7 @@ import tempfile
 import unittest
 from datetime import datetime
 from pathlib import Path
+from unittest import mock
 
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
@@ -225,6 +226,66 @@ class TestCopyFilesToExport(unittest.TestCase):
     def test_missing_files_skipped(self):
         mapping = utils.copy_files_to_export(["/no/such/file.png"], self.export_dir)
         self.assertEqual(mapping, {})
+
+
+class TestDataDir(unittest.TestCase):
+    """get_data_dir / get_config_path：源码模式路径不变 + frozen 模式落到平台数据目录"""
+
+    def _fake_home(self) -> Path:
+        tmp = Path(tempfile.mkdtemp(prefix="stellar_test_home_"))
+        self.addCleanup(shutil.rmtree, tmp, ignore_errors=True)
+        return tmp
+
+    def test_source_mode_is_project_dir(self):
+        # 源码运行：行为必须与历史一致 —— 数据目录就是项目目录
+        self.assertFalse(utils.is_frozen())
+        root = Path(utils.__file__).parent
+        self.assertEqual(utils.get_data_dir(), root)
+        self.assertEqual(
+            utils.get_config_path(), root / ".smart_terminal_config.json"
+        )
+
+    def test_sessions_and_exports_under_data_dir(self):
+        sessions = utils.get_sessions_dir()
+        exports = utils.get_exports_dir()
+        self.assertEqual(sessions, utils.get_data_dir() / "sessions")
+        self.assertEqual(exports, utils.get_data_dir() / "exports")
+        self.assertTrue(sessions.is_dir())
+        self.assertTrue(exports.is_dir())
+
+    def test_frozen_macos_path_and_creation(self):
+        home = self._fake_home()
+        with mock.patch.object(utils.sys, "frozen", True, create=True), \
+             mock.patch.object(utils.sys, "platform", "darwin"), \
+             mock.patch.object(utils.Path, "home", return_value=home):
+            self.assertTrue(utils.is_frozen())
+            data_dir = utils.get_data_dir()
+            config = utils.get_config_path()
+        expected = home / "Library" / "Application Support" / "StellarSmartTerminal"
+        self.assertEqual(data_dir, expected)
+        self.assertTrue(data_dir.is_dir())  # frozen 模式下需自动创建
+        self.assertEqual(config, expected / ".smart_terminal_config.json")
+
+    def test_frozen_linux_path_and_creation(self):
+        home = self._fake_home()
+        with mock.patch.object(utils.sys, "frozen", True, create=True), \
+             mock.patch.object(utils.sys, "platform", "linux"), \
+             mock.patch.object(utils.Path, "home", return_value=home):
+            data_dir = utils.get_data_dir()
+        self.assertEqual(
+            data_dir, home / ".local" / "share" / "StellarSmartTerminal"
+        )
+        self.assertTrue(data_dir.is_dir())
+
+    def test_frozen_windows_path_uses_appdata_env(self):
+        home = self._fake_home()
+        appdata = home / "AppData" / "Roaming"
+        with mock.patch.object(utils.sys, "frozen", True, create=True), \
+             mock.patch.object(utils.sys, "platform", "win32"), \
+             mock.patch.dict(utils.os.environ, {"APPDATA": str(appdata)}):
+            data_dir = utils.get_data_dir()
+        self.assertEqual(data_dir, appdata / "StellarSmartTerminal")
+        self.assertTrue(data_dir.is_dir())
 
 
 if __name__ == "__main__":

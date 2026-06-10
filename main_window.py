@@ -56,7 +56,7 @@ from command_palette import CommandPalette
 from file_editor import FileEditorWidget, EditorArea
 from i18n import t, set_language, get_language
 from flow_layout import FlowLayout
-from utils import read_config_json, atomic_write_json
+from utils import read_config_json, atomic_write_json, get_config_path
 from app_logging import get_logger
 
 logger = get_logger(__name__)
@@ -1085,7 +1085,7 @@ class WindowNavigatorPanel(QWidget):
     def _save_navigator_config(self):
         """保存导航面板设置到主配置文件"""
         try:
-            config_file = Path(__file__).parent / ".smart_terminal_config.json"
+            config_file = get_config_path()
             existing, ok = read_config_json(config_file)
             # 文件存在但解析失败：可能正被别的进程写到一半，放弃本次保存，
             # 否则会把对方的更改（如 git_proxy）当作"已损坏"全部覆盖掉。
@@ -1104,7 +1104,7 @@ class WindowNavigatorPanel(QWidget):
     def _load_navigator_config(self):
         """从主配置文件加载导航面板设置"""
         try:
-            config_file = Path(__file__).parent / ".smart_terminal_config.json"
+            config_file = get_config_path()
             if config_file.exists():
                 with open(config_file, 'r', encoding='utf-8') as f:
                     config = json.load(f)
@@ -1173,8 +1173,8 @@ class WindowNavigatorPanel(QWidget):
 class MainWindow(QMainWindow):
     """主窗口"""
 
-    # 配置文件路径
-    CONFIG_FILE = Path(__file__).parent / ".smart_terminal_config.json"
+    # 配置文件路径（源码运行=项目目录；打包运行=平台用户数据目录，见 utils.get_data_dir）
+    CONFIG_FILE = get_config_path()
 
     # 本地快速命令配置
     LOCAL_CONFIG_DIR = ".sterminal"

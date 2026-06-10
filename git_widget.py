@@ -153,7 +153,7 @@ def _make_git_tool_icon(kind: str, color: str, px: int = 16) -> QIcon:
 
 from git_manager import GitManager, GitFile, FileStatus
 from i18n import t, get_language
-from utils import read_config_json, atomic_write_json
+from utils import read_config_json, atomic_write_json, get_config_path
 
 
 # 文件状态颜色
@@ -2660,7 +2660,7 @@ class GitPanel(QWidget):
 
     def _config_file_path(self) -> Path:
         """主配置文件位置（与 main_window 共用 .smart_terminal_config.json）。"""
-        return Path(__file__).parent / ".smart_terminal_config.json"
+        return get_config_path()
 
     def _load_config(self) -> dict:
         cfg, _ok = read_config_json(self._config_file_path())

@@ -18,6 +18,7 @@ import pyte
 from terminal_backend import create_backend, TerminalBackend
 from i18n import t
 from app_logging import get_logger
+from utils import get_data_dir
 
 logger = get_logger(__name__)
 
@@ -1325,7 +1326,7 @@ class TerminalWidget(QWidget):
             logger.info("[Terminal] Debug capture DISABLED")
         else:
             # 开启捕获
-            capture_path = os.path.join(os.path.dirname(__file__), 'terminal_raw_capture.log')
+            capture_path = str(get_data_dir() / 'terminal_raw_capture.log')
             self._debug_capture_file = open(capture_path, 'w', encoding='utf-8')
             self._debug_capture_enabled = True
             logger.info(f"[Terminal] Debug capture ENABLED → {capture_path}")
@@ -1364,7 +1365,7 @@ class TerminalWidget(QWidget):
         """保存当前 cache pixmap 为 PNG，便于和屏幕实际显示对比。"""
         if self._cache_pixmap is None or self._cache_pixmap.isNull():
             return None
-        out_path = os.path.join(os.path.dirname(__file__), 'pyte_cache_dump.png')
+        out_path = str(get_data_dir() / 'pyte_cache_dump.png')
         ok = self._cache_pixmap.save(out_path, "PNG")
         if ok:
             return out_path
@@ -1377,7 +1378,7 @@ class TerminalWidget(QWidget):
         就能定位 bug 是在缓存阶段还是 paintEvent 的 overlay 阶段（cursor / selection /
         search highlight / IME preedit）。
         """
-        out_path = os.path.join(os.path.dirname(__file__), 'pyte_widget_screenshot.png')
+        out_path = str(get_data_dir() / 'pyte_widget_screenshot.png')
         pix = self.grab()
         if pix.isNull():
             return None
@@ -1395,7 +1396,7 @@ class TerminalWidget(QWidget):
         3) Stellar 进程内实测字体度量（QFontInfo / QFontMetricsF / painter.fontMetrics()）
            —— 这是诊断 char_width 与 CJK glyph advance 不匹配的关键。
         """
-        dump_path = os.path.join(os.path.dirname(__file__), 'pyte_buffer_dump.txt')
+        dump_path = str(get_data_dir() / 'pyte_buffer_dump.txt')
 
         # --- 进程内实测字体度量 ---
         from PyQt6.QtGui import QFontInfo, QFontMetricsF, QPixmap, QPainter

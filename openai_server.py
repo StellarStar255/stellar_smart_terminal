@@ -1007,7 +1007,13 @@ class OpenAIRequestHandler(BaseHTTPRequestHandler):
 
             image_data = base64.b64decode(data)
             timestamp = datetime.now().strftime("%Y%m%d_%H%M%S_%f")
-            images_dir = Path(os.getcwd()) / ".images"
+            # 源码运行：沿用进程工作目录（行为不变）；打包运行：cwd 通常是 "/"
+            # （Finder 启动）不可写，改存到用户数据目录。
+            from utils import is_frozen, get_data_dir
+            if is_frozen():
+                images_dir = get_data_dir() / ".images"
+            else:
+                images_dir = Path(os.getcwd()) / ".images"
             images_dir.mkdir(exist_ok=True)
             file_path = images_dir / f"api_{timestamp}{ext}"
             with open(file_path, 'wb') as f:

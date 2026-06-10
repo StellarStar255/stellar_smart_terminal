@@ -2,8 +2,10 @@
 工具函数模块
 """
 import json
+import os
 import re
 import shutil
+import sys
 import tempfile
 from datetime import datetime
 from pathlib import Path
@@ -53,16 +55,49 @@ def get_project_root() -> Path:
     return Path(__file__).parent
 
 
+def is_frozen() -> bool:
+    """是否运行在 PyInstaller 等打包产物中"""
+    return bool(getattr(sys, 'frozen', False))
+
+
+def get_data_dir() -> Path:
+    """用户数据目录（配置 / 会话 / 导出等的统一根目录）。
+
+    - 源码运行：返回项目目录（Path(__file__).parent），与历史行为完全一致，
+      现有用户数据仍在原位被找到。
+    - 打包运行（frozen）：返回并创建平台标准的用户数据目录，避免把数据写进
+      .app bundle 内部（/Applications 下无写权限，且 App Translocation 会
+      让 bundle 路径每次启动都变化）。
+    """
+    if not is_frozen():
+        return Path(__file__).parent
+    if sys.platform == 'darwin':
+        data_dir = Path.home() / "Library" / "Application Support" / "StellarSmartTerminal"
+    elif sys.platform == 'win32':
+        appdata = os.environ.get('APPDATA')
+        base = Path(appdata) if appdata else Path.home() / "AppData" / "Roaming"
+        data_dir = base / "StellarSmartTerminal"
+    else:
+        data_dir = Path.home() / ".local" / "share" / "StellarSmartTerminal"
+    data_dir.mkdir(parents=True, exist_ok=True)
+    return data_dir
+
+
+def get_config_path() -> Path:
+    """主配置文件路径（.smart_terminal_config.json）"""
+    return get_data_dir() / ".smart_terminal_config.json"
+
+
 def get_sessions_dir() -> Path:
     """获取会话存储目录"""
-    sessions_dir = get_project_root() / "sessions"
+    sessions_dir = get_data_dir() / "sessions"
     sessions_dir.mkdir(exist_ok=True)
     return sessions_dir
 
 
 def get_exports_dir() -> Path:
     """获取导出目录"""
-    exports_dir = get_project_root() / "exports"
+    exports_dir = get_data_dir() / "exports"
     exports_dir.mkdir(exist_ok=True)
     return exports_dir
 
