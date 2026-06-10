@@ -31,6 +31,123 @@ if 'b' not in pyte.Stream.csi:
     pyte.Stream.csi['b'] = 'repeat'
 
 
+# 复制拼接时用于识别「新的结构行」（列表项/有序列表/标题/引用）。
+# 这类行即使上一行被填满，也不应被并入上一行，必须保留换行。
+_LIST_MARKER_RE = re.compile(r'^(?:[-*+•‣◦·]|\d{1,3}[.)]|[A-Za-z][.)]|#{1,6}|>)\s')
+
+
+def _need_boundary_space(last_char: str, first_char: str) -> bool:
+    """判断应用层软换行拼接时是否需要在边界处插入空格"""
+    if not last_char or not first_char:
+        return False
+    # 边界已经有空白（前一行尾部空格或后一行首部空格），不再额外补空格
+    if last_char.isspace() or first_char.isspace():
+        return False
+    last_wide = unicodedata.east_asian_width(last_char) in ('F', 'W')
+    first_wide = unicodedata.east_asian_width(first_char) in ('F', 'W')
+    if last_wide and first_wide:
+        return False  # CJK + CJK: 不需要空格
+    # Latin+CJK, CJK+Latin, Latin+Latin: 需要空格（词边界）
+    return True
+
+
+def merge_extracted_lines(rows, columns: int) -> str:
+    """把从终端缓冲区提取的逐行内容合并成复制用文本（纯函数，无 Qt 依赖）。
+
+    rows: [(text, is_soft, last_content_col, spaceless, can_heuristic), ...]
+        text             —— 该行（或选区内）的文本；软换行行保留尾部空格
+        is_soft          —— 终端层软换行（DECAWM 自动换行）标记
+        last_content_col —— 整行最后一个非空格字符的列结尾位置（-1 表示空行）
+        spaceless        —— 整行内容无内部空格（单一连续 token，如 URL/路径/哈希）
+        can_heuristic    —— 是否允许应用层折行启发式（选区未覆盖整行宽度时为 False）
+    columns: 终端实际列宽
+
+    换行类型（look-ahead 决定）：
+        0=硬换行（保留换行）；1=终端软换行（无缝拼接）；
+        2=应用层「散文」折行（按词边界折 → 拼接时补回词间空格）；
+        3=应用层「token 截断」折行（长 token 被强行从中间截断，如 URL/路径/哈希 →
+          必须无缝直接拼接，绝不能补空格，否则会把 URL 拦腰插入空格导致登录失效）
+    """
+    rows = list(rows)
+    n = len(rows)
+    if n == 0:
+        return ""
+
+    # 估算每行所在「连续非软换行行块」的应用层折行宽度（块内最大内容列）。
+    # 这样即使应用（如 Claude Code 的盒子边距）按比终端更窄的宽度折行，也能正确识别
+    # 散文折行点，而不是依赖「填满到终端右边缘」这个会被边距破坏的假设。
+    run_max = [r[2] for r in rows]
+    i = 0
+    while i < n:
+        if rows[i][1]:  # 软换行行不参与应用层折行块
+            i += 1
+            continue
+        j = i
+        while j < n and not rows[j][1]:
+            j += 1
+        block_max = max((rows[k][2] for k in range(i, j)), default=-1)
+        for k in range(i, j):
+            run_max[k] = block_max
+        i = j
+
+    # 判断每行是「被宽度折断的续行」（拼接）还是「故意的新行」（保留换行）：
+    #  · 无内部空格的长 token（URL/路径/哈希）：只有写满（或因行尾放不下宽字符而差
+    #    1 列写满）终端实际宽度才视为被截断 —— 用 columns 而非块内 run_max 判断，
+    #    否则块内最长的那行恒满足「last_col >= run_max - 2」，会把 ls -1 输出的
+    #    多条长短不一的独立路径误并成一行。
+    #  · 散文：用经典 unwrap 判据——下一行第一个词在本行放不下 → 是被折断的续行
+    #    （折行宽度用本块实测的 run_max，兼容应用按盒子边距比终端更窄折行的情况）。
+    #  · 列表项/标题等结构行（_LIST_MARKER_RE）即使上一行填满也强制保留换行。
+    threshold_low = max(8, int(columns * 0.40))
+    resolved = []
+    for i, (text, is_soft, last_col, spaceless, can_h) in enumerate(rows):
+        if i == n - 1:
+            resolved.append((text, 0))
+            continue
+        if is_soft:
+            resolved.append((text, 1))
+            continue
+        wrap_type = 0
+        nxt = rows[i + 1][0] if can_h else ''
+        next_core = nxt.strip()
+        if (can_h and last_col >= 0 and next_core
+                and run_max[i] >= threshold_low
+                and not _LIST_MARKER_RE.match(next_core)):
+            if spaceless:
+                if last_col >= columns - 2 and not nxt[0].isspace():
+                    wrap_type = 3
+            else:
+                first_word = next_core.split(None, 1)[0]
+                gap = run_max[i] - last_col  # 本行尾部到折行宽度的剩余列数
+                if gap <= len(first_word) + 1:
+                    wrap_type = 2
+        resolved.append((text, wrap_type))
+
+    # 组合结果
+    result = []
+    for i, (text, wrap_type) in enumerate(resolved):
+        if i > 0:
+            prev_wrap = resolved[i - 1][1]
+            if prev_wrap == 1 or prev_wrap == 3:
+                pass  # 终端软换行 / token 截断折行：直接无缝拼接，不补空格
+            elif prev_wrap == 2:
+                # 散文续行：把对齐缩进折叠掉，必要时补回一个词间空格
+                text = text.lstrip()
+                if result and text:
+                    last_ch = result[-1][-1] if result[-1] else ''
+                    first_ch = text[0]
+                    if last_ch and first_ch and _need_boundary_space(last_ch, first_ch):
+                        result.append(' ')
+            else:
+                result.append('\n')
+        result.append(text)
+
+    # 去除整体结果的尾部空白：软换行行会保留尾部空格（它们是续行的真实内容），
+    # 但整段末尾的空白没有任何意义，且会污染剪贴板（例如复制登录 URL / 授权码时
+    # 末尾多出一个空格导致粘贴失效）。
+    return ''.join(result).rstrip()
+
+
 class CompatibleHistoryScreen(pyte.HistoryScreen):
     """兼容性修复：处理新版 pyte 传递的 private 参数
     并实现备用屏幕缓冲区（mode 1049/47/1047），pyte 0.8 原生不支持。
@@ -312,7 +429,8 @@ class TerminalWidget(QWidget):
 
     # 复制拼接时用于识别「新的结构行」（列表项/有序列表/标题/引用）。
     # 这类行即使上一行被填满，也不应被并入上一行，必须保留换行。
-    _LIST_MARKER_RE = re.compile(r'^(?:[-*+•‣◦·]|\d{1,3}[.)]|[A-Za-z][.)]|#{1,6}|>)\s')
+    # （实现移至模块级，供 merge_extracted_lines 纯函数共用；此处保留类属性别名）
+    _LIST_MARKER_RE = _LIST_MARKER_RE
 
     # 预编译正则表达式（用于过滤不支持的转义序列）
     _RE_SYNC_OUTPUT = re.compile(r'\x1b\[\?2026[hl]')
@@ -1490,20 +1608,9 @@ class TerminalWidget(QWidget):
         cache[char] = result
         return result
 
-    @staticmethod
-    def _need_boundary_space(last_char: str, first_char: str) -> bool:
-        """判断应用层软换行拼接时是否需要在边界处插入空格"""
-        if not last_char or not first_char:
-            return False
-        # 边界已经有空白（前一行尾部空格或后一行首部空格），不再额外补空格
-        if last_char.isspace() or first_char.isspace():
-            return False
-        last_wide = unicodedata.east_asian_width(last_char) in ('F', 'W')
-        first_wide = unicodedata.east_asian_width(first_char) in ('F', 'W')
-        if last_wide and first_wide:
-            return False  # CJK + CJK: 不需要空格
-        # Latin+CJK, CJK+Latin, Latin+Latin: 需要空格（词边界）
-        return True
+    # 判断应用层软换行拼接时是否需要在边界处插入空格
+    # （实现移至模块级，供 merge_extracted_lines 纯函数共用；此处保留静态方法别名）
+    _need_boundary_space = staticmethod(_need_boundary_space)
 
     def _row_tile(self, row, count=1):
         """返回从 row 起 count 行的 (y, height)，使相邻行像素无缝拼接
@@ -3057,9 +3164,9 @@ class TerminalWidget(QWidget):
         total_lines = history_count + self.term_rows
         term_cols = self.term_cols
 
-        # 每行收集: (line_text, is_soft, last_content_col, leading_space_count, can_heuristic)
+        # 每行收集: (line_text, is_soft, last_content_col, spaceless, can_heuristic)
         # last_content_col: 整行最后一个非空格字符的列结尾位置（用于判断行是否"填满到行尾"）
-        # leading_space_count: 整行起首的空格数（用于判断下一行是否是续行缩进）
+        # spaceless: 整行内容是否「无内部空格」（单一连续 token，如 URL/路径/哈希）
         # can_heuristic: 是否允许对该行启用应用层软换行启发式（仅当选择覆盖整行宽度时）
         rows = []
 
@@ -3117,14 +3224,8 @@ class TerminalWidget(QWidget):
 
             # 行级元数据（基于整行而非选区，用于换行类型判断）
             last_content_col = -1
-            leading_space_count = 0
-            seen_non_space = False
             for c_col, c_ch in chars:
-                if c_ch == ' ':
-                    if not seen_non_space:
-                        leading_space_count += 1
-                else:
-                    seen_non_space = True
+                if c_ch != ' ':
                     last_content_col = c_col + (1 if self._is_wide_char(c_ch) else 0)
 
             # 整行内容是否「无内部空格」（单一连续 token，如 URL/路径/哈希）
@@ -3140,86 +3241,10 @@ class TerminalWidget(QWidget):
             else:
                 line_text = ''.join(selected_chars).rstrip()
 
-            rows.append((line_text, is_soft, last_content_col, leading_space_count, can_heuristic, spaceless))
+            rows.append((line_text, is_soft, last_content_col, spaceless, can_heuristic))
 
-        # 估算每行所在「连续非软换行行块」的应用层折行宽度（块内最大内容列）。
-        # 这样即使应用（如 Claude Code 的盒子边距）按比终端更窄的宽度折行，也能正确识别折行点，
-        # 而不是依赖「填满到终端右边缘」这个会被边距破坏的假设。
-        n = len(rows)
-        run_max = [r[2] for r in rows]
-        i = 0
-        while i < n:
-            if rows[i][1]:  # 软换行行不参与应用层折行块
-                i += 1
-                continue
-            j = i
-            while j < n and not rows[j][1]:
-                j += 1
-            block_max = max((rows[k][2] for k in range(i, j)), default=-1)
-            for k in range(i, j):
-                run_max[k] = block_max
-            i = j
-
-        # 用 look-ahead 决定每行的换行类型：
-        #   0=硬换行, 1=终端软换行,
-        #   2=应用层「散文」折行（按词边界折 → 拼接时需补回词间空格）
-        #   3=应用层「token 截断」折行（一个长 token 被强行从中间截断，如 URL/路径/哈希 →
-        #     必须无缝直接拼接，绝不能补空格，否则会把 URL 拦腰插入空格/换行导致登录失效）
-        threshold_low = max(8, int(term_cols * 0.40))
-        resolved = []
-        for i, (text, is_soft, last_col, _, can_h, spaceless) in enumerate(rows):
-            if i == n - 1:
-                resolved.append((text, 0))
-                continue
-            if is_soft:
-                resolved.append((text, 1))
-                continue
-            # 判断本行是「被宽度折断的续行」（拼接）还是「故意的新行」（保留换行）。
-            # 折行宽度用本块实测的 run_max（兼容应用按盒子边距比终端更窄折行的情况）。
-            #  · 无内部空格的长 token（URL/路径/哈希）：必须精确填满到 run_max 才算被折断，
-            #    这样长短不一的独立行（如 ls -1 的多条路径）不会被误并。
-            #  · 散文：用经典 unwrap 判据——下一行第一个词在本行放不下 → 是被折断的续行。
-            #    列表项/标题等结构行（_LIST_MARKER_RE）即使上一行填满也强制保留换行。
-            wrap_type = 0
-            nxt = rows[i + 1][0] if can_h else ''
-            next_core = nxt.strip()
-            if (can_h and last_col >= 0 and next_core
-                    and run_max[i] >= threshold_low
-                    and not self._LIST_MARKER_RE.match(next_core)):
-                if spaceless:
-                    if last_col >= run_max[i] - 2 and not nxt[0].isspace():
-                        wrap_type = 3
-                else:
-                    first_word = next_core.split(None, 1)[0]
-                    gap = run_max[i] - last_col  # 本行尾部到折行宽度的剩余列数
-                    if gap <= len(first_word) + 1:
-                        wrap_type = 2
-            resolved.append((text, wrap_type))
-
-        # 组合结果
-        result = []
-        for i, (line_text, wrap_type) in enumerate(resolved):
-            if i > 0:
-                prev_text, prev_wrap = resolved[i - 1]
-                if prev_wrap == 1 or prev_wrap == 3:
-                    # 终端软换行 / token 折断：直接无缝拼接，不补空格
-                    pass
-                elif prev_wrap == 2:
-                    # 散文续行：把对齐缩进折叠掉，必要时补回一个词间空格
-                    line_text = line_text.lstrip()
-                    if result and line_text:
-                        last_ch = result[-1][-1] if result[-1] else ''
-                        first_ch = line_text[0]
-                        if last_ch and first_ch and self._need_boundary_space(last_ch, first_ch):
-                            result.append(' ')
-                else:
-                    result.append('\n')
-            result.append(line_text)
-
-        # 软换行行会保留尾部空格（它们是续行的真实内容），但整段选区末尾的
-        # 尾部空白没有任何意义，且会污染剪贴板（例如复制登录 URL / 授权码时
-        # 末尾多出一个空格导致粘贴失效）。这里去除整体结果的尾部空白。
-        return ''.join(result).rstrip()
+        # 软换行/应用层折行启发式合并（与 _get_all_content 共用同一纯函数）
+        return merge_extracted_lines(rows, term_cols)
 
     def _copy_selection_to_clipboard(self):
         """复制选中内容到剪贴板"""
@@ -3263,8 +3288,8 @@ class TerminalWidget(QWidget):
         screen = self.screen
 
         def extract_line(buffer_line):
-            """提取行内容，返回 (text, is_soft, last_content_col, leading_space_count, spaceless)
-            最终换行类型在后续 look-ahead 阶段决定。
+            """提取行内容，返回 (text, is_soft, last_content_col, spaceless, can_heuristic)
+            最终换行类型在 merge_extracted_lines 的 look-ahead 阶段决定。
             """
             chars_with_col = []  # (col, char_data)
             char_list = []
@@ -3290,14 +3315,8 @@ class TerminalWidget(QWidget):
 
             # 行级元数据
             last_content_col = -1
-            leading_space_count = 0
-            seen_non_space = False
             for c_col, c_ch in chars_with_col:
-                if c_ch == ' ':
-                    if not seen_non_space:
-                        leading_space_count += 1
-                else:
-                    seen_non_space = True
+                if c_ch != ' ':
                     last_content_col = c_col + (1 if is_wide(c_ch) else 0)
 
             # 整行内容是否「无内部空格」（单一连续 token，如 URL/路径/哈希）
@@ -3310,7 +3329,8 @@ class TerminalWidget(QWidget):
             else:
                 text = ''.join(char_list).rstrip()
 
-            return text, is_soft, last_content_col, leading_space_count, spaceless
+            # 全量内容提取始终覆盖整行宽度 → can_heuristic 恒为 True
+            return text, is_soft, last_content_col, spaceless, True
 
         # 收集所有行
         line_data = []
@@ -3327,72 +3347,8 @@ class TerminalWidget(QWidget):
         while line_data and not line_data[-1][0]:
             line_data.pop()
 
-        # 估算每行所在「连续非软换行行块」的应用层折行宽度（块内最大内容列），
-        # 以正确识别按盒子边距（比终端更窄）折行的续行，而非依赖填满到终端右边缘。
-        n = len(line_data)
-        run_max = [r[2] for r in line_data]
-        i = 0
-        while i < n:
-            if line_data[i][1]:
-                i += 1
-                continue
-            j = i
-            while j < n and not line_data[j][1]:
-                j += 1
-            block_max = max((line_data[k][2] for k in range(i, j)), default=-1)
-            for k in range(i, j):
-                run_max[k] = block_max
-            i = j
-
-        # 决定换行类型（与 _get_selected_text 一致）：用「下一行第一个词放得下吗」判断本行
-        # 是被宽度折断的续行(拼接) 还是故意换行(保留)。列表项/标题等结构行强制保留换行。
-        #   1=终端软换行；2=散文续行(补词间空格)；3=无内部空格长 token 续行(无缝拼接)；0=保留换行
-        threshold_low = max(8, int(columns * 0.40))
-        resolved = []
-        for i, (text, is_soft, last_col, _, spaceless) in enumerate(line_data):
-            if i == n - 1:
-                resolved.append((text, 0))
-                continue
-            if is_soft:
-                resolved.append((text, 1))
-                continue
-            wrap_type = 0
-            nxt = line_data[i + 1][0]
-            next_core = nxt.strip()
-            if (last_col >= 0 and next_core
-                    and run_max[i] >= threshold_low
-                    and not self._LIST_MARKER_RE.match(next_core)):
-                if spaceless:
-                    if last_col >= run_max[i] - 2 and not nxt[0].isspace():
-                        wrap_type = 3
-                else:
-                    first_word = next_core.split(None, 1)[0]
-                    gap = run_max[i] - last_col
-                    if gap <= len(first_word) + 1:
-                        wrap_type = 2
-            resolved.append((text, wrap_type))
-
-        # 组合结果
-        result = []
-        for i, (text, wrap_type) in enumerate(resolved):
-            if i > 0:
-                prev_text, prev_wrap = resolved[i - 1]
-                if prev_wrap == 1 or prev_wrap == 3:
-                    pass  # 终端软换行 / token 截断折行：直接无缝拼接
-                elif prev_wrap == 2:
-                    # 散文续行：折叠对齐缩进并补回一个词间空格
-                    text = text.lstrip()
-                    if result and text:
-                        last_ch = result[-1][-1] if result[-1] else ''
-                        first_ch = text[0]
-                        if last_ch and first_ch and self._need_boundary_space(last_ch, first_ch):
-                            result.append(' ')
-                else:
-                    result.append('\n')
-            result.append(text)
-
-        # 去除整体结果的尾部空白（软换行行保留的尾部空格在末尾无意义且污染剪贴板）
-        return ''.join(result).rstrip()
+        # 软换行/应用层折行启发式合并（与 _get_selected_text 共用同一纯函数）
+        return merge_extracted_lines(line_data, columns)
 
     def _clear_selection(self):
         """清除选择"""

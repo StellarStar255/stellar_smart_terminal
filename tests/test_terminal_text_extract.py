@@ -1,11 +1,14 @@
 # -*- coding: utf-8 -*-
-"""终端软换行/选区文本提取的 characterization 测试
+"""终端软换行/选区文本提取的测试
 
 覆盖 terminal_widget.py 中 _get_selected_text / _get_all_content 的
-wrap_type/threshold 启发式（复制粘贴正确性的核心）。
+wrap_type/threshold 启发式（复制粘贴正确性的核心），以及两者共用的
+模块级纯函数 merge_extracted_lines。
 
-所有预期值都是用当前实现实际跑出来的结果（characterization），
-固化现状以防止后续重构悄悄改变复制行为；并非"理想行为"的断言。
+spaceless（无内部空格 token）行的合并判据是「写满终端实际宽度
+（last_col >= columns - 2）」——曾经的 run_max 相对判据会让块内最长的
+spaceless 行恒满足条件，把 ls -1 输出的多条独立路径误并成一行，
+TestMergeExtractedLines 中的边界测试固化了修复后的行为。
 
 运行方式：
     QT_QPA_PLATFORM=offscreen python3 -m unittest tests.test_terminal_text_extract -v
@@ -24,7 +27,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
 from PyQt6.QtWidgets import QApplication
 
-from terminal_widget import TerminalWidget
+from terminal_widget import TerminalWidget, merge_extracted_lines
 
 
 class TerminalTextExtractBase(unittest.TestCase):
@@ -67,14 +70,13 @@ class TestTerminalSoftWrap(TerminalTextExtractBase):
     """终端层软换行（DECAWM 自动换行）：复制时应无缝合并"""
 
     def test_long_command_hard_wrapped_merges_via_all_content(self):
-        # 77 字符的命令在 40 列终端折成两行（终端软换行）
+        # 77 字符的命令在 40 列终端折成两行（终端软换行）→ 无缝合并；
+        # 续行只占 37 列（未写满宽度），其后的独立短行 "done" 保留换行
         w = self.make_widget(cols=40, rows=10)
         self.feed(w, "$ echo " + "a" * 70 + "\r\ndone\r\n")
-        # 当前行为：软换行两行无缝合并；且后面的 "done" 也被
-        # spaceless 启发式（wrap_type 3）并了进来 —— 见 bug 备注。
         self.assertEqual(
             w._get_all_content(),
-            "$ echo " + "a" * 70 + "done",
+            "$ echo " + "a" * 70 + "\ndone",
         )
 
     def test_long_command_hard_wrapped_merges_via_selection(self):
@@ -84,17 +86,16 @@ class TestTerminalSoftWrap(TerminalTextExtractBase):
         w._selection_end = (2, w.term_cols - 1)
         self.assertEqual(
             w._get_selected_text(),
-            "$ echo " + "a" * 70 + "done",
+            "$ echo " + "a" * 70 + "\ndone",
         )
 
     def test_cjk_terminal_wrap_merges(self):
-        # 35 个全角字符 = 70 列，在 40 列终端折两行，复制应合并为一行
+        # 35 个全角字符 = 70 列，在 40 列终端折两行，复制应合并为一行；
+        # 续行只占 30 列（未写满宽度），其后的独立短行 "ok" 保留换行
         w = self.make_widget(cols=40, rows=10)
         text = "这是一段很长的中文文本用来测试宽字符在终端里的自动换行行为是否正确处理"
         self.feed(w, text + "\r\nok\r\n")
-        # 当前行为：软换行合并后，末行 "处理" 与下一行 "ok" 也被
-        # spaceless 启发式无缝拼接
-        self.assertEqual(w._get_all_content(), text + "ok")
+        self.assertEqual(w._get_all_content(), text + "\nok")
 
     def test_long_url_wrapped_reconstructed_without_spaces(self):
         # 复制登录 URL 的关键场景：折行处绝不能插入空格
@@ -168,18 +169,31 @@ class TestApplicationLevelWrap(TerminalTextExtractBase):
         self.assertEqual(w._get_all_content(), line40 + "next_line()")
 
     def test_cjk_exact_width_app_wrap_seamless(self):
-        # 全角字符顶满整行 + 显式换行 → 与下一行无缝拼接（CJK 不补空格）
+        # 20 个全角字符 = 40 列，顶满整行 + 显式换行 → 与下一行无缝拼接（CJK 不补空格）
         w = self.make_widget(cols=40, rows=10)
-        self.feed(w, "这是第一行的中文内容正好顶满整行宽度啦\r\n继续的第二行。\r\n")
+        line_full = "这是第一行的中文内容刚好顶满整行的宽度啦"  # 20 个全角字符
+        self.assertEqual(len(line_full) * 2, 40)
+        self.feed(w, line_full + "\r\n继续的第二行。\r\n")
         self.assertEqual(
             w._get_all_content(),
-            "这是第一行的中文内容正好顶满整行宽度啦继续的第二行。",
+            line_full + "继续的第二行。",
         )
 
-    def test_spaceless_paths_at_block_max_merge(self):
-        # 【可疑行为，固化为现状】ls -1 式的多条独立路径：
-        # 块内最长的 spaceless 行恒满足 last_col >= run_max - 2，
-        # 导致与下一行无缝并联 —— 三条路径被并成一行。
+    def test_cjk_one_col_short_app_wrap_seamless(self):
+        # 行尾因放不下一个全角字符而只填到第 39 列（last_col = columns - 2）：
+        # 视同写满，仍无缝拼接 —— 这是 columns-2（而非 columns-1）判据的用途
+        w = self.make_widget(cols=40, rows=10)
+        line39 = "x" + "这是第一行的中文内容刚好顶满整行的宽度"  # 1 + 19*2 = 39 列
+        self.assertEqual(1 + (len(line39) - 1) * 2, 39)
+        self.feed(w, line39 + "\r\n继续的第二行。\r\n")
+        self.assertEqual(
+            w._get_all_content(),
+            line39 + "继续的第二行。",
+        )
+
+    def test_spaceless_paths_of_varying_length_keep_newlines(self):
+        # ls -1 式的多条长短不一的独立路径：没有任何一条写满终端宽度，
+        # 必须各占一行（曾经的 run_max 相对判据会把它们误并成一行）
         w = self.make_widget(cols=40, rows=10)
         self.feed(
             w,
@@ -189,7 +203,9 @@ class TestApplicationLevelWrap(TerminalTextExtractBase):
         )
         self.assertEqual(
             w._get_all_content(),
-            "/usr/local/bin/python3/usr/local/share/doc/etc/hosts",
+            "/usr/local/bin/python3\n"
+            "/usr/local/share/doc\n"
+            "/etc/hosts",
         )
 
     def test_short_spaceless_paths_below_threshold_keep_newlines(self):
@@ -197,6 +213,102 @@ class TestApplicationLevelWrap(TerminalTextExtractBase):
         w = self.make_widget(cols=40, rows=10)
         self.feed(w, "/etc/hosts\r\n/etc/fstab\r\n")
         self.assertEqual(w._get_all_content(), "/etc/hosts\n/etc/fstab")
+
+
+class TestMergeExtractedLines(unittest.TestCase):
+    """merge_extracted_lines 纯函数直测（无 Qt 依赖）
+
+    行元组格式: (text, is_soft, last_content_col, spaceless, can_heuristic)
+    重点是 spaceless 行合并判据 last_col >= columns - 2 的边界。
+    """
+
+    COLS = 40
+
+    def row(self, text, is_soft=False, last_col=None, spaceless=None, can_h=True):
+        if last_col is None:
+            last_col = len(text.rstrip()) - 1
+        if spaceless is None:
+            core = text.strip()
+            spaceless = bool(core) and (" " not in core)
+        return (text, is_soft, last_col, spaceless, can_h)
+
+    # ---- spaceless 行合并判据的宽度边界 ----
+
+    def test_spaceless_at_columns_minus_1_merges(self):
+        # last_col = 39 = columns-1（写满）→ 无缝并入下一行
+        rows = [self.row("A" * 40), self.row("tail")]
+        self.assertEqual(
+            merge_extracted_lines(rows, self.COLS), "A" * 40 + "tail"
+        )
+
+    def test_spaceless_at_columns_minus_2_merges(self):
+        # last_col = 38 = columns-2（差 1 列写满，行尾放不下宽字符的场景）→ 仍合并
+        rows = [self.row("A" * 39), self.row("tail")]
+        self.assertEqual(
+            merge_extracted_lines(rows, self.COLS), "A" * 39 + "tail"
+        )
+
+    def test_spaceless_at_columns_minus_3_keeps_newline(self):
+        # last_col = 37 = columns-3（明显未写满）→ 保留换行
+        rows = [self.row("A" * 38), self.row("tail")]
+        self.assertEqual(
+            merge_extracted_lines(rows, self.COLS), "A" * 38 + "\ntail"
+        )
+
+    def test_block_longest_spaceless_line_not_merged_when_short_of_width(self):
+        # 修复的核心场景：块内最长的 spaceless 行（ls -1 的最长路径）即使是
+        # run_max 本身，只要没写满终端宽度就不能并入下一行
+        rows = [
+            self.row("/usr/local/bin/python3"),
+            self.row("/usr/local/share/doc"),
+            self.row("/etc/hosts"),
+        ]
+        self.assertEqual(
+            merge_extracted_lines(rows, self.COLS),
+            "/usr/local/bin/python3\n/usr/local/share/doc\n/etc/hosts",
+        )
+
+    def test_spaceless_full_width_not_merged_into_indented_next_line(self):
+        # 下一行以空格开头 → 不是 token 截断的续行，保留换行
+        rows = [self.row("A" * 40), ("  indented", False, 9, False, True)]
+        self.assertEqual(
+            merge_extracted_lines(rows, self.COLS), "A" * 40 + "\n  indented"
+        )
+
+    def test_spaceless_full_width_not_merged_into_list_item(self):
+        # 列表项强制保留换行，即使上一行写满
+        rows = [self.row("A" * 40), self.row("- item", spaceless=False)]
+        self.assertEqual(
+            merge_extracted_lines(rows, self.COLS), "A" * 40 + "\n- item"
+        )
+
+    def test_can_heuristic_false_disables_spaceless_merge(self):
+        # 选区未覆盖整行宽度（can_heuristic=False）→ 即使写满也不合并
+        rows = [self.row("A" * 40, can_h=False), self.row("tail", can_h=False)]
+        self.assertEqual(
+            merge_extracted_lines(rows, self.COLS), "A" * 40 + "\ntail"
+        )
+
+    # ---- 其余换行类型保持原行为 ----
+
+    def test_terminal_soft_wrap_merges_regardless_of_width(self):
+        # 终端层软换行标记优先，与宽度判据无关
+        rows = [self.row("short", is_soft=True), self.row("rest")]
+        self.assertEqual(merge_extracted_lines(rows, self.COLS), "shortrest")
+
+    def test_prose_wrap_uses_block_run_max(self):
+        # 散文折行仍用块内 run_max（兼容应用按盒子边距比终端更窄折行）：
+        # 两行都只折到 35 列左右，下一行首词放不下 → 合并补空格
+        l1 = "The quick brown fox jumps over the"  # 34 字符, last_col=33
+        l2 = "lazy dog."
+        rows = [self.row(l1), self.row(l2)]
+        self.assertEqual(
+            merge_extracted_lines(rows, self.COLS),
+            "The quick brown fox jumps over the lazy dog.",
+        )
+
+    def test_empty_input(self):
+        self.assertEqual(merge_extracted_lines([], self.COLS), "")
 
 
 class TestIntentionalNewlines(TerminalTextExtractBase):
