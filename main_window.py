@@ -8410,14 +8410,13 @@ class MainWindow(QMainWindow):
     # （并设最小像素，避免在大屏上收得过窄、小屏上又超出合计宽度）。
     SPRING_INACTIVE_RATIO = 0.30
     SPRING_INACTIVE_MIN = 220
-    # 弹簧按「编辑器+终端合计宽度」自动生效/失效（滞回双阈值，防止边界反复横跳）：
-    # 合计窄于 ENABLE → spring 生效；宽于 DISABLE → spring 失效（恢复均分）；两阈值之间维持现状。
-    # 用合计宽度而非整窗宽度：① 排除左侧栏，更贴近「两边能否都铺得舒服」；
-    # ② spring 只在两者间挪分界、合计恒定，故不会反馈震荡。
-    # 取值适配超宽屏（如 3440 宽）常态窗口：合计 ≈1430 的半屏窗口仍算「窄」、应让 spring 生效；
-    # 只有合计 >2000（每边 ~1000，两边都能舒服铺开）才自动失效恢复均衡。
-    SPRING_WIDTH_ENABLE = 1800
-    SPRING_WIDTH_DISABLE = 2000
+    # 弹簧按「单列宽度 = 编辑器+终端合计宽度 / 横向并排窗格列数」自动生效/失效
+    # （滞回双阈值，防止边界反复横跳）：单列窄于 ENABLE → spring 生效；宽于 DISABLE → 失效；之间维持。
+    # 为什么用单列宽度而非合计宽度：分屏越多，合计宽度被瓜分得越细、每个窗格越挤，spring 越该保留。
+    # 合计与列数都不随 spring 挪分界而变（spring 只在编辑器/终端间移动分界），故不会反馈震荡。
+    # 取值：超宽屏（3440）半屏窗口不分屏时单列 ≈715 应生效；单列 >1000（足够舒服）才自动失效恢复均衡。
+    SPRING_PANE_ENABLE = 900
+    SPRING_PANE_DISABLE = 1000
 
     def _set_spring_checkboxes(self, enabled: bool):
         """把本窗口两处弹簧复选框设为指定状态（屏蔽信号，避免回环触发）。"""
@@ -8500,12 +8499,37 @@ class MainWindow(QMainWindow):
                 self._animate_main_sizes(self._resolve_main_splitter_sizes_with_editor())
         self._save_config()
 
-    def _update_spring_width_gate(self):
-        """按「编辑器+终端合计宽度」（滞回双阈值）更新 spring 生效门控，仅在门控翻转时联动调整布局。
+    def _spring_h_columns(self, container) -> int:
+        """估算 container 内「横向并排」的叶子窗格列数（合计宽度由这些列瓜分）。
 
-        由 resizeEvent 驱动。只在跨过阈值导致「生效↔失效」翻转时动一次，避免拖动过程中
-        每像素都 setSizes。用合计宽度而非整窗宽度：排除左侧栏更贴近「两边能否铺开」，且
-        spring 只挪分界、合计恒定，故不会反馈震荡。无法取到合计宽度时（如未左右分屏）不动门控。
+        水平 splitter → 各子列数累加；垂直 splitter → 取最大（堆叠不减宽）；叶子 → 1。
+        分屏越多列数越大、单列越窄，从而让 spring 在更宽的窗口下也保持生效。
+        """
+        from PyQt6.QtWidgets import QSplitter
+        if container is None:
+            return 1
+        sp = container if isinstance(container, QSplitter) else container.findChild(QSplitter)
+        if sp is None:
+            return 1
+
+        def cols(w):
+            if isinstance(w, QSplitter):
+                cs = [cols(w.widget(i)) for i in range(w.count())
+                      if w.widget(i) is not None and w.widget(i).isVisible()]
+                if not cs:
+                    return 1
+                return sum(cs) if w.orientation() == Qt.Orientation.Horizontal else max(cs)
+            return 1
+
+        return cols(sp)
+
+    def _update_spring_width_gate(self):
+        """按「单列宽度 = 编辑器+终端合计宽度 / 横向并排列数」（滞回双阈值）更新 spring 门控，
+        仅在门控翻转时联动调整布局。
+
+        由 resizeEvent / 焦点切换 / 分隔条拖动驱动。只在跨阈值「生效↔失效」翻转时动一次，避免
+        每像素都 setSizes。分屏越多 → 列数越大 → 单列越窄 → spring 在更宽窗口下也保持生效。
+        合计宽度与列数都不随 spring 挪分界而变，故不会反馈震荡。取不到合计宽度时不动门控。
         """
         if not hasattr(self, 'main_splitter'):
             return
@@ -8518,14 +8542,25 @@ class MainWindow(QMainWindow):
         sizes = self.main_splitter.sizes()
         if ed_idx < 0 or term_idx < 0 or max(ed_idx, term_idx) >= len(sizes):
             return
-        w = sizes[ed_idx] + sizes[term_idx]
-        if w <= 0:
+        combined = sizes[ed_idx] + sizes[term_idx]
+        if combined <= 0:
             return
+        # 横向并排列数 = 编辑器列数 + 当前标签页终端列数；合计宽度被这些列瓜分
+        ed_cols = self._spring_h_columns(self.editor_area)
+        term_cols = 1
+        try:
+            tsp = self.tab_splitters.get(self.tab_widget.currentIndex()) \
+                if hasattr(self, 'tab_splitters') else None
+            term_cols = self._spring_h_columns(tsp)
+        except Exception:
+            term_cols = 1
+        n_cols = max(1, ed_cols + term_cols)
+        w = combined / n_cols   # 单列宽度
         old_gate = getattr(self, '_spring_width_gate', True)
         if old_gate:
-            new_gate = w <= self.SPRING_WIDTH_DISABLE   # 宽于 DISABLE 才关闭
+            new_gate = w <= self.SPRING_PANE_DISABLE   # 单列宽于 DISABLE 才关闭
         else:
-            new_gate = w < self.SPRING_WIDTH_ENABLE     # 窄于 ENABLE 才重新允许
+            new_gate = w < self.SPRING_PANE_ENABLE     # 单列窄于 ENABLE 才重新允许
         if new_gate == old_gate:
             return
         self._spring_width_gate = new_gate
