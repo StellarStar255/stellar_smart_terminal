@@ -111,6 +111,17 @@ def _make_git_tool_icon(kind: str, color: str, px: int = 16) -> QIcon:
         for dy in (-m, 0.0, m):
             p.drawLine(QPointF(cx - m, cy + dy), QPointF(cx + m, cy + dy))
 
+    elif kind == 'stash':
+        # 收纳箱：箱体 + 上盖分隔线 + 提手，表示"贮藏改动"
+        w2, h2 = s * 0.30, s * 0.26
+        p.drawRoundedRect(QRectF(cx - w2, cy - h2, 2 * w2, 2 * h2),
+                          s * 0.05, s * 0.05)
+        lid_y = cy - h2 + s * 0.16
+        p.drawLine(QPointF(cx - w2, lid_y), QPointF(cx + w2, lid_y))
+        hw = s * 0.10
+        p.drawLine(QPointF(cx - hw, lid_y + s * 0.12),
+                   QPointF(cx + hw, lid_y + s * 0.12))
+
     elif kind == 'gear':
         # 经典平顶齿 cog：每个齿用 内→外→外→内 四个顶点，齿顶是平的
         teeth = 8
@@ -173,6 +184,9 @@ class GitFileItem(QWidget):
     unstage_clicked = pyqtSignal(str)       # 取消暂存按钮点击
     discard_clicked = pyqtSignal(str)       # 放弃更改按钮点击
     diff_clicked = pyqtSignal(str, bool)    # 查看 diff（路径, 是否暂存区）
+    resolve_ours_clicked = pyqtSignal(str)      # 冲突：采用我方版本
+    resolve_theirs_clicked = pyqtSignal(str)    # 冲突：采用对方版本
+    mark_resolved_clicked = pyqtSignal(str)     # 冲突：标记为已解决（git add）
 
     def __init__(self, git_file: GitFile, is_staged: bool = False, theme: dict = None, parent=None):
         super().__init__(parent)
@@ -188,9 +202,10 @@ class GitFileItem(QWidget):
         layout.setContentsMargins(8, 4, 8, 4)
         layout.setSpacing(8)
 
-        # 状态标签
-        status_icon = STATUS_ICONS.get(self.git_file.status, '?')
-        status_color = STATUS_COLORS.get(self.git_file.status, '#888')
+        # 状态标签（冲突文件用醒目的 "!!" 红色标记）
+        is_conflict = getattr(self.git_file, 'is_conflict', False)
+        status_icon = '!!' if is_conflict else STATUS_ICONS.get(self.git_file.status, '?')
+        status_color = '#e06c75' if is_conflict else STATUS_COLORS.get(self.git_file.status, '#888')
 
         self.status_label = QLabel(status_icon)
         self.status_label.setFixedWidth(20)
@@ -203,13 +218,24 @@ class GitFileItem(QWidget):
         """)
         layout.addWidget(self.status_label)
 
-        # 文件名
-        self.filename_label = QLabel(self.git_file.path)
-        self.filename_label.setStyleSheet(f"""
-            QLabel {{
-                color: {self.theme.get('text', '#eaeaea')};
-            }}
-        """)
+        # 文件名（冲突文件整行红色加粗，确保一眼可见）
+        filename_text = self.git_file.path
+        if is_conflict:
+            filename_text += f"  ({t('git.conflict_suffix')})"
+        self.filename_label = QLabel(filename_text)
+        if is_conflict:
+            self.filename_label.setStyleSheet("""
+                QLabel {
+                    color: #e06c75;
+                    font-weight: bold;
+                }
+            """)
+        else:
+            self.filename_label.setStyleSheet(f"""
+                QLabel {{
+                    color: {self.theme.get('text', '#eaeaea')};
+                }}
+            """)
         layout.addWidget(self.filename_label, 1)
 
         # 操作按钮容器
@@ -289,7 +315,20 @@ class GitFileItem(QWidget):
             "QMenu::item { padding: 6px 24px 6px 12px; }"
             "QMenu::item:selected { background-color: #094771; }"
         )
-        if self.is_staged:
+        if getattr(self.git_file, 'is_conflict', False):
+            # 冲突文件：整体采用一方版本 / 手工改完后标记已解决
+            ours_act = menu.addAction(t("git.menu_resolve_ours"))
+            theirs_act = menu.addAction(t("git.menu_resolve_theirs"))
+            menu.addSeparator()
+            resolved_act = menu.addAction(t("git.menu_mark_resolved"))
+            chosen = menu.exec(event.globalPos())
+            if chosen == ours_act:
+                self.resolve_ours_clicked.emit(self.git_file.path)
+            elif chosen == theirs_act:
+                self.resolve_theirs_clicked.emit(self.git_file.path)
+            elif chosen == resolved_act:
+                self.mark_resolved_clicked.emit(self.git_file.path)
+        elif self.is_staged:
             unstage_act = menu.addAction(t("git.menu_unstage"))
             chosen = menu.exec(event.globalPos())
             if chosen == unstage_act:
@@ -426,6 +465,9 @@ class GitChangesWidget(QScrollArea):
     stage_all = pyqtSignal()
     unstage_all = pyqtSignal()
     view_diff = pyqtSignal(str, bool)
+    resolve_ours = pyqtSignal(str)      # 冲突：采用我方版本
+    resolve_theirs = pyqtSignal(str)    # 冲突：采用对方版本
+    mark_resolved = pyqtSignal(str)     # 冲突：标记为已解决
 
     def __init__(self, theme: dict = None, parent=None):
         super().__init__(parent)
@@ -481,8 +523,10 @@ class GitChangesWidget(QScrollArea):
         # 列表没变就不重建：避免每次刷新（5s 定时 / fetch 后）都销毁重建条目，
         # 否则用户正在双击的条目可能在事件处理途中被删 → RuntimeError。
         fp = (
-            tuple((f.path, getattr(f.status, 'value', f.status)) for f in staged),
-            tuple((f.path, getattr(f.status, 'value', f.status)) for f in unstaged),
+            tuple((f.path, getattr(f.status, 'value', f.status),
+                   getattr(f, 'is_conflict', False)) for f in staged),
+            tuple((f.path, getattr(f.status, 'value', f.status),
+                   getattr(f, 'is_conflict', False)) for f in unstaged),
         )
         if fp == getattr(self, '_files_fingerprint', None):
             return
@@ -507,6 +551,9 @@ class GitChangesWidget(QScrollArea):
             item.stage_clicked.connect(self.stage_file.emit)
             item.discard_clicked.connect(self.discard_file.emit)
             item.diff_clicked.connect(self.view_diff.emit)
+            item.resolve_ours_clicked.connect(self.resolve_ours.emit)
+            item.resolve_theirs_clicked.connect(self.resolve_theirs.emit)
+            item.mark_resolved_clicked.connect(self.mark_resolved.emit)
             self.unstaged_layout.addWidget(item)
 
     def _clear_layout(self, layout):
@@ -693,6 +740,7 @@ class _RefreshWorker(QThread):
             data['tags'] = gm.get_tags()
             data['head_ref'] = gm.get_head_ref()
             data['commits'] = gm.get_log(limit=150, all_branches=True)
+            data['merging'] = gm.is_merging()
             data['ok'] = True
         except Exception:
             data['ok'] = False
@@ -1674,6 +1722,7 @@ class GitHeaderWidget(QFrame):
     branch_changed = pyqtSignal(str)              # 兼容保留：仅本地分支切换时触发
     ref_changed = pyqtSignal(str, str)            # (kind, name)；kind ∈ {'local','remote','tag'}
     refresh_clicked = pyqtSignal()
+    stash_clicked = pyqtSignal()
     settings_clicked = pyqtSignal()
     delete_branch_requested = pyqtSignal(str)     # 用户右键菜单确认删除本地分支
 
@@ -1740,6 +1789,14 @@ class GitHeaderWidget(QFrame):
         self.refresh_btn.setIconSize(QSize(16, 16))
         self.refresh_btn.clicked.connect(self.refresh_clicked.emit)
         layout.addWidget(self.refresh_btn)
+
+        # Stash：贮藏当前修改 / 管理已有 stash
+        self.stash_btn = QPushButton()
+        self.stash_btn.setToolTip(t("git.stash_tooltip"))
+        self.stash_btn.setFixedSize(28, 28)
+        self.stash_btn.setIconSize(QSize(16, 16))
+        self.stash_btn.clicked.connect(self.stash_clicked.emit)
+        layout.addWidget(self.stash_btn)
 
         self.settings_btn = QPushButton()
         self.settings_btn.setToolTip(t("git.settings_tooltip"))
@@ -1917,17 +1974,20 @@ class GitHeaderWidget(QFrame):
             }}
         """
         self.refresh_btn.setStyleSheet(btn_style)
+        self.stash_btn.setStyleSheet(btn_style)
         self.settings_btn.setStyleSheet(btn_style)
 
         # 用主题前景色重绘线条图标，保证大小/粗细/对齐一致
         icon_color = theme.get('text', '#eaeaea')
         self.refresh_btn.setIcon(_make_git_tool_icon('refresh', icon_color))
+        self.stash_btn.setIcon(_make_git_tool_icon('stash', icon_color))
         self.settings_btn.setIcon(_make_git_tool_icon('gear', icon_color))
 
     def apply_language(self):
         """更新语言相关的 UI 文本"""
         self.title_label.setText(t("git.source_control"))
         self.refresh_btn.setToolTip(t("git.refresh_tooltip"))
+        self.stash_btn.setToolTip(t("git.stash_tooltip"))
         self.settings_btn.setToolTip(t("git.settings_tooltip"))
 
 
@@ -1976,6 +2036,45 @@ class GitPanel(QWidget):
         # 头部
         self.header = GitHeaderWidget(self.theme)
         layout.addWidget(self.header)
+
+        # 合并状态提示条：仓库处于 merge 中 / 存在未解决冲突时显示在头部正下方。
+        # 用固定的警示色（不随主题），确保任何主题下都足够醒目。
+        self.merge_banner = QFrame()
+        mb_layout = QHBoxLayout(self.merge_banner)
+        mb_layout.setContentsMargins(10, 6, 10, 6)
+        mb_layout.setSpacing(8)
+        self.merge_label = QLabel(t("git.merge_in_progress"))
+        self.merge_label.setWordWrap(True)
+        mb_layout.addWidget(self.merge_label, 1)
+        self.abort_merge_btn = QPushButton(t("git.merge_abort_btn"))
+        self.abort_merge_btn.clicked.connect(self._on_abort_merge)
+        mb_layout.addWidget(self.abort_merge_btn)
+        self.merge_banner.setStyleSheet("""
+            QFrame {
+                background-color: #5c2b2e;
+                border-bottom: 1px solid #8a3a3f;
+            }
+        """)
+        self.merge_label.setStyleSheet(
+            "color: #ffd7d7; font-weight: bold; font-size: 12px;"
+            " background: transparent; border: none;"
+        )
+        self.abort_merge_btn.setStyleSheet("""
+            QPushButton {
+                background-color: #e06c75;
+                color: #ffffff;
+                border: none;
+                border-radius: 4px;
+                padding: 4px 12px;
+                font-size: 12px;
+                font-weight: bold;
+            }
+            QPushButton:hover {
+                background-color: #ef7680;
+            }
+        """)
+        self.merge_banner.hide()
+        layout.addWidget(self.merge_banner)
 
         # 变更列表 + 提交区放进一个竖直分隔器：拖拽中间的分隔条即可上下调整
         # 二者高度（把提交信息框拉大/拉小）。
@@ -2133,6 +2232,7 @@ class GitPanel(QWidget):
         # 头部信号
         self.header.ref_changed.connect(self._on_ref_changed)
         self.header.refresh_clicked.connect(self._on_refresh_clicked)
+        self.header.stash_clicked.connect(self._on_stash_clicked)
         self.header.settings_clicked.connect(self._on_settings_clicked)
         self.header.delete_branch_requested.connect(self._on_delete_branch)
 
@@ -2143,6 +2243,11 @@ class GitPanel(QWidget):
         self.changes_widget.stage_all.connect(self._git_manager.stage_all)
         self.changes_widget.unstage_all.connect(self._git_manager.unstage_all)
         self.changes_widget.view_diff.connect(self._show_diff)
+        self.changes_widget.resolve_ours.connect(
+            lambda path: self._on_resolve_conflict(path, 'ours'))
+        self.changes_widget.resolve_theirs.connect(
+            lambda path: self._on_resolve_conflict(path, 'theirs'))
+        self.changes_widget.mark_resolved.connect(self._on_mark_resolved)
 
         # 提交信号
         self.commit_widget.commit_requested.connect(self._on_commit)
@@ -2171,6 +2276,7 @@ class GitPanel(QWidget):
         else:
             self.no_repo_label.show()
             self.header.hide()
+            self.merge_banner.hide()
             self.changes_widget.hide()
             self.graph_widget.hide()
             self.commit_widget.hide()
@@ -2253,6 +2359,7 @@ class GitPanel(QWidget):
         self.commit_widget.set_ahead_behind(data['ahead'], data['behind'])
         self.header.update_branches(data['branches'], data['head_ref'], data['tags'])
         self.graph_widget.set_commits(data['commits'])
+        self._update_merge_banner(data['unstaged'], merging=data.get('merging', False))
 
     def _refresh_status(self):
         """刷新文件状态"""
@@ -2261,6 +2368,65 @@ class GitPanel(QWidget):
         # 同步本地领先/落后远程的提交数到 Push/Pull 按钮（纯本地比较，不联网）
         ahead, behind = self._git_manager.get_ahead_behind()
         self.commit_widget.set_ahead_behind(ahead, behind)
+        self._update_merge_banner(unstaged)
+
+    def _update_merge_banner(self, unstaged: list, merging: bool = None):
+        """根据 merge 状态 / 未解决冲突数更新提示条。
+
+        - 合并进行中：显示"合并进行中"提示 + 中止合并按钮
+        - 非合并但有冲突（如 stash pop / cherry-pick 产生）：只显示冲突数
+        - 都没有：隐藏
+        """
+        if merging is None:
+            merging = self._git_manager.is_merging()
+        n_conflicts = sum(1 for f in unstaged if getattr(f, 'is_conflict', False))
+        if merging:
+            if n_conflicts:
+                self.merge_label.setText(t("git.merge_with_conflicts", n=n_conflicts))
+            else:
+                self.merge_label.setText(t("git.merge_in_progress"))
+            self.abort_merge_btn.setVisible(True)
+            self.merge_banner.setVisible(True)
+        elif n_conflicts:
+            self.merge_label.setText(t("git.conflicts_present", n=n_conflicts))
+            self.abort_merge_btn.setVisible(False)
+            self.merge_banner.setVisible(True)
+        else:
+            self.merge_banner.setVisible(False)
+
+    def _on_abort_merge(self):
+        """中止合并（git merge --abort），二次确认后执行。"""
+        reply = QMessageBox.question(
+            self,
+            t("git.merge_abort_confirm_title"),
+            t("git.merge_abort_confirm_msg"),
+            QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No,
+            QMessageBox.StandardButton.No,
+        )
+        if reply != QMessageBox.StandardButton.Yes:
+            return
+        if self._git_manager.merge_abort():
+            self._refresh_all_async()
+
+    def _on_resolve_conflict(self, path: str, side: str):
+        """冲突文件右键：整体采用我方/对方版本（checkout --ours/--theirs + add）。"""
+        key = "git.confirm_resolve_ours_msg" if side == 'ours' else "git.confirm_resolve_theirs_msg"
+        reply = QMessageBox.question(
+            self,
+            t("git.confirm_resolve_title"),
+            t(key, path=path),
+            QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No,
+            QMessageBox.StandardButton.No,
+        )
+        if reply != QMessageBox.StandardButton.Yes:
+            return
+        if self._git_manager.resolve_conflict_with(path, side):
+            self._refresh_all_async()
+
+    def _on_mark_resolved(self, path: str):
+        """冲突文件右键：标记为已解决（git add，假定用户已手工编辑掉冲突标记）。"""
+        if self._git_manager.stage_file(path):
+            self._refresh_all_async()
 
     def _on_refresh_clicked(self):
         """点击 ↻：刷新状态 + 强制抓取一次远程（更新可 pull 条数）"""
@@ -2605,6 +2771,142 @@ class GitPanel(QWidget):
         list_widget.itemDoubleClicked.connect(lambda _it: do_edit())
         dlg.exec()
 
+    # ---------- Stash ----------
+
+    def _on_stash_clicked(self):
+        """Stash 按钮 → 弹出菜单：贮藏当前修改 / 管理已有 stash。"""
+        menu = QMenu(self)
+        menu.setStyleSheet(f"""
+            QMenu {{
+                background-color: {self.theme.get('bg_medium', '#16213e')};
+                color: {self.theme.get('text', '#eaeaea')};
+                border: 1px solid {self.theme.get('border', '#3d3d5c')};
+                padding: 4px;
+            }}
+            QMenu::item {{
+                padding: 6px 24px;
+            }}
+            QMenu::item:selected {{
+                background-color: {self.theme.get('accent', '#667eea')};
+            }}
+        """)
+
+        act_save = QAction(t("git.stash_save_menu"), self)
+        act_save.triggered.connect(self._on_stash_save)
+        menu.addAction(act_save)
+
+        act_manage = QAction(t("git.stash_manage_menu"), self)
+        act_manage.triggered.connect(self._show_stash_dialog)
+        menu.addAction(act_manage)
+
+        # 紧贴 Stash 按钮下方弹出（与齿轮菜单一致）
+        btn = self.header.stash_btn
+        pos = btn.mapToGlobal(QPoint(0, btn.height()))
+        menu.exec(pos)
+
+    def _on_stash_save(self):
+        """贮藏当前修改（含未跟踪文件），说明可留空。"""
+        text, ok = QInputDialog.getText(
+            self,
+            t("git.stash_save_title"),
+            t("git.stash_save_prompt"),
+            QLineEdit.EchoMode.Normal,
+            "",
+        )
+        if not ok:
+            return
+        success, output = self._git_manager.stash_save(text)
+        if not success:
+            return  # 失败信息已由 error_occurred 弹出
+        if 'no local changes' in (output or '').lower():
+            QMessageBox.information(
+                self,
+                t("git.stash_nothing_title"),
+                t("git.stash_nothing_msg"),
+            )
+            return
+        self._refresh_all_async()
+
+    def _show_stash_dialog(self):
+        """Stash 管理对话框：列出现有 stash，支持 Pop / Apply / Drop。
+
+        stash 操作均为本地命令（与 commit/checkout 一样同步执行），
+        操作完成后就地刷新列表并触发面板刷新。
+        """
+        dlg = QDialog(self)
+        dlg.setWindowTitle(t("git.stash_manage_title"))
+        dlg.setMinimumWidth(480)
+        v = QVBoxLayout(dlg)
+
+        list_widget = QListWidget(dlg)
+        v.addWidget(list_widget)
+
+        btns = QHBoxLayout()
+        pop_btn = QPushButton(t("git.stash_pop_btn"))
+        apply_btn = QPushButton(t("git.stash_apply_btn"))
+        drop_btn = QPushButton(t("git.stash_drop_btn"))
+        close_btn = QPushButton(t("git.stash_close_btn"))
+        btns.addWidget(pop_btn)
+        btns.addWidget(apply_btn)
+        btns.addWidget(drop_btn)
+        btns.addStretch()
+        btns.addWidget(close_btn)
+        v.addLayout(btns)
+
+        def reload_list():
+            list_widget.clear()
+            stashes = self._git_manager.stash_list()
+            for st in stashes:
+                branch = f" [{st.branch}]" if st.branch else ""
+                item = QListWidgetItem(
+                    f"{st.ref}{branch}  {st.message}  ({st.date})", list_widget
+                )
+                item.setData(Qt.ItemDataRole.UserRole, st.index)
+            has_any = bool(stashes)
+            if not has_any:
+                placeholder = QListWidgetItem(t("git.stash_empty"), list_widget)
+                placeholder.setFlags(Qt.ItemFlag.NoItemFlags)
+            for b in (pop_btn, apply_btn, drop_btn):
+                b.setEnabled(has_any)
+
+        def current_index():
+            item = list_widget.currentItem()
+            if item is None:
+                return None
+            return item.data(Qt.ItemDataRole.UserRole)
+
+        def do_op(op: str):
+            idx = current_index()
+            if idx is None:
+                return
+            if op == 'drop':
+                reply = QMessageBox.question(
+                    dlg,
+                    t("git.stash_drop_confirm_title"),
+                    t("git.stash_drop_confirm_msg", ref=f"stash@{{{idx}}}"),
+                    QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No,
+                    QMessageBox.StandardButton.No,
+                )
+                if reply != QMessageBox.StandardButton.Yes:
+                    return
+                ok = self._git_manager.stash_drop(idx)
+            elif op == 'pop':
+                ok = self._git_manager.stash_pop(idx)
+            else:
+                ok = self._git_manager.stash_apply(idx)
+            # pop/apply 失败（如产生冲突）时 stash 仍在，错误已弹窗；
+            # 无论成败都重载列表 + 刷新面板，保证 UI 与仓库实际状态一致。
+            reload_list()
+            self._refresh_all_async()
+
+        pop_btn.clicked.connect(lambda: do_op('pop'))
+        apply_btn.clicked.connect(lambda: do_op('apply'))
+        drop_btn.clicked.connect(lambda: do_op('drop'))
+        close_btn.clicked.connect(dlg.accept)
+
+        reload_list()
+        dlg.exec()
+
     def _tick_fetch(self):
         """定时器：仅在面板可见时后台 fetch，更新可 pull 条数。"""
         if self.isVisible():
@@ -2844,6 +3146,8 @@ class GitPanel(QWidget):
         self.graph_widget.apply_language()
         self.commit_widget.apply_language()
         self.no_repo_label.setText(t("git.no_repo"))
+        # 提示条标签文本由下一次状态刷新按当前语言重算，这里只更新按钮
+        self.abort_merge_btn.setText(t("git.merge_abort_btn"))
 
     def refresh(self):
         """手动刷新"""

@@ -3,6 +3,7 @@ Git 管理器后端
 提供 Git 仓库操作的核心功能
 """
 import os
+import re
 import signal
 import subprocess
 import threading
@@ -12,6 +13,11 @@ from typing import List, Tuple, Optional
 from PyQt6.QtCore import QObject, pyqtSignal, QFileSystemWatcher, QTimer
 
 from i18n import t
+
+
+# 网络类 git 操作（push / pull / fetch 等）的统一超时秒数。
+# 本地操作仍用 _run_git 的默认 30s。
+GIT_NETWORK_TIMEOUT = 120
 
 
 class FileStatus(Enum):
@@ -32,6 +38,17 @@ class GitFile:
     path: str                           # 文件路径（相对于仓库根目录）
     status: FileStatus                  # 文件状态
     old_path: Optional[str] = None      # 重命名时的旧路径
+    is_conflict: bool = False           # 是否为未解决的合并冲突（UU/AA/DD 等）
+
+
+@dataclass
+class GitStash:
+    """Git stash 条目数据类"""
+    index: int          # 序号（stash@{N} 中的 N）
+    ref: str            # 完整引用，如 'stash@{0}'
+    branch: str         # 创建 stash 时所在的分支（解析不出时为空串）
+    message: str        # stash 描述
+    date: str           # 相对时间，如 '2 hours ago'
 
 
 @dataclass
@@ -345,6 +362,16 @@ class GitManager(QObject):
             if ' -> ' in path:
                 old_path, path = path.split(' -> ', 1)
 
+            # 合并冲突（porcelain 的 XY 组合：UU/AA/DD/AU/UA/DU/UD）：
+            # 归入"未暂存"列表并打上 is_conflict 标记，由 UI 显著提示，
+            # 不再拆成 暂存+未暂存 两条让人困惑的记录。
+            if (index_status + worktree_status) in ('UU', 'AA', 'DD', 'AU', 'UA', 'DU', 'UD'):
+                unstaged.append(GitFile(
+                    path=path, status=FileStatus.UNMERGED,
+                    old_path=old_path, is_conflict=True,
+                ))
+                continue
+
             # 暂存区有变更
             if index_status != ' ' and index_status != '?':
                 status = self._parse_status(index_status)
@@ -487,12 +514,150 @@ class GitManager(QObject):
             self.error_occurred.emit(t("git_mgr.commit_empty"))
             return False
 
+        # 存在未解决的合并冲突时拒绝提交，给出明确提示
+        # （git 自身也会拒绝，但报错晦涩且夹带英文路径列表）。
+        conflicts = self.get_conflict_files()
+        if conflicts:
+            self.error_occurred.emit(t("git_mgr.commit_conflicts", n=len(conflicts)))
+            return False
+
         success, output = self._run_git('commit', '-m', message)
         if not success:
             self.error_occurred.emit(t("git_mgr.commit_failed", error=output))
             return False
         self.status_changed.emit()
         return True
+
+    # ---------- 合并冲突 ----------
+
+    def get_conflict_files(self) -> List[str]:
+        """获取当前未解决冲突的文件列表（git diff --diff-filter=U）。"""
+        success, output = self._run_git('diff', '--name-only', '--diff-filter=U')
+        if not success:
+            return []
+        return [line.strip() for line in output.splitlines() if line.strip()]
+
+    def is_merging(self) -> bool:
+        """仓库是否处于合并中（.git/MERGE_HEAD 存在）。"""
+        if not self._repo_path:
+            return False
+        git_dir = self._find_git_dir(self._repo_path)
+        if not git_dir:
+            return False
+        return os.path.exists(os.path.join(git_dir, 'MERGE_HEAD'))
+
+    def merge_abort(self) -> bool:
+        """中止合并（git merge --abort），回到合并前状态。
+
+        Returns:
+            是否成功
+        """
+        success, output = self._run_git('merge', '--abort')
+        if not success:
+            self.error_occurred.emit(t("git_mgr.merge_abort_failed", error=output))
+            return False
+        self.status_changed.emit()
+        return True
+
+    def resolve_conflict_with(self, path: str, side: str) -> bool:
+        """对冲突文件整体采用某一方版本并标记为已解决。
+
+        Args:
+            path: 文件路径
+            side: 'ours'（我方/当前分支） 或 'theirs'（对方/被合并分支）
+
+        Returns:
+            是否成功
+
+        注意：一方删除的冲突（DU/UD 等）checkout --ours/--theirs 可能失败，
+        此时把 git 的报错原样抛给用户，由其在终端处理。
+        """
+        if side not in ('ours', 'theirs'):
+            return False
+        success, output = self._run_git('checkout', f'--{side}', '--', path)
+        if not success:
+            self.error_occurred.emit(t("git_mgr.resolve_failed", error=output))
+            return False
+        success, output = self._run_git('add', '--', path)
+        if not success:
+            self.error_occurred.emit(t("git_mgr.resolve_failed", error=output))
+            return False
+        self.status_changed.emit()
+        return True
+
+    # ---------- Stash ----------
+
+    def stash_save(self, message: str = '') -> Tuple[bool, str]:
+        """贮藏当前修改（含未跟踪文件）。
+
+        Args:
+            message: stash 说明，可为空
+
+        Returns:
+            (是否成功, git 输出)。没有可贮藏的修改时 git 返回成功并输出
+            "No local changes to save"，由调用方据此提示用户。
+        """
+        args = ['stash', 'push', '--include-untracked']
+        message = (message or '').strip()
+        if message:
+            args += ['-m', message]
+        success, output = self._run_git(*args)
+        if not success:
+            self.error_occurred.emit(t("git_mgr.stash_save_failed", error=output))
+            return False, output
+        self.status_changed.emit()
+        return True, output
+
+    def stash_list(self) -> List[GitStash]:
+        """获取 stash 列表（新→旧，index 即 stash@{N} 中的 N）。"""
+        if not self._repo_path:
+            return []
+        sep = '\x1f'
+        fmt = sep.join(['%gd', '%cr', '%gs'])
+        success, output = self._run_git('stash', 'list', f'--format={fmt}')
+        if not success:
+            return []
+        stashes: List[GitStash] = []
+        for line in output.splitlines():
+            parts = line.split(sep)
+            if len(parts) < 3:
+                continue
+            ref, date, subject = parts[0].strip(), parts[1].strip(), parts[2].strip()
+            m = re.match(r'stash@\{(\d+)\}', ref)
+            if not m:
+                continue
+            # subject 形如 "WIP on main: 1234abc msg" 或 "On main: 自定义说明"
+            branch, message = '', subject
+            m2 = re.match(r'(?:WIP on|On) ([^:]+): (.*)$', subject)
+            if m2:
+                branch, message = m2.group(1).strip(), m2.group(2).strip()
+            stashes.append(GitStash(
+                index=int(m.group(1)), ref=ref,
+                branch=branch, message=message, date=date,
+            ))
+        return stashes
+
+    def _stash_op(self, op: str, index: int, error_key: str) -> bool:
+        """对指定 stash 执行 pop/apply/drop。"""
+        ref = f'stash@{{{int(index)}}}'
+        success, output = self._run_git('stash', op, ref)
+        if not success:
+            self.error_occurred.emit(t(error_key, error=output))
+            return False
+        self.status_changed.emit()
+        return True
+
+    def stash_pop(self, index: int) -> bool:
+        """应用并删除指定 stash（产生冲突时 git 会保留该 stash 并报错）。"""
+        return self._stash_op('pop', index, "git_mgr.stash_pop_failed")
+
+    def stash_apply(self, index: int) -> bool:
+        """应用指定 stash（保留该 stash 不删除）。"""
+        return self._stash_op('apply', index, "git_mgr.stash_apply_failed")
+
+    def stash_drop(self, index: int) -> bool:
+        """删除指定 stash（不可恢复）。"""
+        return self._stash_op('drop', index, "git_mgr.stash_drop_failed")
 
     def revert_commit(self, commit_hash: str) -> bool:
         """撤销某次提交（git revert）：生成一个新提交来抵消该提交的改动。
@@ -804,13 +969,13 @@ class GitManager(QObject):
         if branch is None:
             branch = self.get_current_branch()
 
-        success, output = self._run_git('push', remote, branch, timeout=120)
+        success, output = self._run_git('push', remote, branch, timeout=GIT_NETWORK_TIMEOUT)
         if not success:
             self.error_occurred.emit(t("git_mgr.push_failed", error=output))
             return False
         return True
 
-    def _run_git_verbose(self, *args, timeout: int = 120) -> Tuple[bool, str]:
+    def _run_git_verbose(self, *args, timeout: int = GIT_NETWORK_TIMEOUT) -> Tuple[bool, str]:
         """跑 git 命令并返回 (成功, 合并输出)。
 
         push/pull 的有用信息分散在 stdout（合并摘要/diffstat）和 stderr
@@ -847,7 +1012,7 @@ class GitManager(QObject):
         只更新远程跟踪分支，不改动工作区。后台静默调用：失败（如离线）时不报错，
         保留上次的计数即可。
         """
-        success, _ = self._run_git('fetch', remote, '--quiet', timeout=120)
+        success, _ = self._run_git('fetch', remote, '--quiet', timeout=GIT_NETWORK_TIMEOUT)
         return success
 
     def pull(self, remote: str = "origin", branch: str = None) -> bool:
@@ -867,7 +1032,7 @@ class GitManager(QObject):
         if branch is None:
             branch = self.get_current_branch()
 
-        success, output = self._run_git_verbose('pull', remote, branch, timeout=120)
+        success, output = self._run_git_verbose('pull', remote, branch, timeout=GIT_NETWORK_TIMEOUT)
         if not success:
             self.error_occurred.emit(t("git_mgr.pull_failed", error=output))
             return False
