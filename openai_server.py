@@ -21,6 +21,258 @@ from datetime import datetime
 from PyQt6.QtCore import QObject, pyqtSignal, QThread, QTimer
 
 
+# ============================================================
+# 屏幕响应提取（模块级纯函数，只依赖标准库，便于无 GUI 单元测试）
+# 逻辑与原 OpenAIRequestHandler._extract_response_from_screen 完全一致
+# ============================================================
+
+# 响应开始标记（Claude 等 AI 工具常用）
+RESPONSE_MARKERS = ('✢', '✶', '✷', '✸', '✹', '✺', '⏺', '●', '✽', '✻', '✼', '❋', '❊', '❉', '✳', '✴', '✵', '*', '·', '•')
+# 输入提示符模式
+INPUT_PROMPT_PATTERNS = ('>', '›', '❯')
+# UI 关键词（需要跳过的行）
+EXTRACT_UI_KEYWORDS = ['for shortcuts', 'shift+tab', 'ctrl+', 'claude code', 'opus',
+                       'enter to send', 'esc to', 'tab to cycle', 'thought for',
+                       'shimmying', 'shimmy', 'analyzing', 'processing', 'thinking',
+                       'read image', 'read(', '⎿', '[image #', 'l  [image',
+                       'mulling', 'pondering', 'considering', 'reasoning', 'seasoning',
+                       'cogitating', 'forming', 'actioning', 'simmering', 'misting',
+                       'brewing', 'steeping', 'percolating', 'distilling', 'filtering',
+                       'crystallizing', 'synthesizing', 'composing', 'crafting',
+                       'weaving', 'spinning', 'churning', 'mixing', 'blending',
+                       'stirring', 'whisking',
+                       # 更多 thinking 动画词
+                       'pollinating', 'germinating', 'blooming', 'budding', 'sprouting',
+                       'fermenting', 'marinating', 'roasting', 'baking',
+                       'incubating', 'hatching', 'nurturing', 'cultivating', 'growing',
+                       'doodling', 'spelunking', 'exploring', 'wandering', 'meandering',
+                       'contemplating', 'reflecting', 'musing', 'deliberating',
+                       'ruminating', 'meditating', 'digesting', 'absorbing',
+                       # Claude 会话反馈提示
+                       'how is claude doing', 'this session', '(optional)',
+                       '1: bad', '2: fine', '3: good', '0: dismiss',
+                       # 队列消息提示
+                       'press up to edit', 'queued messages']
+
+
+def _is_empty_prompt_line(s: str) -> bool:
+    """检查是否是空的输入提示符行（等待输入状态）"""
+    for p in INPUT_PROMPT_PATTERNS:
+        if s == p or s == p + ' ' or (s.startswith(p) and len(s) <= 3):
+            return True
+    return False
+
+
+def _is_input_line(s: str) -> bool:
+    """检查是否是用户输入行（提示符后有内容）"""
+    for p in INPUT_PROMPT_PATTERNS:
+        if s.startswith(p) and len(s) > 3:
+            return True
+    return False
+
+
+def _is_extract_ui_line(s: str) -> bool:
+    """检查是否是 UI 元素行"""
+    lower = s.lower()
+    if any(kw in lower for kw in EXTRACT_UI_KEYWORDS):
+        return True
+    clean_check = s.replace(' ', '')
+    if clean_check and all(c in '─━═┌┐└┘├┤┬┴┼│┃║·•*-_=—–―‐‑‒⁃)(' for c in clean_check):
+        return True
+    return False
+
+
+def _has_response_marker(s: str) -> bool:
+    """检查行是否以响应标记开头"""
+    return any(s.startswith(m) for m in RESPONSE_MARKERS)
+
+
+def _clean_response_line(s: str) -> str:
+    """清理响应行，移除开头的标记"""
+    cleaned = s
+    for m in RESPONSE_MARKERS:
+        cleaned = cleaned.lstrip(m)
+    return cleaned.strip()
+
+
+def _clean_final_result(text: str) -> str:
+    """清理最终结果，移除尾部的孤立括号等 UI 残留"""
+    if not text:
+        return text
+    # 按行处理，移除只包含 ) 的行
+    lines = text.split('\n')
+    cleaned_lines = []
+    for line in lines:
+        stripped = line.strip()
+        # 跳过只有 ) 或空白+) 的行
+        if stripped == ')' or stripped == '）':
+            continue
+        # 移除行尾的孤立 )（前面有多个空格的情况）
+        if line.rstrip().endswith('  )') or line.rstrip().endswith('  ）'):
+            line = line.rstrip()[:-1].rstrip()
+        cleaned_lines.append(line)
+    result = '\n'.join(cleaned_lines).strip()
+    # 移除结果末尾的孤立 )
+    while result.endswith(')') or result.endswith('）'):
+        result = result[:-1].rstrip()
+    return result.strip()
+
+
+def _find_empty_prompt_line(lines: List[str]) -> int:
+    """从底部向上找空提示符行，找不到返回 -1"""
+    for i in range(len(lines) - 1, -1, -1):
+        stripped = lines[i].strip()
+        if _is_empty_prompt_line(stripped):
+            print(f"[Extract] Found empty prompt at line {i}")
+            return i
+    return -1
+
+
+def _find_input_boundary(lines: List[str], empty_prompt_line: int):
+    """从空提示符向上找 [Image #...] 标记（用户输入的结束）或用户输入行
+
+    返回 (image_marker_line, last_input_line)，未找到的为 -1
+    """
+    image_marker_line = -1
+    last_input_line = -1
+    if empty_prompt_line > 0:
+        for i in range(empty_prompt_line - 1, -1, -1):
+            stripped = lines[i].strip()
+            lower = stripped.lower()
+            # 找到图片标记
+            if '[image #' in lower or '⎿' in stripped:
+                image_marker_line = i
+                print(f"[Extract] Found image marker at line {i}: {stripped[:50]}")
+                break
+            # 如果遇到用户输入行，记录位置
+            if _is_input_line(stripped):
+                last_input_line = i
+                print(f"[Extract] Found input line at {i}: {stripped[:50]}")
+                break
+    return image_marker_line, last_input_line
+
+
+def _extract_input_based_response(lines: List[str], start_line: int, empty_prompt_line: int) -> Optional[str]:
+    """策略1：提取分界线之后到空提示符之间的 AI 回答；无内容时返回 None"""
+    response_lines = []
+    for i in range(start_line, empty_prompt_line):
+        stripped = lines[i].strip()
+        if not stripped:
+            if response_lines:
+                response_lines.append('')
+            continue
+
+        # 跳过 UI 元素
+        if _is_extract_ui_line(stripped):
+            continue
+
+        # 跳过空提示符
+        if _is_empty_prompt_line(stripped):
+            continue
+
+        # 跳过用户输入行
+        if _is_input_line(stripped):
+            continue
+
+        # 处理响应标记行
+        if _has_response_marker(stripped):
+            cleaned = _clean_response_line(stripped)
+            if cleaned:
+                response_lines.append(cleaned)
+        else:
+            response_lines.append(stripped)
+
+    if response_lines:
+        result = '\n'.join(response_lines).strip()
+        result = _clean_final_result(result)
+        print(f"[Extract] Input-based response: '{result[:100]}...' ({len(result)} chars)")
+        return result
+    return None
+
+
+def _find_last_marker_line(lines: List[str]) -> int:
+    """从底部向上找到最后一个响应标记行，找不到返回 -1"""
+    for i in range(len(lines) - 1, -1, -1):
+        stripped = lines[i].strip()
+        if _has_response_marker(stripped):
+            print(f"[Extract] Found last response marker at line {i}: {stripped[:50]}")
+            return i
+    return -1
+
+
+def _extract_marker_based_response(lines: List[str], last_marker_line: int) -> Optional[str]:
+    """备用方法：从最后一个响应标记开始提取到空提示符；无内容时返回 None"""
+    response_lines = []
+    for i in range(last_marker_line, len(lines)):
+        stripped = lines[i].strip()
+        if not stripped:
+            if response_lines:
+                response_lines.append('')
+            continue
+
+        # 检测空提示符（结束）
+        if _is_empty_prompt_line(stripped):
+            print(f"[Extract] Found prompt at line {i}, ending")
+            break
+
+        # 跳过 UI 元素
+        if _is_extract_ui_line(stripped):
+            continue
+
+        # 处理响应标记行
+        if _has_response_marker(stripped):
+            cleaned = _clean_response_line(stripped)
+            if cleaned:
+                response_lines.append(cleaned)
+        else:
+            response_lines.append(stripped)
+
+    if response_lines:
+        result = '\n'.join(response_lines).strip()
+        result = _clean_final_result(result)
+        print(f"[Extract] Marker-based response: '{result[:100]}...' ({len(result)} chars)")
+        return result
+    return None
+
+
+def extract_response_from_screen(screen_content: str, input_text: str = "") -> str:
+    """从屏幕内容中提取 AI 响应 - 只提取最后一次用户输入之后的 AI 回答（调度函数）"""
+    if not screen_content:
+        print("[Extract] Screen content is empty")
+        return ""
+
+    lines = screen_content.split('\n')
+
+    # 策略1：找到空提示符，然后找 [Image #...] 标记（用户输入结束），提取之后的内容
+    # AI 回答可能有标记（* · •）也可能没有
+    empty_prompt_line = _find_empty_prompt_line(lines)
+    image_marker_line, last_input_line = _find_input_boundary(lines, empty_prompt_line)
+
+    # 优先使用图片标记作为分界线
+    start_line = -1
+    if image_marker_line >= 0:
+        start_line = image_marker_line + 1
+    elif last_input_line >= 0:
+        start_line = last_input_line + 1
+
+    # 提取 AI 回答（从分界线之后到空提示符之间）
+    if start_line >= 0 and empty_prompt_line > start_line:
+        result = _extract_input_based_response(lines, start_line, empty_prompt_line)
+        if result is not None:
+            return result
+
+    # 备用方法：从底部向上找到最后一个响应标记，然后提取
+    print(f"[Extract] Trying marker-based extraction")
+    last_marker_line = _find_last_marker_line(lines)
+    if last_marker_line >= 0:
+        result = _extract_marker_based_response(lines, last_marker_line)
+        if result is not None:
+            return result
+
+    print(f"[Extract] No response found")
+    return ""
+
+
 @dataclass
 class ServerConfig:
     """服务器配置"""
@@ -531,6 +783,9 @@ class OpenAIRequestHandler(BaseHTTPRequestHandler):
 
     server_version = "SmartTerminal/1.0"
 
+    # 客户端断开标志（SSE 写入失败时置位，停止继续等待生成）
+    _client_disconnected = False
+
     def __init__(self, *args, bridge: TerminalBridge, parser: ResponseParser,
                  config: ServerConfig, **kwargs):
         self.bridge = bridge
@@ -1016,6 +1271,8 @@ class OpenAIRequestHandler(BaseHTTPRequestHandler):
             self._send_error(429, "Another request is already in progress")
             return
 
+        self._client_disconnected = False  # 重置客户端断开标志
+
         try:  # 包装整个流程，确保 end_request 被调用
             # 发送 SSE 头
             self.send_response(200)
@@ -1111,6 +1368,10 @@ class OpenAIRequestHandler(BaseHTTPRequestHandler):
                     print(f"[OpenAI Server] Stream: Max iterations reached: {iteration_count}")
                     break
 
+                # 客户端已断开（SSE 写入失败），停止继续等待生成
+                if self._client_disconnected:
+                    break
+
                 # 自适应轮询间隔：活跃时快，空闲时慢
                 time_since_activity = time.time() - last_activity_time
                 poll_interval = 0.08 if time_since_activity < 1.0 else (0.15 if time_since_activity < 3.0 else 0.25)
@@ -1120,13 +1381,14 @@ class OpenAIRequestHandler(BaseHTTPRequestHandler):
                 idle_time = current_time - last_activity_time
                 significant_idle_time = current_time - last_significant_change_time
 
-                # 心跳
+                # 心跳（同时用于探测客户端是否断开）
                 if current_time - last_heartbeat_time > 5.0:
                     try:
                         self.wfile.write(b": heartbeat\n\n")
                         self.wfile.flush()
                         last_heartbeat_time = current_time
-                    except BrokenPipeError:
+                    except (BrokenPipeError, ConnectionResetError):
+                        self._client_disconnected = True
                         break
 
                 if output:
@@ -1245,6 +1507,11 @@ class OpenAIRequestHandler(BaseHTTPRequestHandler):
                     confirmed_screen = current_screen
                     break
 
+            # 客户端已断开：不再提取/发送，直接结束（finally 中 end_request 清理资源）
+            if self._client_disconnected:
+                print("[OpenAI Server] Client disconnected, aborting stream response")
+                return
+
             # 从屏幕内容提取最终响应（使用确认时保存的屏幕内容，避免被后续请求覆盖）
             screen_content = confirmed_screen if confirmed_screen else self.bridge.get_screen_content()
             print(f"[OpenAI Server] Screen content length: {len(screen_content)}")
@@ -1275,7 +1542,8 @@ class OpenAIRequestHandler(BaseHTTPRequestHandler):
 
             print(f"[OpenAI Server] Stream complete: {len(final_content)} chars")
 
-        except BrokenPipeError:
+        except (BrokenPipeError, ConnectionResetError):
+            self._client_disconnected = True
             print("[OpenAI Server] Client disconnected")
         except Exception as e:
             print(f"[OpenAI Server] Stream error: {e}")
@@ -1385,8 +1653,9 @@ class OpenAIRequestHandler(BaseHTTPRequestHandler):
         try:
             self.wfile.write(f"data: {json.dumps(data, ensure_ascii=False)}\n\n".encode('utf-8'))
             self.wfile.flush()
-        except BrokenPipeError:
-            pass
+        except (BrokenPipeError, ConnectionResetError):
+            # 客户端已断开，置位标志让流式循环停止等待生成
+            self._client_disconnected = True
 
     def _send_json(self, data: dict, status: int = 200):
         try:
@@ -1404,216 +1673,11 @@ class OpenAIRequestHandler(BaseHTTPRequestHandler):
         self._send_json({"error": {"message": message, "type": "server_error", "code": status}}, status)
 
     def _extract_response_from_screen(self, screen_content: str, input_text: str) -> str:
-        """从屏幕内容中提取 AI 响应 - 只提取最后一次用户输入之后的 AI 回答"""
-        if not screen_content:
-            print("[Extract] Screen content is empty")
-            return ""
+        """从屏幕内容中提取 AI 响应 - 只提取最后一次用户输入之后的 AI 回答
 
-        lines = screen_content.split('\n')
-
-        # 响应开始标记（Claude 等 AI 工具常用）
-        response_markers = ('✢', '✶', '✷', '✸', '✹', '✺', '⏺', '●', '✽', '✻', '✼', '❋', '❊', '❉', '✳', '✴', '✵', '*', '·', '•')
-        # 输入提示符模式
-        input_prompt_patterns = ('>', '›', '❯')
-        # UI 关键词（需要跳过的行）
-        ui_keywords = ['for shortcuts', 'shift+tab', 'ctrl+', 'claude code', 'opus',
-                       'enter to send', 'esc to', 'tab to cycle', 'thought for',
-                       'shimmying', 'shimmy', 'analyzing', 'processing', 'thinking',
-                       'read image', 'read(', '⎿', '[image #', 'l  [image',
-                       'mulling', 'pondering', 'considering', 'reasoning', 'seasoning',
-                       'cogitating', 'forming', 'actioning', 'simmering', 'misting',
-                       'brewing', 'steeping', 'percolating', 'distilling', 'filtering',
-                       'crystallizing', 'synthesizing', 'composing', 'crafting',
-                       'weaving', 'spinning', 'churning', 'mixing', 'blending',
-                       'stirring', 'whisking',
-                       # 更多 thinking 动画词
-                       'pollinating', 'germinating', 'blooming', 'budding', 'sprouting',
-                       'fermenting', 'marinating', 'roasting', 'baking',
-                       'incubating', 'hatching', 'nurturing', 'cultivating', 'growing',
-                       'doodling', 'spelunking', 'exploring', 'wandering', 'meandering',
-                       'contemplating', 'reflecting', 'musing', 'deliberating',
-                       'ruminating', 'meditating', 'digesting', 'absorbing',
-                       # Claude 会话反馈提示
-                       'how is claude doing', 'this session', '(optional)',
-                       '1: bad', '2: fine', '3: good', '0: dismiss',
-                       # 队列消息提示
-                       'press up to edit', 'queued messages']
-
-        def is_empty_prompt_line(s: str) -> bool:
-            """检查是否是空的输入提示符行（等待输入状态）"""
-            for p in input_prompt_patterns:
-                if s == p or s == p + ' ' or (s.startswith(p) and len(s) <= 3):
-                    return True
-            return False
-
-        def is_input_line(s: str) -> bool:
-            """检查是否是用户输入行（提示符后有内容）"""
-            for p in input_prompt_patterns:
-                if s.startswith(p) and len(s) > 3:
-                    return True
-            return False
-
-        def is_ui_line(s: str) -> bool:
-            """检查是否是 UI 元素行"""
-            lower = s.lower()
-            if any(kw in lower for kw in ui_keywords):
-                return True
-            clean_check = s.replace(' ', '')
-            if clean_check and all(c in '─━═┌┐└┘├┤┬┴┼│┃║·•*-_=—–―‐‑‒⁃)(' for c in clean_check):
-                return True
-            return False
-
-        def has_response_marker(s: str) -> bool:
-            """检查行是否以响应标记开头"""
-            return any(s.startswith(m) for m in response_markers)
-
-        def clean_response_line(s: str) -> str:
-            """清理响应行，移除开头的标记"""
-            cleaned = s
-            for m in response_markers:
-                cleaned = cleaned.lstrip(m)
-            return cleaned.strip()
-
-        def clean_final_result(text: str) -> str:
-            """清理最终结果，移除尾部的孤立括号等 UI 残留"""
-            if not text:
-                return text
-            # 按行处理，移除只包含 ) 的行
-            lines = text.split('\n')
-            cleaned_lines = []
-            for line in lines:
-                stripped = line.strip()
-                # 跳过只有 ) 或空白+) 的行
-                if stripped == ')' or stripped == '）':
-                    continue
-                # 移除行尾的孤立 )（前面有多个空格的情况）
-                if line.rstrip().endswith('  )') or line.rstrip().endswith('  ）'):
-                    line = line.rstrip()[:-1].rstrip()
-                cleaned_lines.append(line)
-            result = '\n'.join(cleaned_lines).strip()
-            # 移除结果末尾的孤立 )
-            while result.endswith(')') or result.endswith('）'):
-                result = result[:-1].rstrip()
-            return result.strip()
-
-        # 策略1：找到空提示符，然后找 [Image #...] 标记（用户输入结束），提取之后的内容
-        # AI 回答可能有标记（* · •）也可能没有
-
-        empty_prompt_line = -1
-        image_marker_line = -1
-        last_input_line = -1
-
-        # 从底部向上找空提示符
-        for i in range(len(lines) - 1, -1, -1):
-            stripped = lines[i].strip()
-            if is_empty_prompt_line(stripped):
-                empty_prompt_line = i
-                print(f"[Extract] Found empty prompt at line {i}")
-                break
-
-        # 从空提示符向上找 [Image #...] 标记（这是用户输入的结束）
-        if empty_prompt_line > 0:
-            for i in range(empty_prompt_line - 1, -1, -1):
-                stripped = lines[i].strip()
-                lower = stripped.lower()
-                # 找到图片标记
-                if '[image #' in lower or '⎿' in stripped:
-                    image_marker_line = i
-                    print(f"[Extract] Found image marker at line {i}: {stripped[:50]}")
-                    break
-                # 如果遇到用户输入行，记录位置
-                if is_input_line(stripped):
-                    last_input_line = i
-                    print(f"[Extract] Found input line at {i}: {stripped[:50]}")
-                    break
-
-        # 优先使用图片标记作为分界线
-        start_line = -1
-        if image_marker_line >= 0:
-            start_line = image_marker_line + 1
-        elif last_input_line >= 0:
-            start_line = last_input_line + 1
-
-        # 提取 AI 回答（从分界线之后到空提示符之间）
-        if start_line >= 0 and empty_prompt_line > start_line:
-            response_lines = []
-            for i in range(start_line, empty_prompt_line):
-                stripped = lines[i].strip()
-                if not stripped:
-                    if response_lines:
-                        response_lines.append('')
-                    continue
-
-                # 跳过 UI 元素
-                if is_ui_line(stripped):
-                    continue
-
-                # 跳过空提示符
-                if is_empty_prompt_line(stripped):
-                    continue
-
-                # 跳过用户输入行
-                if is_input_line(stripped):
-                    continue
-
-                # 处理响应标记行
-                if has_response_marker(stripped):
-                    cleaned = clean_response_line(stripped)
-                    if cleaned:
-                        response_lines.append(cleaned)
-                else:
-                    response_lines.append(stripped)
-
-            if response_lines:
-                result = '\n'.join(response_lines).strip()
-                result = clean_final_result(result)
-                print(f"[Extract] Input-based response: '{result[:100]}...' ({len(result)} chars)")
-                return result
-
-        # 备用方法：从底部向上找到最后一个响应标记，然后提取
-        print(f"[Extract] Trying marker-based extraction")
-        last_marker_line = -1
-        for i in range(len(lines) - 1, -1, -1):
-            stripped = lines[i].strip()
-            if has_response_marker(stripped):
-                last_marker_line = i
-                print(f"[Extract] Found last response marker at line {i}: {stripped[:50]}")
-                break
-
-        if last_marker_line >= 0:
-            response_lines = []
-            for i in range(last_marker_line, len(lines)):
-                stripped = lines[i].strip()
-                if not stripped:
-                    if response_lines:
-                        response_lines.append('')
-                    continue
-
-                # 检测空提示符（结束）
-                if is_empty_prompt_line(stripped):
-                    print(f"[Extract] Found prompt at line {i}, ending")
-                    break
-
-                # 跳过 UI 元素
-                if is_ui_line(stripped):
-                    continue
-
-                # 处理响应标记行
-                if has_response_marker(stripped):
-                    cleaned = clean_response_line(stripped)
-                    if cleaned:
-                        response_lines.append(cleaned)
-                else:
-                    response_lines.append(stripped)
-
-            if response_lines:
-                result = '\n'.join(response_lines).strip()
-                result = clean_final_result(result)
-                print(f"[Extract] Marker-based response: '{result[:100]}...' ({len(result)} chars)")
-                return result
-
-        print(f"[Extract] No response found")
-        return ""
+        实际逻辑在模块级纯函数 extract_response_from_screen 中（便于单元测试）。
+        """
+        return extract_response_from_screen(screen_content, input_text)
 
 
 class OpenAICompatServer(QThread):
