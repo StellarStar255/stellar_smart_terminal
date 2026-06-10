@@ -237,11 +237,14 @@ class GitManager(QObject):
         """发出状态变更信号"""
         self.status_changed.emit()
 
-    def _spawn_git(self, args: list):
+    def _spawn_git(self, args: list, stdin=None):
         """启动一个 git 子进程并登记到 _active_procs。
 
         使用 start_new_session=True 让 git 及其子进程（ssh / credential helper）
         进入独立进程组，便于在取消时通过 killpg 一次性结束整棵进程树。
+
+        Args:
+            stdin: 传给 Popen 的 stdin（如 subprocess.PIPE，用于喂 patch 等输入）
         """
         env = dict(os.environ)
         env['GIT_TERMINAL_PROMPT'] = '0'
@@ -256,6 +259,7 @@ class GitManager(QObject):
         proc = subprocess.Popen(
             ['git'] + list(args),
             cwd=self._repo_path,
+            stdin=stdin,
             stdout=subprocess.PIPE,
             stderr=subprocess.PIPE,
             text=True,
@@ -296,13 +300,15 @@ class GitManager(QObject):
                 except Exception:
                     pass
 
-    def _run_git(self, *args, check: bool = True, timeout: int = 30) -> Tuple[bool, str]:
+    def _run_git(self, *args, check: bool = True, timeout: int = 30,
+                 input_text: str = None) -> Tuple[bool, str]:
         """执行 git 命令
 
         Args:
             *args: git 命令参数
             check: 是否检查返回码
             timeout: 超时秒数（push/pull 等网络操作需要更长）
+            input_text: 通过 stdin 喂给 git 的文本（如 `git apply -` 的 patch）
 
         Returns:
             (成功与否, 输出内容)
@@ -312,9 +318,12 @@ class GitManager(QObject):
 
         proc = None
         try:
-            proc = self._spawn_git(list(args))
+            proc = self._spawn_git(
+                list(args),
+                stdin=subprocess.PIPE if input_text is not None else None,
+            )
             try:
-                stdout, stderr = proc.communicate(timeout=timeout)
+                stdout, stderr = proc.communicate(input=input_text, timeout=timeout)
             except subprocess.TimeoutExpired:
                 self._kill_proc(proc)
                 try:
@@ -435,6 +444,39 @@ class GitManager(QObject):
         success, output = self._run_git('reset', 'HEAD', '--', path)
         if not success:
             self.error_occurred.emit(t("git_mgr.unstage_failed", error=output))
+            return False
+        self.status_changed.emit()
+        return True
+
+    def apply_patch(self, patch_text: str, cached: bool = True,
+                    reverse: bool = False) -> bool:
+        """对暂存区（index）应用一段 patch，用于 hunk 级暂存/取消暂存。
+
+        - 暂存某个 hunk：patch 取自 `git diff`（index→worktree），正向 apply --cached
+        - 取消暂存某个 hunk：patch 取自 `git diff --cached`（HEAD→index），
+          反向（-R）apply --cached
+
+        Args:
+            patch_text: 完整可独立 apply 的 patch 文本（文件头 + 单个 hunk）
+            cached: 是否作用于暂存区（--cached）
+            reverse: 是否反向应用（-R）
+
+        Returns:
+            是否成功
+        """
+        if not patch_text or not patch_text.strip():
+            return False
+        args = ['apply']
+        if cached:
+            args.append('--cached')
+        if reverse:
+            args.append('-R')
+        args += ['--unidiff-zero', '-']
+        if not patch_text.endswith('\n'):
+            patch_text += '\n'
+        success, output = self._run_git(*args, input_text=patch_text)
+        if not success:
+            self.error_occurred.emit(t("git_mgr.apply_patch_failed", error=output))
             return False
         self.status_changed.emit()
         return True

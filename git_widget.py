@@ -13,7 +13,10 @@ from PyQt6.QtWidgets import (
     QAbstractItemView, QMessageBox, QDialog, QTextEdit, QSplitter,
     QLineEdit, QDialogButtonBox, QMenu, QInputDialog
 )
-from PyQt6.QtCore import Qt, pyqtSignal, QSize, QThread, QTimer, QPoint, QRect, QPointF, QRectF
+from PyQt6.QtCore import (
+    Qt, pyqtSignal, QSize, QThread, QTimer, QPoint, QRect, QPointF, QRectF,
+    QEvent,
+)
 from PyQt6.QtGui import (
     QFont, QColor, QBrush, QTextCursor, QTextCharFormat, QTextBlockFormat,
     QFontMetrics, QPainter, QPen, QAction, QIcon, QPixmap, QPainterPath
@@ -1138,6 +1141,16 @@ class GitDiffView(QWidget):
         super().__init__(parent)
         self.theme = theme or {}
         self._syncing = False
+        # hunk 级暂存/取消暂存的上下文（set_context 设置；不设置时纯展示）
+        self._gm = None             # GitManager 引用
+        self._ctx_path = None       # 当前 diff 对应的文件路径
+        self._ctx_staged = False    # True=展示的是暂存区 diff
+        # 每次 set_diff 重算：文件头行、各 hunk 原始文本、hunk 行映射等
+        self._file_header = None    # ['diff --git ...', 'index ...', '--- ...', '+++ ...']
+        self._hunk_patches = []     # 每个 hunk 的原始文本（含 @@ 行）
+        self._hunk_row_map = {}     # 显示行号(block) -> hunk 下标
+        self._marker_offsets = {}   # 显示行号(block) -> 行内可点击标记起始列
+        self._marker_label = None   # 标记文案（None=本 diff 不支持 hunk 操作）
         self._setup_ui()
 
     def _setup_ui(self):
@@ -1181,6 +1194,9 @@ class GitDiffView(QWidget):
         e.setReadOnly(True)
         e.setLineWrapMode(QPlainTextEdit.LineWrapMode.NoWrap)
         e.setFont(QFont("Menlo", 12))
+        # hunk 头行内的「暂存/取消暂存此块」标记：在 viewport 上监听点击与悬停
+        e.viewport().setMouseTracking(True)
+        e.viewport().installEventFilter(self)
         return e
 
     def _sync_from_left(self, value: int):
@@ -1197,16 +1213,130 @@ class GitDiffView(QWidget):
         self.left_edit.verticalScrollBar().setValue(value)
         self._syncing = False
 
+    def set_context(self, git_manager, file_path: str, staged: bool):
+        """补充 hunk 级暂存/取消暂存所需的上下文。
+
+        在 set_diff 之前调用。不调用（或 git_manager/file_path 为空）时，
+        视图行为与纯展示完全一致，不出现任何可点击标记。
+        """
+        self._gm = git_manager
+        self._ctx_path = file_path or None
+        self._ctx_staged = bool(staged)
+
     def set_diff(self, title: str, diff_content: str):
         self.title_label.setText(title)
-        left_rows, right_rows = self._parse(diff_content or "")
+        # 重算 hunk 级操作所需数据；不满足条件（无上下文/新增/删除/二进制
+        # 文件等）时 _marker_label 保持 None，hunk 头不出现可点击标记。
+        self._file_header, self._hunk_patches = None, []
+        self._hunk_row_map = {}
+        self._marker_offsets = {}
+        self._marker_label = None
+        if self._gm is not None and self._ctx_path:
+            header, hunks = self._parse_hunks(diff_content or "")
+            if header and hunks:
+                self._file_header = header
+                self._hunk_patches = hunks
+                self._marker_label = (
+                    t("git.unstage_hunk") if self._ctx_staged else t("git.stage_hunk")
+                )
+        left_rows, right_rows, hunk_rows = self._parse(diff_content or "")
         if not left_rows and not right_rows:
             left_rows = [(None, t("git.diff_no_content"), 'ctx')]
             right_rows = [(None, '', 'ctx')]
+        if self._marker_label:
+            # 显示中的 hunk 行按出现顺序与 patch hunk 一一对应
+            self._hunk_row_map = {
+                row: i for i, row in enumerate(hunk_rows)
+                if i < len(self._hunk_patches)
+            }
         self._fill_edit(self.left_edit, left_rows)
         self._fill_edit(self.right_edit, right_rows)
         self.left_edit.verticalScrollBar().setValue(0)
         self.right_edit.verticalScrollBar().setValue(0)
+
+    def _parse_hunks(self, diff_content: str):
+        """把单文件 diff 拆成 (文件头行列表, [每个 hunk 的原始文本])。
+
+        不支持 hunk 级操作的情形返回 (None, [])：多文件 diff、二进制 diff、
+        新增/删除文件（整个文件本来就是一个整体，没有部分暂存的意义）、
+        缺少 ---/+++ 头（无法构造合法 patch）。
+        """
+        header, hunks, cur = [], [], None
+        seen_diff = 0
+        for line in diff_content.splitlines():
+            if line.startswith('diff --git'):
+                seen_diff += 1
+                if seen_diff > 1:
+                    return None, []  # 多文件 diff 不支持
+            if (line.startswith('Binary files') or line.startswith('GIT binary patch')
+                    or line.startswith('new file mode')
+                    or line.startswith('deleted file mode')):
+                return None, []
+            if line.startswith('@@'):
+                cur = [line]
+                hunks.append(cur)
+            elif cur is not None:
+                cur.append(line)  # hunk 体（含 "\ No newline ..."）原样保留
+            else:
+                header.append(line)
+        if not hunks:
+            return None, []
+        if (not any(l.startswith('--- ') for l in header)
+                or not any(l.startswith('+++ ') for l in header)):
+            return None, []
+        return header, ['\n'.join(h) for h in hunks]
+
+    def _apply_hunk(self, hunk_index: int):
+        """点击 hunk 头标记：暂存（未暂存视图）或取消暂存（暂存视图）该 hunk。
+
+        成功后用最新 diff 刷新自身；文件列表由 GitManager.status_changed
+        信号驱动 GitPanel 刷新。失败走 GitManager.error_occurred 现有弹窗。
+        """
+        if self._gm is None or not self._ctx_path or not self._file_header:
+            return
+        if not (0 <= hunk_index < len(self._hunk_patches)):
+            return
+        patch = '\n'.join(self._file_header + [self._hunk_patches[hunk_index]]) + '\n'
+        # 暂存：patch 来自 index→worktree 的 diff，正向应用到 index；
+        # 取消暂存：patch 来自 HEAD→index 的 diff，反向应用到 index。
+        if self._gm.apply_patch(patch, cached=True, reverse=self._ctx_staged):
+            new_diff = self._gm.get_diff(self._ctx_path, self._ctx_staged)
+            self.set_diff(self.title_label.text(), new_diff)
+
+    def _hunk_hit(self, edit, pos):
+        """命中测试：pos 是否落在某个 hunk 头行的可点击标记上。"""
+        if not self._marker_label or not self._hunk_row_map:
+            return None
+        cursor = edit.cursorForPosition(pos)
+        row = cursor.blockNumber()
+        hunk_idx = self._hunk_row_map.get(row)
+        if hunk_idx is None:
+            return None
+        rect = edit.cursorRect(cursor)
+        if pos.y() < rect.top() or pos.y() > rect.bottom():
+            return None  # 点在文档下方空白处时 cursorForPosition 会钳到最后一行
+        offset = self._marker_offsets.get(row)
+        if offset is None or cursor.positionInBlock() < offset:
+            return None
+        return hunk_idx
+
+    def eventFilter(self, obj, event):
+        if obj is self.left_edit.viewport() or obj is self.right_edit.viewport():
+            edit = self.left_edit if obj is self.left_edit.viewport() else self.right_edit
+            etype = event.type()
+            if (etype == QEvent.Type.MouseButtonPress
+                    and event.button() == Qt.MouseButton.LeftButton):
+                idx = self._hunk_hit(edit, event.position().toPoint())
+                if idx is not None:
+                    self._apply_hunk(idx)
+                    return True
+            elif etype == QEvent.Type.MouseMove:
+                idx = self._hunk_hit(edit, event.position().toPoint())
+                obj.setCursor(
+                    Qt.CursorShape.PointingHandCursor if idx is not None
+                    else Qt.CursorShape.IBeamCursor
+                )
+        return super().eventFilter(obj, event)
 
     def _line_bg_brush(self, kind: str):
         """整行背景：删除=半透明红、新增=半透明绿、对齐占位=半透明斜条纹、
@@ -1237,7 +1367,7 @@ class GitDiffView(QWidget):
         cursor = QTextCursor(edit.document())
         cursor.beginEditBlock()
         first = True
-        for (ln, text, kind) in rows:
+        for i, (ln, text, kind) in enumerate(rows):
             if not first:
                 cursor.insertBlock()
             first = False
@@ -1255,6 +1385,14 @@ class GitDiffView(QWidget):
             txt_fmt = QTextCharFormat()
             txt_fmt.setForeground(text_color)
             cursor.insertText(text or '', txt_fmt)
+            # hunk 头行尾追加可点击标记「暂存此块 / 取消暂存此块」
+            # （左右两栏 hunk 行文本相同 → 标记起始列一致，offset 共用）
+            if kind == 'hunk' and self._marker_label and i in self._hunk_row_map:
+                self._marker_offsets[i] = 6 + len(text or '') + 2
+                mark_fmt = QTextCharFormat()
+                mark_fmt.setForeground(QColor('#61afef'))
+                mark_fmt.setFontUnderline(True)
+                cursor.insertText('  ' + self._marker_label, mark_fmt)
         cursor.endEditBlock()
 
     def _parse(self, diff_content: str):
@@ -1262,9 +1400,11 @@ class GitDiffView(QWidget):
 
         每行是 (lineno, text, kind)，kind ∈ {ctx, del, add, hunk, pad}。
         删除/新增成对时左右对齐，数量不等时短的一侧补 pad 空行。
+        另返回 hunk 头所在的显示行号列表（与 _parse_hunks 的 hunk 顺序对应）。
         """
         import re
         left, right = [], []
+        hunk_rows = []
         old_ln = new_ln = 0
         pend_del, pend_add = [], []
         MAX_ROWS = 6000
@@ -1289,6 +1429,7 @@ class GitDiffView(QWidget):
                     old_ln, new_ln = int(m.group(1)), int(m.group(2))
                 left.append((None, line, 'hunk'))
                 right.append((None, line, 'hunk'))
+                hunk_rows.append(len(left) - 1)
                 continue
             if line.startswith('-'):
                 pend_del.append((old_ln, line[1:], 'del'))
@@ -1306,7 +1447,7 @@ class GitDiffView(QWidget):
             if len(left) > MAX_ROWS:
                 break
         flush()
-        return left, right
+        return left, right, hunk_rows
 
     def apply_theme(self, theme: dict):
         self.theme = theme
@@ -1998,10 +2139,16 @@ class GitPanel(QWidget):
     commit_height_changed = pyqtSignal(int)
     # 用户拖拽分隔条改变 body 各栏高度时发出完整 sizes（主窗口据此持久化）
     body_sizes_changed = pyqtSignal(list)
-    # 双击文件请求查看 diff，交给主窗口在右侧大空间显示 (title, diff_content)
-    diff_requested = pyqtSignal(str, str)
+    # 双击文件请求查看 diff，交给主窗口在右侧大空间显示
+    # (title, diff_content, file_path, staged) —— 后两项供 hunk 级暂存用
+    diff_requested = pyqtSignal(str, str, str, bool)
     # pull 等操作完成后，把 git 输出交给主窗口在右侧大空间显示 (title, output)
     output_requested = pyqtSignal(str, str)
+
+    @property
+    def git_manager(self):
+        """暴露内部 GitManager（如 GitDiffView 的 hunk 级暂存需要）。"""
+        return self._git_manager
 
     def __init__(self, theme: dict = None, parent=None):
         super().__init__(parent)
@@ -3111,7 +3258,7 @@ class GitPanel(QWidget):
         """双击文件 → 交给主窗口在右侧大空间以左右并排方式显示 diff（不弹窗）"""
         diff_content = self._git_manager.get_diff(path, staged)
         title = path + (" (staged)" if staged else "")
-        self.diff_requested.emit(title, diff_content)
+        self.diff_requested.emit(title, diff_content, path, staged)
 
     def _on_op_output(self, kind: str, output: str):
         """pull 等操作的 git 输出 → 交给主窗口在右侧大空间展示（不弹窗）"""

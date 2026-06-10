@@ -452,6 +452,10 @@ TRANSLATIONS = {
     "git.stash_drop_confirm_title": {"zh": "删除 Stash", "en": "Drop stash"},
     "git.stash_drop_confirm_msg": {"zh": "确定删除 {ref} 吗？此操作不可恢复。", "en": "Drop {ref}? This cannot be undone."},
 
+    # ===== Git 面板 - hunk 暂存 =====
+    "git.stage_hunk": {"zh": "暂存此块", "en": "Stage hunk"},
+    "git.unstage_hunk": {"zh": "取消暂存此块", "en": "Unstage hunk"},
+
     # ===== Git 面板 - 冲突/合并 =====
     "git.conflict_suffix": {"zh": "冲突", "en": "conflict"},
     "git.menu_resolve_ours": {"zh": "采用我方版本 (ours)", "en": "Take our version (ours)"},
@@ -494,6 +498,7 @@ TRANSLATIONS = {
     "git_mgr.merge_abort_failed": {"zh": "中止合并失败：{error}", "en": "Failed to abort merge: {error}"},
     "git_mgr.resolve_failed": {"zh": "解决冲突失败：{error}", "en": "Failed to resolve conflict: {error}"},
     "git_mgr.commit_conflicts": {"zh": "存在 {n} 个未解决的合并冲突文件，请先解决冲突再提交。", "en": "{n} file(s) have unresolved merge conflicts. Resolve them before committing."},
+    "git_mgr.apply_patch_failed": {"zh": "应用补丁失败: {error}", "en": "Failed to apply patch: {error}"},
 
     # ===== 文件编辑器 =====
     "editor.no_file": {"zh": "未打开文件", "en": "No file open"},
@@ -650,6 +655,7 @@ TRANSLATIONS = {
     "remote.loading": {"zh": "加载中…", "en": "Loading…"},
     "remote.load_failed": {"zh": "加载失败: {error}", "en": "Load failed: {error}"},
     "remote.transfer_stats": {"zh": "{rate} · 剩余 {eta}", "en": "{rate} · {eta} left"},
+    "remote.uploading_to": {"zh": "正在上传到 {dst}…", "en": "Uploading to {dst}..."},
 
     # ===== SSH 会话 =====
     "ssh.reconnect_failed": {"zh": "SSH 自动重连失败", "en": "SSH automatic reconnect failed"},

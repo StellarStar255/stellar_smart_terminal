@@ -7013,8 +7013,17 @@ class MainWindow(QMainWindow):
         if isinstance(sizes, list) and sizes and all(isinstance(s, int) and s >= 0 for s in sizes):
             self._saved_git_body_sizes = list(sizes)
 
-    def _show_git_diff(self, title: str, diff_content: str):
-        """在主内容区（右侧大空间）显示左右并排 diff，暂时盖住终端。"""
+    def _show_git_diff(self, title: str, diff_content: str,
+                       file_path: str = "", staged: bool = False):
+        """在主内容区（右侧大空间）显示左右并排 diff，暂时盖住终端。
+
+        file_path/staged 来自 GitPanel.diff_requested，连同 GitManager 一起
+        交给 GitDiffView，使其支持 hunk 级暂存/取消暂存；为空则纯展示。
+        """
+        if file_path:
+            self.git_diff_view.set_context(self.git_panel.git_manager, file_path, staged)
+        else:
+            self.git_diff_view.set_context(None, None, False)
         self.git_diff_view.set_diff(title, diff_content)
         self._main_content_stack.setCurrentWidget(self.git_diff_view)
 
