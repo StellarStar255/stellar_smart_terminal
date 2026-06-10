@@ -1674,12 +1674,10 @@ class TerminalWidget(QWidget):
         painter.setCompositionMode(QPainter.CompositionMode.CompositionMode_Source)
         painter.fillRect(self.rect(), opaque_bg)
         if self._cache_pixmap and not self._cache_pixmap.isNull():
-            if fast_scale:
-                # 把旧缓存按当前控件尺寸缩放贴满（快速过渡，文本略有拉伸，动画结束
-                # 后 set_fast_resize(False) 会重建为清晰文本）
-                painter.drawPixmap(self.rect(), self._cache_pixmap)
-            else:
-                painter.drawPixmap(0, 0, self._cache_pixmap)
+            # fast_resize（弹簧动画）期间跳过重建，旧缓存按原尺寸左上角贴图、
+            # 不缩放：变宽时右侧暂露背景色、变窄时右侧裁剪，避免文字被横向
+            # 拉伸/压缩；动画结束后 set_fast_resize(False) 按最终尺寸重建。
+            painter.drawPixmap(0, 0, self._cache_pixmap)
         painter.setCompositionMode(QPainter.CompositionMode.CompositionMode_SourceOver)
 
         # 选区高亮单独绘制（不在缓存中，避免拖动时重建缓存）
