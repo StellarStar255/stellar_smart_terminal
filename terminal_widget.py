@@ -8,6 +8,7 @@ import re
 import sys
 import shutil
 import codecs
+from collections import OrderedDict
 from typing import Optional, List
 from pathlib import Path
 import unicodedata
@@ -94,8 +95,16 @@ class CompatibleHistoryScreen(pyte.HistoryScreen):
     def _enter_alt_screen(self, save_cursor=True):
         """进入备用屏幕：保存主缓冲区，创建空的备用缓冲区"""
         import copy
-        # 保存主屏幕的缓冲区和光标
-        self._saved_main_buffer = copy.deepcopy(self.buffer)
+        # 保存主屏幕的缓冲区和光标。
+        # pyte 的 Char 是 immutable namedtuple，行级浅拷贝即可完全隔离，
+        # 无需 deepcopy（deepcopy 会递归复制每个 Char，大屏幕下非常慢）。
+        # copy.copy 能保留容器类型及其默认值行为：
+        # - 外层 defaultdict 保留 default_factory
+        # - 每行 StaticDefaultDict 保留 .default（缺失列返回 default_char）
+        saved = copy.copy(self.buffer)
+        for row_idx in list(saved):
+            saved[row_idx] = copy.copy(saved[row_idx])
+        self._saved_main_buffer = saved
         self._saved_main_history_lines = self._total_history_lines
         if save_cursor:
             self._saved_main_cursor = copy.copy(self.cursor)
@@ -523,12 +532,20 @@ class TerminalWidget(QWidget):
         self._last_ctrl_c_time = 0
         self._ctrl_c_interval = 0.5  # 500ms 内按两次视为双击
 
-        # 颜色缓存（避免重复创建 QColor 对象）
-        self._color_cache = {}
-        # 宽字符缓存（避免重复调用 unicodedata.east_asian_width）
-        self._wide_char_cache = {}
-        # 可见性调整后的颜色缓存
-        self._visible_color_cache = {}
+        # 颜色缓存（避免重复创建 QColor 对象）—— LRU（OrderedDict）
+        self._color_cache = OrderedDict()
+        # 宽字符缓存（避免重复调用 unicodedata.east_asian_width）—— LRU
+        self._wide_char_cache = OrderedDict()
+        # 可见性调整后的颜色缓存 —— LRU
+        self._visible_color_cache = OrderedDict()
+        # 缓存上限（命中时 move_to_end，超限时淘汰最久未用项）
+        self._WIDE_CHAR_CACHE_MAX = 8192
+        self._COLOR_CACHE_MAX = 4096
+
+        # 增量重绘状态：上次整屏渲染的几何/内容快照 + 主题代号。
+        # 状态完全一致且在底部（无回滚）时，只重绘 pyte 标脏的行。
+        self._last_render_state = None
+        self._render_epoch = 0
 
         # 实例级别的终端颜色（支持主题切换）
         self._current_colors = self.DEFAULT_COLORS.copy()
@@ -1349,20 +1366,21 @@ class TerminalWidget(QWidget):
         return len(history.top) if history else 0
 
     def _is_wide_char(self, char: str) -> bool:
-        """判断字符是否为宽字符（中文等）- 带缓存"""
+        """判断字符是否为宽字符（中文等）- 带 LRU 缓存"""
         if not char or len(char) == 0:
             return False
-        # 检查缓存
-        if char in self._wide_char_cache:
-            return self._wide_char_cache[char]
+        # 检查缓存（命中时移到队尾，标记为最近使用）
+        cache = self._wide_char_cache
+        result = cache.get(char)
+        if result is not None:
+            cache.move_to_end(char)
+            return result
         # 计算并缓存 - east_asian_width 只接受单个字符，取第一个字符判断
         result = unicodedata.east_asian_width(char[0]) in ('F', 'W')
-        # 限制缓存大小（保留一半常用项而不是全部清空）
-        if len(self._wide_char_cache) > 2000:
-            # 使用 popitem() 高效删除，避免创建临时列表
-            for _ in range(1000):
-                self._wide_char_cache.popitem()
-        self._wide_char_cache[char] = result
+        # 超限时淘汰最久未用项（LRU）
+        if len(cache) >= self._WIDE_CHAR_CACHE_MAX:
+            cache.popitem(last=False)
+        cache[char] = result
         return result
 
     @staticmethod
@@ -1574,6 +1592,7 @@ class TerminalWidget(QWidget):
         # - CJK glyph 视觉宽度被放大、超过 cell 分配 → 后字盖住前字（"被切半"）
         dpr = self.devicePixelRatioF()
         target_size = self.size() * dpr
+        pixmap_recreated = False
         if (self._cache_pixmap is None
                 or self._cache_pixmap.isNull()
                 or self._cache_pixmap.size() != target_size
@@ -1582,10 +1601,10 @@ class TerminalWidget(QWidget):
             if self._cache_pixmap.isNull():
                 return
             self._cache_pixmap.setDevicePixelRatio(dpr)
+            pixmap_recreated = True
 
         opaque_bg = QColor(self.bg_color)
         opaque_bg.setAlpha(255)
-        self._cache_pixmap.fill(opaque_bg)
 
         painter = QPainter(self._cache_pixmap)
         if not painter.isActive():
@@ -1629,16 +1648,68 @@ class TerminalWidget(QWidget):
         # 使用 term_cols 为主限制（从 widget 尺寸计算得出），
         # max_visible_cols 为安全上限。不使用 screen.columns 因为 resize 后它可能滞后。
         num_cols = min(self.term_cols, max_visible_cols)
+
+        # ---- 增量重绘判定 ----
+        # 渲染状态快照：任何影响布局/配色的因素变化都会触发整屏重绘。
+        # 快照一致 + 处于底部（scroll_offset == 0，此时 display_row == buffer_row，
+        # 且可见行全部来自 screen.buffer）时，只重绘 pyte 标脏的行（screen.dirty）。
+        # _total_history_lines 纳入快照：有新行推入历史即整屏重绘，
+        # 避免历史 deque 滚动导致可见内容位移而未被标脏。
+        screen_dirty = getattr(self.screen, 'dirty', None)
+        render_state = (
+            start_line, end_line, num_cols, self.term_rows,
+            history_count,
+            getattr(self.screen, '_total_history_lines', -1),
+            getattr(self.screen, '_in_alt_screen', False),
+            round(self.char_width * 1000),
+            round(self.char_height * 1000),
+            round(self.char_ascent * 1000),
+            self._header_h,
+            self.bg_color.rgba(), self.fg_color.rgba(),
+            self.term_font.key(),
+            self._render_epoch,
+        )
+        rows_to_draw = None  # None = 整屏重绘
+        if (not pixmap_recreated
+                and screen_dirty is not None
+                and self.scroll_offset == 0
+                and self._last_render_state == render_state):
+            visible_rows = end_line - start_line
+            dirty_rows = set()
+            for dirty_r in screen_dirty:
+                # 脏行上下各扩一行，防御个别字形（emoji/fallback glyph）
+                # 略微越出本行像素带时留下残影
+                for rr in (dirty_r - 1, dirty_r, dirty_r + 1):
+                    if 0 <= rr < visible_rows:
+                        dirty_rows.add(rr)
+            if not dirty_rows:
+                # 内容无行级变化（如仅光标移动/OSC 标题），pixmap 已是最新
+                painter.end()
+                self._cache_valid = True
+                self._last_render_state = render_state
+                screen_dirty.clear()
+                return
+            rows_to_draw = dirty_rows
+
         char_width = self.char_width
         char_height = self.char_height
         bg_default = opaque_bg
         last_fg_color = None  # 缓存上一个前景色，减少 setPen 调用
         padding = self.PADDING  # 局部变量加速（横向用）
         pad_top = self.PADDING + self._header_h  # 纵向起点（含标题栏占用）
+        if rows_to_draw is None:
+            # 整屏重绘：清空为背景色（opaque_bg 为不透明色，fillRect 等效 fill；
+            # +1 防御分数 DPR 下 logical→physical 取整在边缘留下残留像素）
+            painter.fillRect(0, 0, self.width() + 1, self.height() + 1, opaque_bg)
         for display_row, buffer_line in enumerate(display_lines):
+            if rows_to_draw is not None and display_row not in rows_to_draw:
+                continue
             row_y = int(pad_top + display_row * char_height)
             # 用下一行起点减去本行起点作为本行高度，防止分数像素累计造成行间空隙
             row_h = int(pad_top + (display_row + 1) * char_height) - row_y
+            if rows_to_draw is not None:
+                # 增量重绘：仅清空本行像素带（整行宽度，含左右 padding）
+                painter.fillRect(0, row_y, self.width() + 1, row_h, opaque_bg)
             text_y = int(row_y + self.char_ascent)
             row_cells = []
 
@@ -1716,6 +1787,7 @@ class TerminalWidget(QWidget):
         # 这样拖动选择时不会触发缓存重建，大幅提升性能
 
         # 滚动指示器（显示在右上角）
+        # （仅整屏路径会走到：增量路径要求 scroll_offset == 0）
         if self.scroll_offset > 0:
             painter.setPen(QColor("#667eea"))
             indicator_text = f"[History: +{self.scroll_offset} lines]"
@@ -1723,13 +1795,20 @@ class TerminalWidget(QWidget):
 
         painter.end()
         self._cache_valid = True
+        # 记录本次渲染状态并消费脏行集合（本 widget 是 screen.dirty 的唯一消费者）
+        self._last_render_state = render_state
+        if screen_dirty is not None:
+            screen_dirty.clear()
 
     def _ensure_visible(self, fg: QColor, bg: QColor) -> QColor:
-        """确保前景色在背景色上可见，支持深色和浅色背景 - 带缓存"""
+        """确保前景色在背景色上可见，支持深色和浅色背景 - 带 LRU 缓存"""
         # 构建缓存键（使用 RGB 值作为键）
         cache_key = (fg.rgb(), bg.rgb())
-        if cache_key in self._visible_color_cache:
-            return self._visible_color_cache[cache_key]
+        cache = self._visible_color_cache
+        cached = cache.get(cache_key)
+        if cached is not None:
+            cache.move_to_end(cache_key)
+            return cached
 
         # 计算亮度 (perceived luminance)
         fg_lum = 0.299 * fg.red() + 0.587 * fg.green() + 0.114 * fg.blue()
@@ -1774,15 +1853,14 @@ class TerminalWidget(QWidget):
         else:
             result = fg
 
-        # 限制缓存大小（使用 popitem() 高效删除）
-        if len(self._visible_color_cache) > 1000:
-            for _ in range(500):
-                self._visible_color_cache.popitem()
-        self._visible_color_cache[cache_key] = result
+        # 超限时淘汰最久未用项（LRU）
+        if len(cache) >= self._COLOR_CACHE_MAX:
+            cache.popitem(last=False)
+        cache[cache_key] = result
         return result
 
     def _get_char_color(self, color, bold: bool = False, is_bg: bool = False) -> QColor:
-        """获取字符颜色 - 支持各种格式，带缓存"""
+        """获取字符颜色 - 支持各种格式，带 LRU 缓存"""
         # 默认颜色 - 直接返回预设值
         if color == "default" or color is None:
             return self.bg_color if is_bg else self.fg_color
@@ -1793,19 +1871,21 @@ class TerminalWidget(QWidget):
         else:
             cache_key = (color, bold, is_bg)
 
-        # 检查缓存
-        if cache_key in self._color_cache:
-            return self._color_cache[cache_key]
+        # 检查缓存（命中时移到队尾，标记为最近使用）
+        cache = self._color_cache
+        cached = cache.get(cache_key)
+        if cached is not None:
+            cache.move_to_end(cache_key)
+            return cached
 
         # 计算颜色
         result = self._compute_color(color, bold, is_bg)
 
-        # 限制缓存大小（使用 popitem() 高效删除）
-        if len(self._color_cache) > 1000:
-            for _ in range(500):
-                self._color_cache.popitem()
+        # 超限时淘汰最久未用项（LRU）
+        if len(cache) >= self._COLOR_CACHE_MAX:
+            cache.popitem(last=False)
 
-        self._color_cache[cache_key] = result
+        cache[cache_key] = result
         return result
 
     def _compute_color(self, color, bold: bool, is_bg: bool) -> QColor:
@@ -3442,8 +3522,10 @@ class TerminalWidget(QWidget):
         if cursor_color:
             self._cursor_color = QColor(*cursor_color)
         # 清空颜色缓存
-        self._color_cache = {}
-        self._visible_color_cache = {}
+        self._color_cache = OrderedDict()
+        self._visible_color_cache = OrderedDict()
+        # 颜色映射变化 → 渲染状态失配，强制下次整屏重绘
+        self._render_epoch += 1
 
     def reset_to_dark_theme_colors(self):
         """重置为深色主题颜色"""
@@ -3452,8 +3534,10 @@ class TerminalWidget(QWidget):
         self._selection_color = QColor(100, 149, 237, 100)
         self._cursor_color = QColor(200, 200, 200, 180)
         # 清空颜色缓存
-        self._color_cache = {}
-        self._visible_color_cache = {}
+        self._color_cache = OrderedDict()
+        self._visible_color_cache = OrderedDict()
+        # 颜色映射变化 → 渲染状态失配，强制下次整屏重绘
+        self._render_epoch += 1
 
     def get_cwd(self) -> Optional[str]:
         """获取子进程的当前工作目录"""
