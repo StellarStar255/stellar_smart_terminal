@@ -10,6 +10,7 @@ Design notes:
   host configs (with HostName/User/Port/IdentityFile already resolved) so the
   UI doesn't have to know about ssh_config quirks.
 """
+import functools
 import os
 import posixpath
 import stat
@@ -31,6 +32,40 @@ from paramiko.config import SSHConfig
 paramiko.sftp_file.SFTPFile.MAX_REQUEST_SIZE = 1024 * 256
 
 from PyQt6.QtCore import QObject, pyqtSignal
+
+from i18n import t
+
+# --- 连接稳定性参数 ---
+KEEPALIVE_INTERVAL = 30        # transport 层 keep-alive 间隔（秒），防 NAT/网关空闲断连
+CONNECT_TIMEOUT = 15           # 单次 TCP/SSH 握手超时（秒）
+RECONNECT_MAX_ATTEMPTS = 3     # 自动重连最多尝试次数
+RECONNECT_BACKOFF_BASE = 1.0   # 指数退避基数（秒）：1s → 2s → 4s
+
+# 这些异常通常意味着底层连接断了（而非业务错误）。注意 OSError 也可能是
+# SFTP 状态错误（FileNotFoundError/PermissionError 等），所以判定时还要
+# 结合 transport.is_active()，见 SSHSession._should_reconnect。
+_RECONNECTABLE_ERRORS = (paramiko.SSHException, EOFError, OSError)
+
+
+def _auto_reconnect(method):
+    """装饰 SFTP 操作：连接确实断开导致失败时，自动重连并把该操作重试一次。
+
+    所有被装饰的方法都经由 submit() 在单线程 executor 上运行，因此这里的
+    重连不会和其它操作并发；_reconnect 内部再用锁兜底（防止外部线程直调）。
+    """
+    @functools.wraps(method)
+    def wrapper(self: "SSHSession", *args, **kwargs):
+        # 上一次重连失败后连接已被拆掉：先试着把连接重新建起来
+        if self._sftp is None and self._was_connected:
+            self._reconnect()
+        try:
+            return method(self, *args, **kwargs)
+        except _RECONNECTABLE_ERRORS as exc:
+            if not self._should_reconnect(exc):
+                raise
+            self._reconnect()
+            return method(self, *args, **kwargs)
+    return wrapper
 
 
 # ---------- ssh_config parsing ----------
@@ -288,8 +323,16 @@ class SSHSession(QObject):
         self.host_config = host_config
         self._client: Optional[paramiko.SSHClient] = None
         self._sftp: Optional[paramiko.SFTPClient] = None
+        self._jump_clients: list[paramiko.SSHClient] = []  # ProxyJump 跳板连接（按跳序）
         self._executor = ThreadPoolExecutor(max_workers=1, thread_name_prefix=f"ssh-{host_config.alias}")
         self._lock = threading.Lock()  # serializes paramiko calls just in case
+        self._reconnect_lock = threading.Lock()  # 保证同一时刻只有一个重连在进行
+        self._was_connected = False               # 曾成功连接过（区分「从未连上」和「断线」）
+        # 认证上下文：初次连接用的 provider + 成功过的密码/口令缓存（按 alias），
+        # 重连时优先复用缓存，避免在后台重连流程里再次弹框
+        self._password_provider: Optional[Callable[[str], Optional[str]]] = None
+        self._passphrase_provider: Optional[Callable[[str], Optional[str]]] = None
+        self._auth_secrets: dict[str, dict[str, str]] = {}
         self._home: Optional[str] = None
         # 路径 → (timestamp, entries) 的 listdir 缓存，节省重复网络往返
         self._listdir_cache: dict[str, tuple[float, list["RemoteEntry"]]] = {}
@@ -315,7 +358,45 @@ class SSHSession(QObject):
         return fut
 
     def _do_connect(self, password_provider, passphrase_provider):
+        # 记住认证 provider，自动重连时复用同一套认证逻辑
+        self._password_provider = password_provider
+        self._passphrase_provider = passphrase_provider
+        self._establish()
+
+    def _establish(self):
+        """真正建立连接：先按 ProxyJump 链路连跳板，再连目标，最后开 SFTP。
+
+        初次连接和自动重连共用这一条路径，保证认证/host key 策略完全一致。
+        """
         cfg = self.host_config
+        jump_clients, sock = self._connect_jump_chain(cfg)
+        try:
+            client = self._connect_client(cfg, sock=sock)
+        except Exception:
+            self._close_clients(jump_clients)
+            raise
+        try:
+            sftp = client.open_sftp()
+        except Exception:
+            self._close_clients([client] + jump_clients)
+            raise
+        try:
+            home = sftp.normalize(".")
+        except Exception:
+            home = "/"
+        self._client = client
+        self._sftp = sftp
+        self._jump_clients = jump_clients
+        self._home = home
+        self._was_connected = True
+
+    def _connect_client(self, cfg: HostConfig,
+                        sock: Optional[Any] = None) -> paramiko.SSHClient:
+        """连接单台主机（目标机或跳板机），返回已认证的 SSHClient。
+
+        host key 策略、认证回退（agent/key → passphrase → password）对目标机
+        和跳板机一视同仁；成功用过的密码/口令按 alias 缓存，供自动重连复用。
+        """
         client = paramiko.SSHClient()
         client.load_system_host_keys()
         # 持久化 TOFU：加载用户 known_hosts，使「已知主机密钥变更」能被 paramiko 在
@@ -333,36 +414,56 @@ class SSHSession(QObject):
         connect_kwargs: dict[str, Any] = {
             "hostname": cfg.hostname,
             "port": cfg.port,
-            "timeout": 15,
+            "timeout": CONNECT_TIMEOUT,
             "allow_agent": True,
             "look_for_keys": True,
             "compress": True,
         }
+        if sock is not None:
+            connect_kwargs["sock"] = sock
         if cfg.user:
             connect_kwargs["username"] = cfg.user
         if cfg.identity_file and os.path.isfile(cfg.identity_file):
             connect_kwargs["key_filename"] = cfg.identity_file
 
-        try:
-            client.connect(**connect_kwargs)
-        except paramiko.PasswordRequiredException:
-            if not passphrase_provider:
-                raise
-            phrase = passphrase_provider(f"{cfg.alias} key passphrase")
-            if phrase is None:
-                raise
-            connect_kwargs["passphrase"] = phrase
-            client.connect(**connect_kwargs)
-        except paramiko.AuthenticationException:
-            if not password_provider:
-                raise
-            pwd = password_provider(cfg.alias)
-            if pwd is None:
-                raise
-            connect_kwargs["password"] = pwd
+        # 重连时优先复用上次成功的密码/口令，避免后台重连再次弹框
+        cached = self._auth_secrets.get(cfg.alias, {})
+        if cached.get("passphrase") is not None:
+            connect_kwargs["passphrase"] = cached["passphrase"]
+        if cached.get("password") is not None:
+            connect_kwargs["password"] = cached["password"]
             connect_kwargs["allow_agent"] = False
             connect_kwargs["look_for_keys"] = False
-            client.connect(**connect_kwargs)
+
+        try:
+            try:
+                client.connect(**connect_kwargs)
+            except paramiko.PasswordRequiredException:
+                if not self._passphrase_provider:
+                    raise
+                phrase = self._passphrase_provider(f"{cfg.alias} key passphrase")
+                if phrase is None:
+                    raise
+                connect_kwargs["passphrase"] = phrase
+                client.connect(**connect_kwargs)
+                self._auth_secrets.setdefault(cfg.alias, {})["passphrase"] = phrase
+            except paramiko.AuthenticationException:
+                if not self._password_provider:
+                    raise
+                pwd = self._password_provider(cfg.alias)
+                if pwd is None:
+                    raise
+                connect_kwargs["password"] = pwd
+                connect_kwargs["allow_agent"] = False
+                connect_kwargs["look_for_keys"] = False
+                client.connect(**connect_kwargs)
+                self._auth_secrets.setdefault(cfg.alias, {})["password"] = pwd
+        except Exception:
+            try:
+                client.close()
+            except Exception:
+                pass
+            raise
 
         # 首次接受的未知主机 key 写回 known_hosts，让后续连接受 MITM 校验保护
         if host_key_policy.added:
@@ -372,14 +473,122 @@ class SSHSession(QObject):
             except Exception:
                 pass
 
-        sftp = client.open_sftp()
+        # keep-alive：定期发 transport 层心跳，防止 NAT/防火墙把空闲连接掐掉
+        transport = client.get_transport()
+        if transport is not None:
+            transport.set_keepalive(KEEPALIVE_INTERVAL)
+        return client
+
+    # --- ProxyJump ---
+
+    @staticmethod
+    def _parse_jump_token(spec: str) -> tuple[str, str, Optional[int]]:
+        """解析单个 ProxyJump 片段：[user@]host[:port]，支持 [IPv6]:port。
+
+        返回 (user, host, port)，未显式给出的字段为 ""/None。
+        """
+        user = ""
+        host = spec.strip()
+        port: Optional[int] = None
+        if "@" in host:
+            user, host = host.rsplit("@", 1)
+        if host.startswith("["):
+            end = host.find("]")
+            if end != -1:
+                rest = host[end + 1:]
+                host = host[1:end]
+                if rest.startswith(":"):
+                    try:
+                        port = int(rest[1:])
+                    except ValueError:
+                        port = None
+        elif host.count(":") == 1:
+            h, _, p = host.partition(":")
+            try:
+                port = int(p)
+                host = h
+            except ValueError:
+                pass
+        return user, host, port
+
+    def _resolve_jump_spec(self, spec: str) -> HostConfig:
+        """把 ProxyJump 片段解析成 HostConfig：先查 ~/.ssh/config（别名 →
+        HostName/User/Port/IdentityFile），spec 里显式写的 user/port 优先。
+        """
+        user, host, port = self._parse_jump_token(spec)
+        resolved: dict = {}
+        config_path = Path(os.path.expanduser("~/.ssh/config"))
+        if config_path.is_file():
+            try:
+                cfg = SSHConfig()
+                with config_path.open("r", encoding="utf-8", errors="replace") as fh:
+                    cfg.parse(fh)
+                resolved = cfg.lookup(host)
+            except Exception:
+                resolved = {}
+        hostname = resolved.get("hostname", host)
+        if not user:
+            user = resolved.get("user", "")
+        if port is None:
+            try:
+                port = int(resolved.get("port", 22))
+            except (TypeError, ValueError):
+                port = 22
+        identity_files = resolved.get("identityfile") or []
+        identity = os.path.expanduser(identity_files[0]) if identity_files else None
+        return HostConfig(
+            alias=host,
+            hostname=hostname,
+            user=user,
+            port=port,
+            identity_file=identity,
+            raw=dict(resolved),
+        )
+
+    def _connect_jump_chain(self, cfg: HostConfig) -> tuple[list[paramiko.SSHClient], Optional[Any]]:
+        """按 ProxyJump 链路（逗号分隔，依次跳）连接所有跳板机。
+
+        返回 (跳板 client 列表, 指向最终目标的 direct-tcpip channel)；没有
+        配置 ProxyJump 时返回 ([], None)。任一跳失败会把已连上的跳板全部关掉。
+        注：只展开目标机自身的 ProxyJump 链，跳板机配置里再嵌套的 ProxyJump
+        不递归处理（与多数场景一致，避免环路）。
+        """
+        spec = (cfg.proxy_jump or "").strip()
+        if not spec or spec.lower() == "none":
+            return [], None
+        hops = [s for s in (p.strip() for p in spec.split(",")) if s]
+        if not hops:
+            return [], None
+        hop_cfgs = [self._resolve_jump_spec(h) for h in hops]
+        clients: list[paramiko.SSHClient] = []
+        sock: Optional[Any] = None
         try:
-            home = sftp.normalize(".")
+            for i, hop_cfg in enumerate(hop_cfgs):
+                client = self._connect_client(hop_cfg, sock=sock)
+                clients.append(client)
+                if i + 1 < len(hop_cfgs):
+                    dest = (hop_cfgs[i + 1].hostname, hop_cfgs[i + 1].port)
+                else:
+                    dest = (cfg.hostname, cfg.port)
+                transport = client.get_transport()
+                if transport is None:
+                    raise paramiko.SSHException(
+                        f"{t('ssh.jump_channel_failed')}: {hop_cfg.alias}")
+                sock = transport.open_channel(
+                    "direct-tcpip", dest, ("127.0.0.1", 0))
+            return clients, sock
         except Exception:
-            home = "/"
-        self._client = client
-        self._sftp = sftp
-        self._home = home
+            self._close_clients(clients)
+            raise
+
+    @staticmethod
+    def _close_clients(clients: list):
+        """静默关闭一组 client（按倒序，先关靠近目标的一端）"""
+        for c in reversed(clients):
+            try:
+                c.close()
+            except Exception:
+                pass
 
     def disconnect(self):
         """关闭连接（在 UI 线程调用安全）"""
@@ -391,18 +600,72 @@ class SSHSession(QObject):
         self.disconnected.emit()
 
     def _do_disconnect(self):
-        if self._sftp is not None:
+        self._was_connected = False  # 主动断开后不再自动重连
+        self._teardown_connection()
+
+    def _teardown_connection(self):
+        """静默关闭当前连接（含跳板机），不发信号、不关 executor。
+
+        供主动断开和自动重连前的清理共用。
+        """
+        sftp, self._sftp = self._sftp, None
+        client, self._client = self._client, None
+        jumps, self._jump_clients = self._jump_clients, []
+        if sftp is not None:
             try:
-                self._sftp.close()
+                sftp.close()
             except Exception:
                 pass
-            self._sftp = None
-        if self._client is not None:
-            try:
-                self._client.close()
-            except Exception:
-                pass
-            self._client = None
+        self._close_clients(([client] if client is not None else []) + jumps)
+
+    # --- liveness & auto-reconnect ---
+
+    def is_alive(self) -> bool:
+        """底层 transport 是否仍然存活（不额外发请求）"""
+        client = self._client
+        if client is None or self._sftp is None:
+            return False
+        transport = client.get_transport()
+        return bool(transport is not None and transport.is_active())
+
+    def _should_reconnect(self, exc: BaseException) -> bool:
+        """判断一次操作失败是否应该走自动重连。
+
+        - 从未成功连接 / 已主动断开 → 不重连；
+        - SSHException / EOFError → 基本可断定是连接层故障；
+        - OSError 既可能是连接断了，也可能是 SFTP 状态错误（文件不存在、
+          权限不足等），只有 transport 确实死了才视为断线。
+        """
+        if not self._was_connected:
+            return False
+        if isinstance(exc, (paramiko.SSHException, EOFError)):
+            return True
+        return not self.is_alive()
+
+    def _reconnect(self):
+        """自动重连：指数退避，最多 RECONNECT_MAX_ATTEMPTS 次。
+
+        用 _reconnect_lock 保证同一时刻只有一个重连在跑（操作本身都在单线程
+        executor 上串行，这把锁主要防外部线程直调时的并发重连风暴）。
+        全部失败时抛出带 i18n 文案的 RuntimeError（链上保留原始异常）。
+        """
+        with self._reconnect_lock:
+            if self.is_alive():
+                return  # 别的调用已经把连接修好了
+            last_exc: Optional[BaseException] = None
+            for attempt in range(RECONNECT_MAX_ATTEMPTS):
+                self._teardown_connection()
+                try:
+                    self._establish()
+                    self.invalidate_cache()  # 断线期间远端可能已变化
+                    return
+                except Exception as e:
+                    last_exc = e
+                    if attempt + 1 < RECONNECT_MAX_ATTEMPTS:
+                        time.sleep(RECONNECT_BACKOFF_BASE * (2 ** attempt))
+            raise RuntimeError(
+                f"{t('ssh.reconnect_failed')} ({self.host_config.alias}): {last_exc}"
+            ) from last_exc
 
     # --- generic submit ---
 
@@ -433,6 +696,7 @@ class SSHSession(QObject):
             else:
                 self._listdir_cache.pop(path, None)
 
+    @_auto_reconnect
     def listdir(self, path: str, use_cache: bool = True) -> list[RemoteEntry]:
         if use_cache:
             with self._cache_lock:
@@ -448,6 +712,7 @@ class SSHSession(QObject):
             self._listdir_cache[path] = (time.time(), entries)
         return list(entries)
 
+    @_auto_reconnect
     def stat(self, path: str) -> RemoteEntry:
         sftp = self._require()
         attr = sftp.stat(path)
@@ -457,6 +722,7 @@ class SSHSession(QObject):
         attr.filename = name
         return _attr_to_entry(parent, attr)
 
+    @_auto_reconnect
     def read_file(self, path: str, max_bytes: int = 5 * 1024 * 1024) -> bytes:
         """读取远程文件。max_bytes 防止误开超大文件"""
         sftp = self._require()
@@ -469,6 +735,7 @@ class SSHSession(QObject):
         with sftp.open(path, "rb") as fh:
             return fh.read()
 
+    @_auto_reconnect
     def write_file(self, path: str, content: bytes):
         sftp = self._require()
         # paramiko 的 put_fo 走原子重命名，但这里我们只是覆盖写
@@ -476,22 +743,26 @@ class SSHSession(QObject):
             fh.write(content)
         self.invalidate_cache(self._parent(path))
 
+    @_auto_reconnect
     def mkdir(self, path: str):
         sftp = self._require()
         sftp.mkdir(path)
         self.invalidate_cache(self._parent(path))
 
+    @_auto_reconnect
     def rmdir(self, path: str):
         sftp = self._require()
         sftp.rmdir(path)
         self.invalidate_cache(self._parent(path))
         self.invalidate_cache(path)
 
+    @_auto_reconnect
     def remove(self, path: str):
         sftp = self._require()
         sftp.remove(path)
         self.invalidate_cache(self._parent(path))
 
+    @_auto_reconnect
     def rename(self, old: str, new: str):
         sftp = self._require()
         sftp.rename(old, new)
@@ -499,15 +770,18 @@ class SSHSession(QObject):
         self.invalidate_cache(self._parent(new))
         self.invalidate_cache(old)
 
+    @_auto_reconnect
     def upload(self, local_path: str, remote_path: str):
         sftp = self._require()
         sftp.put(local_path, remote_path)
         self.invalidate_cache(self._parent(remote_path))
 
+    @_auto_reconnect
     def download(self, remote_path: str, local_path: str):
         sftp = self._require()
         sftp.get(remote_path, local_path)
 
+    @_auto_reconnect
     def download_with_progress(self, remote_path: str, local_path: str,
                                progress_cb=None) -> "paramiko.SFTPAttributes":
         """流式下载到本地，paramiko 会按 32K 块边读边写盘，不会把整个文件塞内存。
@@ -533,18 +807,23 @@ class SSHSession(QObject):
             raise
         return attr
 
+    @_auto_reconnect
     def remove_tree(self, path: str):
         """递归删除目录（不跨链接）"""
+        # 递归走不带重连装饰的内部实现，避免断线时逐层嵌套重试
+        self._remove_tree_impl(path)
+        self.invalidate_cache(self._parent(path))
+        self.invalidate_cache(path)
+
+    def _remove_tree_impl(self, path: str):
         sftp = self._require()
         for entry in sftp.listdir_attr(path):
             child = path.rstrip("/") + "/" + entry.filename
             if entry.st_mode and stat.S_ISDIR(entry.st_mode) and not stat.S_ISLNK(entry.st_mode):
-                self.remove_tree(child)
+                self._remove_tree_impl(child)
             else:
                 sftp.remove(child)
         sftp.rmdir(path)
-        self.invalidate_cache(self._parent(path))
-        self.invalidate_cache(path)
 
     def _require(self) -> paramiko.SFTPClient:
         if self._sftp is None:
