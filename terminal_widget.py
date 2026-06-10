@@ -2767,6 +2767,14 @@ class TerminalWidget(QWidget):
 
         # === 以下所有按键都发送到终端 ===
 
+        # 单独按下的修饰键（Cmd/Ctrl/Shift/Alt…）不产生终端输入，必须在
+        # 「输入时滚到底部」之前拦掉：否则在历史区选中文本后按住 Cmd 准备
+        # Cmd+C 复制时，第一下 Cmd 就把视图滚回底部、选区被滚走。
+        if key in (Qt.Key.Key_Shift, Qt.Key.Key_Control, Qt.Key.Key_Meta,
+                   Qt.Key.Key_Alt, Qt.Key.Key_AltGr, Qt.Key.Key_CapsLock):
+            event.accept()
+            return
+
         # 输入时自动滚动到底部（走整屏重绘路径，并同步滚动条）
         if self.scroll_offset > 0:
             self.scroll_to_bottom()
