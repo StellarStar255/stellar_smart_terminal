@@ -44,6 +44,7 @@ pip install PyQt6==6.7.1 PyQt6-Qt6==6.7.1 --no-cache-dir
 ## Guides / 指南
 
 - [Claude Code 通知点击跳转 / Click-to-focus notifications (macOS)](docs/claude-code-notifications.md) — Stop hook 配置，点击通知直接跳回对应 Smart Terminal 窗口
+- [打包与发布 / Packaging & Release](docs/PACKAGING.md) — 从 `./build.sh` 打包到 GitHub Release 发版的完整流程
 
 ## Build / 打包
 
@@ -51,7 +52,7 @@ pip install PyQt6==6.7.1 PyQt6-Qt6==6.7.1 --no-cache-dir
 Package as a standalone app (onedir mode, no Python required).
 
 ```bash
-# macOS — 产出 dist/Stellar Smart Terminal.app
+# macOS — 产出 dist/Stellar Smart Terminal.app 和拖拽安装的 .dmg
 ./build.sh
 open "dist/Stellar Smart Terminal.app"
 ```
@@ -61,8 +62,11 @@ open "dist/Stellar Smart Terminal.app"
 build.bat
 ```
 
-> 脚本会自动创建独立虚拟环境 `.venv-build`、安装依赖与 PyInstaller，macOS 下还会从 `assets/smart_terminal.png` 生成 `.icns` 图标。配置见 `smart_terminal.spec`。
-> The script creates an isolated `.venv-build` venv, installs dependencies + PyInstaller, and (on macOS) generates the `.icns` icon from `assets/smart_terminal.png`. See `smart_terminal.spec` for configuration.
+> 脚本会自动创建独立虚拟环境 `.venv-build`、安装依赖与 PyInstaller，macOS 下还会从 `assets/smart_terminal.png` 生成 `.icns` 图标并打出 DMG。配置见 `smart_terminal.spec`。
+> The script creates an isolated `.venv-build` venv, installs dependencies + PyInstaller, and (on macOS) generates the `.icns` icon from `assets/smart_terminal.png` and a drag-to-install DMG. See `smart_terminal.spec` for configuration.
+>
+> 完整的版本发布流程（版本号、tag、GitHub Release）见 [docs/PACKAGING.md](docs/PACKAGING.md)。
+> For the full release workflow (version bump, tag, GitHub Release), see [docs/PACKAGING.md](docs/PACKAGING.md).
 
 ## License / 许可
 
