@@ -673,13 +673,13 @@ class OpenAIRequestHandler(BaseHTTPRequestHandler):
             stream = request.get('stream', False)
             input_text = self._build_input(messages)
 
+            # 不打印消息/输入正文，避免 prompt 内容泄露到 stdout/日志；只记录元信息
             print(f"[OpenAI Server] Messages count: {len(messages)}")
             for i, msg in enumerate(messages):
                 role = msg.get('role', 'unknown')
                 content = msg.get('content', '')
-                content_preview = str(content)[:50] if content else 'EMPTY'
-                print(f"[OpenAI Server]   [{i}] role={role}, content={content_preview}...")
-            print(f"[OpenAI Server] Built input_text: '{input_text[:100] if input_text else 'EMPTY'}...' ({len(input_text)} chars)")
+                print(f"[OpenAI Server]   [{i}] role={role}, content_len={len(str(content))}")
+            print(f"[OpenAI Server] Built input_text: {len(input_text)} chars")
 
             if stream:
                 self._handle_stream_response(input_text, request)
@@ -786,7 +786,7 @@ class OpenAIRequestHandler(BaseHTTPRequestHandler):
                 self._send_clear_command_sync(master_fd)
 
             # 发送输入文本（不带回车）
-            print(f"[OpenAI Server] Sending input to terminal: '{input_text[:100]}...'")
+            print(f"[OpenAI Server] Sending input to terminal: {len(input_text)} chars")
             os.write(master_fd, input_text.encode('utf-8'))
             print(f"[OpenAI Server] Text sent: {len(input_text)} chars, waiting for paste detection...")
 
@@ -998,10 +998,8 @@ class OpenAIRequestHandler(BaseHTTPRequestHandler):
         # 从屏幕内容提取响应（使用确认时保存的屏幕内容，避免被后续请求覆盖）
         screen_content = confirmed_screen if confirmed_screen else self.bridge.get_screen_content()
         print(f"[OpenAI Server] Final screen length: {len(screen_content)}")
-        print(f"[OpenAI Server] Screen content preview (last 500 chars):")
-        print(screen_content[-500:] if screen_content else 'EMPTY')
         response = self._extract_response_from_screen(screen_content, input_text)
-        print(f"[OpenAI Server] Extracted response ({len(response)} chars): '{response[:200] if response else 'EMPTY'}...'")
+        print(f"[OpenAI Server] Extracted response: {len(response)} chars")
         return response
 
     def _handle_stream_response(self, input_text: str, request: dict):
@@ -1063,7 +1061,7 @@ class OpenAIRequestHandler(BaseHTTPRequestHandler):
                 self._send_clear_command_sync(master_fd)
 
             # 发送输入文本（不带回车）
-            print(f"[OpenAI Server] Stream: Sending input to terminal: '{input_text[:100]}...'")
+            print(f"[OpenAI Server] Stream: Sending input to terminal: {len(input_text)} chars")
             os.write(master_fd, input_text.encode('utf-8'))
             print(f"[OpenAI Server] Stream: Text sent: {len(input_text)} chars, waiting for paste detection...")
 
@@ -1250,9 +1248,8 @@ class OpenAIRequestHandler(BaseHTTPRequestHandler):
             # 从屏幕内容提取最终响应（使用确认时保存的屏幕内容，避免被后续请求覆盖）
             screen_content = confirmed_screen if confirmed_screen else self.bridge.get_screen_content()
             print(f"[OpenAI Server] Screen content length: {len(screen_content)}")
-            print(f"[OpenAI Server] Screen content preview: {screen_content[-500:] if screen_content else 'EMPTY'}")
             final_content = self._extract_response_from_screen(screen_content, input_text)
-            print(f"[OpenAI Server] Extracted content: '{final_content}'")
+            print(f"[OpenAI Server] Extracted content: {len(final_content)} chars")
 
             if final_content.strip():
                 # 发送最终内容

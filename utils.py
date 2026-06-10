@@ -231,12 +231,22 @@ def atomic_write_json(file_path: Path, data) -> bool:
         except BaseException:
             Path(tmp_path).unlink(missing_ok=True)
             raise
+        # 配置可能含明文密钥（LLM 代理 api_key 等），强制仅属主可读写，
+        # 防止旧文件残留的宽松权限或宽 umask 导致同机其它用户读取。
+        try:
+            file_path.chmod(0o600)
+        except OSError:
+            pass
         return True
     except OSError:
         # 临时文件创建/重命名失败时回退到直写，至少保证当前进程的设置能落盘
         try:
             with open(file_path, 'w', encoding='utf-8') as f:
                 json.dump(data, f, ensure_ascii=False, indent=2)
+            try:
+                file_path.chmod(0o600)
+            except OSError:
+                pass
             return True
         except OSError:
             return False
