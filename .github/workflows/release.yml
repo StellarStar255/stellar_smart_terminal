@@ -1,0 +1,91 @@
+# 推送 v* tag 时自动打包 macOS (arm64) 与 Windows (x64) 并上传到对应 Release。
+#
+# 与手动发版（docs/PACKAGING.md）兼容：release 已存在时跳过创建、只补传产物
+# （--clobber 允许覆盖同名文件）；release 不存在时自动创建并生成默认 notes,
+# 之后可用 `gh release edit` 替换成手写说明。
+#
+# 注意：GitHub 托管的 macOS runner 已全部是 Apple Silicon，Intel mac 包
+# 需要自备 x86_64 机器构建。
+name: Release
+
+on:
+  push:
+    tags: ["v*"]
+
+permissions:
+  contents: write
+
+jobs:
+  macos:
+    name: macOS (arm64)
+    runs-on: macos-latest
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - name: Build .app + DMG
+        run: ./build.sh
+
+      - name: Run tests (offscreen)
+        run: |
+          .venv-build/bin/python -m pip install pytest --quiet
+          QT_QPA_PLATFORM=offscreen .venv-build/bin/python -m pytest tests/ -q
+
+      - name: Zip app bundle
+        run: |
+          VERSION="${GITHUB_REF_NAME#v}"
+          ditto -c -k --keepParent "dist/Stellar Smart Terminal.app" \
+            "dist/Stellar-Smart-Terminal-v${VERSION}-macOS-arm64.zip"
+
+      - name: Upload to release
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          gh release create "$GITHUB_REF_NAME" --verify-tag \
+            --title "$GITHUB_REF_NAME" --generate-notes || true
+          gh release upload "$GITHUB_REF_NAME" --clobber \
+            dist/Stellar-Smart-Terminal-v*-macOS-arm64.dmg \
+            dist/Stellar-Smart-Terminal-v*-macOS-arm64.zip
+
+  windows:
+    name: Windows (x64)
+    runs-on: windows-latest
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - name: Build onedir exe
+        shell: cmd
+        run: build.bat
+
+      - name: Run tests (offscreen)
+        shell: cmd
+        run: |
+          .venv-build\Scripts\python.exe -m pip install pytest --quiet || exit /b 1
+          set QT_QPA_PLATFORM=offscreen
+          .venv-build\Scripts\python.exe -m pytest tests/ -q
+
+      - name: Zip onedir
+        shell: pwsh
+        run: |
+          $version = $env:GITHUB_REF_NAME.TrimStart("v")
+          Compress-Archive -Path dist\StellarSmartTerminal `
+            -DestinationPath "dist\Stellar-Smart-Terminal-v$version-windows-x64.zip"
+
+      - name: Upload to release
+        shell: bash
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          gh release create "$GITHUB_REF_NAME" --verify-tag \
+            --title "$GITHUB_REF_NAME" --generate-notes || true
+          gh release upload "$GITHUB_REF_NAME" --clobber \
+            dist/Stellar-Smart-Terminal-v*-windows-x64.zip
