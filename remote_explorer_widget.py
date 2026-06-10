@@ -45,6 +45,61 @@ from utils import (
 # 子项的 UserRole 数据键
 _ROLE_ENTRY = Qt.ItemDataRole.UserRole
 _ROLE_LOADED = Qt.ItemDataRole.UserRole + 1
+# 目录展开请求的递增 generation：响应回来时 gen 失配 → 该节点其间被
+# 刷新/重新请求过，旧结果直接丢弃（防竞态串台）
+_ROLE_REQ_GEN = Qt.ItemDataRole.UserRole + 2
+
+
+class _TransferRateTracker:
+    """传输测速：滑动窗口（最近 ~2s 的 (时刻, 累计字节) 采样）算瞬时速率，
+    用全程平均速率估算剩余时间。按 key（当前文件的远端路径等）自动重置，
+    多文件批量传输时显示的总是"当前这个文件"的速率。"""
+
+    WINDOW_SECS = 2.0
+
+    def __init__(self):
+        self._samples: deque = deque()        # (monotonic_ts, bytes_done)
+        self._key = None
+        self._start: Optional[tuple] = None   # 首个采样 (ts, bytes)
+
+    def reset(self, key=None):
+        self._samples.clear()
+        self._key = key
+        self._start = None
+
+    def update(self, key, bytes_done: int):
+        if key != self._key:
+            self.reset(key)
+        now = time.monotonic()
+        if self._start is None:
+            self._start = (now, bytes_done)
+        self._samples.append((now, bytes_done))
+        cutoff = now - self.WINDOW_SECS
+        while len(self._samples) > 2 and self._samples[0][0] < cutoff:
+            self._samples.popleft()
+
+    def rate(self) -> float:
+        """瞬时速率（bytes/s）；样本不足时返回 0（调用方不显示速率）。"""
+        if len(self._samples) < 2:
+            return 0.0
+        t0, b0 = self._samples[0]
+        t1, b1 = self._samples[-1]
+        if t1 <= t0:
+            return 0.0
+        return max(0.0, (b1 - b0) / (t1 - t0))
+
+    def eta_secs(self, bytes_done: int, bytes_total: int) -> Optional[float]:
+        """按全程平均速率估算剩余秒数；速率未知 / 已完成返回 None。"""
+        if self._start is None or bytes_total <= 0 or bytes_done >= bytes_total:
+            return None
+        t0, b0 = self._start
+        elapsed = time.monotonic() - t0
+        if elapsed <= 0 or bytes_done <= b0:
+            return None
+        avg = (bytes_done - b0) / elapsed
+        if avg <= 0:
+            return None
+        return (bytes_total - bytes_done) / avg
 
 
 class _AddHostDialog(QDialog):
@@ -518,7 +573,8 @@ class RemoteExplorerPanel(QWidget):
     # —— 内部信号：用于把 SSH 工作线程的结果安全派发回 UI 线程
     # （直接 QTimer.singleShot 在没有事件循环的工作线程里不会触发）
     _top_level_ready = pyqtSignal(list)
-    _subtree_ready = pyqtSignal(object, list)         # (parent_item, entries)
+    _subtree_ready = pyqtSignal(object, int, list)    # (parent_item, req_gen, entries)
+    _subtree_failed = pyqtSignal(object, int, str)    # (parent_item, req_gen, error_msg)
     _error_signal = pyqtSignal(str)
     _file_downloaded = pyqtSignal(str, str, str, bytes)  # host_alias, remote_path, local_path, data
     _file_ready = pyqtSignal(str, str, str)  # host_alias, remote_path, local_path (流式下载完成)
@@ -574,12 +630,15 @@ class RemoteExplorerPanel(QWidget):
         # 内部跨线程信号 → UI 线程槽（QueuedConnection 自动应用）
         self._top_level_ready.connect(self._apply_top_level)
         self._subtree_ready.connect(self._apply_children)
+        self._subtree_failed.connect(self._on_subtree_failed)
         self._error_signal.connect(self._toast_error)
         self._file_downloaded.connect(self._on_file_downloaded)
         self._file_ready.connect(self._on_file_ready)
         self._download_progress.connect(self._on_download_progress)
         # 节流下载进度文案：paramiko 回调每个 chunk 都触发，UI 100ms 一次足够
         self._last_progress_emit_ts = 0.0
+        # 下载测速：滑动窗口算瞬时速率 + 平均速率估剩余时间（按当前文件）
+        self._dl_rate = _TransferRateTracker()
         self._stat_resolved.connect(self._on_stat_resolved)
         self._auto_refresh_result.connect(self._on_auto_refresh_result)
 
@@ -1509,12 +1568,16 @@ class RemoteExplorerPanel(QWidget):
 
     def _on_item_expanded(self, item: QTreeWidgetItem):
         if item.data(0, _ROLE_LOADED):
-            return
+            return  # 已加载 / 请求在途：重复展开不重复发请求
         entry: RemoteEntry = item.data(0, _ROLE_ENTRY)
         if not entry or not entry.is_dir:
             return
-        # 加一个占位避免展开时空闪
+        if self._session is None:
+            return  # 未连接：保持未加载态，连上后再展开会重试
+        # 先标记，再把占位改成"加载中…"——listdir 在后台 executor 跑，
+        # 结果通过 _subtree_ready/_subtree_failed 信号回 UI 线程
         item.setData(0, _ROLE_LOADED, True)
+        self._set_dir_placeholder(item, t("remote.loading"))
         self._fill_children(item, entry.path)
 
     def _on_refresh(self):
@@ -1772,25 +1835,72 @@ class RemoteExplorerPanel(QWidget):
         kind = 'star_filled' if starred else 'star'
         self._bookmark_btn.setIcon(_make_git_tool_icon(kind, color))
 
+    @staticmethod
+    def _set_dir_placeholder(item: QTreeWidgetItem, text: str):
+        """把目录项下的占位子项（没挂 RemoteEntry 的）统一改成指定文案；
+        没有占位时补一个。占位不可选中/编辑，仅作状态展示。"""
+        try:
+            placeholders = [item.child(i) for i in range(item.childCount())
+                            if item.child(i).data(0, _ROLE_ENTRY) is None]
+            if not placeholders:
+                ph = QTreeWidgetItem([text])
+                ph.setFlags(Qt.ItemFlag.NoItemFlags)
+                item.addChild(ph)
+                return
+            for ph in placeholders:
+                ph.setText(0, text)
+                ph.setFlags(Qt.ItemFlag.NoItemFlags)
+        except RuntimeError:
+            pass  # item 已被销毁
+
     def _fill_children(self, parent_item: QTreeWidgetItem, path: str):
         if self._session is None:
+            # 拿不到会话：还原未加载态，下次展开重试
+            parent_item.setData(0, _ROLE_LOADED, False)
             return
         sess = self._session
+        # 每次请求给该节点发一个递增的 generation；响应回来时 gen 失配
+        # 说明节点其间被刷新/重新请求过，旧结果直接丢弃（防竞态串台）。
+        gen = (parent_item.data(0, _ROLE_REQ_GEN) or 0) + 1
+        parent_item.setData(0, _ROLE_REQ_GEN, gen)
         fut = sess.submit(sess.listdir, path)
 
         def on_done(f):
             try:
                 entries: list[RemoteEntry] = f.result()
             except Exception as e:
-                self._error_signal.emit(str(e))
+                self._subtree_failed.emit(parent_item, gen, str(e))
                 return
-            self._subtree_ready.emit(parent_item, entries)
+            self._subtree_ready.emit(parent_item, gen, entries)
         fut.add_done_callback(on_done)
 
-    def _apply_children(self, parent_item: QTreeWidgetItem, entries: list[RemoteEntry]):
-        # 父项可能已被释放（用户断开了），守一下
+    def _on_subtree_failed(self, parent_item: QTreeWidgetItem, gen: int, msg: str):
+        """展开目录的 listdir 失败：占位项显示错误文案；
+        还原未加载态，收起再展开即可重试。"""
+        try:
+            if sip.isdeleted(parent_item):
+                return
+            if gen != (parent_item.data(0, _ROLE_REQ_GEN) or 0):
+                return  # 过期响应：其间已发起过新请求，由新请求负责收尾
+            parent_item.setData(0, _ROLE_LOADED, False)
+            self._set_dir_placeholder(
+                parent_item, t("remote.load_failed", error=msg))
+        except RuntimeError:
+            return  # item 已被销毁（整树重建/断开）
+        # 断线类错误仍走统一提示（带"一键重连"对话框）
+        if self._looks_like_disconnect(msg):
+            self._toast_error(msg)
+
+    def _apply_children(self, parent_item: QTreeWidgetItem, gen: int,
+                        entries: list[RemoteEntry]):
+        # 父项可能已被释放（断开/整树重建），守一下；gen 失配说明该节点
+        # 其间被刷新/重新请求过，这份结果已过期，直接丢弃。
         entries = self._sorted_entries(self._visible_entries(entries))
         try:
+            if sip.isdeleted(parent_item):
+                return
+            if gen != (parent_item.data(0, _ROLE_REQ_GEN) or 0):
+                return
             self._tree.setUpdatesEnabled(False)
             parent_item.takeChildren()
             children: list[QTreeWidgetItem] = []
@@ -2528,6 +2638,7 @@ class RemoteExplorerPanel(QWidget):
         except Exception:
             pass  # 可能已存在，忽略
         futures = []
+        sizes = []  # 与 futures 对齐：upload 记文件字节数，mkdir 记 0
         for root, dirs, files in os.walk(local_dir):
             rel = os.path.relpath(root, local_dir)
             remote_root = remote_dir if rel == "." else posixpath.join(
@@ -2538,14 +2649,19 @@ class RemoteExplorerPanel(QWidget):
                 f = sess.submit(sess.mkdir, r_path)
                 # mkdir 失败（已存在）不致命，等会回收
                 futures.append(f)
+                sizes.append(0)
             for fname in files:
                 local_path = os.path.join(root, fname)
                 r_path = posixpath.join(remote_root, fname)
                 futures.append(sess.submit(sess.upload, local_path, r_path))
+                try:
+                    sizes.append(os.path.getsize(local_path))
+                except OSError:
+                    sizes.append(0)
         # 等所有 future 完成；mkdir 的失败吞掉
         self._wait_future_with_progress(futures, t("remote.pasting_progress",
                                                    dst=remote_dir),
-                                        tolerate_errors=True)
+                                        tolerate_errors=True, sizes=sizes)
 
     def _remote_to_remote(self, src_sess: SSHSession, dst_sess: SSHSession,
                           src_path: str, dst_path: str):
@@ -2592,27 +2708,36 @@ class RemoteExplorerPanel(QWidget):
                                                          dst=local_path))
 
     def _wait_future_with_progress(self, futures: list, label: str,
-                                    tolerate_errors: bool = False):
-        """阻塞等待 futures 完成，跑事件循环避免 UI 卡死"""
+                                    tolerate_errors: bool = False,
+                                    sizes: Optional[list] = None):
+        """阻塞等待 futures 完成，跑事件循环避免 UI 卡死。
+
+        sizes：与 futures 一一对应的字节数（未知填 0/None）。给出时进度框
+        文案追加传输速率 / 剩余时间 —— 粒度是"已完成的 future 的字节累计"
+        （sess.upload 没有字节级回调，只能按文件完成时机累计）。"""
         if not futures:
             return
         progress = QProgressDialog(label, None, 0, len(futures), self)
         progress.setWindowModality(Qt.WindowModality.WindowModal)
         progress.setMinimumDuration(300)
         progress.setValue(0)
-        done = {"n": 0, "errors": []}
+        done = {"n": 0, "errors": [], "bytes": 0}
+        total_bytes = sum(s or 0 for s in sizes) if sizes else 0
+        tracker = _TransferRateTracker() if total_bytes > 0 else None
 
-        def make_cb():
+        def make_cb(nbytes=0):
             def cb(f):
                 try:
                     f.result()
                 except Exception as e:
                     done["errors"].append(str(e))
                 done["n"] += 1
+                done["bytes"] += nbytes or 0
             return cb
 
-        for fut in futures:
-            fut.add_done_callback(make_cb())
+        for i, fut in enumerate(futures):
+            nbytes = sizes[i] if sizes and i < len(sizes) else 0
+            fut.add_done_callback(make_cb(nbytes))
 
         from PyQt6.QtCore import QEventLoop
         loop = QEventLoop()
@@ -2627,6 +2752,12 @@ class RemoteExplorerPanel(QWidget):
                     loop.quit()
                     return
                 progress.setValue(done["n"])
+                if tracker is not None and done["bytes"] < total_bytes:
+                    tracker.update("batch", done["bytes"])
+                    stats = self._transfer_stats_text(
+                        tracker, done["bytes"], total_bytes)
+                    if stats:
+                        progress.setLabelText(f"{label} · {stats}")
                 if done["n"] >= len(futures):
                     timer.stop()
                     loop.quit()
@@ -2690,18 +2821,8 @@ class RemoteExplorerPanel(QWidget):
             else t("remote.downloading_unknown", name=entry.name)
         )
         self._last_progress_emit_ts = 0.0
-
-        def progress_cb(done, total):
-            # paramiko 在 worker 线程调用 —— 节流后通过信号回 UI 线程
-            now = time.monotonic()
-            # 350ms 节流（~3Hz）：肉眼看着仍流畅，但 setText 不会高频触发
-            # 任何 layout 重算，避免给用户"窗口一直在抖"的错觉。
-            if now - self._last_progress_emit_ts < 0.35 and done < total:
-                return
-            self._last_progress_emit_ts = now
-            self._download_progress.emit(remote_path, done, total)
-
-        fut = sess.submit(sess.download_with_progress, remote_path, local_path, progress_cb)
+        fut = sess.submit(sess.download_with_progress, remote_path, local_path,
+                          self._make_progress_cb(remote_path))
 
         def on_done(f):
             try:
@@ -2721,6 +2842,19 @@ class RemoteExplorerPanel(QWidget):
             self._file_ready.emit(host_alias, remote_path, local_path)
         fut.add_done_callback(on_done)
 
+    def _make_progress_cb(self, remote_path: str):
+        """构造给 paramiko 的字节级进度回调（worker 线程触发，节流后发信号回 UI）。"""
+        def progress_cb(done, total):
+            # paramiko 在 worker 线程调用 —— 节流后通过信号回 UI 线程
+            now = time.monotonic()
+            # 350ms 节流（~3Hz）：肉眼看着仍流畅，但 setText 不会高频触发
+            # 任何 layout 重算，避免给用户"窗口一直在抖"的错觉。
+            if now - self._last_progress_emit_ts < 0.35 and done < total:
+                return
+            self._last_progress_emit_ts = now
+            self._download_progress.emit(remote_path, done, total)
+        return progress_cb
+
     @staticmethod
     def _fmt_size(n: int) -> str:
         if n is None or n < 0:
@@ -2733,23 +2867,53 @@ class RemoteExplorerPanel(QWidget):
             return f"{n / (1024 * 1024):.1f} MB"
         return f"{n / (1024 * 1024 * 1024):.2f} GB"
 
+    @classmethod
+    def _fmt_rate(cls, bps: float) -> str:
+        """速率文案：1.5 MB/s / 320.0 KB/s"""
+        return f"{cls._fmt_size(int(bps))}/s"
+
+    @staticmethod
+    def _fmt_eta(seconds: float) -> str:
+        """剩余时间 mm:ss（向最近秒取整）"""
+        secs = max(0, int(seconds + 0.5))
+        return f"{secs // 60}:{secs % 60:02d}"
+
+    def _transfer_stats_text(self, tracker: "_TransferRateTracker",
+                             bytes_done: int, bytes_total: int) -> str:
+        """根据 tracker 生成 "1.5 MB/s · 剩余 0:04" 尾缀；速率未知返回空串。"""
+        rate = tracker.rate()
+        if rate <= 0:
+            return ""
+        eta = tracker.eta_secs(bytes_done, bytes_total)
+        if eta is None:
+            return self._fmt_rate(rate)
+        return t("remote.transfer_stats",
+                 rate=self._fmt_rate(rate), eta=self._fmt_eta(eta))
+
     def _on_download_progress(self, remote_path: str, done: int, total: int):
-        """节流后的下载进度更新 —— 写到 subtitle 标签上"""
+        """节流后的下载进度更新 —— 写到 subtitle 标签上（含速率/剩余时间）"""
         if done < 0:
-            # 出错信号：还原 subtitle
+            # 出错/收尾信号：还原 subtitle
             sess = self._session
             self._subtitle_label.setText(sess.host_config.alias if sess else "")
+            self._dl_rate.reset()
             return
         name = posixpath.basename(remote_path)
+        # 按 remote_path 维护滑动窗口；批量传输切换文件时自动重置 → 按当前文件显示
+        self._dl_rate.update(remote_path, done)
         if total > 0:
-            self._subtitle_label.setText(
-                t("remote.downloading", name=name,
-                  done=self._fmt_size(done), total=self._fmt_size(total))
-            )
+            text = t("remote.downloading", name=name,
+                     done=self._fmt_size(done), total=self._fmt_size(total))
+            if done < total:
+                stats = self._transfer_stats_text(self._dl_rate, done, total)
+                if stats:
+                    text += f" · {stats}"
         else:
-            self._subtitle_label.setText(
-                t("remote.downloading_unknown", name=name)
-            )
+            text = t("remote.downloading_unknown", name=name)
+            rate = self._dl_rate.rate()
+            if rate > 0:
+                text += f" · {self._fmt_rate(rate)}"
+        self._subtitle_label.setText(text)
 
     def _on_file_ready(self, host_alias: str, remote_path: str, local_path: str):
         """流式下载完成（或缓存命中）→ 通知主窗口在编辑器/预览里打开"""
@@ -2976,12 +3140,25 @@ class RemoteExplorerPanel(QWidget):
         sess = self._session
         if sess is None:
             return
-        fut = sess.submit(sess.download, entry.path, save_path)
+        # download_with_progress：内部先写 <目标>.part、完成后原子 rename ——
+        # 中途失败/断线不会留下半成品覆盖用户文件；顺带拿到字节级进度。
+        size_hint = entry.size or 0
+        self._subtitle_label.setText(
+            t("remote.downloading", name=entry.name, done=self._fmt_size(0),
+              total=self._fmt_size(size_hint)) if size_hint
+            else t("remote.downloading_unknown", name=entry.name)
+        )
+        self._last_progress_emit_ts = 0.0
+        fut = sess.submit(sess.download_with_progress, entry.path, save_path,
+                          self._make_progress_cb(entry.path))
+
         def on_done(f):
             try:
                 f.result()
             except Exception as e:
                 self._error_signal.emit(str(e))
+            # 成功/失败都通过信号回 UI 线程还原 subtitle
+            self._download_progress.emit(entry.path, -1, -1)
         fut.add_done_callback(on_done)
 
     def _download_entries_to_local(self, entries: list[tuple]):
@@ -3003,37 +3180,49 @@ class RemoteExplorerPanel(QWidget):
         def exists_fn(name: str, _target=target_dir) -> bool:
             return os.path.exists(os.path.join(_target, name))
 
+        self._last_progress_emit_ts = 0.0
         for ent, _item in entries:
             try:
                 name = explorer_clipboard.next_free_name(ent.name, exists_fn)
                 dst = os.path.join(target_dir, name)
                 if ent.is_dir:
-                    # 目录：递归下载（沿用 paste 走的路径）
-                    fut = sess.submit(self._sftp_download_dir_blocking, sess, ent.path, dst)
+                    # 目录：递归下载（沿用 paste 走的路径），逐文件报字节进度
+                    fut = sess.submit(self._sftp_download_dir_blocking, sess,
+                                      ent.path, dst, self._make_progress_cb)
                 else:
-                    fut = sess.submit(sess.download, ent.path, dst)
+                    fut = sess.submit(sess.download_with_progress, ent.path, dst,
+                                      self._make_progress_cb(ent.path))
 
-                def on_done(f, _name=name):
+                def on_done(f, _name=name, _rp=ent.path):
                     try:
                         f.result()
                     except Exception as e:
                         self._error_signal.emit(f"{_name}: {e}")
+                    # 单工作线程串行执行：本条收尾后下一条的进度才会出现，
+                    # 不会互相覆盖；最后一条收尾把 subtitle 还原成主机名。
+                    self._download_progress.emit(_rp, -1, -1)
                 fut.add_done_callback(on_done)
             except Exception as e:
                 self._error_signal.emit(f"{ent.path}: {e}")
 
     @staticmethod
-    def _sftp_download_dir_blocking(sess, remote_dir: str, local_dir: str):
-        """递归下载远端目录到本地（在 SSH worker 线程里跑，阻塞）"""
+    def _sftp_download_dir_blocking(sess, remote_dir: str, local_dir: str,
+                                    cb_factory=None):
+        """递归下载远端目录到本地（在 SSH worker 线程里跑，阻塞）。
+
+        cb_factory(remote_path) → paramiko 字节级进度回调；每个文件都走
+        download_with_progress（.part + 原子 rename），进度按当前文件展示。"""
         os.makedirs(local_dir, exist_ok=True)
         entries = sess.listdir(remote_dir)
         for e in entries:
             child_remote = e.path
             child_local = os.path.join(local_dir, e.name)
             if e.is_dir:
-                RemoteExplorerPanel._sftp_download_dir_blocking(sess, child_remote, child_local)
+                RemoteExplorerPanel._sftp_download_dir_blocking(
+                    sess, child_remote, child_local, cb_factory)
             else:
-                sess.download(child_remote, child_local)
+                cb = cb_factory(child_remote) if cb_factory is not None else None
+                sess.download_with_progress(child_remote, child_local, cb)
 
     def _open_terminal_here(self, entry: RemoteEntry):
         self._open_terminal_at_path(entry.path)
@@ -3072,7 +3261,18 @@ class RemoteExplorerPanel(QWidget):
         progress.setValue(0)
 
         # 让 progress 通过信号在主线程里更新
-        done_counter = {"n": 0, "errors": []}
+        done_counter = {"n": 0, "errors": [], "bytes": 0}
+        # 速率/剩余时间：sess.upload 没有字节级回调，按"已完成文件的字节数"
+        # 累计估算（粒度=文件，多个小文件时仍能给出有意义的速率）
+        size_by_path: dict[str, int] = {}
+        for lp in local_paths:
+            try:
+                size_by_path[lp] = os.path.getsize(lp) if os.path.isfile(lp) else 0
+            except OSError:
+                size_by_path[lp] = 0
+        total_bytes = sum(size_by_path.values())
+        tracker = _TransferRateTracker() if total_bytes > 0 else None
+        base_label = f"Uploading to {target_dir}..."
 
         def make_upload_done(local_path):
             def cb(f):
@@ -3081,6 +3281,7 @@ class RemoteExplorerPanel(QWidget):
                 except Exception as e:
                     done_counter["errors"].append(f"{os.path.basename(local_path)}: {e}")
                 done_counter["n"] += 1
+                done_counter["bytes"] += size_by_path.get(local_path, 0)
                 # 不能在工作线程更新 UI，靠 progress.setValue 在主循环里查询
             return cb
 
@@ -3102,6 +3303,12 @@ class RemoteExplorerPanel(QWidget):
                     loop.quit()
                     return
                 progress.setValue(done_counter["n"])
+                if tracker is not None and done_counter["bytes"] < total_bytes:
+                    tracker.update("upload", done_counter["bytes"])
+                    stats = self._transfer_stats_text(
+                        tracker, done_counter["bytes"], total_bytes)
+                    if stats:
+                        progress.setLabelText(f"{base_label} · {stats}")
                 if done_counter["n"] >= total or progress.wasCanceled():
                     timer.stop()
                     loop.quit()
