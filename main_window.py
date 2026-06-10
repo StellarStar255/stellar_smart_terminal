@@ -4063,9 +4063,11 @@ class MainWindow(QMainWindow):
         # 设置初始比例（Git 面板隐藏，终端占满，日志隐藏）
         self.main_splitter.setSizes([0, 1000, 0])
 
-        # 记忆用户手动调整后的尺寸（仅记录有意义的状态）
+        # 记忆用户手动调整后的尺寸（仅记录有意义的状态）；
+        # 同时按合计宽度刷新 spring 门控（拖侧栏改变 editor+终端可用宽度时也能联动）
         self.main_splitter.splitterMoved.connect(
-            lambda *_: self._capture_explorer_layout()
+            lambda *_: (self._capture_explorer_layout(),
+                        self._update_spring_width_gate())
         )
 
         # 弹簧模式：监听全局焦点变化，点击编辑器/终端时自动展宽对应一侧
@@ -8506,6 +8508,10 @@ class MainWindow(QMainWindow):
         """
         if not hasattr(self, 'main_splitter'):
             return
+        # spring 自身动画期间 setSizes 会触发 splitterMoved → 误重入；合计宽度此时恒定，
+        # 跳过即可，避免在动画帧里再调一次 setSizes。
+        if getattr(self, '_applying_spring', False):
+            return
         ed_idx = self.main_splitter.indexOf(self.editor_area) if hasattr(self, 'editor_area') else -1
         term_idx = self.main_splitter.indexOf(getattr(self, '_main_content_stack', None))
         sizes = self.main_splitter.sizes()
@@ -8573,6 +8579,9 @@ class MainWindow(QMainWindow):
 
     def _on_focus_changed_for_spring(self, old, new):
         """焦点在编辑器与终端之间切换时，自动展宽被点击的一侧。"""
+        # 先按当前合计宽度刷新门控：窗口本来就很宽 / 没经历过 resize 时，门控可能仍停在
+        # 旧值，这里确保「点编辑器」前门控是新鲜的（够宽则此处即触发失效+恢复均衡）。
+        self._update_spring_width_gate()
         if not self._spring_applicable():
             return
         target = self._spring_target_for_widget(new)
