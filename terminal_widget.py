@@ -239,7 +239,7 @@ class CompatibleHistoryScreen(pyte.HistoryScreen):
 
 from PyQt6.QtWidgets import (
     QWidget, QVBoxLayout, QApplication, QMenu, QLineEdit,
-    QHBoxLayout, QPushButton, QLabel, QFileDialog, QSizePolicy
+    QHBoxLayout, QPushButton, QLabel, QFileDialog, QSizePolicy, QScrollBar
 )
 from PyQt6.QtCore import QThread, pyqtSignal, Qt, QTimer, QEvent, QPoint, QUrl, QMimeData
 from PyQt6.QtGui import (
@@ -337,6 +337,9 @@ class TerminalWidget(QWidget):
 
     # 分屏自定义标题栏高度（仅在用户设置了名称后才占用此高度，默认 0）
     HEADER_HEIGHT = 22
+
+    # 右缘覆盖式垂直滚动条宽度（像素）
+    SCROLLBAR_WIDTH = 10
 
     # 原始输出诊断捕获（调试用）
     _debug_capture_enabled = False
@@ -571,10 +574,28 @@ class TerminalWidget(QWidget):
 
         # 搜索相关
         self._search_bar = None
-        self._search_matches = []  # [(row, col, length), ...]
+        self._search_matches = []  # [(abs_row, col, col_span), ...] 绝对行号（含历史）
         self._current_match_index = -1
         self._search_highlight_color = QColor(255, 255, 0, 150)  # 黄色高亮
         self._search_current_color = QColor(255, 165, 0, 180)  # 当前匹配项橙色
+        # 全历史搜索：输入防抖 + 历史行文本提取缓存
+        self._search_pending_text = ""
+        self._search_debounce_timer = QTimer()
+        self._search_debounce_timer.setSingleShot(True)
+        self._search_debounce_timer.timeout.connect(self._perform_search)
+        # 历史行提取缓存：id(line) -> (line_ref, text, col_map)
+        # 值里保留 line 引用以「钉住」对象，保证缓存有效期内 id 不会被复用
+        self._search_line_cache = OrderedDict()
+        self._SEARCH_LINE_CACHE_MAX = 30000
+
+        # 垂直滚动条：覆盖在右缘的子控件，不参与布局（终端为自绘 widget）
+        self._scrollbar_syncing = False  # 防止 setValue/setRange 触发信号回环
+        self._v_scrollbar = QScrollBar(Qt.Orientation.Vertical, self)
+        self._v_scrollbar.setFixedWidth(self.SCROLLBAR_WIDTH)
+        self._v_scrollbar.setFocusPolicy(Qt.FocusPolicy.NoFocus)
+        self._v_scrollbar.hide()
+        self._v_scrollbar.valueChanged.connect(self._on_scrollbar_value_changed)
+        self._apply_scrollbar_style()
 
         # 预编辑文本颜色缓存（避免 paintEvent 中重复创建）
         self._preedit_bg_color = QColor(60, 70, 90, 220)
@@ -709,7 +730,89 @@ class TerminalWidget(QWidget):
         self._content_dirty = False
         self._cache_valid = False
         self._invalidate_display_info()
+        self._sync_scrollbar()
         self.update()
+
+    # ==================== 垂直滚动条 ====================
+
+    def _apply_scrollbar_style(self):
+        """低调样式：窄、半透明、跟随前景色"""
+        fg = self.fg_color
+        self._v_scrollbar.setStyleSheet(f"""
+            QScrollBar:vertical {{
+                background: transparent;
+                width: {self.SCROLLBAR_WIDTH}px;
+                margin: 0;
+                border: none;
+            }}
+            QScrollBar::handle:vertical {{
+                background: rgba({fg.red()}, {fg.green()}, {fg.blue()}, 35%);
+                border-radius: 4px;
+                min-height: 24px;
+            }}
+            QScrollBar::handle:vertical:hover {{
+                background: rgba({fg.red()}, {fg.green()}, {fg.blue()}, 55%);
+            }}
+            QScrollBar::add-line:vertical, QScrollBar::sub-line:vertical {{
+                height: 0; background: none; border: none;
+            }}
+            QScrollBar::add-page:vertical, QScrollBar::sub-page:vertical {{
+                background: transparent;
+            }}
+        """)
+
+    def _position_scrollbar(self):
+        """把滚动条定位到 widget 右缘（标题栏以下），覆盖式、不参与布局"""
+        sb = getattr(self, '_v_scrollbar', None)
+        if sb is None:
+            return
+        w = self.SCROLLBAR_WIDTH
+        sb.setGeometry(self.width() - w, self._header_h,
+                       w, max(0, self.height() - self._header_h))
+
+    def _sync_scrollbar(self):
+        """让滚动条的 range/pageStep/value 与 scrollback 状态保持一致。
+
+        在所有 scroll_offset / 历史行数变化的入口（统一经由
+        _invalidate_render_cache）调用；用 _scrollbar_syncing + blockSignals
+        防止 setValue 反过来触发 _on_scrollbar_value_changed 形成回环。
+        无历史或处于备用屏幕（_get_history_count() == 0）时隐藏。
+        """
+        sb = getattr(self, '_v_scrollbar', None)
+        if sb is None:
+            return
+        max_scroll = self._get_history_count()  # 备用屏幕返回 0
+        if max_scroll <= 0:
+            if sb.isVisible():
+                sb.hide()
+            return
+        self._scrollbar_syncing = True
+        sb.blockSignals(True)
+        try:
+            sb.setRange(0, max_scroll)
+            sb.setPageStep(self.term_rows)
+            sb.setSingleStep(1)
+            # 滚动条 value=0 表示顶部；scroll_offset=0 表示底部，方向相反
+            sb.setValue(max_scroll - self.scroll_offset)
+        finally:
+            sb.blockSignals(False)
+            self._scrollbar_syncing = False
+        if not sb.isVisible():
+            self._position_scrollbar()
+            sb.show()
+            sb.raise_()
+
+    def _on_scrollbar_value_changed(self, value: int):
+        """拖动滚动条 → 更新 scroll_offset 并整屏重绘"""
+        if self._scrollbar_syncing:
+            return
+        max_scroll = self._get_history_count()
+        new_offset = max(0, min(max_scroll - value, max_scroll))
+        if new_offset != self.scroll_offset:
+            self.scroll_offset = new_offset
+            self._scroll_accum = 0.0
+            # scroll_offset 变化使 render_state 中的 start_line 失配 → 整屏重绘
+            self._invalidate_render_cache()
 
     def _update_terminal_size(self):
         """根据窗口大小更新终端尺寸"""
@@ -845,6 +948,9 @@ class TerminalWidget(QWidget):
         # 重新定位搜索栏（这个可以立即执行，很轻量）
         if hasattr(self, '_search_bar') and self._search_bar:
             self._position_search_bar()
+
+        # 重新定位右缘滚动条（覆盖式子控件，轻量）
+        self._position_scrollbar()
 
         # 重新定位分屏标题栏
         if self._header_bar is not None and self._header_h:
@@ -2139,9 +2245,9 @@ class TerminalWidget(QWidget):
 
         # === 以下所有按键都发送到终端 ===
 
-        # 输入时自动滚动到底部
+        # 输入时自动滚动到底部（走整屏重绘路径，并同步滚动条）
         if self.scroll_offset > 0:
-            self.scroll_offset = 0
+            self.scroll_to_bottom()
 
         data = b''
 
@@ -3373,6 +3479,12 @@ class TerminalWidget(QWidget):
         if hasattr(self, '_search_bar') and self._search_bar:
             self._search_bar.deleteLater()
             self._search_bar = None
+        if hasattr(self, '_search_debounce_timer') and self._search_debounce_timer:
+            self._search_debounce_timer.stop()
+            self._search_debounce_timer.deleteLater()
+            self._search_debounce_timer = None
+        if hasattr(self, '_search_line_cache'):
+            self._search_line_cache.clear()
 
         # 清空缓存
         if hasattr(self, '_color_cache'):
@@ -3937,7 +4049,8 @@ if (hasFileURL) {{
             self._header_h = 0
             if self._header_bar is not None:
                 self._header_bar.hide()
-        # 顶部留白变化 → 重算行数并整屏重绘
+        # 顶部留白变化 → 重算行数并整屏重绘，滚动条随标题栏高度重新定位
+        self._position_scrollbar()
         self._invalidate_render_cache()
         self._update_terminal_size()
         self.update()
@@ -3999,10 +4112,24 @@ if (hasFileURL) {{
         """隐藏搜索栏"""
         if self._search_bar:
             self._search_bar.hide()
+            self._search_debounce_timer.stop()
             self._search_matches = []
             self._current_match_index = -1
+            self._search_line_cache.clear()  # 释放被钉住的历史行引用
             self.setFocus()
             self.update()
+
+    def eventFilter(self, obj, event):
+        """搜索输入框：Shift+Enter 跳转上一个匹配（Enter 由 returnPressed 处理）"""
+        if (self._search_bar is not None
+                and event.type() == QEvent.Type.KeyPress
+                and isinstance(obj, QLineEdit)
+                and obj.parent() is self._search_bar
+                and event.key() in (Qt.Key.Key_Return, Qt.Key.Key_Enter)
+                and event.modifiers() & Qt.KeyboardModifier.ShiftModifier):
+            self._search_prev()
+            return True
+        return super().eventFilter(obj, event)
 
     def _create_search_bar(self):
         """创建搜索栏"""
@@ -4017,6 +4144,8 @@ if (hasFileURL) {{
         search_input.setMinimumWidth(200)
         search_input.textChanged.connect(self._on_search_text_changed)
         search_input.returnPressed.connect(self._search_next)
+        # Shift+Enter 跳转上一个匹配（returnPressed 不区分修饰键，用 eventFilter 拦截）
+        search_input.installEventFilter(self)
 
         # 匹配计数标签
         self._match_label = QLabel("0/0")
@@ -4067,40 +4196,130 @@ if (hasFileURL) {{
             self._search_bar.move(self.width() - bar_width - 20, 10)
 
     def _on_search_text_changed(self, text: str):
-        """搜索文本变化"""
+        """搜索文本变化：300ms 防抖后才执行全量（历史 + 当前屏幕）搜索"""
+        self._search_pending_text = text
+
+        if not text:
+            self._search_debounce_timer.stop()
+            self._search_matches = []
+            self._current_match_index = -1
+            self._match_label.setText("0/0")
+            self.update()
+            return
+
+        self._search_debounce_timer.start(300)
+
+    def _extract_search_line(self, buffer_line) -> tuple:
+        """提取单行用于搜索的 (text, col_map)。
+
+        text 中宽字符只占 1 个字符（跳过 pyte 的 stub 格），col_map[i] 为
+        text[i] 对应的 buffer 列号，用于把匹配的字符串下标映射回高亮列区间。
+        """
+        # 完全空行（无任何已写入格子）直接短路，避免 2 万行历史逐格扫描
+        if not buffer_line:
+            return "", ()
+        columns = self.screen.columns
+        try:
+            columns = max(columns, max(buffer_line.keys()) + 1)
+        except (ValueError, AttributeError, TypeError):
+            pass
+        is_wide = self._is_wide_char
+        chars = []
+        cols = []
+        col = 0
+        while col < columns:
+            try:
+                char = buffer_line[col]
+                data = getattr(char, 'data', None)
+                if data is None:
+                    data = char if isinstance(char, str) else ' '
+            except (KeyError, IndexError, TypeError):
+                data = ' '
+            if data:
+                chars.append(data)
+                cols.append(col)
+                col += 2 if is_wide(data) else 1
+            else:
+                # 宽字符占位 stub，跳过
+                col += 1
+        return ''.join(chars), tuple(cols)
+
+    def _perform_search(self):
+        """执行全量搜索：全部 history 行 + 当前屏幕行（匹配为搜索时刻的快照）"""
+        text = self._search_pending_text
         self._search_matches = []
         self._current_match_index = -1
 
         if not text:
-            self._match_label.setText("0/0")
+            self._update_match_label()
             self.update()
             return
 
         # 限制搜索结果数量，防止内存暴涨
         MAX_SEARCH_RESULTS = 5000
 
-        # 在所有内容中搜索
-        all_content = self._get_all_content()
-        lines = all_content.split('\n')
-
         search_lower = text.lower()
-        for row, line in enumerate(lines):
-            col = 0
-            line_lower = line.lower()
-            while True:
-                idx = line_lower.find(search_lower, col)
-                if idx == -1:
-                    break
-                self._search_matches.append((row, idx, len(text)))
-                col = idx + 1
-                # 检查是否达到上限
-                if len(self._search_matches) >= MAX_SEARCH_RESULTS:
-                    break
-            if len(self._search_matches) >= MAX_SEARCH_RESULTS:
-                break
+        qlen = len(search_lower)
+        is_wide = self._is_wide_char
+        matches = self._search_matches
 
-        if self._search_matches:
-            self._current_match_index = 0
+        def find_in_line(line_text, col_map, abs_row):
+            line_lower = line_text.lower()
+            pos = 0
+            while True:
+                idx = line_lower.find(search_lower, pos)
+                if idx == -1:
+                    return
+                last_i = idx + qlen - 1
+                if last_i >= len(col_map):
+                    return
+                start_col = col_map[idx]
+                end_col = col_map[last_i] + (2 if is_wide(line_text[last_i]) else 1)
+                matches.append((abs_row, start_col, end_col - start_col))
+                if len(matches) >= MAX_SEARCH_RESULTS:
+                    return
+                pos = idx + 1
+
+        # 1) 历史行：行对象推入历史后内容不再变化，可按 id 缓存提取结果。
+        #    缓存值中保留行对象引用，钉住对象保证 id 在缓存有效期内不被复用。
+        cache = self._search_line_cache
+        history = self._get_history_top()
+        for abs_row, line in enumerate(history):
+            key = id(line)
+            cached = cache.get(key)
+            if cached is not None and cached[0] is line:
+                cache.move_to_end(key)
+                line_text, col_map = cached[1], cached[2]
+            else:
+                line_text, col_map = self._extract_search_line(line)
+                cache[key] = (line, line_text, col_map)
+                if len(cache) > self._SEARCH_LINE_CACHE_MAX:
+                    cache.popitem(last=False)
+            if line_text:
+                find_in_line(line_text, col_map, abs_row)
+                if len(matches) >= MAX_SEARCH_RESULTS:
+                    break
+
+        # 2) 当前屏幕行（可变，不缓存）
+        history_count = len(history)
+        if len(matches) < MAX_SEARCH_RESULTS:
+            buffer = self.screen.buffer
+            for row in range(self.term_rows):
+                line_text, col_map = self._extract_search_line(buffer[row])
+                if line_text:
+                    find_in_line(line_text, col_map, history_count + row)
+                    if len(matches) >= MAX_SEARCH_RESULTS:
+                        break
+
+        if matches:
+            # 初始选中：离当前可见区域中心最近的匹配，避免每次都跳到最顶部
+            total_lines = history_count + self.term_rows
+            display_start = max(0, total_lines - self.term_rows - self.scroll_offset)
+            center = display_start + self.term_rows // 2
+            self._current_match_index = min(
+                range(len(matches)), key=lambda i: abs(matches[i][0] - center)
+            )
+            self._scroll_to_match()
 
         self._update_match_label()
         self.update()
@@ -4122,20 +4341,31 @@ if (hasFileURL) {{
             self.update()
 
     def _scroll_to_match(self):
-        """滚动到当前匹配位置"""
-        if not self._search_matches or self._current_match_index < 0:
+        """滚动使当前匹配进入可见区域（已可见则不动）。
+
+        匹配基于搜索时刻的快照：搜索后历史继续增长时，行号可能位移，
+        这里只保证 clamp 在合法范围内、不崩溃不跳飞；新输出后需重新搜索。
+        """
+        if not self._search_matches:
             return
-        old_offset = self.scroll_offset
-        row, col, length = self._search_matches[self._current_match_index]
+        if not (0 <= self._current_match_index < len(self._search_matches)):
+            self._current_match_index = 0
+        row, _col, _length = self._search_matches[self._current_match_index]
         history_count = self._get_history_count()
         total_lines = history_count + self.term_rows
+        row = max(0, min(row, total_lines - 1))
 
-        # 计算需要的滚动偏移
-        if row < history_count:
-            self.scroll_offset = history_count - row
-        else:
-            self.scroll_offset = 0
-        if old_offset != self.scroll_offset:
+        display_start = max(0, total_lines - self.term_rows - self.scroll_offset)
+        if display_start <= row < display_start + self.term_rows:
+            return  # 已在可见区域内
+
+        # 让匹配行尽量居中
+        desired_start = max(0, row - self.term_rows // 2)
+        new_offset = max(0, min(history_count, history_count - desired_start))
+        if new_offset != self.scroll_offset:
+            self.scroll_offset = new_offset
+            self._scroll_accum = 0.0
+            # scroll_offset 变化 → render_state 失配 → 整屏重绘（并同步滚动条）
             self._invalidate_render_cache()
 
     def _update_match_label(self):
