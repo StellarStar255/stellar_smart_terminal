@@ -707,6 +707,11 @@ class CodeEditor(QPlainTextEdit):
         if self._ai is not None:
             self._ai.set_bg_color(color)
 
+    def set_ai_ghost_fg(self, color):
+        """编辑器正文颜色：行中触发时用于重画被灰字推后的剩余文本。"""
+        if self._ai is not None:
+            self._ai.set_fg_color(color)
+
     def ai_get_config(self):
         """向上找主窗口拿补全用的 LLM 配置（优先专用「completion/补全」配置，
         否则回退默认配置；均为 OpenAI 兼容）。"""
@@ -2259,6 +2264,7 @@ class FileEditorWidget(QWidget):
         # AI 灰字建议用暗色文字 + 编辑器背景作底色（盖住下方真实文字），跟随主题
         self.editor.set_ai_ghost_color(QColor(self.theme.get('text_dim', '#6a737d')))
         self.editor.set_ai_ghost_bg(QColor(editor_bg))
+        self.editor.set_ai_ghost_fg(QColor(editor_fg))
 
         # 行号条配色：默认用稍暗的 bg + 暗灰 fg，浅色主题则反向
         gutter_bg = self.theme.get('editor_gutter_bg')

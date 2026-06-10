@@ -16,9 +16,11 @@ from PyQt6.QtGui import QColor, QTextCursor
 
 
 # 单次请求上下文上限（字符数），避免把整份大文件塞进去浪费 token。
+# 模块级常量，便于以后做成可配置项。
+# 截断方向：prefix 取尾部（保留靠近光标的内容），suffix 取头部（同理）。
 # suffix 不宜过长：弱模型常把 suffix 里的代码原样抄回来当“补全”。
-_PREFIX_LIMIT = 4000
-_SUFFIX_LIMIT = 600
+PREFIX_LIMIT = 8000
+SUFFIX_LIMIT = 2000
 
 # 光标占位符：放进真实代码里标记插入点。选一个几乎不可能出现在代码里的串。
 _CURSOR_MARKER = '<|CURSOR|>'
@@ -40,10 +42,22 @@ class CompletionWorker(QThread):
         self._language = language or 'text'
         self._gen = generation
         self._cancelled = False
+        self._resp = None  # 在途的 requests.Response；cancel() 时直接关掉底层连接
 
     def cancel(self):
-        """请求作废：用户继续输入时调用，让流式循环尽快退出。"""
+        """请求作废：用户继续输入时调用，让流式循环尽快退出。
+
+        除了置标志位（流式循环逐行轮询），还直接 close() 在途的 Response，
+        关闭底层 socket，让阻塞在网络读上的 iter_lines 立刻抛错退出，
+        不再占用连接资源、也不再回填过期结果。
+        """
         self._cancelled = True
+        resp = self._resp
+        if resp is not None:
+            try:
+                resp.close()
+            except Exception:
+                pass
 
     def run(self):
         try:
@@ -140,8 +154,17 @@ class CompletionWorker(QThread):
             proxies = {'http': proxy, 'https': proxy} if proxy else None
             timeout = cfg.get('timeout') or 30
 
+            if self._cancelled:
+                return
             resp = requests.post(url, json=payload, headers=headers,
                                  timeout=timeout, proxies=proxies, stream=True)
+            self._resp = resp  # 暴露给 cancel()，可从主线程关闭底层连接
+            if self._cancelled:
+                try:
+                    resp.close()
+                except Exception:
+                    pass
+                return
             if resp.status_code != 200:
                 body = ''
                 try:
@@ -197,10 +220,21 @@ class CompletionWorker(QThread):
                 except Exception:
                     pass
 
+            if self._cancelled:
+                return
             self.done.emit(self._gen, acc)
         except Exception as e:
+            # cancel() 关闭连接会让阻塞读抛错，这属于预期退出，静默即可
             if not self._cancelled:
                 self.failed.emit(self._gen, str(e))
+        finally:
+            resp = self._resp
+            self._resp = None
+            if resp is not None:
+                try:
+                    resp.close()
+                except Exception:
+                    pass
 
 
 class InlineCompletionController(QObject):
@@ -219,9 +253,11 @@ class InlineCompletionController(QObject):
         self._enabled = False
         self._suggestion = ''          # 当前灰字建议（可能多行）
         self._anchor_pos = -1          # 建议锚定的光标绝对位置
+        self._anchor_midline = False   # 触发时光标后本行是否还有内容（行中触发）
         self._gen = 0                  # generation：过期结果作废
         self._color = QColor('#6a737d')
         self._bg_color = QColor('#282c34')  # 灰字底色（= 编辑器背景），用于盖住下方真实文字
+        self._fg_color = QColor('#abb2bf')  # 正文颜色：行中触发时重画被“推后”的剩余文本
         self._workers = []             # 持有运行中的 worker，防止被 GC
         self._active_worker = None     # 当前在途请求；新请求/撤销时取消它
         self._req_suffix = ''
@@ -249,6 +285,11 @@ class InlineCompletionController(QObject):
         if color is not None:
             self._bg_color = QColor(color)
 
+    def set_fg_color(self, color: QColor):
+        """编辑器正文颜色：行中触发时用它重画被灰字“推后”的剩余文本。"""
+        if color is not None:
+            self._fg_color = QColor(color)
+
     # ---------- 建议状态 ----------
 
     def has_suggestion(self) -> bool:
@@ -270,6 +311,7 @@ class InlineCompletionController(QObject):
     def dismiss(self):
         """清除当前建议，并让在途请求结果作废。"""
         self._cancel_active()
+        self._anchor_midline = False
         if self._suggestion:
             self._suggestion = ''
             self._anchor_pos = -1
@@ -287,6 +329,7 @@ class InlineCompletionController(QObject):
         self._cancel_active()
         self._suggestion = ''
         self._anchor_pos = -1
+        self._anchor_midline = False
         self._gen += 1
         cursor = self._editor.textCursor()
         cursor.insertText(text)
@@ -326,11 +369,17 @@ class InlineCompletionController(QObject):
         cursor = ed.textCursor()
         if cursor.hasSelection():
             return
-        # 仅在“行尾”补全：光标之后本行只剩空白时才请求，避免灰字与已有文字重叠
+        # 行尾、行中都可触发（FIM 模型本就支持任意 suffix）。
+        # 唯一限制：光标正卡在单词中间（前后字符都是标识符字符）时不触发，
+        # 避免用户打字打到一半就疯狂发请求。
         block_text = cursor.block().text()
         col = cursor.positionInBlock()
-        if block_text[col:].strip() != '':
+        prev_ch = block_text[col - 1] if col > 0 else ''
+        next_ch = block_text[col] if col < len(block_text) else ''
+        if self._is_word_char(prev_ch) and self._is_word_char(next_ch):
             return
+        # 行中触发：光标后本行还有非空白内容 → 只渲染/插入单行建议
+        midline = block_text[col:].strip() != ''
         cfg = None
         try:
             cfg = ed.ai_get_config()
@@ -341,8 +390,9 @@ class InlineCompletionController(QObject):
 
         pos = cursor.position()
         full = ed.toPlainText()
-        prefix = full[:pos][-_PREFIX_LIMIT:]
-        suffix = full[pos:pos + _SUFFIX_LIMIT]
+        # prefix 截尾部（保留靠近光标的），suffix 截头部（保留靠近光标的）
+        prefix = full[:pos][-PREFIX_LIMIT:]
+        suffix = full[pos:pos + SUFFIX_LIMIT]
         language = 'text'
         try:
             language = ed.ai_get_language()
@@ -353,6 +403,7 @@ class InlineCompletionController(QObject):
         self._gen += 1
         gen = self._gen
         self._anchor_pos = pos
+        self._anchor_midline = midline
         self._req_suffix = suffix  # 用于在结果里识别“抄 suffix”的回声
 
         worker = CompletionWorker(cfg, prefix, suffix, language, gen, self)
@@ -383,6 +434,9 @@ class InlineCompletionController(QObject):
         if ed.textCursor().position() != self._anchor_pos:
             return
         cleaned = self._clean(acc)
+        if self._anchor_midline:
+            # 行中触发只展示单行 ghost（overlay 渲染多行会盖住下方真实代码）
+            cleaned = cleaned.split('\n', 1)[0]
         if not cleaned or cleaned == self._suggestion:
             return
         # 流式中途暂不做反回声判断（内容还没收全），仅最终态严格过滤
@@ -398,14 +452,24 @@ class InlineCompletionController(QObject):
             self.dismiss()
             return
         cleaned = self._clean(text)
-        # 反回声：若建议只是把光标后的 suffix 原样抄回来，丢弃（弱模型常见失败）
-        if not cleaned or self._is_echo(cleaned, getattr(self, '_req_suffix', '')):
+        if self._anchor_midline:
+            # 行中触发只展示/插入单行（与 _on_chunk 保持一致）
+            cleaned = cleaned.split('\n', 1)[0]
+        req_suffix = getattr(self, '_req_suffix', '')
+        # 反回声（截断版）：建议结尾把 suffix 开头抄回来 → 截掉重复部分
+        cleaned = self._trim_suffix_echo(cleaned, req_suffix)
+        # 反回声（整体版）：若建议只是把光标后的 suffix 原样抄回来，丢弃（弱模型常见失败）
+        if not cleaned or self._is_echo(cleaned, req_suffix):
             if self._suggestion:  # 撤掉流式中途显示出来的回声/空内容
                 self._suggestion = ''
                 ed.viewport().update()
             return
         self._suggestion = cleaned
         ed.viewport().update()
+
+    @staticmethod
+    def _is_word_char(ch: str) -> bool:
+        return bool(ch) and (ch.isalnum() or ch == '_')
 
     @staticmethod
     def _is_echo(cand: str, suffix: str) -> bool:
@@ -416,6 +480,22 @@ class InlineCompletionController(QObject):
         head = c[:40]
         # suffix 紧接着就是这段建议，或建议开头大段出现在 suffix 前部 → 判为回声
         return s.startswith(head) or (len(head) >= 12 and head in s[:300])
+
+    @staticmethod
+    def _trim_suffix_echo(cand: str, suffix: str) -> str:
+        """若建议结尾把光标后已有内容（suffix 开头）原样抄了一遍，截掉重复部分。
+
+        典型场景：行中触发时光标在 `foo(|)` 里，模型返回 `bar)` —— 末尾的 `)`
+        与 suffix 开头重复，截掉后接受补全才不会出现 `bar))`。
+        取最长重叠，整段都是回声时返回空串（调用方按无建议处理）。
+        """
+        s = suffix or ''
+        if not cand or not s:
+            return cand
+        for k in range(min(len(cand), len(s)), 0, -1):
+            if cand.endswith(s[:k]):
+                return cand[:-k]
+        return cand
 
     # 单条建议最多展示/插入的行数，避免模型偶尔长篇大论盖满屏幕
     MAX_LINES = 12
@@ -467,18 +547,35 @@ class InlineCompletionController(QObject):
         bc.movePosition(QTextCursor.MoveOperation.StartOfBlock)
         left_x = ed.cursorRect(bc).left()
 
+        # 行中触发：光标后本行还有内容，需要把它“推后”显示。
+        # 实现：先用底色盖住光标右侧整段原文，画完灰字后再用正文色把剩余文本
+        # 画回灰字之后（视觉上等价于剩余文本被建议推开；该段暂不带语法高亮）。
+        block_text = cursor.block().text()
+        col = cursor.positionInBlock()
+        rest = block_text[col:]
+
         painter.save()
         painter.setFont(ed.font())
         for i, ln in enumerate(lines):
             if i == 0:
-                x = cr.left()       # 第一行紧接光标（仅在行尾触发，右侧无文字）
+                x = cr.left()       # 第一行紧接光标
                 top = cr.top()
             else:
                 x = left_x          # 续行从行首列开始
                 top = cr.top() + i * line_h
             w = fm.horizontalAdvance(ln) if ln else fm.horizontalAdvance(' ')
-            # 关键：先用不透明底色盖住下方真实文字，再画灰字，避免与已有代码重叠看不清
-            painter.fillRect(int(x), int(top), int(w) + 4, int(line_h), self._bg_color)
-            painter.setPen(self._color)
-            painter.drawText(int(x), int(top + ascent), ln)
+            if i == 0 and rest:
+                # 盖住光标右侧到视口右缘的原文，避免灰字与已有代码重叠
+                cover_w = ed.viewport().width() - int(x)
+                painter.fillRect(int(x), int(top), cover_w, int(line_h), self._bg_color)
+                painter.setPen(self._color)
+                painter.drawText(int(x), int(top + ascent), ln)
+                # 把被盖住的剩余文本用正文色画回灰字之后（“推后”效果）
+                painter.setPen(self._fg_color)
+                painter.drawText(int(x + w), int(top + ascent), rest)
+            else:
+                # 关键：先用不透明底色盖住下方真实文字，再画灰字，避免与已有代码重叠看不清
+                painter.fillRect(int(x), int(top), int(w) + 4, int(line_h), self._bg_color)
+                painter.setPen(self._color)
+                painter.drawText(int(x), int(top + ascent), ln)
         painter.restore()
