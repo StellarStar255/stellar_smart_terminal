@@ -255,6 +255,23 @@ def _attr_to_entry(parent: str, attr) -> RemoteEntry:
 
 # ---------- The session itself ----------
 
+class _PersistOnFirstUsePolicy(paramiko.MissingHostKeyPolicy):
+    """首次见到的主机：记录其 host key（TOFU 信任），并标记需要写回 known_hosts。
+
+    安全意义：相比 AutoAddPolicy「每次连接都临时接受、从不持久化」（导致已知主机
+    密钥被替换时也永远不会被发现），这里把首次接受的 key 写回 ~/.ssh/known_hosts。
+    一旦持久化，后续连接时 paramiko 会在调用本策略之前就比对已知 key，密钥变更
+    （典型 MITM 特征）会直接抛 BadHostKeyException，从而真正拦截中间人攻击。
+    """
+
+    def __init__(self):
+        self.added = False
+
+    def missing_host_key(self, client, hostname, key):
+        client.get_host_keys().add(hostname, key.get_name(), key)
+        self.added = True
+
+
 class SSHSession(QObject):
     """单台主机的 SSH/SFTP 会话
 
@@ -301,8 +318,17 @@ class SSHSession(QObject):
         cfg = self.host_config
         client = paramiko.SSHClient()
         client.load_system_host_keys()
-        # 用户主机：不严格校验 host key，自动接受（与桌面 SSH 体验一致）
-        client.set_missing_host_key_policy(paramiko.AutoAddPolicy())
+        # 持久化 TOFU：加载用户 known_hosts，使「已知主机密钥变更」能被 paramiko 在
+        # 握手阶段直接拦截（抛 BadHostKeyException），从而防御中间人攻击；首次连接的
+        # 未知主机记录指纹后写回 known_hosts，后续连接即受校验。
+        known_hosts = os.path.expanduser("~/.ssh/known_hosts")
+        try:
+            if os.path.isfile(known_hosts):
+                client.load_host_keys(known_hosts)
+        except Exception:
+            pass
+        host_key_policy = _PersistOnFirstUsePolicy()
+        client.set_missing_host_key_policy(host_key_policy)
 
         connect_kwargs: dict[str, Any] = {
             "hostname": cfg.hostname,
@@ -337,6 +363,14 @@ class SSHSession(QObject):
             connect_kwargs["allow_agent"] = False
             connect_kwargs["look_for_keys"] = False
             client.connect(**connect_kwargs)
+
+        # 首次接受的未知主机 key 写回 known_hosts，让后续连接受 MITM 校验保护
+        if host_key_policy.added:
+            try:
+                os.makedirs(os.path.dirname(known_hosts), exist_ok=True)
+                client.save_host_keys(known_hosts)
+            except Exception:
+                pass
 
         sftp = client.open_sftp()
         try:

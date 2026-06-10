@@ -570,6 +570,31 @@ class OpenAIRequestHandler(BaseHTTPRequestHandler):
             return auth_header[7:] == self.config.api_key
         return False
 
+    def _check_csrf(self) -> bool:
+        """Reject browser-driven cross-site requests (CSRF防护).
+
+        本服务器把请求内容直接写入终端 PTY 并执行，且默认无鉴权。仅绑定 127.0.0.1
+        并不足以防御 CSRF：恶意网页用 text/plain「简单请求」即可免预检 POST 过来，
+        CORS 只挡读响应、挡不住已经发生的注入副作用。
+        这里据浏览器自带的 Sec-Fetch-Site / Origin 头拒绝跨站调用；非浏览器客户端
+        （curl、openai SDK 等）不带这些头，照常放行。
+        """
+        # 现代浏览器：跨站/跨源调用会带 cross-site / same-site；同源或非浏览器为 same-origin/none
+        sfs = self.headers.get('Sec-Fetch-Site', '')
+        if sfs and sfs not in ('same-origin', 'none'):
+            return False
+        # 跨源请求必带 Origin；只允许 localhost 来源
+        origin = self.headers.get('Origin', '')
+        if origin:
+            from urllib.parse import urlparse
+            try:
+                host = urlparse(origin).hostname
+            except Exception:
+                return False
+            if host not in ('localhost', '127.0.0.1', '::1'):
+                return False
+        return True
+
     def do_OPTIONS(self):
         self.send_response(200)
         cors_origin = self._get_cors_origin()
@@ -580,6 +605,9 @@ class OpenAIRequestHandler(BaseHTTPRequestHandler):
         self.end_headers()
 
     def do_GET(self):
+        if not self._check_csrf():
+            self._send_error(403, "Cross-site request forbidden")
+            return
         if not self._check_auth():
             self._send_error(401, "Invalid or missing API key")
             return
@@ -591,6 +619,9 @@ class OpenAIRequestHandler(BaseHTTPRequestHandler):
             self._send_error(404, "Not Found")
 
     def do_POST(self):
+        if not self._check_csrf():
+            self._send_error(403, "Cross-site request forbidden")
+            return
         if not self._check_auth():
             self._send_error(401, "Invalid or missing API key")
             return

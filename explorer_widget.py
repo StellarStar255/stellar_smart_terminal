@@ -7,6 +7,7 @@ import posixpath
 import sys
 import subprocess
 import shutil
+import shlex
 import threading
 from pathlib import Path
 from typing import Optional
@@ -1015,62 +1016,59 @@ class ExplorerPanel(QWidget):
         # 如果都失败了，使用系统默认应用
         self._open_file(file_path)
 
+    @staticmethod
+    def _applescript_terminal_run(dir_path: str, command: str) -> str:
+        """构造在 Terminal.app 执行 `cd <dir> && <command>` 的 AppleScript。
+
+        安全：路径已由调用方用 shlex.quote 做 shell 引用，这里再对整条命令做
+        AppleScript 字符串转义（反斜杠、双引号），双重防止恶意文件名注入命令。
+        """
+        shell_cmd = f"cd {shlex.quote(dir_path)} && {command}"
+        esc = shell_cmd.replace('\\', '\\\\').replace('"', '\\"')
+        return (
+            'tell application "Terminal"\n'
+            '    activate\n'
+            f'    do script "{esc}"\n'
+            'end tell'
+        )
+
     def _run_file(self, file_path: str):
         """运行文件"""
         # 获取文件扩展名
         _, ext = os.path.splitext(file_path)
         ext = ext.lower()
 
+        # 扩展名 → 解释器；其余走系统默认应用
+        interp_map = {
+            '.py': 'python3', '.sh': 'bash', '.bash': 'bash',
+            '.js': 'node', '.mjs': 'node',
+        }
+        interp = interp_map.get(ext)
+        if interp is None:
+            self._open_file(file_path)
+            return
+
+        dir_path = os.path.dirname(file_path)
         try:
-            if ext == '.py':
-                # Python 文件
-                if sys.platform == 'darwin':
-                    # macOS: 在 Terminal 中运行
-                    script = f'''
-                    tell application "Terminal"
-                        activate
-                        do script "cd \\"{os.path.dirname(file_path)}\\" && python3 \\"{file_path}\\""
-                    end tell
-                    '''
-                    subprocess.Popen(['osascript', '-e', script])
-                elif sys.platform == 'win32':
-                    subprocess.Popen(['python', file_path], cwd=os.path.dirname(file_path),
-                                   creationflags=subprocess.CREATE_NEW_CONSOLE)
+            if sys.platform == 'darwin':
+                # 文件路径用 shlex.quote 引用，杜绝文件名内的引号/元字符注入
+                command = f"{interp} {shlex.quote(file_path)}"
+                script = self._applescript_terminal_run(dir_path, command)
+                subprocess.Popen(['osascript', '-e', script])
+            elif sys.platform == 'win32':
+                # Windows 无 bash；.sh 退回系统默认应用
+                if interp == 'bash':
+                    self._open_file(file_path)
                 else:
-                    subprocess.Popen(['x-terminal-emulator', '-e', f'python3 "{file_path}"'],
-                                   cwd=os.path.dirname(file_path))
-            elif ext in ['.sh', '.bash']:
-                # Shell 脚本
-                if sys.platform == 'darwin':
-                    script = f'''
-                    tell application "Terminal"
-                        activate
-                        do script "cd \\"{os.path.dirname(file_path)}\\" && bash \\"{file_path}\\""
-                    end tell
-                    '''
-                    subprocess.Popen(['osascript', '-e', script])
-                elif sys.platform != 'win32':
-                    subprocess.Popen(['x-terminal-emulator', '-e', f'bash "{file_path}"'],
-                                   cwd=os.path.dirname(file_path))
-            elif ext in ['.js', '.mjs']:
-                # JavaScript/Node.js 文件
-                if sys.platform == 'darwin':
-                    script = f'''
-                    tell application "Terminal"
-                        activate
-                        do script "cd \\"{os.path.dirname(file_path)}\\" && node \\"{file_path}\\""
-                    end tell
-                    '''
-                    subprocess.Popen(['osascript', '-e', script])
-                elif sys.platform == 'win32':
-                    subprocess.Popen(['node', file_path], cwd=os.path.dirname(file_path),
-                                   creationflags=subprocess.CREATE_NEW_CONSOLE)
-                else:
-                    subprocess.Popen(['x-terminal-emulator', '-e', f'node "{file_path}"'],
-                                   cwd=os.path.dirname(file_path))
+                    exe = 'python' if interp == 'python3' else interp
+                    subprocess.Popen([exe, file_path], cwd=dir_path,
+                                     creationflags=subprocess.CREATE_NEW_CONSOLE)
             else:
-                # 其他文件使用系统默认应用运行
-                self._open_file(file_path)
+                # Linux：-e 接收命令字符串，对路径做 shell 引用
+                subprocess.Popen(
+                    ['x-terminal-emulator', '-e', f"{interp} {shlex.quote(file_path)}"],
+                    cwd=dir_path,
+                )
         except Exception as e:
             QMessageBox.warning(self, t("explorer.error"), t("explorer.run_failed", error=e))
 
