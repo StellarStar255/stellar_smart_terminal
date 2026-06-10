@@ -6703,10 +6703,24 @@ class MainWindow(QMainWindow):
             target = self._spring_target_for_widget(QApplication.focusWidget()) or 'editor'
             self._apply_spring(target)
         else:
-            # 关闭：恢复记忆中的均衡尺寸
+            # 关闭：编辑器/终端像弹簧回弹一样均分宽度（带轻微过冲），之后用户手动拖拽定比例。
+            # 注意不能用 _spring_applicable() 判断——它首先检查 _spring_mode_enabled，
+            # 取消勾选时恒为 False，旧写法的恢复动画从未执行过，布局会停在偏置状态。
             self._spring_current_side = None
-            if self._spring_applicable():
-                self._animate_main_sizes(self._resolve_main_splitter_sizes_with_editor())
+            if (hasattr(self, 'editor_area') and self.editor_area.isVisible()
+                    and self.main_splitter.indexOf(self.editor_area) >= 0
+                    and self.main_splitter.indexOf(self._main_content_stack) >= 0):
+                sizes = self.main_splitter.sizes()
+                ed_idx = self.main_splitter.indexOf(self.editor_area)
+                term_idx = self.main_splitter.indexOf(self._main_content_stack)
+                combined = sizes[ed_idx] + sizes[term_idx]
+                if combined > 0:
+                    new_sizes = list(sizes)
+                    new_sizes[ed_idx] = combined // 2
+                    new_sizes[term_idx] = combined - combined // 2
+                    self._animate_main_sizes(
+                        new_sizes, duration=300,
+                        easing=QEasingCurve.Type.OutBack)
         self._save_config()
 
     def _spring_h_columns(self, container) -> int:
@@ -6909,8 +6923,13 @@ class MainWindow(QMainWindow):
         if isinstance(width, int) and width > 0:
             self._broadcast_left_panel_width(width)
 
-    def _animate_main_sizes(self, target_sizes):
-        """平滑过渡 main_splitter 到目标尺寸（弹簧手感），期间不记忆尺寸。"""
+    def _animate_main_sizes(self, target_sizes, duration=170,
+                            easing=QEasingCurve.Type.OutCubic):
+        """平滑过渡 main_splitter 到目标尺寸（弹簧手感），期间不记忆尺寸。
+
+        duration/easing 可定制：关闭弹簧模式的「回弹均分」用 OutBack 加一点过冲,
+        日常的展开切换保持默认 OutCubic。
+        """
         start = self.main_splitter.sizes()
         if len(start) != len(target_sizes):
             self.main_splitter.setSizes(target_sizes)
@@ -6926,8 +6945,8 @@ class MainWindow(QMainWindow):
         anim = QVariantAnimation(self)
         anim.setStartValue(0.0)
         anim.setEndValue(1.0)
-        anim.setDuration(170)
-        anim.setEasingCurve(QEasingCurve.Type.OutCubic)
+        anim.setDuration(duration)
+        anim.setEasingCurve(easing)
 
         def _on_val(t):
             cur = [int(round(s + (e - s) * t)) for s, e in zip(start, target_sizes)]
