@@ -99,6 +99,6 @@ gh release edit v1.6.0 --notes-file notes.md   # 更新说明
 
 ## 已知限制 / Known limitations
 
-- **未签名/未公证**:用户首次打开会被 Gatekeeper 拦截,需要 `xattr -cr "/Applications/Stellar Smart Terminal.app"` 或右键 → 打开。彻底解决需要 Apple Developer 账号($99/年)做 codesign + notarytool 公证。
+- **未签名/未公证**:用户首次打开会被 Gatekeeper 拦截(macOS 15 Sequoia 起右键 → 打开已失效),需到 系统设置 → 隐私与安全性 → 仍要打开(Open Anyway),或执行 `xattr -cr "/Applications/Stellar Smart Terminal.app"`。彻底解决需要 Apple Developer 账号($99/年)做 codesign + notarytool 公证。
 - **仅 arm64**:PyInstaller 跟随构建机架构,Intel 包需在 Intel Mac 上另行构建。
 - 用户数据(配置、历史、书签)写在 bundle 外的用户目录,升级覆盖安装不会丢失。

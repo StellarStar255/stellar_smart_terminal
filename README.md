@@ -22,7 +22,26 @@ A PyQt6-based smart terminal with file explorer, Git GUI, LLM proxy, and VS Code
 - **VS Code Extensions / VS Code 扩展浏览**
 - **i18n** — English / 中文
 
-## Quick Start / 快速开始
+## Download / 下载安装
+
+无需安装 Python，从 [**Releases**](https://github.com/StellarStar255/stellar_smart_terminal/releases/latest) 下载即可使用。
+No Python required — grab a build from the [**Releases**](https://github.com/StellarStar255/stellar_smart_terminal/releases/latest) page.
+
+1. 下载 `Stellar-Smart-Terminal-vX.Y.Z-macOS-arm64.dmg`（推荐；也提供 zip）
+   Download the `.dmg` (recommended; a zip is also available)
+2. 打开 DMG，把 `Stellar Smart Terminal.app` 拖进 `Applications` 文件夹
+   Open the DMG and drag the app into the `Applications` folder
+3. 首次启动若提示 **"Stellar Smart Terminal" Not Opened**（应用暂未签名）：点 **完成/Done**，到 **系统设置 → 隐私与安全性** 底部点 **仍要打开 (Open Anyway)**；或在终端执行：
+   On first launch, if macOS blocks the app (it is not code-signed yet): click **Done**, then go to **System Settings → Privacy & Security** and click **Open Anyway** — or run:
+
+   ```bash
+   xattr -cr "/Applications/Stellar Smart Terminal.app"
+   ```
+
+> 目前仅提供 Apple Silicon (arm64) 构建。
+> Currently Apple Silicon (arm64) only.
+
+## Quick Start (from source) / 源码运行
 
 ```bash
 pip install -r requirements.txt
