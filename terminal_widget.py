@@ -2711,6 +2711,20 @@ class TerminalWidget(QWidget):
                     self._write_to_backend(b'\x01')
                 event.accept()
                 return
+            # Cmd+Down / Cmd+Up：跳到历史最底部/最顶部（与 macOS「跳到文末/文首」习惯一致；
+            # 排除 Shift——Ctrl+Shift+Up/Down 是窗口级的不透明度快捷键）
+            if ((modifiers & Qt.KeyboardModifier.ControlModifier)
+                    and not (modifiers & (Qt.KeyboardModifier.ShiftModifier
+                                          | Qt.KeyboardModifier.AltModifier
+                                          | Qt.KeyboardModifier.MetaModifier))
+                    and key in (Qt.Key.Key_Down, Qt.Key.Key_Up)):
+                if key == Qt.Key.Key_Down:
+                    self.scroll_to_bottom()
+                else:
+                    self.scroll_offset = self._get_history_count()
+                    self._invalidate_render_cache()
+                event.accept()
+                return
 
         # Escape 关闭搜索栏
         if key == Qt.Key.Key_Escape and self._search_bar and self._search_bar.isVisible():

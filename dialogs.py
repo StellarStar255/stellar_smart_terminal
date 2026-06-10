@@ -9,12 +9,13 @@ import shutil
 from pathlib import Path
 
 from PyQt6.QtWidgets import (
-    QApplication, QDialog, QDialogButtonBox, QFileDialog, QFormLayout,
-    QHBoxLayout, QLabel, QLineEdit, QListWidget, QListWidgetItem,
-    QMessageBox, QPlainTextEdit, QPushButton, QVBoxLayout, QWidget
+    QApplication, QAbstractItemView, QDialog, QDialogButtonBox, QFileDialog,
+    QFormLayout, QHBoxLayout, QLabel, QLineEdit, QListWidget, QListWidgetItem,
+    QMessageBox, QPlainTextEdit, QPushButton, QTreeWidget, QTreeWidgetItem,
+    QVBoxLayout, QWidget
 )
 from PyQt6.QtCore import Qt, QTimer, pyqtSignal
-from PyQt6.QtGui import QKeySequence
+from PyQt6.QtGui import QFont, QKeySequence
 
 from i18n import t
 
@@ -1338,6 +1339,121 @@ class ShortcutSettingsDialog(QDialog):
                 background-color: #2563eb;
                 border: none;
             }
+            QPushButton#scSave:hover { background-color: #3b76f0; }
+            QPushButton#scReset { background-color: #3d3d5c; border: none; }
+            QPushButton#scReset:hover { background-color: #4d4d6c; }
+        """)
+
+
+class ShortcutCheatSheetDialog(QDialog):
+    """快捷键速查表（只读、可搜索、非模态）。
+
+    groups: [(分组标题, [(快捷键显示文本, 描述), ...]), ...]
+    键位文本由调用方按平台原生格式渲染好——「全局」组取的是当前生效值
+    （含用户自定义覆盖），所以速查表不会和实际行为漂移。
+    """
+
+    customize_requested = pyqtSignal()
+
+    def __init__(self, groups, parent=None):
+        super().__init__(parent)
+        self._groups = list(groups)
+        self.setWindowTitle(t("shortcuts.cheatsheet_title"))
+        self.resize(560, 680)
+        self._setup_ui()
+        self._apply_style()
+
+    def _setup_ui(self):
+        layout = QVBoxLayout(self)
+        layout.setContentsMargins(16, 16, 16, 12)
+        layout.setSpacing(10)
+
+        self.search_input = QLineEdit()
+        self.search_input.setPlaceholderText(t("shortcuts.cheatsheet_search"))
+        self.search_input.setClearButtonEnabled(True)
+        self.search_input.textChanged.connect(self._apply_filter)
+        layout.addWidget(self.search_input)
+
+        self.tree = QTreeWidget()
+        self.tree.setColumnCount(2)
+        self.tree.setHeaderHidden(True)
+        self.tree.setRootIsDecorated(False)
+        self.tree.setSelectionMode(QAbstractItemView.SelectionMode.NoSelection)
+        self.tree.setFocusPolicy(Qt.FocusPolicy.NoFocus)
+        self.tree.setUniformRowHeights(True)
+        group_font = QFont()
+        group_font.setBold(True)
+        for title, rows in self._groups:
+            group_item = QTreeWidgetItem([title, ""])
+            group_item.setFont(0, group_font)
+            group_item.setFlags(Qt.ItemFlag.ItemIsEnabled)
+            self.tree.addTopLevelItem(group_item)
+            for keys, desc in rows:
+                child = QTreeWidgetItem([desc, keys])
+                child.setFlags(Qt.ItemFlag.ItemIsEnabled)
+                child.setTextAlignment(
+                    1, Qt.AlignmentFlag.AlignRight | Qt.AlignmentFlag.AlignVCenter)
+                group_item.addChild(child)
+        self.tree.expandAll()
+        self.tree.setColumnWidth(0, 360)
+        layout.addWidget(self.tree, 1)
+
+        btn_row = QHBoxLayout()
+        customize_btn = QPushButton(t("shortcuts.cheatsheet_customize"))
+        customize_btn.setObjectName("scReset")
+        customize_btn.clicked.connect(self.customize_requested.emit)
+        btn_row.addWidget(customize_btn)
+        btn_row.addStretch(1)
+        close_btn = QPushButton(t("shortcuts.cheatsheet_close"))
+        close_btn.setObjectName("scSave")
+        close_btn.clicked.connect(self.close)
+        btn_row.addWidget(close_btn)
+        layout.addLayout(btn_row)
+
+    def _apply_filter(self, text: str):
+        """空格分词、大小写不敏感的过滤：描述或键位包含全部词条才显示；
+        组内全部被滤掉时连组标题一起隐藏。"""
+        tokens = [tok for tok in text.lower().split() if tok]
+        for gi in range(self.tree.topLevelItemCount()):
+            group_item = self.tree.topLevelItem(gi)
+            visible_children = 0
+            for ci in range(group_item.childCount()):
+                child = group_item.child(ci)
+                haystack = (child.text(0) + " " + child.text(1)).lower()
+                match = all(tok in haystack for tok in tokens)
+                child.setHidden(not match)
+                if match:
+                    visible_children += 1
+            group_item.setHidden(visible_children == 0)
+
+    def _apply_style(self):
+        self.setStyleSheet("""
+            QDialog { background-color: #1a1a2e; color: #eaeaea; }
+            QLineEdit {
+                background-color: #16213e;
+                border: 1px solid #3d3d5c;
+                border-radius: 4px;
+                padding: 6px 10px;
+                color: #eaeaea;
+            }
+            QLineEdit:focus { border-color: #667eea; }
+            QTreeWidget {
+                background-color: #16213e;
+                border: 1px solid #3d3d5c;
+                border-radius: 4px;
+                color: #eaeaea;
+                outline: none;
+            }
+            QTreeWidget::item { padding: 4px 6px; }
+            QPushButton {
+                background-color: #16213e;
+                border: 1px solid #3d3d5c;
+                border-radius: 4px;
+                padding: 6px 12px;
+                color: #eaeaea;
+            }
+            QPushButton:hover { border-color: #667eea; }
+            QPushButton#scSave { background-color: #2563eb; border: none; }
             QPushButton#scSave:hover { background-color: #3b76f0; }
             QPushButton#scReset { background-color: #3d3d5c; border: none; }
             QPushButton#scReset:hover { background-color: #4d4d6c; }

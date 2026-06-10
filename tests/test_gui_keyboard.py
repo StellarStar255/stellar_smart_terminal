@@ -119,6 +119,36 @@ class TestRegularInputScrolls(KeyboardBase):
         self.assertEqual(w.scroll_offset, 0)
 
 
+@unittest.skipUnless(sys.platform == "darwin", "Cmd+Up/Down 是 macOS 专属键位")
+class TestCmdJumpShortcuts(KeyboardBase):
+    """Cmd+↓ / Cmd+↑：跳到历史最底部/最顶部"""
+
+    def test_cmd_down_jumps_to_bottom(self):
+        w = self.make_widget(scroll_offset=20)
+        w.keyPressEvent(key_event(
+            Qt.Key.Key_Down, Qt.KeyboardModifier.ControlModifier))
+        self.assertEqual(w.scroll_offset, 0)
+        self.assertEqual(w.writes, [], "Cmd+↓ 不应向终端写入")
+
+    def test_cmd_up_jumps_to_top(self):
+        w = self.make_widget(scroll_offset=0)
+        w.keyPressEvent(key_event(
+            Qt.Key.Key_Up, Qt.KeyboardModifier.ControlModifier))
+        self.assertEqual(w.scroll_offset, w._get_history_count())
+        self.assertGreater(w.scroll_offset, 0, "应存在历史可滚动")
+        self.assertEqual(w.writes, [])
+
+    def test_cmd_shift_down_not_consumed_by_jump_handler(self):
+        # Ctrl+Shift+Down 是「降低不透明度」的窗口级快捷键。真实应用中它在到达
+        # 终端前就被窗口级 QAction 消费；这里只验证跳底 handler 带 Shift 时不吞键,
+        # 事件照常走「发送到终端」路径（有写入即证明落到了透传分支）。
+        w = self.make_widget(scroll_offset=20)
+        w.keyPressEvent(key_event(
+            Qt.Key.Key_Down,
+            Qt.KeyboardModifier.ControlModifier | Qt.KeyboardModifier.ShiftModifier))
+        self.assertNotEqual(w.writes, [], "带 Shift 时应透传给终端而非被跳底 handler 吞掉")
+
+
 class TestCopyPasteShortcuts(KeyboardBase):
     """Cmd+C / Cmd+V：走 GUI 复制粘贴路径，不滚动、不透传按键本身"""
 

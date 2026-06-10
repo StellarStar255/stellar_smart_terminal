@@ -70,6 +70,7 @@ from widgets import (
 from dialogs import (
     get_default_shell, PresetDialog, LLMConfigDialog,
     DirectoryHistoryDialog, _ShortcutCaptureButton, ShortcutSettingsDialog,
+    ShortcutCheatSheetDialog,
 )
 
 
@@ -3625,6 +3626,7 @@ class MainWindow(QMainWindow):
         ("zoom_out",        "Ctrl+-",         "shortcuts.act.zoom_out",        "_global_zoom_out"),
         ("opacity_up",      "Ctrl+Shift+Up",  "shortcuts.act.opacity_up",      "_opacity_increase"),
         ("opacity_down",    "Ctrl+Shift+Down","shortcuts.act.opacity_down",    "_opacity_decrease"),
+        ("cheatsheet",      "Ctrl+/",         "shortcuts.act.cheatsheet",      "_show_shortcut_cheatsheet"),
     ]
 
     def _setup_shortcuts(self):
@@ -3787,6 +3789,68 @@ class MainWindow(QMainWindow):
         self._shortcuts_modified = True
         self._save_config()
         self.statusbar.showMessage(t("shortcuts.saved"), 3000)
+
+    def _shortcut_cheatsheet_groups(self):
+        """组装速查表数据：全局组读 _SHORTCUT_SPECS 的当前生效值（含用户覆盖，
+        不会和实际行为漂移）；终端/编辑器组是 keyPressEvent 里硬编码键位的镜像，
+        改那边记得同步这里。键位按平台原生格式渲染（macOS 显示 ⌘⇧⌃ 符号）。"""
+        def nat(seq):
+            s = QKeySequence(seq).toString(QKeySequence.SequenceFormat.NativeText)
+            return s or seq
+
+        global_rows = []
+        for action_id, default_seq, label_key, _slot in self._SHORTCUT_SPECS:
+            seq = self._effective_shortcut(action_id, default_seq)
+            global_rows.append((nat(seq) if seq else t("shortcuts.unset"), t(label_key)))
+        global_rows += [
+            (nat("Ctrl+K"), t("shortcuts.sc.cmd_search")),
+            (nat("Ctrl+`") + " / " + nat("Ctrl+Shift+`"),
+             t("window.next_window") + " / " + t("window.prev_window")),
+        ]
+
+        # 终端键位（terminal_widget.keyPressEvent；SIGINT 是物理 Ctrl，故用 Meta 渲染）
+        sigint = nat("Meta+C") if sys.platform == "darwin" else nat("Ctrl+C")
+        terminal_rows = [
+            (nat("Ctrl+C"), t("shortcuts.sc.term_copy")),
+            (sigint, t("shortcuts.sc.term_interrupt")),
+            (nat("Ctrl+V"), t("shortcuts.sc.term_paste")),
+            (nat("Ctrl+A"), t("shortcuts.sc.term_select_all")),
+            (nat("Shift+PgUp") + " / " + nat("Shift+PgDown"), t("shortcuts.sc.term_page")),
+            (nat("Shift+Home") + " / " + nat("Shift+End"), t("shortcuts.sc.term_home_end")),
+            (nat("Ctrl+Up") + " / " + nat("Ctrl+Down"), t("shortcuts.sc.term_jump")),
+            (nat("Ctrl+Left") + " / " + nat("Ctrl+Right"), t("shortcuts.sc.term_line_ends")),
+            (nat("Esc"), t("shortcuts.sc.term_close_search")),
+        ]
+
+        # 编辑器键位（file_editor.py）
+        editor_rows = [
+            (nat("Ctrl+S"), t("shortcuts.sc.edit_save")),
+            ("Tab", t("shortcuts.sc.edit_ai_accept")),
+            (nat("Esc"), t("shortcuts.sc.edit_ai_dismiss")),
+            (nat("Alt+\\"), t("shortcuts.sc.edit_ai_trigger")),
+        ]
+
+        return [
+            (t("shortcuts.group.global"), global_rows),
+            (t("shortcuts.group.terminal"), terminal_rows),
+            (t("shortcuts.group.editor"), editor_rows),
+        ]
+
+    def _show_shortcut_cheatsheet(self):
+        """打开快捷键速查表（非模态；重复触发时刷新数据并提到前台）。"""
+        old = getattr(self, '_cheatsheet_dialog', None)
+        if old is not None:
+            try:
+                old.close()
+                old.deleteLater()
+            except Exception:
+                pass
+        dialog = ShortcutCheatSheetDialog(self._shortcut_cheatsheet_groups(), self)
+        dialog.customize_requested.connect(self._show_shortcut_settings)
+        self._cheatsheet_dialog = dialog
+        dialog.show()
+        dialog.raise_()
+        dialog.activateWindow()
 
     # ==================== 全局字体缩放 ====================
 
@@ -7598,6 +7662,8 @@ class MainWindow(QMainWindow):
         toolbar_act.triggered.connect(self._show_toolbar_manager)
         shortcuts_act = menu.addAction(t("shortcuts.menu_item"))
         shortcuts_act.triggered.connect(self._show_shortcut_settings)
+        cheatsheet_act = menu.addAction(t("shortcuts.cheatsheet_menu_item"))
+        cheatsheet_act.triggered.connect(self._show_shortcut_cheatsheet)
         btn = self.toolbar_settings_btn
         menu.exec(btn.mapToGlobal(QPoint(0, btn.height())))
 
