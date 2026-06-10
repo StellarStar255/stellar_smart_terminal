@@ -1041,6 +1041,9 @@ class TerminalWidget(QWidget):
         self._had_output_activity = False
         self._activity_bytes = 0
         self._ACTIVITY_IDLE_MS = 1500
+        # 是否有"待结算"的用户命令（提交过回车后置位，提醒发出时消费）。
+        # 没有它时输出停顿不算执行完毕，避免 TUI 闲置动画产生假提醒。
+        self._pending_user_command = False
 
         # 设置
         self.setFocusPolicy(Qt.FocusPolicy.StrongFocus)
@@ -1490,9 +1493,15 @@ class TerminalWidget(QWidget):
         if self._backend is None:
             return False
         try:
-            return self._backend.write(data)
+            ok = self._backend.write(data)
         except Exception:
             return False
+        # 用户提交了命令（回车/换行）→ 此后第一次输出停顿才视为"执行完毕"。
+        # 自动应答（设备属性、光标位置上报等）不含换行，不会误触发；
+        # 这样 claude code 等 TUI 闲置时的周期性重绘不会再点亮导航绿点。
+        if ok and (b'\r' in data or b'\n' in data):
+            self._pending_user_command = True
+        return ok
 
     def resizeEvent(self, event: QResizeEvent):
         """窗口大小变化 - 使用防抖机制避免频繁重绘导致闪烁"""
@@ -1773,7 +1782,8 @@ class TerminalWidget(QWidget):
         substantial = self._activity_bytes >= 4
         self._had_output_activity = False
         self._activity_bytes = 0
-        if substantial:
+        if substantial and self._pending_user_command:
+            self._pending_user_command = False
             self.attention_requested.emit()
 
     def _on_process_finished(self, status: int):
