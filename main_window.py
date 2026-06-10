@@ -5270,11 +5270,22 @@ class MainWindow(QMainWindow):
         if session:
             self.session_manager.end_session()
 
-        # 移除标签页
-        self.tab_widget.removeTab(index)
+        # 移除标签页。removeTab 会同步发出 currentChanged，而此时 tab_cwds 等映射
+        # 还是旧索引 → _on_tab_changed 会用新索引查到被关 tab 的目录，导致
+        # Directory/Current 回退到旧路径。先屏蔽信号，重建映射后再手动同步一次。
+        self.tab_widget.blockSignals(True)
+        try:
+            self.tab_widget.removeTab(index)
+        finally:
+            self.tab_widget.blockSignals(False)
 
         # 更新映射（重建索引）
         self._rebuild_tab_mappings()
+
+        # 映射已就绪，手动触发一次 tab 切换回调，让目录栏/导航面板同步到新当前 tab
+        current = self.tab_widget.currentIndex()
+        if current >= 0:
+            self._on_tab_changed(current)
 
         # 如果没有标签页了，根据参数决定是否创建新的
         if self.tab_widget.count() == 0 and auto_create_new:
