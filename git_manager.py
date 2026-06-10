@@ -6,6 +6,7 @@ import os
 import re
 import signal
 import subprocess
+import sys
 import threading
 from enum import Enum
 from dataclasses import dataclass
@@ -18,6 +19,11 @@ from i18n import t
 # 网络类 git 操作（push / pull / fetch 等）的统一超时秒数。
 # 本地操作仍用 _run_git 的默认 30s。
 GIT_NETWORK_TIMEOUT = 120
+
+# Windows: 窗口化（无控制台）应用 spawn 子进程时若不加 CREATE_NO_WINDOW,
+# 每次都会闪出一个 conhost 控制台窗口；状态刷新每 5 秒跑多个 git 命令,
+# 不加这个标志在 Windows 上表现为持续闪窗 + 卡顿。
+SUBPROCESS_FLAGS = subprocess.CREATE_NO_WINDOW if sys.platform == "win32" else 0
 
 
 class FileStatus(Enum):
@@ -135,7 +141,8 @@ class GitManager(QObject):
         try:
             result = subprocess.run(
                 ['git', 'rev-parse', '--show-toplevel'],
-                cwd=path, capture_output=True, text=True, timeout=5
+                cwd=path, capture_output=True, text=True, timeout=5,
+                creationflags=SUBPROCESS_FLAGS,
             )
             if result.returncode == 0:
                 repo_root = result.stdout.strip()
@@ -265,6 +272,7 @@ class GitManager(QObject):
             text=True,
             env=env,
             start_new_session=True,
+            creationflags=SUBPROCESS_FLAGS,
         )
         with self._proc_lock:
             self._active_procs.add(proc)

@@ -4,6 +4,7 @@ VS Code 扩展管理器后端
 """
 import os
 import subprocess
+import sys
 import json
 import shutil
 from dataclasses import dataclass
@@ -11,6 +12,10 @@ from typing import List, Optional, Tuple
 from PyQt6.QtCore import QObject, pyqtSignal, QThread
 import urllib.request
 import urllib.parse
+
+# Windows: code/cursor CLI 是 .cmd 批处理，窗口化应用不加 CREATE_NO_WINDOW
+# 每次调用都会闪一个控制台窗口（列扩展、装/卸扩展时尤其频繁）
+SUBPROCESS_FLAGS = subprocess.CREATE_NO_WINDOW if sys.platform == "win32" else 0
 
 
 @dataclass
@@ -134,14 +139,16 @@ class InstallWorker(QThread):
                     [self.code_path, "--install-extension", self.extension_id],
                     capture_output=True,
                     text=True,
-                    timeout=120
+                    timeout=120,
+                    creationflags=SUBPROCESS_FLAGS,
                 )
             else:
                 result = subprocess.run(
                     [self.code_path, "--uninstall-extension", self.extension_id],
                     capture_output=True,
                     text=True,
-                    timeout=60
+                    timeout=60,
+                    creationflags=SUBPROCESS_FLAGS,
                 )
 
             if result.returncode == 0:
@@ -195,7 +202,8 @@ class VSCodeManager(QObject):
                 [self._code_path, "--version"],
                 capture_output=True,
                 text=True,
-                timeout=10
+                timeout=10,
+                creationflags=SUBPROCESS_FLAGS,
             )
             return result.returncode == 0
         except Exception:
@@ -208,7 +216,8 @@ class VSCodeManager(QObject):
                 [self._code_path, "--version"],
                 capture_output=True,
                 text=True,
-                timeout=10
+                timeout=10,
+                creationflags=SUBPROCESS_FLAGS,
             )
             if result.returncode == 0:
                 return result.stdout.strip().split('\n')[0]
@@ -241,7 +250,8 @@ class VSCodeManager(QObject):
                 [self._code_path, "--list-extensions"],
                 capture_output=True,
                 text=True,
-                timeout=30
+                timeout=30,
+                creationflags=SUBPROCESS_FLAGS,
             )
             if result.returncode == 0:
                 self._installed_extensions = [
@@ -287,7 +297,7 @@ class VSCodeManager(QObject):
     def open_in_vscode(self, path: str) -> bool:
         """在 VS Code 中打开文件或目录"""
         try:
-            subprocess.Popen([self._code_path, path])
+            subprocess.Popen([self._code_path, path], creationflags=SUBPROCESS_FLAGS)
             return True
         except Exception as e:
             self.error_occurred.emit(f"打开 VS Code 失败: {e}")

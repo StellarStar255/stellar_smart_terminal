@@ -179,6 +179,21 @@ STATUS_ICONS = {
 }
 
 
+def _mono_font(size: int = 12) -> QFont:
+    """跨平台等宽字体。
+
+    Menlo 只在 macOS 存在；Windows 上每次 QFont("Menlo") 都要走一遍
+    字体回退/别名查询。用 setFamilies 给出各平台首选，命中即停。
+    """
+    f = QFont()
+    f.setFamilies(["Menlo", "Consolas", "Cascadia Mono",
+                   "DejaVu Sans Mono", "Courier New"])
+    f.setPointSize(size)
+    f.setStyleHint(QFont.StyleHint.Monospace)
+    f.setFixedPitch(True)
+    return f
+
+
 class GitFileItem(QWidget):
     """Git 文件列表项"""
 
@@ -750,6 +765,32 @@ class _RefreshWorker(QThread):
         self.loaded.emit(data)
 
 
+class _StatusWorker(QThread):
+    """后台收集轻量状态（status / ahead-behind / merge 态），供 5s 定时刷新使用。
+
+    与 _RefreshWorker 的区别：不拉 branches/tags/log，开销小一个数量级。
+    定时刷新原先在 UI 线程同步跑 3+ 个 git 子进程——macOS 上每个 ~2ms 无感,
+    Windows 上每个 30-100ms（杀软扫描时更糟），表现为每 5 秒一次的明显卡顿。
+    """
+    loaded = pyqtSignal(dict)
+
+    def __init__(self, git_manager, parent=None):
+        super().__init__(parent)
+        self._gm = git_manager
+
+    def run(self):
+        data = {'ok': False}
+        try:
+            gm = self._gm
+            data['staged'], data['unstaged'] = gm.get_status()
+            data['ahead'], data['behind'] = gm.get_ahead_behind()
+            data['merging'] = gm.is_merging()
+            data['ok'] = True
+        except Exception:
+            data['ok'] = False
+        self.loaded.emit(data)
+
+
 class GitCommitWidget(QFrame):
     """Git 提交区组件"""
 
@@ -1069,7 +1110,7 @@ class GitDiffDialog(QDialog):
         self.diff_text = QTextEdit()
         self.diff_text.setReadOnly(True)
         self.diff_text.setLineWrapMode(QTextEdit.LineWrapMode.NoWrap)
-        self.diff_text.setFont(QFont("Menlo", 12))
+        self.diff_text.setFont(_mono_font(12))
 
         # 设置 diff 内容（带语法高亮）
         self._set_diff_content(diff_content)
@@ -1193,7 +1234,7 @@ class GitDiffView(QWidget):
         e = QPlainTextEdit()
         e.setReadOnly(True)
         e.setLineWrapMode(QPlainTextEdit.LineWrapMode.NoWrap)
-        e.setFont(QFont("Menlo", 12))
+        e.setFont(_mono_font(12))
         # hunk 头行内的「暂存/取消暂存此块」标记：在 viewport 上监听点击与悬停
         e.viewport().setMouseTracking(True)
         e.viewport().installEventFilter(self)
@@ -1517,7 +1558,7 @@ class GitOutputView(QWidget):
         self.output_edit = QTextEdit()
         self.output_edit.setReadOnly(True)
         self.output_edit.setLineWrapMode(QTextEdit.LineWrapMode.NoWrap)
-        self.output_edit.setFont(QFont("Menlo", 12))
+        self.output_edit.setFont(_mono_font(12))
         layout.addWidget(self.output_edit, 1)
 
         self.apply_theme(self.theme)
@@ -1603,7 +1644,7 @@ class _GraphCanvas(QWidget):
         self._dot_r = 4
         self._left_pad = 8
         self._hover = -1
-        self._font = QFont("Menlo", 12)
+        self._font = _mono_font(12)
         self.setMouseTracking(True)
         self.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Expanding)
 
@@ -2161,6 +2202,8 @@ class GitPanel(QWidget):
         self._fetch_running = False
         self._refresh_running = False   # 后台全量刷新是否进行中
         self._refresh_pending = False   # 进行中又被请求 → 跑完后补一次（合并）
+        self._status_refresh_running = False  # 后台轻量状态刷新是否进行中
+        self._status_stale = False      # 隐藏期间跳过了刷新 → 重新可见时补一次
 
         self._setup_ui()
         self._connect_signals()
@@ -2509,13 +2552,41 @@ class GitPanel(QWidget):
         self._update_merge_banner(data['unstaged'], merging=data.get('merging', False))
 
     def _refresh_status(self):
-        """刷新文件状态"""
-        staged, unstaged = self._git_manager.get_status()
-        self.changes_widget.update_files(staged, unstaged)
-        # 同步本地领先/落后远程的提交数到 Push/Pull 按钮（纯本地比较，不联网）
-        ahead, behind = self._git_manager.get_ahead_behind()
-        self.commit_widget.set_ahead_behind(ahead, behind)
-        self._update_merge_banner(unstaged)
+        """刷新文件状态（轻量：status + ahead/behind + merge 态，后台线程收集）。
+
+        - 面板不可见时跳过（5s 定时器照常触发，但没必要为看不见的面板
+          spawn git 子进程占用 UI 资源），重新可见时 showEvent 补一次；
+        - 数据收集在 _StatusWorker 线程，避免 Windows 上 30-100ms/个的
+          子进程 spawn 把 UI 线程卡出每 5 秒一顿的节奏。
+        """
+        if not self.isVisible():
+            self._status_stale = True
+            return
+        if self._status_refresh_running:
+            return
+        self._status_refresh_running = True
+        worker = _StatusWorker(self._git_manager, self)
+        worker.loaded.connect(self._apply_status_refresh)
+        worker.finished.connect(
+            lambda: setattr(self, '_status_refresh_running', False))
+        self._register_worker(worker)
+        worker.start()
+
+    def _apply_status_refresh(self, data: dict):
+        """在 UI 线程应用轻量状态刷新的数据。"""
+        if not data.get('ok'):
+            return
+        self.changes_widget.update_files(data['staged'], data['unstaged'])
+        self.commit_widget.set_ahead_behind(data['ahead'], data['behind'])
+        self._update_merge_banner(data['unstaged'],
+                                  merging=data.get('merging', False))
+
+    def showEvent(self, event):
+        super().showEvent(event)
+        # 隐藏期间跳过的定时刷新，重新可见时立刻补上
+        if self._status_stale:
+            self._status_stale = False
+            self._refresh_status()
 
     def _update_merge_banner(self, unstaged: list, merging: bool = None):
         """根据 merge 状态 / 未解决冲突数更新提示条。

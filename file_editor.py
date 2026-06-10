@@ -1852,9 +1852,14 @@ class FileEditorWidget(QWidget):
         self.editor.move_left_requested.connect(self.move_left_requested.emit)
         self.editor.move_up_requested.connect(self.move_up_requested.emit)
 
-        # 设置等宽字体；默认字号与终端一致（12pt），保证两者字号联动
-        font = QFont("Menlo", 12)
+        # 设置等宽字体；默认字号与终端一致（12pt），保证两者字号联动。
+        # Menlo 仅 macOS 存在，用 setFamilies 提供各平台首选避免 Windows 字体回退
+        font = QFont()
+        font.setFamilies(["Menlo", "Consolas", "Cascadia Mono",
+                          "DejaVu Sans Mono", "Courier New"])
+        font.setPointSize(12)
         font.setStyleHint(QFont.StyleHint.Monospace)
+        font.setFixedPitch(True)
         self.editor.setFont(font)
 
         # 设置 Tab 宽度为 4 个空格
