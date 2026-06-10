@@ -672,7 +672,7 @@ class CodeEditor(QPlainTextEdit):
         self._update_viewport_margin()
         self._apply_extra_selections()
 
-        # AI 行内补全（灰字建议）。默认关闭，由编辑器标题栏的 🤖 开关启用。
+        # AI 行内补全（灰字建议）。默认关闭，由编辑器标题栏的 ✦ 开关启用。
         self._ai = InlineCompletionController(self)
         self.textChanged.connect(self._ai.on_text_changed)
         self.cursorPositionChanged.connect(self._ai.on_cursor_moved)
@@ -1804,7 +1804,8 @@ class FileEditorWidget(QWidget):
         # 不再 addStretch：file_label 已用 stretch=1 占满中间空间，按钮自然靠右。
 
         # AI 行内补全开关（灰字建议，Tab 接受 / Esc 取消）
-        self.ai_btn = QPushButton("🤖")
+        # 用文字字形 ✦ 而非 emoji：emoji 是彩色位图，不随 QSS 配色，和相邻按钮不协调
+        self.ai_btn = QPushButton("✦")
         self.ai_btn.setFixedSize(26, 26)
         self.ai_btn.setCheckable(True)
         self.ai_btn.setToolTip(t("editor.ai_toggle_tooltip"))
@@ -2216,7 +2217,7 @@ class FileEditorWidget(QWidget):
             QPushButton {{
                 background-color: transparent;
                 color: {text_dim};
-                font-size: 14px;
+                font-size: 16px;
                 border-radius: 4px;
             }}
             QPushButton:hover {{
