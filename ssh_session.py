@@ -777,6 +777,45 @@ class SSHSession(QObject):
         self.invalidate_cache(self._parent(remote_path))
 
     @_auto_reconnect
+    def upload_with_progress(self, local_path: str, remote_path: str,
+                             progress_cb=None):
+        """流式上传到远端，带字节级进度（与 download_with_progress 对称）。
+
+        progress_cb(bytes_done, bytes_total) 由 paramiko 从 worker 线程里
+        高频回调（每个 chunk 一次）。调用方需要自己做节流，并把更新切回
+        UI 线程 —— 线程语义与 download_with_progress 完全一致。
+
+        远端侧原子性：先传到 <目标>.part，传完再 posix_rename 改名；服务器
+        不支持 posix-rename@openssh.com 扩展时回退普通 rename（SFTP rename
+        在目标已存在时会失败，所以先删一次目标）。失败时清理远端 .part。
+
+        注意：被 _auto_reconnect 装饰 —— 断线重连后整个文件从头重传，
+        progress_cb 的 bytes_done 会从 0 重新涨（可接受）。
+        """
+        sftp = self._require()
+        tmp_path = remote_path + ".part"
+        try:
+            sftp.put(local_path, tmp_path, callback=progress_cb)
+            try:
+                sftp.posix_rename(tmp_path, remote_path)
+            except OSError:
+                # 服务器不支持 posix_rename 扩展（或目标状态导致失败）→
+                # 回退到「先删目标再 rename」。目标不存在的删除失败忽略。
+                try:
+                    sftp.remove(remote_path)
+                except OSError:
+                    pass
+                sftp.rename(tmp_path, remote_path)
+        except Exception:
+            # 失败时清理远端半成品（连接已断时删不掉也只能算了）
+            try:
+                sftp.remove(tmp_path)
+            except Exception:
+                pass
+            raise
+        self.invalidate_cache(self._parent(remote_path))
+
+    @_auto_reconnect
     def download(self, remote_path: str, local_path: str):
         sftp = self._require()
         sftp.get(remote_path, local_path)

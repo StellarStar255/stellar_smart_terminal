@@ -2518,9 +2518,16 @@ class RemoteExplorerPanel(QWidget):
                     if os.path.isdir(src) and not os.path.islink(src):
                         self._upload_local_dir(sess, src, dst)
                     else:
-                        fut = sess.submit(sess.upload, src, dst)
+                        try:
+                            nbytes = os.path.getsize(src)
+                        except OSError:
+                            nbytes = 0
+                        live = {"bytes": 0}
+                        fut = sess.submit(sess.upload_with_progress, src, dst,
+                                          self._make_live_progress_cb(live))
                         self._wait_future_with_progress([fut], t("remote.pasting_progress",
-                                                                 dst=target_dir))
+                                                                 dst=target_dir),
+                                                        sizes=[nbytes], live=live)
                     existing.add(name)
 
                 elif kind == "remote":
@@ -2642,6 +2649,10 @@ class RemoteExplorerPanel(QWidget):
             pass  # 可能已存在，忽略
         futures = []
         sizes = []  # 与 futures 对齐：upload 记文件字节数，mkdir 记 0
+        # 单 worker 线程串行执行 → 所有文件共用一个 live 字节计数即可，
+        # 进度框显示"已完成文件累计 + 当前文件已传字节"
+        live = {"bytes": 0}
+        live_cb = self._make_live_progress_cb(live)
         for root, dirs, files in os.walk(local_dir):
             rel = os.path.relpath(root, local_dir)
             remote_root = remote_dir if rel == "." else posixpath.join(
@@ -2656,7 +2667,8 @@ class RemoteExplorerPanel(QWidget):
             for fname in files:
                 local_path = os.path.join(root, fname)
                 r_path = posixpath.join(remote_root, fname)
-                futures.append(sess.submit(sess.upload, local_path, r_path))
+                futures.append(sess.submit(sess.upload_with_progress,
+                                           local_path, r_path, live_cb))
                 try:
                     sizes.append(os.path.getsize(local_path))
                 except OSError:
@@ -2664,7 +2676,8 @@ class RemoteExplorerPanel(QWidget):
         # 等所有 future 完成；mkdir 的失败吞掉
         self._wait_future_with_progress(futures, t("remote.pasting_progress",
                                                    dst=remote_dir),
-                                        tolerate_errors=True, sizes=sizes)
+                                        tolerate_errors=True, sizes=sizes,
+                                        live=live)
 
     def _remote_to_remote(self, src_sess: SSHSession, dst_sess: SSHSession,
                           src_path: str, dst_path: str):
@@ -2681,9 +2694,17 @@ class RemoteExplorerPanel(QWidget):
                 fut = src_sess.submit(src_sess.download, src_path, tmp_local)
                 self._wait_future_with_progress([fut], t("remote.pasting_progress",
                                                          dst=dst_path))
-                fut2 = dst_sess.submit(dst_sess.upload, tmp_local, dst_path)
+                try:
+                    nbytes = os.path.getsize(tmp_local)
+                except OSError:
+                    nbytes = 0
+                live = {"bytes": 0}
+                fut2 = dst_sess.submit(dst_sess.upload_with_progress,
+                                       tmp_local, dst_path,
+                                       self._make_live_progress_cb(live))
                 self._wait_future_with_progress([fut2], t("remote.pasting_progress",
-                                                          dst=dst_path))
+                                                          dst=dst_path),
+                                                sizes=[nbytes], live=live)
         finally:
             try:
                 import shutil as _shutil
@@ -2712,12 +2733,18 @@ class RemoteExplorerPanel(QWidget):
 
     def _wait_future_with_progress(self, futures: list, label: str,
                                     tolerate_errors: bool = False,
-                                    sizes: Optional[list] = None):
+                                    sizes: Optional[list] = None,
+                                    live: Optional[dict] = None):
         """阻塞等待 futures 完成，跑事件循环避免 UI 卡死。
 
         sizes：与 futures 一一对应的字节数（未知填 0/None）。给出时进度框
-        文案追加传输速率 / 剩余时间 —— 粒度是"已完成的 future 的字节累计"
-        （sess.upload 没有字节级回调，只能按文件完成时机累计）。"""
+        文案追加 "x MB / y MB · 速率 · 剩余时间"。
+
+        live：可选的 {"bytes": int} 共享计数 —— upload_with_progress /
+        download_with_progress 的字节级回调（worker 线程）往里写"当前
+        正在传的这个文件已完成的字节数"，这里在主线程轮询时读出来叠加到
+        已完成 future 的累计字节上，让单个大文件传输期间速率/ETA 也会动。
+        不给 live 时退化为旧行为（按已完成文件粒度累计）。"""
         if not futures:
             return
         progress = QProgressDialog(label, None, 0, len(futures), self)
@@ -2727,6 +2754,9 @@ class RemoteExplorerPanel(QWidget):
         done = {"n": 0, "errors": [], "bytes": 0}
         total_bytes = sum(s or 0 for s in sizes) if sizes else 0
         tracker = _TransferRateTracker() if total_bytes > 0 else None
+        # 进度文案节流（与 subtitle 路径的 350ms 节流一致）：QTimer 80ms
+        # 一跳只更新进度条数值，label setText 限到 ~3Hz，避免布局抖动
+        label_ts = {"t": 0.0}
 
         def make_cb(nbytes=0):
             def cb(f):
@@ -2735,6 +2765,10 @@ class RemoteExplorerPanel(QWidget):
                 except Exception as e:
                     done["errors"].append(str(e))
                 done["n"] += 1
+                # 当前文件收尾：live 里的"进行中字节"换成整文件累计，
+                # 先清零再累加（瞬时少算一帧，比多算一帧不会倒退）
+                if live is not None:
+                    live["bytes"] = 0
                 done["bytes"] += nbytes or 0
             return cb
 
@@ -2755,12 +2789,19 @@ class RemoteExplorerPanel(QWidget):
                     loop.quit()
                     return
                 progress.setValue(done["n"])
-                if tracker is not None and done["bytes"] < total_bytes:
-                    tracker.update("batch", done["bytes"])
+                cur_bytes = done["bytes"] + (live["bytes"] if live else 0)
+                now = time.monotonic()
+                if (tracker is not None and cur_bytes < total_bytes
+                        and now - label_ts["t"] >= 0.35):
+                    label_ts["t"] = now
+                    tracker.update("batch", cur_bytes)
+                    text = (f"{label} · {self._fmt_size(cur_bytes)}"
+                            f" / {self._fmt_size(total_bytes)}")
                     stats = self._transfer_stats_text(
-                        tracker, done["bytes"], total_bytes)
+                        tracker, cur_bytes, total_bytes)
                     if stats:
-                        progress.setLabelText(f"{label} · {stats}")
+                        text += f" · {stats}"
+                    progress.setLabelText(text)
                 if done["n"] >= len(futures):
                     timer.stop()
                     loop.quit()
@@ -2857,6 +2898,18 @@ class RemoteExplorerPanel(QWidget):
             self._last_progress_emit_ts = now
             self._download_progress.emit(remote_path, done, total)
         return progress_cb
+
+    @staticmethod
+    def _make_live_progress_cb(live: dict):
+        """构造给 upload_with_progress 的字节级回调（worker 线程触发）。
+
+        只往共享 dict 写一个 int（GIL 保证原子），不碰任何 UI / 信号；
+        主线程的轮询 timer（_wait_future_with_progress / _handle_drop_upload）
+        负责读出来展示。批量上传在单 worker 线程上串行执行，所以多个文件
+        共用同一个 live 计数也不会互相踩。"""
+        def cb(bytes_done, _bytes_total):
+            live["bytes"] = bytes_done
+        return cb
 
     @staticmethod
     def _fmt_size(n: int) -> str:
@@ -3243,8 +3296,19 @@ class RemoteExplorerPanel(QWidget):
         if sess is None:
             return
         remote_path = posixpath.join(parent_path, os.path.basename(local_path))
-        fut = sess.submit(sess.upload, local_path, remote_path)
+        try:
+            nbytes = os.path.getsize(local_path)
+        except OSError:
+            nbytes = 0
+        live = {"bytes": 0}
+        fut = sess.submit(sess.upload_with_progress, local_path, remote_path,
+                          self._make_live_progress_cb(live))
+        # 错误经 _refresh_after 的 error_signal 报告，这里 tolerate 掉避免重复弹窗
         self._refresh_after(fut, parent_item, parent_path)
+        self._wait_future_with_progress([fut], t("remote.uploading_to",
+                                                 dst=parent_path),
+                                        tolerate_errors=True,
+                                        sizes=[nbytes], live=live)
 
     def _upload_into(self, dir_entry: RemoteEntry, dir_item: QTreeWidgetItem):
         self._upload_at(dir_entry.path, dir_item)
@@ -3256,17 +3320,14 @@ class RemoteExplorerPanel(QWidget):
             return
         sess = self._session
         total = len(local_paths)
-        progress = QProgressDialog(
-            f"Uploading to {target_dir}...", "Cancel", 0, total, self
-        )
+        base_label = t("remote.uploading_to", dst=target_dir)
+        progress = QProgressDialog(base_label, "Cancel", 0, total, self)
         progress.setWindowTitle(t("remote.title"))
         progress.setMinimumDuration(300)
         progress.setValue(0)
 
         # 让 progress 通过信号在主线程里更新
         done_counter = {"n": 0, "errors": [], "bytes": 0}
-        # 速率/剩余时间：sess.upload 没有字节级回调，按"已完成文件的字节数"
-        # 累计估算（粒度=文件，多个小文件时仍能给出有意义的速率）
         size_by_path: dict[str, int] = {}
         for lp in local_paths:
             try:
@@ -3275,7 +3336,12 @@ class RemoteExplorerPanel(QWidget):
                 size_by_path[lp] = 0
         total_bytes = sum(size_by_path.values())
         tracker = _TransferRateTracker() if total_bytes > 0 else None
-        base_label = f"Uploading to {target_dir}..."
+        # upload_with_progress 的字节级回调（worker 线程）写这个共享计数：
+        # 当前文件已传字节。单 worker 串行执行，所有文件共用一个计数即可。
+        live = {"bytes": 0}
+        live_cb = self._make_live_progress_cb(live)
+        # label setText 节流到 ~3Hz（350ms），与 subtitle 路径一致
+        label_ts = {"t": 0.0}
 
         def make_upload_done(local_path):
             def cb(f):
@@ -3284,6 +3350,8 @@ class RemoteExplorerPanel(QWidget):
                 except Exception as e:
                     done_counter["errors"].append(f"{os.path.basename(local_path)}: {e}")
                 done_counter["n"] += 1
+                # 当前文件的进行中字节换算成整文件累计（先清零再累加）
+                live["bytes"] = 0
                 done_counter["bytes"] += size_by_path.get(local_path, 0)
                 # 不能在工作线程更新 UI，靠 progress.setValue 在主循环里查询
             return cb
@@ -3291,7 +3359,7 @@ class RemoteExplorerPanel(QWidget):
         for lp in local_paths:
             remote_name = os.path.basename(lp)
             remote_path = posixpath.join(target_dir, remote_name)
-            fut = sess.submit(sess.upload, lp, remote_path)
+            fut = sess.submit(sess.upload_with_progress, lp, remote_path, live_cb)
             fut.add_done_callback(make_upload_done(lp))
 
         # 主线程轮询进度（避免 progress dialog 卡死）
@@ -3306,12 +3374,19 @@ class RemoteExplorerPanel(QWidget):
                     loop.quit()
                     return
                 progress.setValue(done_counter["n"])
-                if tracker is not None and done_counter["bytes"] < total_bytes:
-                    tracker.update("upload", done_counter["bytes"])
+                cur_bytes = done_counter["bytes"] + live["bytes"]
+                now = time.monotonic()
+                if (tracker is not None and cur_bytes < total_bytes
+                        and now - label_ts["t"] >= 0.35):
+                    label_ts["t"] = now
+                    tracker.update("upload", cur_bytes)
+                    text = (f"{base_label} · {self._fmt_size(cur_bytes)}"
+                            f" / {self._fmt_size(total_bytes)}")
                     stats = self._transfer_stats_text(
-                        tracker, done_counter["bytes"], total_bytes)
+                        tracker, cur_bytes, total_bytes)
                     if stats:
-                        progress.setLabelText(f"{base_label} · {stats}")
+                        text += f" · {stats}"
+                    progress.setLabelText(text)
                 if done_counter["n"] >= total or progress.wasCanceled():
                     timer.stop()
                     loop.quit()
