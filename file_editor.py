@@ -2,8 +2,11 @@
 内置文件编辑器组件
 提供在程序内部编辑文件的功能
 """
+import hashlib
+import json
 import os
 import re
+import tempfile
 import time
 from pathlib import Path
 
@@ -26,6 +29,41 @@ _IMAGE_EXTENSIONS = {
     '.png', '.jpg', '.jpeg', '.gif', '.bmp', '.webp', '.tif', '.tiff',
     '.ico', '.svg', '.heic', '.heif',
 }
+
+# 自动保存（崩溃恢复）：备份目录与写入周期
+_AUTOSAVE_DIR = os.path.expanduser("~/.smart_terminal_autosave")
+_AUTOSAVE_INTERVAL_MS = 30 * 1000
+
+
+def _looks_binary(raw: bytes) -> bool:
+    """含 NUL 字节即视为二进制（与 git 同款启发式）。
+
+    原先靠「UTF-8 解码失败」拒绝二进制文件；引入 latin-1 兜底后解码永不失败，
+    改为显式检测 NUL，保持「二进制文件拒绝打开」的既有行为不退化。
+    """
+    if not raw:
+        return False
+    return b'\x00' in raw[:8192]
+
+
+def _decode_with_fallback(raw: bytes) -> tuple[str, str]:
+    """按 utf-8 → utf-8-sig → gb18030 → latin-1 的顺序解码 raw。
+
+    返回 (文本, 编码名)；latin-1 兜底永不失败。带 BOM 的 UTF-8 记作
+    utf-8-sig（BOM 不进编辑器缓冲区，保存时按 utf-8-sig 写回以保留 BOM）。
+    """
+    if raw.startswith(b'\xef\xbb\xbf'):
+        try:
+            return raw.decode('utf-8-sig'), 'utf-8-sig'
+        except UnicodeDecodeError:
+            pass
+    for enc in ('utf-8', 'gb18030'):
+        try:
+            return raw.decode(enc), enc
+        except UnicodeDecodeError:
+            continue
+    return raw.decode('latin-1'), 'latin-1'
+
 
 # AI 补全：文件扩展名 → 语言名（用于给模型的提示词上下文）
 _AI_LANG_BY_EXT = {
@@ -1710,6 +1748,19 @@ class FileEditorWidget(QWidget):
         # 用于去抖：rename 类保存会先收到 deleted 再 created
         self._external_change_timer: QTimer | None = None
 
+        # 打开时检测到的文件编码（utf-8 / utf-8-sig / gb18030 / latin-1），
+        # 保存时按它写回；新建（另存为）文件默认 utf-8
+        self._file_encoding = "utf-8"
+
+        # --- 自动保存（崩溃恢复）---
+        # 周期检查未保存修改并写入 ~/.smart_terminal_autosave/；
+        # open_file 时启动、关闭/切图片时停止，QTimer 以 self 为父随窗格销毁
+        self._autosave_timer = QTimer(self)
+        self._autosave_timer.setInterval(_AUTOSAVE_INTERVAL_MS)
+        self._autosave_timer.timeout.connect(self._autosave_tick)
+        # 上次写入备份的内容指纹：内容没变就不重复写盘
+        self._last_autosave_hash: str | None = None
+
         self._setup_ui()
         self._setup_shortcuts()
         self._apply_theme()
@@ -2285,17 +2336,19 @@ class FileEditorWidget(QWidget):
                               t("editor.file_too_large_msg", size=f"{file_size / 1024 / 1024:.1f}"))
             return False
 
-        # 检查是否是二进制文件
+        # 读原始字节自行解码（utf-8 → utf-8-sig → gb18030 → latin-1 兜底）；
+        # 含 NUL 的二进制文件保持原先「拒绝打开」的行为
         try:
-            with open(file_path, 'r', encoding='utf-8') as f:
-                content = f.read()
-        except UnicodeDecodeError:
-            QMessageBox.warning(self, t("editor.binary_title"),
-                              t("editor.binary_msg"))
-            return False
+            with open(file_path, 'rb') as f:
+                raw = f.read()
         except Exception as e:
             QMessageBox.warning(self, t("editor.error"), t("editor.read_error", error=e))
             return False
+        if _looks_binary(raw):
+            QMessageBox.warning(self, t("editor.binary_title"),
+                              t("editor.binary_msg"))
+            return False
+        content, encoding = _decode_with_fallback(raw)
 
         # 如果当前文件已修改，提示保存
         if self.is_modified():
@@ -2311,6 +2364,9 @@ class FileEditorWidget(QWidget):
                     return False
             elif reply == QMessageBox.StandardButton.Cancel:
                 return False
+            else:
+                # 用户明确放弃旧文件的修改 → 它的崩溃恢复备份也一并清掉
+                self._remove_autosave_backup()
 
         # 切到文本编辑器视图（可能此前在显示图片）
         self._in_image_mode = False
@@ -2319,8 +2375,19 @@ class FileEditorWidget(QWidget):
 
         # 加载文件内容
         self._current_file = file_path
+        self._file_encoding = encoding
         self._original_content = content  # 保存原始内容用于比较
-        self.editor.setPlainText(content)
+        # 崩溃恢复：存在更新的自动保存备份 → 询问是否恢复（恢复后为「已修改」态）
+        restored = self._maybe_restore_autosave(file_path, content)
+        if restored is not None:
+            self.editor.setPlainText(restored)
+            self._last_autosave_hash = hashlib.sha1(
+                restored.encode('utf-8')).hexdigest()
+        else:
+            self.editor.setPlainText(content)
+            self._last_autosave_hash = None
+        # 启动周期性自动保存（崩溃恢复）
+        self._autosave_timer.start()
 
         # 切换文件时关闭已打开的查找栏（旧文件的高亮已无意义）
         if hasattr(self, 'search_bar') and not self.search_bar.isHidden():
@@ -2363,6 +2430,13 @@ class FileEditorWidget(QWidget):
                     return False
             elif reply == QMessageBox.StandardButton.Cancel:
                 return False
+            else:
+                # 用户明确放弃旧文件的修改 → 它的崩溃恢复备份也一并清掉
+                self._remove_autosave_backup()
+
+        # 图片只读，不参与自动保存
+        self._autosave_timer.stop()
+        self._last_autosave_hash = None
 
         # 关闭可能正在显示文本搜索栏
         if hasattr(self, 'search_bar') and not self.search_bar.isHidden():
@@ -2377,6 +2451,7 @@ class FileEditorWidget(QWidget):
         self.editor.blockSignals(False)
 
         self._current_file = file_path
+        self._file_encoding = "utf-8"
         self._original_content = ""  # 图片不参与文本 modified 判定
         self._image_pixmap = QPixmap.fromImage(image)
         self._in_image_mode = True
@@ -2526,12 +2601,23 @@ class FileEditorWidget(QWidget):
 
         try:
             content = self.editor.toPlainText()
+            # 用打开时检测到的编码写回（utf-8-sig 自动带 BOM）；新建文件默认 utf-8
+            encoding = self._file_encoding or 'utf-8'
+            try:
+                data = content.encode(encoding)
+            except (UnicodeEncodeError, LookupError):
+                # 新输入的字符旧编码放不下（如往 latin-1 文件里打中文）→ 升级 utf-8
+                encoding = 'utf-8'
+                data = content.encode(encoding)
+                self._file_encoding = encoding
             # 屏蔽 watcher：我们自己写文件不应弹"外部已改动"
             self._suppress_external_until = time.time() + 1.5
-            with open(self._current_file, 'w', encoding='utf-8') as f:
-                f.write(content)
+            with open(self._current_file, 'wb') as f:
+                f.write(data)
             # 更新原始内容，这样 is_modified() 会返回 False
             self._original_content = content
+            # 保存成功 → 崩溃恢复备份已无意义，删掉
+            self._remove_autosave_backup()
             self._refresh_known_mtime()
             self._update_title()
             self.file_saved.emit(self._current_file)
@@ -2564,11 +2650,21 @@ class FileEditorWidget(QWidget):
         """更新标题"""
         if self._current_file:
             file_name = os.path.basename(self._current_file)
-            self.file_label.setText(file_name)
+            enc = (self._file_encoding or 'utf-8').lower()
+            if not self._in_image_mode and enc != 'utf-8':
+                # 非 utf-8 编码：标题后缀 + tooltip 提示保存时按此编码写回
+                self.file_label.setText(f"{file_name}  ·  {enc.upper()}")
+                self.file_label.setToolTip(
+                    t("editor.encoding_tooltip", encoding=enc.upper())
+                )
+            else:
+                self.file_label.setText(file_name)
+                self.file_label.setToolTip("")
             # 通过比较内容判断是否修改
             self.modified_label.setText("●" if self.is_modified() else "")
         else:
             self.file_label.setText(t("editor.no_file"))
+            self.file_label.setToolTip("")
             self.modified_label.setText("")
 
     def is_modified(self) -> bool:
@@ -2578,6 +2674,137 @@ class FileEditorWidget(QWidget):
         if self._in_image_mode:
             return False  # 图片只读，不参与 modified 判定
         return self.editor.toPlainText() != self._original_content
+
+    # ---- 自动保存（崩溃恢复）----
+    def _backup_identity(self, path: str) -> str:
+        """备份键：本地文件用绝对路径；远程文件用 host+远端路径。
+
+        远程 Explorer 把远端文件下载到
+        tempdir/smart_terminal_remote_<alias>/<远端路径> 再交给编辑器打开，
+        识别这种临时路径并还原成 `remote://<alias>/<远端路径>`，
+        跨会话 / tempdir 变化时仍能对应同一个远端文件。
+        """
+        abspath = os.path.abspath(path)
+        real = os.path.realpath(abspath)
+        tmp_root = os.path.realpath(tempfile.gettempdir())
+        try:
+            rel = os.path.relpath(real, tmp_root)
+        except ValueError:
+            rel = None
+        if rel and not rel.startswith('..'):
+            parts = rel.split(os.sep)
+            if len(parts) >= 2 and parts[0].startswith('smart_terminal_remote_'):
+                alias = parts[0][len('smart_terminal_remote_'):]
+                return f"remote://{alias}/" + '/'.join(parts[1:])
+        return abspath
+
+    def _backup_paths(self, path: str | None = None) -> tuple[str, str] | None:
+        """返回 (备份文件, 元数据文件) 路径；无目标文件时返回 None。
+
+        文件名 = sha1(备份键).autosave / .meta.json
+        """
+        p = path or self._current_file
+        if not p:
+            return None
+        key = hashlib.sha1(self._backup_identity(p).encode('utf-8')).hexdigest()
+        base = os.path.join(_AUTOSAVE_DIR, key)
+        return base + '.autosave', base + '.meta.json'
+
+    def _autosave_tick(self):
+        """30 秒周期：有未保存修改且内容自上次备份后有变化 → 写备份；
+        回到未修改状态（撤销 / 外部重载等）→ 顺手清理遗留备份。"""
+        if not self._current_file or self._in_image_mode:
+            return
+        if not self.is_modified():
+            if self._last_autosave_hash is not None:
+                self._remove_autosave_backup()
+            return
+        content = self.editor.toPlainText()
+        digest = hashlib.sha1(content.encode('utf-8')).hexdigest()
+        if digest == self._last_autosave_hash:
+            return
+        self._write_autosave_backup(content, digest)
+
+    def _write_autosave_backup(self, content: str, digest: str):
+        """把 content 写进备份目录（备份本体固定 utf-8；原文件编码记在 meta 里）"""
+        paths = self._backup_paths()
+        if paths is None:
+            return
+        backup_path, meta_path = paths
+        try:
+            # mode 仅在新建目录时生效：备份可能含敏感内容，仅本用户可读
+            os.makedirs(_AUTOSAVE_DIR, mode=0o700, exist_ok=True)
+            with open(backup_path, 'w', encoding='utf-8') as f:
+                f.write(content)
+            meta = {
+                'path': os.path.abspath(self._current_file),
+                'identity': self._backup_identity(self._current_file),
+                'timestamp': time.time(),
+                'encoding': self._file_encoding,
+            }
+            with open(meta_path, 'w', encoding='utf-8') as f:
+                json.dump(meta, f, ensure_ascii=False)
+            self._last_autosave_hash = digest
+        except OSError:
+            # 写备份失败（磁盘满 / 权限等）不打扰用户，下个周期再试
+            pass
+
+    def _remove_autosave_backup(self, path: str | None = None):
+        """删除 path（默认当前文件）对应的备份与元数据，幂等。"""
+        paths = self._backup_paths(path)
+        if paths is None:
+            return
+        for p in paths:
+            try:
+                os.remove(p)
+            except OSError:
+                pass
+        self._last_autosave_hash = None
+
+    def _maybe_restore_autosave(self, file_path: str, disk_content: str) -> str | None:
+        """打开文件时检查崩溃恢复备份。
+
+        返回要载入编辑器的备份内容；无备份 / 与磁盘一致（删备份）/
+        用户拒绝（删备份）时返回 None。
+        """
+        paths = self._backup_paths(file_path)
+        if paths is None:
+            return None
+        backup_path, meta_path = paths
+        if not os.path.isfile(backup_path):
+            return None
+        try:
+            with open(backup_path, 'r', encoding='utf-8') as f:
+                backup_content = f.read()
+        except OSError:
+            return None
+        if backup_content == disk_content:
+            # 上次其实已保存（或外部已同步），备份没有增量信息
+            self._remove_autosave_backup(file_path)
+            return None
+        # 取备份时间给用户参考；meta 缺失/损坏不影响恢复
+        ts_text = ""
+        try:
+            with open(meta_path, 'r', encoding='utf-8') as f:
+                meta = json.load(f)
+            ts = meta.get('timestamp')
+            if ts:
+                ts_text = time.strftime(
+                    '%Y-%m-%d %H:%M:%S', time.localtime(float(ts)))
+        except (OSError, ValueError, TypeError):
+            pass
+        reply = QMessageBox.question(
+            self,
+            t("editor.autosave_restore_title"),
+            t("editor.autosave_restore_msg",
+              name=os.path.basename(file_path), time=ts_text or "?"),
+            QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No,
+            QMessageBox.StandardButton.Yes,
+        )
+        if reply == QMessageBox.StandardButton.Yes:
+            return backup_content
+        self._remove_autosave_backup(file_path)
+        return None
 
     # ---- 外部文件变更检测 ----
     def _start_watching(self, path: str | None):
@@ -2653,15 +2880,16 @@ class FileEditorWidget(QWidget):
             return
 
         try:
-            with open(path, 'r', encoding='utf-8') as f:
-                new_content = f.read()
-        except UnicodeDecodeError:
-            QMessageBox.warning(self, t("editor.binary_title"), t("editor.binary_msg"))
-            self._known_mtime = new_mtime
-            return
+            with open(path, 'rb') as f:
+                raw = f.read()
         except Exception as e:
             QMessageBox.warning(self, t("editor.error"), t("editor.read_error", error=e))
             return
+        if _looks_binary(raw):
+            QMessageBox.warning(self, t("editor.binary_title"), t("editor.binary_msg"))
+            self._known_mtime = new_mtime
+            return
+        new_content, new_encoding = _decode_with_fallback(raw)
 
         # 内容相同（不同进程写入了相同字节）：仅同步 mtime
         if new_content == self.editor.toPlainText():
@@ -2689,7 +2917,10 @@ class FileEditorWidget(QWidget):
         cursor_pos = self.editor.textCursor().position()
         self.editor.setPlainText(new_content)
         self._original_content = new_content
+        self._file_encoding = new_encoding
         self._known_mtime = new_mtime
+        # 重载后已与磁盘一致，本地修改的崩溃恢复备份不再有意义
+        self._remove_autosave_backup()
         try:
             cur = self.editor.textCursor()
             cur.setPosition(min(cursor_pos, len(new_content)))
@@ -2717,8 +2948,15 @@ class FileEditorWidget(QWidget):
             elif reply == QMessageBox.StandardButton.Cancel:
                 return
 
+        # 正常关闭（已保存 / 无修改 / 明确丢弃）：停自动保存定时器并清理备份。
+        # 删除是幂等的；Save 分支在 save_file 里已删，这里再调无副作用。
+        self._autosave_timer.stop()
+        self._remove_autosave_backup()
+        self._last_autosave_hash = None
+
         self._stop_watching()
         self._current_file = None
+        self._file_encoding = "utf-8"
         self._original_content = ""
         self.editor.clear()
         # 复位图片预览
