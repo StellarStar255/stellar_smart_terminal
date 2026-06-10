@@ -1477,6 +1477,23 @@ class MainWindow(QMainWindow):
         self.active_terminal = None  # 当前活动的终端
         self.detached_windows = []  # 分离出的独立窗口列表
 
+        # 分隔条拖拽期间的终端快速渲染：连续 splitterMoved 视为一次「拖拽流」，
+        # 期间终端缩放旧缓存（与弹簧动画同一机制），静默 160ms 后恢复清晰渲染。
+        # 否则每拖一像素都整屏重建字符，拖侧边栏明显卡顿。
+        self._splitter_drag_active = False
+        self._splitter_drag_settle = QTimer(self)
+        self._splitter_drag_settle.setSingleShot(True)
+        self._splitter_drag_settle.setInterval(160)
+        self._splitter_drag_settle.timeout.connect(self._end_splitter_drag_fast_resize)
+
+        # 左侧栏宽度跨窗口同步的节流：拖拽时每像素都广播会让其它窗口每像素整窗重排,
+        # 改为合并 80ms 内的变更、只推最新值（松手后最终宽度仍会被推到）。
+        self._left_width_broadcast_pending = None
+        self._left_width_broadcast_timer = QTimer(self)
+        self._left_width_broadcast_timer.setSingleShot(True)
+        self._left_width_broadcast_timer.setInterval(80)
+        self._left_width_broadcast_timer.timeout.connect(self._flush_left_width_broadcast)
+
         # 窗口创建时间 (用于排序)
         self._created_time = datetime.now()
 
@@ -2177,7 +2194,8 @@ class MainWindow(QMainWindow):
         # 记忆用户手动调整后的尺寸（仅记录有意义的状态）；
         # 同时按合计宽度刷新 spring 门控（拖侧栏改变 editor+终端可用宽度时也能联动）
         self.main_splitter.splitterMoved.connect(
-            lambda *_: (self._capture_explorer_layout(),
+            lambda *_: (self._on_splitter_drag_tick(),
+                        self._capture_explorer_layout(),
                         self._update_spring_width_gate())
         )
 
@@ -6145,7 +6163,8 @@ class MainWindow(QMainWindow):
 
         # 记忆用户手动拖拽过的尺寸
         self.explorer_splitter.splitterMoved.connect(
-            lambda *_: self._capture_explorer_layout()
+            lambda *_: (self._on_splitter_drag_tick(),
+                        self._capture_explorer_layout())
         )
 
         layout.addWidget(self.explorer_splitter)
@@ -6315,7 +6334,12 @@ class MainWindow(QMainWindow):
         changed = (MainWindow._shared_left_panel_width != width)
         self._saved_left_panel_width = width
         if changed and not getattr(self, '_applying_shared_left_width', False):
-            self._broadcast_left_panel_width(width)
+            # 节流：拖拽时宽度每像素都在变，逐像素广播会让其它窗口每像素整窗重排。
+            # 合并 80ms 内的变更只推最新值；定时器不重启，保证拖拽中也有周期性同步,
+            # 最后一次 start 覆盖松手后的最终宽度。
+            self._left_width_broadcast_pending = width
+            if not self._left_width_broadcast_timer.isActive():
+                self._left_width_broadcast_timer.start()
 
     def _broadcast_left_panel_width(self, width):
         """把左侧栏宽度实时应用到其它所有已打开窗口。"""
@@ -6787,6 +6811,39 @@ class MainWindow(QMainWindow):
         for term in self.main_splitter.findChildren(TerminalWidget):
             if hasattr(term, 'set_fast_resize'):
                 term.set_fast_resize(on)
+
+    def _on_splitter_drag_tick(self):
+        """splitterMoved 的拖拽流识别：首拍开启终端快速渲染，之后每拍续命静默定时器。
+
+        手动拖分隔条没有「开始/结束」信号，只能由连续的 splitterMoved 推断：
+        静默 160ms 视为松手。弹簧动画期间的 setSizes 也会发 splitterMoved，
+        但动画自己管理 fast_resize（_applying_spring 置位），跳过。
+        被其它窗口同步宽度时（_applying_shared_left_width）同样是连续 setSizes 流,
+        正需要快速渲染，故不跳过。
+        """
+        if getattr(self, '_applying_spring', False):
+            return
+        if not self._splitter_drag_active:
+            self._splitter_drag_active = True
+            self._set_terminals_fast_resize(True)
+        self._splitter_drag_settle.start()
+
+    def _end_splitter_drag_fast_resize(self):
+        """拖拽流静默：恢复终端清晰渲染（按最终尺寸整屏重建一次）。"""
+        if not self._splitter_drag_active:
+            return
+        self._splitter_drag_active = False
+        # 拖拽触发 spring 门控翻转时弹簧动画可能正在进行并已接管 fast_resize，
+        # 让动画的 finished 回调去恢复，这里不抢着关。
+        if getattr(self, '_spring_anim', None) is None:
+            self._set_terminals_fast_resize(False)
+
+    def _flush_left_width_broadcast(self):
+        """节流定时器到点：把最新的左侧栏宽度推给其它窗口。"""
+        width = self._left_width_broadcast_pending
+        self._left_width_broadcast_pending = None
+        if isinstance(width, int) and width > 0:
+            self._broadcast_left_panel_width(width)
 
     def _animate_main_sizes(self, target_sizes):
         """平滑过渡 main_splitter 到目标尺寸（弹簧手感），期间不记忆尺寸。"""
