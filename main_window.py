@@ -8408,13 +8408,13 @@ class MainWindow(QMainWindow):
     # （并设最小像素，避免在大屏上收得过窄、小屏上又超出合计宽度）。
     SPRING_INACTIVE_RATIO = 0.30
     SPRING_INACTIVE_MIN = 220
-    # 弹簧按窗口宽度自动生效/失效（滞回双阈值，防止边界反复横跳）：
-    # 窗口窄于 ENABLE → spring 生效；宽于 DISABLE → spring 失效（恢复均分）；
-    # 两阈值之间维持现状。用窗口宽度而非分屏合计宽度，避免 spring 自身改尺寸时反馈震荡。
-    # 取值参考：MacBook Air 全屏逻辑宽度 13"≈1470 / 15"≈1512（含轻度 More Space 仍
-    # 在内屏范围），都应让 spring 生效；只有外接大屏（1920+）才自动失效。
-    SPRING_WIDTH_ENABLE = 1550
-    SPRING_WIDTH_DISABLE = 1750
+    # 弹簧按「编辑器+终端合计宽度」自动生效/失效（滞回双阈值，防止边界反复横跳）：
+    # 合计窄于 ENABLE → spring 生效；宽于 DISABLE → spring 失效（恢复均分）；两阈值之间维持现状。
+    # 用合计宽度而非整窗宽度：① 排除左侧栏，更贴近「两边能否都铺得舒服」；
+    # ② spring 只在两者间挪分界、合计恒定，故不会反馈震荡。
+    # 取值按每边可读宽度估（14pt 下 80 列 ≈ 640px）：合计 <1200 每边偏挤、>1450 每边约 85~90 列够用。
+    SPRING_WIDTH_ENABLE = 1200
+    SPRING_WIDTH_DISABLE = 1450
 
     def _set_spring_checkboxes(self, enabled: bool):
         """把本窗口两处弹簧复选框设为指定状态（屏蔽信号，避免回环触发）。"""
@@ -8498,13 +8498,22 @@ class MainWindow(QMainWindow):
         self._save_config()
 
     def _update_spring_width_gate(self):
-        """按窗口宽度（滞回双阈值）更新 spring 生效门控，仅在门控翻转时联动调整布局。
+        """按「编辑器+终端合计宽度」（滞回双阈值）更新 spring 生效门控，仅在门控翻转时联动调整布局。
 
-        由 resizeEvent 驱动。只在跨过阈值导致「生效↔失效」翻转时动一次，避免
-        拖动过程中每像素都 setSizes。用窗口宽度而非分屏合计宽度，spring 自身的
-        尺寸动画不会改变窗口宽度，故不会反馈震荡。
+        由 resizeEvent 驱动。只在跨过阈值导致「生效↔失效」翻转时动一次，避免拖动过程中
+        每像素都 setSizes。用合计宽度而非整窗宽度：排除左侧栏更贴近「两边能否铺开」，且
+        spring 只挪分界、合计恒定，故不会反馈震荡。无法取到合计宽度时（如未左右分屏）不动门控。
         """
-        w = self.width()
+        if not hasattr(self, 'main_splitter'):
+            return
+        ed_idx = self.main_splitter.indexOf(self.editor_area) if hasattr(self, 'editor_area') else -1
+        term_idx = self.main_splitter.indexOf(getattr(self, '_main_content_stack', None))
+        sizes = self.main_splitter.sizes()
+        if ed_idx < 0 or term_idx < 0 or max(ed_idx, term_idx) >= len(sizes):
+            return
+        w = sizes[ed_idx] + sizes[term_idx]
+        if w <= 0:
+            return
         old_gate = getattr(self, '_spring_width_gate', True)
         if old_gate:
             new_gate = w <= self.SPRING_WIDTH_DISABLE   # 宽于 DISABLE 才关闭
