@@ -8411,8 +8411,10 @@ class MainWindow(QMainWindow):
     # 弹簧按窗口宽度自动生效/失效（滞回双阈值，防止边界反复横跳）：
     # 窗口窄于 ENABLE → spring 生效；宽于 DISABLE → spring 失效（恢复均分）；
     # 两阈值之间维持现状。用窗口宽度而非分屏合计宽度，避免 spring 自身改尺寸时反馈震荡。
-    SPRING_WIDTH_ENABLE = 1300
-    SPRING_WIDTH_DISABLE = 1500
+    # 取值参考：MacBook Air 全屏逻辑宽度 13"≈1470 / 15"≈1512（含轻度 More Space 仍
+    # 在内屏范围），都应让 spring 生效；只有外接大屏（1920+）才自动失效。
+    SPRING_WIDTH_ENABLE = 1550
+    SPRING_WIDTH_DISABLE = 1750
 
     def _set_spring_checkboxes(self, enabled: bool):
         """把本窗口两处弹簧复选框设为指定状态（屏蔽信号，避免回环触发）。"""
