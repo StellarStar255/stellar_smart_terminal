@@ -109,11 +109,9 @@ class TestFormatFileSize(unittest.TestCase):
         self.assertEqual(utils.format_file_size(1048576), "1.0 MB")
         self.assertEqual(utils.format_file_size(1024 ** 3), "1.0 GB")
 
-    def test_tb_is_off_by_factor_1024(self):
-        # 【可疑行为，固化为现状】循环只除到 GB 就退出，TB 分支
-        # 少除一次 1024：1 TiB 显示成 "1024.0 TB" 而不是 "1.0 TB"。
-        self.assertEqual(utils.format_file_size(1024 ** 4), "1024.0 TB")
-        self.assertEqual(utils.format_file_size(5 * 1024 ** 4), "5120.0 TB")
+    def test_tb(self):
+        self.assertEqual(utils.format_file_size(1024 ** 4), "1.0 TB")
+        self.assertEqual(utils.format_file_size(5 * 1024 ** 4), "5.0 TB")
 
 
 class TestMiscPureHelpers(unittest.TestCase):

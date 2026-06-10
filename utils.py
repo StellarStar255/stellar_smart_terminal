@@ -183,7 +183,7 @@ def format_file_size(size_bytes: int) -> str:
         size_bytes /= 1024
         if size_bytes < 1024:
             return f"{size_bytes:.1f} {unit}"
-    return f"{size_bytes:.1f} TB"
+    return f"{size_bytes / 1024:.1f} TB"
 
 
 def read_config_json(file_path: Path):
