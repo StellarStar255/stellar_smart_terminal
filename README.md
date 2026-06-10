@@ -45,6 +45,25 @@ pip install PyQt6==6.7.1 PyQt6-Qt6==6.7.1 --no-cache-dir
 
 - [Claude Code 通知点击跳转 / Click-to-focus notifications (macOS)](docs/claude-code-notifications.md) — Stop hook 配置，点击通知直接跳回对应 Smart Terminal 窗口
 
+## Build / 打包
+
+打包为独立应用（onedir 模式，无需安装 Python）。
+Package as a standalone app (onedir mode, no Python required).
+
+```bash
+# macOS — 产出 dist/Stellar Smart Terminal.app
+./build.sh
+open "dist/Stellar Smart Terminal.app"
+```
+
+```bat
+:: Windows — 产出 dist\StellarSmartTerminal\StellarSmartTerminal.exe
+build.bat
+```
+
+> 脚本会自动创建独立虚拟环境 `.venv-build`、安装依赖与 PyInstaller，macOS 下还会从 `assets/smart_terminal.png` 生成 `.icns` 图标。配置见 `smart_terminal.spec`。
+> The script creates an isolated `.venv-build` venv, installs dependencies + PyInstaller, and (on macOS) generates the `.icns` icon from `assets/smart_terminal.png`. See `smart_terminal.spec` for configuration.
+
 ## License / 许可
 
 [MIT](LICENSE)
