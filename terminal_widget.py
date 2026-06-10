@@ -2119,32 +2119,6 @@ class TerminalWidget(QWidget):
             event.accept()
             return
 
-        # Cmd+B (macOS) / Ctrl+B: 切换 Explorer 面板 — 委托给主窗口
-        # 注意：只匹配 Cmd(ControlModifier)，物理 Ctrl+B(MetaModifier) 仍发送到终端
-        if (modifiers & Qt.KeyboardModifier.ControlModifier
-                and not (modifiers & (Qt.KeyboardModifier.MetaModifier
-                                       | Qt.KeyboardModifier.AltModifier
-                                       | Qt.KeyboardModifier.ShiftModifier))
-                and key == Qt.Key.Key_B):
-            main_win = self.window()
-            if hasattr(main_win, '_toggle_explorer_panel'):
-                main_win._toggle_explorer_panel()
-                event.accept()
-                return
-
-        # Cmd+G (macOS) / Ctrl+G: 切换 Git 面板 — 委托给主窗口
-        # 注意：只匹配 Cmd(ControlModifier)，物理 Ctrl+G(MetaModifier) 仍发送到终端
-        if (modifiers & Qt.KeyboardModifier.ControlModifier
-                and not (modifiers & (Qt.KeyboardModifier.MetaModifier
-                                       | Qt.KeyboardModifier.AltModifier
-                                       | Qt.KeyboardModifier.ShiftModifier))
-                and key == Qt.Key.Key_G):
-            main_win = self.window()
-            if hasattr(main_win, '_toggle_git_panel'):
-                main_win._toggle_git_panel()
-                event.accept()
-                return
-
         # Cmd+E (macOS) / Ctrl+E: 收起/展开文件编辑区 — 委托给主窗口
         # 注意：只匹配 Cmd(ControlModifier)，物理 Ctrl+E(MetaModifier) 仍发送到
         # 终端（readline 的「跳到行尾」\x05），二者互不干扰。
