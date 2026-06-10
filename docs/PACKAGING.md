@@ -2,6 +2,27 @@
 
 如何把 Stellar Smart Terminal 打包成 macOS 应用(`.app` / `.dmg`)并发布到 GitHub Release。
 
+## 自动发版(推荐)/ Automated release
+
+仓库配置了 GitHub Actions(`.github/workflows/release.yml`):**推送 `v*` tag 即自动发版**——
+macOS runner 跑 `build.sh` 产出 DMG + zip,Windows runner 跑 `build.bat` 产出 onedir zip,
+两个平台都先跑离屏测试套件,产物自动挂到对应 Release(已存在的 release 只补传产物,
+notes 不会被覆盖;新建的 release 用自动生成的 notes,之后可用 `gh release edit` 替换)。
+
+所以日常发版只需:
+
+```bash
+# 1. 更新版本号(见下文「更新版本号」),提交推送
+# 2. 打 tag 并推送,剩下交给 CI(约 10 分钟)
+git tag -a v1.7.0 -m "v1.7.0"
+git push origin v1.7.0
+gh run watch   # 可选:盯着跑完
+```
+
+下文的手动流程仍然有效,作为 CI 不可用时的备份,或需要本地验证产物时使用。
+
+> 注:GitHub 托管的 macOS runner 均为 Apple Silicon,Intel mac 包需自备机器手动构建。
+
 ## 前置要求 / Prerequisites
 
 - macOS(Apple Silicon 机器上打出的是 arm64 包,Intel Mac 无法运行)
