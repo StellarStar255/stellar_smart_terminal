@@ -8526,10 +8526,6 @@ class MainWindow(QMainWindow):
             new_gate = w <= self.SPRING_WIDTH_DISABLE   # 宽于 DISABLE 才关闭
         else:
             new_gate = w < self.SPRING_WIDTH_ENABLE     # 窄于 ENABLE 才重新允许
-        # TEMP 调试：打印代码实际看到的合计宽度与门控决策，用真实逻辑像素调阈值
-        print(f"[Spring] combined_w={w} enable<{self.SPRING_WIDTH_ENABLE} "
-              f"disable>{self.SPRING_WIDTH_DISABLE} gate={old_gate}->{new_gate} "
-              f"spring_on={getattr(self, '_spring_mode_enabled', False)}")
         if new_gate == old_gate:
             return
         self._spring_width_gate = new_gate
