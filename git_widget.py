@@ -3204,13 +3204,24 @@ class GitPanel(QWidget):
         worker = _CommitMessageWorker(config, diff, get_language(), self)
         worker.succeeded.connect(self._on_generate_done)
         worker.failed.connect(self._on_generate_failed)
-        worker.finished.connect(lambda: self.commit_widget.set_generating(False))
+        worker.finished.connect(
+            lambda: (self.commit_widget.set_generating(False),
+                     self._notify_generation_attention())
+        )
         self._register_worker(worker)
         worker.start()
 
     def _on_generate_done(self, message: str):
         if message:
             self.commit_widget.set_message(message)
+
+    def _notify_generation_attention(self):
+        """生成提交信息完成（成功或失败）：窗口不在前台时点亮导航绿点，
+        让切去别的窗口等结果的用户知道可以回来了。"""
+        win = self._find_main_window()
+        if (win is not None and hasattr(win, '_request_nav_attention')
+                and hasattr(win, 'isActiveWindow') and not win.isActiveWindow()):
+            win._request_nav_attention()
 
     def _on_generate_failed(self, error: str):
         QMessageBox.warning(

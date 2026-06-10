@@ -9895,6 +9895,15 @@ class MainWindow(QMainWindow):
         # 正在前台看着的活动终端不打扰
         if self.isActiveWindow() and terminal is self.active_terminal:
             return
+        self._request_nav_attention()
+
+    def _request_nav_attention(self):
+        """点亮本窗口的导航绿点（后台任务完成提醒的通用入口）。
+
+        终端命令结束之外的来源（如 Git 面板生成提交信息完成）也可调用。
+        「前台时是否不打扰」的判断由各来源自行决定后再调用——终端要求
+        「不是正在看的活动终端」，Git 生成则要求「窗口不在前台」。
+        """
         if getattr(self, '_nav_attention', False):
             return  # 已经在提醒，避免重复刷新
         self._nav_attention = True
