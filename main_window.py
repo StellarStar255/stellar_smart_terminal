@@ -5965,6 +5965,8 @@ class MainWindow(QMainWindow):
         """窗口大小变化时更新 flow toolbar 高度"""
         super().resizeEvent(event)
         self._update_flow_toolbar_height()
+        # 按窗口宽度自动让 spring 生效/失效（仅在跨阈值翻转时动一次）
+        self._update_spring_width_gate()
 
     def _global_zoom_in(self):
         """全局放大字体 — 同步缩放所有区域"""
@@ -8406,6 +8408,11 @@ class MainWindow(QMainWindow):
     # （并设最小像素，避免在大屏上收得过窄、小屏上又超出合计宽度）。
     SPRING_INACTIVE_RATIO = 0.30
     SPRING_INACTIVE_MIN = 220
+    # 弹簧按窗口宽度自动生效/失效（滞回双阈值，防止边界反复横跳）：
+    # 窗口窄于 ENABLE → spring 生效；宽于 DISABLE → spring 失效（恢复均分）；
+    # 两阈值之间维持现状。用窗口宽度而非分屏合计宽度，避免 spring 自身改尺寸时反馈震荡。
+    SPRING_WIDTH_ENABLE = 1300
+    SPRING_WIDTH_DISABLE = 1500
 
     def _set_spring_checkboxes(self, enabled: bool):
         """把本窗口两处弹簧复选框设为指定状态（屏蔽信号，避免回环触发）。"""
@@ -8488,6 +8495,39 @@ class MainWindow(QMainWindow):
                 self._animate_main_sizes(self._resolve_main_splitter_sizes_with_editor())
         self._save_config()
 
+    def _update_spring_width_gate(self):
+        """按窗口宽度（滞回双阈值）更新 spring 生效门控，仅在门控翻转时联动调整布局。
+
+        由 resizeEvent 驱动。只在跨过阈值导致「生效↔失效」翻转时动一次，避免
+        拖动过程中每像素都 setSizes。用窗口宽度而非分屏合计宽度，spring 自身的
+        尺寸动画不会改变窗口宽度，故不会反馈震荡。
+        """
+        w = self.width()
+        old_gate = getattr(self, '_spring_width_gate', True)
+        if old_gate:
+            new_gate = w <= self.SPRING_WIDTH_DISABLE   # 宽于 DISABLE 才关闭
+        else:
+            new_gate = w < self.SPRING_WIDTH_ENABLE     # 窄于 ENABLE 才重新允许
+        if new_gate == old_gate:
+            return
+        self._spring_width_gate = new_gate
+        # 仅当用户开了 spring 才需要联动布局
+        if not getattr(self, '_spring_mode_enabled', False):
+            return
+        if new_gate:
+            # 重新生效：按当前焦点展开一侧（_apply_spring 内部会再查 applicable）
+            target = (self._spring_target_for_widget(QApplication.focusWidget())
+                      or self._spring_current_side or 'editor')
+            self._apply_spring(target)
+        else:
+            # 失效：恢复记忆中的均衡尺寸（此时 _spring_applicable 已因门控为 False，
+            # 故这里直接校验结构条件后自行恢复）
+            self._spring_current_side = None
+            if (hasattr(self, 'editor_area') and self.editor_area.isVisible()
+                    and self.main_splitter.indexOf(self.editor_area) >= 0
+                    and self.main_splitter.indexOf(self._main_content_stack) >= 0):
+                self._animate_main_sizes(self._resolve_main_splitter_sizes_with_editor())
+
     def _spring_applicable(self) -> bool:
         """仅当编辑器与终端在 main_splitter 中左右并排、且都可见时弹簧才生效。
 
@@ -8502,6 +8542,10 @@ class MainWindow(QMainWindow):
         if self.main_splitter.indexOf(self.editor_area) < 0:
             return False
         if self.main_splitter.indexOf(self._main_content_stack) < 0:
+            return False
+        # 窗口太宽时 spring 自动失效（两边都能舒服铺开）。门控值在 resize 时按滞回更新，
+        # 这里只读，避免每次查询都重算/抖动。
+        if not getattr(self, '_spring_width_gate', True):
             return False
         return True
 
@@ -10395,6 +10439,7 @@ class MainWindow(QMainWindow):
         # 弹簧模式：编辑器与终端左右并排时，点哪边哪边自动变宽，另一边收窄但不收起
         self._spring_mode_enabled = False
         self._spring_current_side = None   # 'editor' / 'terminal'，当前已展开的一侧
+        self._spring_width_gate = True     # 窗口宽度是否允许 spring 生效（resize 时按滞回更新）
         self._applying_spring = False      # setSizes 期间置位，避免污染记忆尺寸
         self._spring_anim = None           # 进行中的尺寸过渡动画（持引用防 GC）
         self._saved_remote_internal_sizes = None  # remote_splitter 2 项尺寸（上下分屏）
