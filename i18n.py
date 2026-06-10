@@ -435,6 +435,38 @@ TRANSLATIONS = {
     "git.delete_branch_force_msg": {"zh": "分支 \"{name}\" 尚未合并到上游，安全删除被拒绝。\n\n仍然强制删除（git branch -D）？此操作可能丢失未合并的提交。", "en": "Branch \"{name}\" is not fully merged; safe delete was rejected.\n\nForce delete (git branch -D)? This may lose unmerged commits."},
     "git.delete_branch_failed_msg": {"zh": "删除分支失败：{error}", "en": "Delete branch failed: {error}"},
 
+    # ===== Git 面板 - Stash =====
+    "git.stash_tooltip": {"zh": "Stash（贮藏改动）", "en": "Stash changes"},
+    "git.stash_save_menu": {"zh": "Stash 当前修改…", "en": "Stash current changes…"},
+    "git.stash_manage_menu": {"zh": "管理 Stash…", "en": "Manage stashes…"},
+    "git.stash_save_title": {"zh": "Stash 当前修改", "en": "Stash changes"},
+    "git.stash_save_prompt": {"zh": "Stash 说明（可留空）：", "en": "Stash message (optional):"},
+    "git.stash_nothing_title": {"zh": "没有可贮藏的修改", "en": "Nothing to stash"},
+    "git.stash_nothing_msg": {"zh": "当前没有本地修改，无需 Stash。", "en": "There are no local changes to stash."},
+    "git.stash_manage_title": {"zh": "Stash 列表", "en": "Stashes"},
+    "git.stash_empty": {"zh": "（没有 stash）", "en": "(no stashes)"},
+    "git.stash_pop_btn": {"zh": "Pop（应用并删除）", "en": "Pop"},
+    "git.stash_apply_btn": {"zh": "Apply（仅应用）", "en": "Apply"},
+    "git.stash_drop_btn": {"zh": "Drop（删除）", "en": "Drop"},
+    "git.stash_close_btn": {"zh": "关闭", "en": "Close"},
+    "git.stash_drop_confirm_title": {"zh": "删除 Stash", "en": "Drop stash"},
+    "git.stash_drop_confirm_msg": {"zh": "确定删除 {ref} 吗？此操作不可恢复。", "en": "Drop {ref}? This cannot be undone."},
+
+    # ===== Git 面板 - 冲突/合并 =====
+    "git.conflict_suffix": {"zh": "冲突", "en": "conflict"},
+    "git.menu_resolve_ours": {"zh": "采用我方版本 (ours)", "en": "Take our version (ours)"},
+    "git.menu_resolve_theirs": {"zh": "采用对方版本 (theirs)", "en": "Take their version (theirs)"},
+    "git.menu_mark_resolved": {"zh": "标记为已解决（git add）", "en": "Mark as resolved (git add)"},
+    "git.confirm_resolve_title": {"zh": "解决冲突", "en": "Resolve conflict"},
+    "git.confirm_resolve_ours_msg": {"zh": "对 {path} 整体采用我方版本？该文件中对方的改动将被丢弃。", "en": "Take our version of {path}? Their changes to this file will be discarded."},
+    "git.confirm_resolve_theirs_msg": {"zh": "对 {path} 整体采用对方版本？该文件中我方的改动将被丢弃。", "en": "Take their version of {path}? Our changes to this file will be discarded."},
+    "git.merge_in_progress": {"zh": "合并进行中 — 请解决冲突后提交", "en": "Merge in progress — resolve conflicts, then commit"},
+    "git.merge_with_conflicts": {"zh": "合并进行中 — {n} 个文件存在未解决冲突", "en": "Merge in progress — {n} file(s) with unresolved conflicts"},
+    "git.conflicts_present": {"zh": "存在 {n} 个未解决冲突的文件", "en": "{n} file(s) with unresolved conflicts"},
+    "git.merge_abort_btn": {"zh": "中止合并", "en": "Abort merge"},
+    "git.merge_abort_confirm_title": {"zh": "中止合并", "en": "Abort merge"},
+    "git.merge_abort_confirm_msg": {"zh": "确定中止合并吗？将丢弃合并引入的改动，回到合并前的状态。", "en": "Abort the merge? Changes from the merge will be discarded and the repository restored to its pre-merge state."},
+
     # ===== Git Manager 错误消息 =====
     "git_mgr.no_repo_path": {"zh": "未设置仓库路径", "en": "Repository path not set"},
     "git_mgr.timeout": {"zh": "Git 命令超时", "en": "Git command timed out"},
@@ -455,6 +487,13 @@ TRANSLATIONS = {
     "git_mgr.branch_name_empty": {"zh": "分支名不能为空", "en": "Branch name cannot be empty"},
     "git_mgr.push_failed": {"zh": "推送失败: {error}", "en": "Push failed: {error}"},
     "git_mgr.pull_failed": {"zh": "拉取失败: {error}", "en": "Pull failed: {error}"},
+    "git_mgr.stash_save_failed": {"zh": "Stash 失败：{error}", "en": "Stash failed: {error}"},
+    "git_mgr.stash_pop_failed": {"zh": "Stash pop 失败：{error}", "en": "Stash pop failed: {error}"},
+    "git_mgr.stash_apply_failed": {"zh": "Stash apply 失败：{error}", "en": "Stash apply failed: {error}"},
+    "git_mgr.stash_drop_failed": {"zh": "删除 stash 失败：{error}", "en": "Stash drop failed: {error}"},
+    "git_mgr.merge_abort_failed": {"zh": "中止合并失败：{error}", "en": "Failed to abort merge: {error}"},
+    "git_mgr.resolve_failed": {"zh": "解决冲突失败：{error}", "en": "Failed to resolve conflict: {error}"},
+    "git_mgr.commit_conflicts": {"zh": "存在 {n} 个未解决的合并冲突文件，请先解决冲突再提交。", "en": "{n} file(s) have unresolved merge conflicts. Resolve them before committing."},
 
     # ===== 文件编辑器 =====
     "editor.no_file": {"zh": "未打开文件", "en": "No file open"},
@@ -508,6 +547,12 @@ TRANSLATIONS = {
         "zh": "{name} 在外部被删除。当前缓冲区已保留，下次保存会重新创建该文件。",
         "en": "{name} was deleted on disk. The buffer is kept; next save will recreate the file.",
     },
+    "editor.autosave_restore_title": {"zh": "恢复未保存的更改", "en": "Recover Unsaved Changes"},
+    "editor.autosave_restore_msg": {
+        "zh": "检测到「{name}」有自动保存的未保存更改（{time}）。是否恢复？选择\"否\"将删除该备份。",
+        "en": "Found auto-saved unsaved changes for \"{name}\" ({time}). Restore them? Choosing \"No\" deletes the backup.",
+    },
+    "editor.encoding_tooltip": {"zh": "文件编码：{encoding}（保存时按此编码写回）", "en": "File encoding: {encoding} (saved back in this encoding)"},
 
     # ===== Remote Explorer =====
     "remote.title": {"zh": "远程", "en": "Remote"},
@@ -602,6 +647,13 @@ TRANSLATIONS = {
         "en": "Cannot move \"{name}\" into itself or one of its subdirectories"
     },
     "remote.move_progress": {"zh": "正在移动到 {target}…", "en": "Moving to {target}…"},
+    "remote.loading": {"zh": "加载中…", "en": "Loading…"},
+    "remote.load_failed": {"zh": "加载失败: {error}", "en": "Load failed: {error}"},
+    "remote.transfer_stats": {"zh": "{rate} · 剩余 {eta}", "en": "{rate} · {eta} left"},
+
+    # ===== SSH 会话 =====
+    "ssh.reconnect_failed": {"zh": "SSH 自动重连失败", "en": "SSH automatic reconnect failed"},
+    "ssh.jump_channel_failed": {"zh": "无法通过跳板机建立转发通道", "en": "Failed to open forwarding channel via jump host"},
 
     # ===== 历史对话框 =====
     "history.title": {"zh": "历史会话", "en": "Session History"},
