@@ -46,12 +46,29 @@ echo "==> Running PyInstaller"
 "$VENV/bin/pyinstaller" --noconfirm smart_terminal.spec
 
 # ---------------------------------------------------------------------------
-# 4. 输出位置提示
+# 4. macOS: 打包 DMG（内含 .app + Applications 软链接，拖拽即安装）
+# ---------------------------------------------------------------------------
+DMG=""
+if [ "$(uname)" = "Darwin" ]; then
+    VERSION=$(grep -m1 'CFBundleShortVersionString' smart_terminal.spec | sed 's/[^0-9.]//g')
+    DMG="dist/Stellar-Smart-Terminal-v${VERSION}-macOS-$(uname -m).dmg"
+    echo "==> Creating $DMG"
+    STAGING=$(mktemp -d)
+    cp -R "dist/Stellar Smart Terminal.app" "$STAGING/"
+    ln -s /Applications "$STAGING/Applications"
+    hdiutil create -volname "Stellar Smart Terminal" -srcfolder "$STAGING" \
+        -ov -format UDZO "$DMG" >/dev/null
+    rm -rf "$STAGING"
+fi
+
+# ---------------------------------------------------------------------------
+# 5. 输出位置提示
 # ---------------------------------------------------------------------------
 echo ""
 echo "==> Build finished."
 if [ "$(uname)" = "Darwin" ]; then
     echo "    App bundle : dist/Stellar Smart Terminal.app"
+    echo "    DMG        : $DMG"
     echo "    Run        : open \"dist/Stellar Smart Terminal.app\""
 fi
 echo "    Onedir     : dist/StellarSmartTerminal/"
