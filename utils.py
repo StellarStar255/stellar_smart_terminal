@@ -102,9 +102,26 @@ def get_exports_dir() -> Path:
     return exports_dir
 
 
+_last_session_id = None
+
+
 def generate_session_id() -> str:
-    """生成会话ID（包含微秒避免同秒碰撞）"""
-    return datetime.now().strftime("%Y%m%d_%H%M%S_%f")
+    """生成会话ID（含微秒，并保证单进程内严格递增唯一）。
+
+    Windows 的时钟粒度约 1ms+，连续两次调用可能拿到完全相同的时间戳
+    （CI 实测碰撞）；ID 是定宽零填充格式，字符串比较即时间序，碰撞时把
+    上一个 ID 的微秒段 +1。微秒段用尽（同一刻 100 万次调用）时等下一个时钟刻。
+    """
+    global _last_session_id
+    sid = datetime.now().strftime("%Y%m%d_%H%M%S_%f")
+    while _last_session_id is not None and sid <= _last_session_id:
+        head, us = _last_session_id.rsplit("_", 1)
+        if int(us) < 999999:
+            sid = f"{head}_{int(us) + 1:06d}"
+        else:
+            sid = datetime.now().strftime("%Y%m%d_%H%M%S_%f")
+    _last_session_id = sid
+    return sid
 
 
 def extract_file_paths(text: str, validate_exists: bool = True) -> Set[str]:

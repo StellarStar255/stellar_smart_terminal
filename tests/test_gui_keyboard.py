@@ -152,6 +152,8 @@ class TestCmdJumpShortcuts(KeyboardBase):
 class TestCopyPasteShortcuts(KeyboardBase):
     """Cmd+C / Cmd+V：走 GUI 复制粘贴路径，不滚动、不透传按键本身"""
 
+    @unittest.skipUnless(sys.platform == "darwin",
+                         "Windows/Linux 上 Ctrl+C 无选区时语义是 SIGINT 而非复制")
     def test_copy_shortcut_keeps_scroll_and_does_not_write(self):
         w = self.make_widget(scroll_offset=20)
         copied = []

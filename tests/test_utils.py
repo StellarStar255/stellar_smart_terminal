@@ -134,7 +134,12 @@ class TestMiscPureHelpers(unittest.TestCase):
         a = utils.generate_session_id()
         b = utils.generate_session_id()
         self.assertRegex(a, r"^\d{8}_\d{6}_\d{6}$")
-        self.assertNotEqual(a, b)  # 微秒级时间戳，连续两次不应碰撞
+        self.assertNotEqual(a, b)  # 单进程内保证唯一（Windows 时钟粒度粗也不碰撞）
+        # 紧密连发也必须全部唯一且格式不破（覆盖微秒段 +1 的碰撞分支）
+        burst = [utils.generate_session_id() for _ in range(500)]
+        self.assertEqual(len(set(burst)), 500)
+        for sid in burst:
+            self.assertRegex(sid, r"^\d{8}_\d{6}_\d{6}$")
 
     def test_get_project_root_is_repo_dir(self):
         root = utils.get_project_root()
@@ -177,9 +182,11 @@ class TestConfigJson(unittest.TestCase):
         data, ok = utils.read_config_json(self.path)
         self.assertTrue(ok)
         self.assertEqual(data, payload)
-        # 强制 0o600（配置可能含明文密钥）
-        mode = stat.S_IMODE(os.stat(self.path).st_mode)
-        self.assertEqual(mode, 0o600)
+        # 强制 0o600（配置可能含明文密钥）。Windows 没有 POSIX 权限位
+        # （chmod 仅映射只读标志，st_mode 恒为 0o666），只在 POSIX 上断言。
+        if os.name == "posix":
+            mode = stat.S_IMODE(os.stat(self.path).st_mode)
+            self.assertEqual(mode, 0o600)
         # 没有遗留 .tmp 临时文件
         leftovers = [p for p in Path(self.dir).iterdir() if p.suffix == ".tmp"]
         self.assertEqual(leftovers, [])

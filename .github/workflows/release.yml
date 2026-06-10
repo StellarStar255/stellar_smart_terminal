@@ -27,6 +27,14 @@ jobs:
         with:
           python-version: "3.12"
 
+      - name: Check spec version matches tag
+        run: |
+          SPEC_V=$(grep -m1 CFBundleShortVersionString smart_terminal.spec | sed 's/[^0-9.]//g')
+          case "$GITHUB_REF_NAME" in
+            "v$SPEC_V"|"v$SPEC_V"-*) echo "spec $SPEC_V matches tag $GITHUB_REF_NAME" ;;
+            *) echo "::error::smart_terminal.spec version ($SPEC_V) does not match tag ($GITHUB_REF_NAME) — bump the version before tagging (see docs/PACKAGING.md)"; exit 1 ;;
+          esac
+
       - name: Build .app + DMG
         run: ./build.sh
 
@@ -61,6 +69,15 @@ jobs:
       - uses: actions/setup-python@v5
         with:
           python-version: "3.12"
+
+      - name: Check spec version matches tag
+        shell: bash
+        run: |
+          SPEC_V=$(grep -m1 CFBundleShortVersionString smart_terminal.spec | sed 's/[^0-9.]//g')
+          case "$GITHUB_REF_NAME" in
+            "v$SPEC_V"|"v$SPEC_V"-*) echo "spec $SPEC_V matches tag $GITHUB_REF_NAME" ;;
+            *) echo "::error::smart_terminal.spec version ($SPEC_V) does not match tag ($GITHUB_REF_NAME) — bump the version before tagging (see docs/PACKAGING.md)"; exit 1 ;;
+          esac
 
       - name: Build onedir exe
         shell: cmd
