@@ -9889,6 +9889,18 @@ class MainWindow(QMainWindow):
             }
         """)
 
+        # 扩展为新窗口（等同拖出标签，但不需要手动拖拽）—— 放最上面，最常用
+        detach_action = menu.addAction(t("tab.detach"))
+        detach_action.setEnabled(self.tab_widget.count() > 1)
+        detach_action.triggered.connect(
+            lambda: self._detach_tab(tab_index, None, follow_drag=False))
+
+        menu.addSeparator()
+
+        # 切换工作目录到该 tab 终端的当前路径
+        switch_path_action = menu.addAction(t("tab.switch_to_path"))
+        switch_path_action.triggered.connect(lambda: self._switch_dir_to_tab_path(tab_index))
+
         # OpenAI API 服务器选项
         is_server_running = self.openai_server_manager.is_running(tab_index)
 
@@ -9901,8 +9913,6 @@ class MainWindow(QMainWindow):
             copy_url_action = menu.addAction(t("openai.copy_url"))
             copy_url_action.triggered.connect(lambda: self._copy_api_url(port))
 
-            menu.addSeparator()
-
             # 每次 Query 后清除会话
             clear_after = self.api_server_clear_after_query.get(tab_index, False)
             clear_action = menu.addAction(t("openai.clear_session"))
@@ -9912,18 +9922,6 @@ class MainWindow(QMainWindow):
         else:
             start_action = menu.addAction(t("openai.set_as_server"))
             start_action.triggered.connect(lambda: self._show_openai_server_dialog(tab_index))
-
-        menu.addSeparator()
-
-        # 切换工作目录到该 tab 终端的当前路径
-        switch_path_action = menu.addAction(t("tab.switch_to_path"))
-        switch_path_action.triggered.connect(lambda: self._switch_dir_to_tab_path(tab_index))
-
-        # 扩展为新窗口（等同拖出标签，但不需要手动拖拽）
-        detach_action = menu.addAction(t("tab.detach"))
-        detach_action.setEnabled(self.tab_widget.count() > 1)
-        detach_action.triggered.connect(
-            lambda: self._detach_tab(tab_index, None, follow_drag=False))
 
         menu.addSeparator()
 
