@@ -5635,24 +5635,31 @@ class MainWindow(QMainWindow):
                     # 吸附对齐：松手时若与父窗口的边缘只差一点（肉眼想对齐但差
                     # 几十像素），自动贴齐父窗口，消除"差一丁点错位"。
                     if not sip.isdeleted(self) and self.isVisible():
-                        SNAP = 56
-                        nx, ny = new_window.x(), new_window.y()
                         pf = self.frameGeometry()
                         nf = new_window.frameGeometry()
-                        # 上对齐 / 贴在父窗口正下方
-                        if abs(ny - pf.y()) <= SNAP:
-                            ny = pf.y()
-                        elif abs(ny - pf.bottom()) <= SNAP:
-                            ny = pf.bottom() + 1
-                        # 左对齐 / 贴在父窗口右侧 / 贴在父窗口左侧
-                        if abs(nx - pf.x()) <= SNAP:
-                            nx = pf.x()
-                        elif abs(nx - (pf.right() + 1)) <= SNAP:
-                            nx = pf.right() + 1
-                        elif abs((nx + nf.width()) - pf.x()) <= SNAP:
-                            nx = pf.x() - nf.width()
-                        if (nx, ny) != (new_window.x(), new_window.y()):
-                            new_window.move(nx, ny)
+                        inter = pf.intersected(nf)
+                        overlap = inter.width() * inter.height()
+                        if overlap >= 0.6 * nf.width() * nf.height():
+                            # 大面积叠在父窗口上 → 视为想完全重合，直接继承
+                            # 父窗口几何（位置+尺寸逐像素一致）
+                            new_window.setGeometry(self.geometry())
+                        else:
+                            SNAP = 56
+                            nx, ny = new_window.x(), new_window.y()
+                            # 上对齐 / 贴在父窗口正下方
+                            if abs(ny - pf.y()) <= SNAP:
+                                ny = pf.y()
+                            elif abs(ny - pf.bottom()) <= SNAP:
+                                ny = pf.bottom() + 1
+                            # 左对齐 / 贴在父窗口右侧 / 贴在父窗口左侧
+                            if abs(nx - pf.x()) <= SNAP:
+                                nx = pf.x()
+                            elif abs(nx - (pf.right() + 1)) <= SNAP:
+                                nx = pf.right() + 1
+                            elif abs((nx + nf.width()) - pf.x()) <= SNAP:
+                                nx = pf.x() - nf.width()
+                            if (nx, ny) != (new_window.x(), new_window.y()):
+                                new_window.move(nx, ny)
                     new_window.raise_()
                     new_window.activateWindow()
                     if new_window.active_terminal:
