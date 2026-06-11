@@ -253,10 +253,10 @@ class WindowNavigatorPanel(QWidget):
         compact_row = QHBoxLayout()
         compact_row.setSpacing(8)
 
-        self.compact_checkbox = QCheckBox(t("window.compact_display"))
-        self.compact_checkbox.setChecked(True)  # 默认开启简洁显示
-        self.compact_checkbox.setToolTip(t("window.compact_tooltip"))
-        self.compact_checkbox.setStyleSheet("""
+        # 三个勾选框共用的深色样式：必须把 ::indicator 的外观（边框/背景/选中态）
+        # 全部定义掉，否则 Qt 会退回 Windows 原生风格画指示器，浅色高亮叠在
+        # 深色主题上非常突兀（hover 时尤其明显）。
+        nav_checkbox_style = """
             QCheckBox {
                 color: #aaaaaa;
                 font-size: 11px;
@@ -265,8 +265,23 @@ class WindowNavigatorPanel(QWidget):
             QCheckBox::indicator {
                 width: 14px;
                 height: 14px;
+                border: 2px solid #3d3d5c;
+                border-radius: 3px;
+                background-color: #16213e;
             }
-        """)
+            QCheckBox::indicator:hover {
+                border-color: #667eea;
+            }
+            QCheckBox::indicator:checked {
+                border-color: #667eea;
+                background-color: #667eea;
+            }
+        """
+
+        self.compact_checkbox = QCheckBox(t("window.compact_display"))
+        self.compact_checkbox.setChecked(True)  # 默认开启简洁显示
+        self.compact_checkbox.setToolTip(t("window.compact_tooltip"))
+        self.compact_checkbox.setStyleSheet(nav_checkbox_style)
         self.compact_checkbox.stateChanged.connect(self._toggle_compact_mode)
         compact_row.addWidget(self.compact_checkbox)
 
@@ -274,34 +289,14 @@ class WindowNavigatorPanel(QWidget):
         self.quick_close_checkbox = QCheckBox(t("window.quick_close"))
         self.quick_close_checkbox.setChecked(self._quick_close)
         self.quick_close_checkbox.setToolTip(t("window.quick_close_tooltip"))
-        self.quick_close_checkbox.setStyleSheet("""
-            QCheckBox {
-                color: #aaaaaa;
-                font-size: 11px;
-                border: none;
-            }
-            QCheckBox::indicator {
-                width: 14px;
-                height: 14px;
-            }
-        """)
+        self.quick_close_checkbox.setStyleSheet(nav_checkbox_style)
         self.quick_close_checkbox.stateChanged.connect(self._on_quick_close_changed)
         compact_row.addWidget(self.quick_close_checkbox)
 
         # 「嵌入到侧栏」勾选框：勾选=内嵌到各窗口左侧栏；取消=独立浮动窗口。自动记住。
         self.embed_checkbox = QCheckBox(t("window.embed_checkbox"))
         self.embed_checkbox.setToolTip(t("window.embed_checkbox_tooltip"))
-        self.embed_checkbox.setStyleSheet("""
-            QCheckBox {
-                color: #aaaaaa;
-                font-size: 11px;
-                border: none;
-            }
-            QCheckBox::indicator {
-                width: 14px;
-                height: 14px;
-            }
-        """)
+        self.embed_checkbox.setStyleSheet(nav_checkbox_style)
         self.embed_checkbox.blockSignals(True)
         self.embed_checkbox.setChecked(self._embedded)
         self.embed_checkbox.blockSignals(False)
