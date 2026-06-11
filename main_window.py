@@ -5540,6 +5540,20 @@ class MainWindow(QMainWindow):
         available_color = self._get_available_window_color()
         new_window._set_window_color(available_color)
 
+        # 继承父窗口面板的开关状态（Explorer / Git / Remote 互斥，开一个即可；
+        # Log 独立），让分离出的窗口与父窗口外观一致，不造成认知负担
+        try:
+            if getattr(self, 'explorer_panel_visible', False):
+                new_window._toggle_explorer_panel()
+            elif getattr(self, 'git_panel_visible', False):
+                new_window._toggle_git_panel()
+            elif getattr(self, 'remote_panel_visible', False):
+                new_window._toggle_remote_panel()
+            if getattr(self, 'log_panel_visible', False):
+                new_window._toggle_log_panel()
+        except Exception:
+            pass
+
         # 新窗口初始尺寸继承产生它的父窗口（拖拽过程中作为可移动窗口跟随光标，
         # 故不沿用最大化状态，只复制像素尺寸）
         try:
