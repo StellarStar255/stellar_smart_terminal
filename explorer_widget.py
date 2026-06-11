@@ -523,10 +523,14 @@ class ExplorerPanel(QWidget):
         self.tree_view.doubleClicked.connect(self._on_double_click)
         self.tree_view.customContextMenuRequested.connect(self._show_context_menu)
 
-        # Cmd+C / Cmd+V — 当 tree_view 或其子项有焦点时触发
+        # Cmd+C / Cmd+X / Cmd+V — 当 tree_view 或其子项有焦点时触发
         copy_sc = QShortcut(QKeySequence.StandardKey.Copy, self.tree_view)
         copy_sc.setContext(Qt.ShortcutContext.WidgetWithChildrenShortcut)
         copy_sc.activated.connect(lambda: self._clipboard_copy_selection(None))
+
+        cut_sc = QShortcut(QKeySequence.StandardKey.Cut, self.tree_view)
+        cut_sc.setContext(Qt.ShortcutContext.WidgetWithChildrenShortcut)
+        cut_sc.activated.connect(lambda: self._clipboard_copy_selection(None, cut=True))
 
         paste_sc = QShortcut(QKeySequence.StandardKey.Paste, self.tree_view)
         paste_sc.setContext(Qt.ShortcutContext.WidgetWithChildrenShortcut)
@@ -1152,9 +1156,13 @@ class ExplorerPanel(QWidget):
 
             menu.addSeparator()
 
-            # 复制 / 粘贴（跨面板、跨窗口）
+            # 复制 / 剪切 / 粘贴（跨面板、跨窗口）
             copy_action = menu.addAction(t("explorer.copy"))
             copy_action.triggered.connect(lambda: self._clipboard_copy_selection(file_path))
+
+            cut_action = menu.addAction(t("explorer.cut"))
+            cut_action.triggered.connect(
+                lambda: self._clipboard_copy_selection(file_path, cut=True))
 
             paste_target = file_path if is_dir else os.path.dirname(file_path)
             if explorer_clipboard.has_pastable():
@@ -1448,10 +1456,11 @@ class ExplorerPanel(QWidget):
 
     # ---------- 跨面板复制 / 粘贴 ----------
 
-    def _clipboard_copy_selection(self, fallback_path: str = None):
+    def _clipboard_copy_selection(self, fallback_path: str = None, cut: bool = False):
         """把当前选中的文件 / 文件夹放入跨面板剪贴板（同时写到系统剪贴板）。
 
         若 fallback_path 不在选中范围内，则只复制 fallback_path（右键单项）。
+        cut=True 表示剪切：粘贴时移动而非复制。
         """
         indexes = self.tree_view.selectionModel().selectedIndexes()
         paths: list[str] = []
@@ -1470,6 +1479,7 @@ class ExplorerPanel(QWidget):
         explorer_clipboard.set_items(
             [("local", p) for p in paths],
             push_local_paths=paths,
+            cut=cut,
         )
 
     def _clipboard_paste_into(self, target_dir: str):
@@ -1483,6 +1493,8 @@ class ExplorerPanel(QWidget):
         items = explorer_clipboard.effective_items()
         if not items or not target_dir:
             return
+        # 剪切（Cmd+X）→ 本地项按"移动"处理；粘贴后剪贴板一次性失效
+        move_mode = explorer_clipboard.is_cut()
         try:
             os.makedirs(target_dir, exist_ok=True)
         except Exception as e:
@@ -1510,6 +1522,9 @@ class ExplorerPanel(QWidget):
                     src_dir_abs = os.path.abspath(os.path.dirname(src.rstrip("/")))
                     same_folder = (src_dir_abs == target_abs)
                     dst = os.path.join(target_dir, name)
+                    # 剪切到原文件夹 = 原地移动，无事可做
+                    if move_mode and same_folder:
+                        continue
                     # 同源同目标：原地复制 → 自动 (N) 后缀，绝不弹窗
                     if same_folder:
                         if os.path.exists(dst):
@@ -1533,7 +1548,9 @@ class ExplorerPanel(QWidget):
                         else:  # keep
                             name = explorer_clipboard.next_free_name(name, local_name_exists)
                             dst = os.path.join(target_dir, name)
-                    if os.path.isdir(src) and not os.path.islink(src):
+                    if move_mode:
+                        shutil.move(src, dst)
+                    elif os.path.isdir(src) and not os.path.islink(src):
                         shutil.copytree(src, dst)
                     else:
                         shutil.copy2(src, dst)
@@ -1568,6 +1585,9 @@ class ExplorerPanel(QWidget):
             except Exception as e:
                 errors.append(f"{it}: {e}")
 
+        if move_mode:
+            # 剪切是一次性的：来源已被移走，残留的剪贴板路径已失效
+            explorer_clipboard.clear()
         if errors:
             QMessageBox.warning(self, t("explorer.error"), "\n".join(errors))
         self.refresh()

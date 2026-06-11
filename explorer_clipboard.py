@@ -74,6 +74,7 @@ def next_free_name(basename: str, exists_fn: Callable[[str], bool]) -> str:
 
 
 _items: list[tuple] = []
+_cut = False  # True → Paste 按"移动"处理（Cmd+X 剪切）
 _last_system_urls: list[str] = []  # abs paths we last saw/wrote on system clipboard
 
 
@@ -106,15 +107,19 @@ def _push_to_system(paths: list[str]) -> None:
     QApplication.clipboard().setMimeData(mime)
 
 
-def set_items(items: list[tuple], push_local_paths: Optional[list[str]] = None) -> None:
+def set_items(items: list[tuple], push_local_paths: Optional[list[str]] = None,
+              cut: bool = False) -> None:
     """Set internal clipboard. If push_local_paths is given, mirror those to OS clipboard.
 
     If push_local_paths is None we don't touch the system clipboard, but we
     snapshot what's currently on it so future paste calls can detect if an
     external app has overwritten it.
+
+    cut=True 表示剪切（Cmd+X）：随后的 Paste 应把来源**移动**到目标处。
     """
-    global _items, _last_system_urls
+    global _items, _last_system_urls, _cut
     _items = list(items or [])
+    _cut = bool(cut)
     if push_local_paths is not None:
         _push_to_system(push_local_paths)
         _last_system_urls = _norm(push_local_paths)
@@ -123,8 +128,9 @@ def set_items(items: list[tuple], push_local_paths: Optional[list[str]] = None) 
 
 
 def clear() -> None:
-    global _items, _last_system_urls
+    global _items, _last_system_urls, _cut
     _items = []
+    _cut = False
     _last_system_urls = _norm(_system_urls())
 
 
@@ -145,6 +151,12 @@ def effective_items() -> list[tuple]:
     if _system_was_updated_externally():
         return [("local", p) for p in _system_urls()]
     return list(_items)
+
+
+def is_cut() -> bool:
+    """Paste 是否应按"移动"处理。外部应用覆盖系统剪贴板后，剪切语义随之失效
+    （此时 Paste 的来源已是外部内容，按复制处理）。"""
+    return _cut and not _system_was_updated_externally()
 
 
 def has_items() -> bool:

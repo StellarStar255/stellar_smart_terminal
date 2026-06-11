@@ -325,6 +325,7 @@ TRANSLATIONS = {
     "explorer.copy_path": {"zh": "复制路径", "en": "Copy Path"},
     "explorer.copy_relative_path": {"zh": "复制相对路径", "en": "Copy Relative Path"},
     "explorer.copy": {"zh": "复制", "en": "Copy"},
+    "explorer.cut": {"zh": "剪切", "en": "Cut"},
     "explorer.paste": {"zh": "粘贴", "en": "Paste"},
     "explorer.paste_with_label": {"zh": "粘贴 ({label})", "en": "Paste ({label})"},
     "explorer.paste_failed": {"zh": "粘贴失败: {error}", "en": "Paste failed: {error}"},

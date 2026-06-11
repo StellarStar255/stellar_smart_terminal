@@ -157,6 +157,37 @@ class TestClipboardBridging(unittest.TestCase):
         self.assertFalse(ec.has_items())
         self.assertFalse(ec.has_pastable())
 
+    # ---------- 剪切（Cmd+X → Paste 移动）语义 ----------
+
+    def test_cut_flag_default_false(self):
+        ec.set_items([("local", "/tmp/a.txt")])
+        self.assertFalse(ec.is_cut())
+
+    def test_cut_flag_set(self):
+        ec.set_items([("local", "/tmp/a.txt")],
+                     push_local_paths=["/tmp/a.txt"], cut=True)
+        self.assertTrue(ec.is_cut())
+
+    def test_cut_invalidated_by_external_clipboard_update(self):
+        ec.set_items([("local", "/tmp/a.txt")],
+                     push_local_paths=["/tmp/a.txt"], cut=True)
+        self._set_system_urls(["/tmp/external.png"])
+        # 外部应用覆盖剪贴板后，粘贴来源已不是被剪切的文件 → 退回复制语义
+        self.assertFalse(ec.is_cut())
+
+    def test_clear_resets_cut(self):
+        ec.set_items([("local", "/tmp/a.txt")],
+                     push_local_paths=["/tmp/a.txt"], cut=True)
+        ec.clear()
+        self.assertFalse(ec.is_cut())
+
+    def test_copy_after_cut_resets_cut(self):
+        ec.set_items([("local", "/tmp/a.txt")],
+                     push_local_paths=["/tmp/a.txt"], cut=True)
+        ec.set_items([("local", "/tmp/b.txt")],
+                     push_local_paths=["/tmp/b.txt"])
+        self.assertFalse(ec.is_cut())
+
     def test_describe_single_local(self):
         ec.set_items([("local", "/tmp/a.txt")])
         self.assertEqual(ec.describe(), "a.txt")
