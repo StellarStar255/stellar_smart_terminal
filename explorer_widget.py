@@ -25,7 +25,10 @@ from PyQt6.QtWidgets import (
     QAbstractItemView, QFileDialog, QApplication, QProgressDialog,
     QStyledItemDelegate, QFileIconProvider, QListWidget, QListWidgetItem
 )
-from PyQt6.QtCore import Qt, QDir, QModelIndex, QPersistentModelIndex, pyqtSignal, QTimer, QEventLoop, QSize, QFileInfo
+from PyQt6.QtCore import (
+    Qt, QDir, QModelIndex, QPersistentModelIndex, pyqtSignal, QTimer,
+    QEventLoop, QSize, QFileInfo, QSortFilterProxyModel,
+)
 from PyQt6.QtGui import (
     QFileSystemModel, QAction, QDesktopServices, QCursor,
     QShortcut, QKeySequence, QColor, QBrush,
@@ -308,6 +311,38 @@ class FilteredFileSystemModel(QFileSystemModel):
         return result
 
 
+class _DotFileProxy(QSortFilterProxyModel):
+    """在 Windows 上过滤以 '.' 开头的隐藏文件/文件夹。
+
+    QDir.Filter.Hidden 只识别 Windows 隐藏属性，不识别 Unix 风格的
+    dot-prefix 约定。此代理补充了 dot-prefix 过滤。
+    """
+
+    def __init__(self, parent=None):
+        super().__init__(parent)
+        self._hide_dot = False
+
+    def set_hide_dot_files(self, hide: bool):
+        if self._hide_dot != hide:
+            self._hide_dot = hide
+            self.invalidateFilter()
+
+    def filterAcceptsRow(self, source_row, source_parent):
+        if not self._hide_dot:
+            return True
+        model = self.sourceModel()
+        idx = model.index(source_row, 0, source_parent)
+        return not model.fileName(idx).startswith('.')
+
+    # --- 便捷方法：透明代理到 QFileSystemModel，自动做 index 映射 ---
+
+    def filePath(self, proxy_index):
+        return self.sourceModel().filePath(self.mapToSource(proxy_index))
+
+    def fileName(self, proxy_index):
+        return self.sourceModel().fileName(self.mapToSource(proxy_index))
+
+
 class ExplorerPanel(QWidget):
     """Explorer 文件浏览器面板"""
 
@@ -445,6 +480,8 @@ class ExplorerPanel(QWidget):
         self._show_hidden = show
         if hasattr(self, 'model'):
             self.model.setFilter(self._build_filter())
+        if hasattr(self, '_proxy'):
+            self._proxy.set_hide_dot_files(not show)
         self._save_show_hidden()
 
     def _setup_ui(self):
@@ -478,10 +515,15 @@ class ExplorerPanel(QWidget):
         # 允许通过模型对文件/文件夹原地重命名
         self.model.setReadOnly(False)
 
+        # 代理模型：在 Windows 上补充过滤 dot-prefix 隐藏文件/文件夹
+        self._proxy = _DotFileProxy(self)
+        self._proxy.setSourceModel(self.model)
+        self._proxy.set_hide_dot_files(not self._show_hidden)
+
         # 树形视图（自定义子类，支持把 file:// URL 拖入并复制）
         self.tree_view = _LocalDropTreeView(self)
-        self.tree_view.setModel(self.model)
-        self.tree_view.setRootIndex(self.model.index(self._current_path))
+        self.tree_view.setModel(self._proxy)
+        self.tree_view.setRootIndex(self._proxy.mapFromSource(self.model.index(self._current_path)))
 
         # 隐藏不需要的列（只显示文件名）
         self.tree_view.setHeaderHidden(True)
@@ -542,7 +584,7 @@ class ExplorerPanel(QWidget):
         for idx in self.tree_view.selectionModel().selectedIndexes():
             if idx.column() != 0:
                 continue
-            p = self.model.filePath(idx)
+            p = self._proxy.filePath(idx)
             if not p:
                 continue
             target = p if os.path.isdir(p) else os.path.dirname(p)
@@ -740,7 +782,7 @@ class ExplorerPanel(QWidget):
                 return
             self._current_path = path
             self.model.setRootPath(path)
-            self.tree_view.setRootIndex(self.model.index(path))
+            self.tree_view.setRootIndex(self._proxy.mapFromSource(self.model.index(path)))
             # 切换了根 → 重置自动刷新基线
             self._auto_refresh_fingerprint = frozenset()
             # 换了目录 → 退出可能正在进行的搜索（结果属于旧根目录）
@@ -777,7 +819,7 @@ class ExplorerPanel(QWidget):
         # 重新设置根路径以触发目录重新扫描
         self.model.setRootPath("")
         self.model.setRootPath(current)
-        self.tree_view.setRootIndex(self.model.index(current))
+        self.tree_view.setRootIndex(self._proxy.mapFromSource(self.model.index(current)))
         self._auto_refresh_fingerprint = frozenset()
 
     # ---------- 文件搜索（递归、多关键词组合） ----------
@@ -898,7 +940,7 @@ class ExplorerPanel(QWidget):
             # 不改变根目录（否则会与工具栏目录脱节且无法返回），
             # 而是退出搜索、在原有文件树里定位并展开该文件夹。
             self.search_edit.clear()  # 触发 _exit_search
-            idx = self.model.index(abs_path)
+            idx = self._proxy.mapFromSource(self.model.index(abs_path))
             if idx.isValid():
                 self.tree_view.setCurrentIndex(idx)
                 self.tree_view.scrollTo(
@@ -931,14 +973,14 @@ class ExplorerPanel(QWidget):
         sel_path: Optional[str] = None
         idx = self.tree_view.currentIndex()
         if idx.isValid():
-            sel_path = self.model.filePath(idx)
+            sel_path = self._proxy.filePath(idx)
         self.refresh()
         self._auto_refresh_fingerprint = names
         if sel_path and os.path.exists(sel_path):
             QTimer.singleShot(50, lambda p=sel_path: self._reselect_path(p))
 
     def _reselect_path(self, path: str):
-        idx = self.model.index(path)
+        idx = self._proxy.mapFromSource(self.model.index(path))
         if idx.isValid():
             self.tree_view.setCurrentIndex(idx)
             self.tree_view.scrollTo(idx)
@@ -969,7 +1011,7 @@ class ExplorerPanel(QWidget):
         if not index.isValid():
             return
 
-        file_path = self.model.filePath(index)
+        file_path = self._proxy.filePath(index)
         if os.path.isfile(file_path):
             # 双击文件，发射信号请求在内置编辑器中打开
             self.file_double_clicked.emit(file_path)
@@ -1104,7 +1146,7 @@ class ExplorerPanel(QWidget):
         """)
 
         if index.isValid():
-            file_path = self.model.filePath(index)
+            file_path = self._proxy.filePath(index)
             is_dir = os.path.isdir(file_path)
 
             # 打开（编辑）
@@ -1276,10 +1318,10 @@ class ExplorerPanel(QWidget):
         直到新条目在视图里排好版、编辑框真的打开为止。"""
         # 在子目录里新建 → 先展开父目录，新条目才会出现在视图里
         if os.path.normpath(target_dir) != os.path.normpath(self._current_path):
-            parent_idx = self.model.index(target_dir)
+            parent_idx = self._proxy.mapFromSource(self.model.index(target_dir))
             if parent_idx.isValid():
                 self.tree_view.expand(parent_idx)
-        idx = self.model.index(new_path)
+        idx = self._proxy.mapFromSource(self.model.index(new_path))
         if idx.isValid():
             self.tree_view.setCurrentIndex(idx)
             self.tree_view.scrollTo(idx)
@@ -1309,7 +1351,7 @@ class ExplorerPanel(QWidget):
 
     def _rename_item(self, file_path: str):
         """在文件树中原地重命名文件/文件夹（不弹窗）"""
-        idx = self.model.index(file_path)
+        idx = self._proxy.mapFromSource(self.model.index(file_path))
         if not idx.isValid():
             return
         self.tree_view.setCurrentIndex(idx)
@@ -1329,7 +1371,7 @@ class ExplorerPanel(QWidget):
         for idx in sel.selectedIndexes():
             if idx.column() != 0:
                 continue
-            p = self.model.filePath(idx)
+            p = self._proxy.filePath(idx)
             if not p:
                 continue
             ap = os.path.abspath(p)
@@ -1468,7 +1510,7 @@ class ExplorerPanel(QWidget):
         for idx in indexes:
             if idx.column() != 0:
                 continue
-            p = self.model.filePath(idx)
+            p = self._proxy.filePath(idx)
             if p and p not in seen:
                 seen.add(p)
                 paths.append(p)
