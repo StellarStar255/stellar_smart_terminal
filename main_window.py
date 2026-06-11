@@ -5586,10 +5586,15 @@ class MainWindow(QMainWindow):
                 new_window.show()
 
                 # macOS 首次创建原生窗口时可能自行微调位置/尺寸（级联、约束到
-                # 屏幕等），把 show 前设置的几何改掉，显示后再强制校正一次。
-                def _realign():
-                    if not sip.isdeleted(new_window) and not new_window.isMaximized():
+                # 屏幕等），且调整可能发生在首帧之后——显示后反复校正几次，
+                # 直到几何与父窗口一致为止（约 0/120/240/360ms 四次断言）。
+                def _realign(attempt=0):
+                    if sip.isdeleted(new_window) or new_window.isMaximized():
+                        return
+                    if new_window.geometry() != target_geo:
                         new_window.setGeometry(target_geo)
+                    if attempt < 3:
+                        QTimer.singleShot(120, lambda: _realign(attempt + 1))
                 QTimer.singleShot(0, _realign)
 
         # 激活窗口
