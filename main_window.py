@@ -5618,6 +5618,27 @@ class MainWindow(QMainWindow):
                 # 鼠标释放，停止拖拽跟随
                 drag_timer.stop()
                 if not sip.isdeleted(new_window) and new_window.isVisible():
+                    # 吸附对齐：松手时若与父窗口的边缘只差一点（肉眼想对齐但差
+                    # 几十像素），自动贴齐父窗口，消除"差一丁点错位"。
+                    if not sip.isdeleted(self) and self.isVisible():
+                        SNAP = 56
+                        nx, ny = new_window.x(), new_window.y()
+                        pf = self.frameGeometry()
+                        nf = new_window.frameGeometry()
+                        # 上对齐 / 贴在父窗口正下方
+                        if abs(ny - pf.y()) <= SNAP:
+                            ny = pf.y()
+                        elif abs(ny - pf.bottom()) <= SNAP:
+                            ny = pf.bottom() + 1
+                        # 左对齐 / 贴在父窗口右侧 / 贴在父窗口左侧
+                        if abs(nx - pf.x()) <= SNAP:
+                            nx = pf.x()
+                        elif abs(nx - (pf.right() + 1)) <= SNAP:
+                            nx = pf.right() + 1
+                        elif abs((nx + nf.width()) - pf.x()) <= SNAP:
+                            nx = pf.x() - nf.width()
+                        if (nx, ny) != (new_window.x(), new_window.y()):
+                            new_window.move(nx, ny)
                     new_window.raise_()
                     new_window.activateWindow()
                     if new_window.active_terminal:
