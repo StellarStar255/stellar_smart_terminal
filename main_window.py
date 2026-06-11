@@ -5556,9 +5556,9 @@ class MainWindow(QMainWindow):
             window_x = global_pos.x() - drag_offset_x
             window_y = global_pos.y() - drag_offset_y
         else:
-            # 菜单触发：相对父窗口层叠偏移，不跟随鼠标
-            window_x = self.x() + 40
-            window_y = self.y() + 40
+            # 菜单触发：与父窗口完全重合（同位置同尺寸），新窗口在最上层获得焦点
+            window_x = self.x()
+            window_y = self.y()
         # 保证窗口完整留在屏幕内：否则越界部分会被 macOS 裁掉，使「与父窗口同尺寸」的
         # 新窗口被压窄变小。
         ref_point = global_pos if follow_drag else self.frameGeometry().center()
