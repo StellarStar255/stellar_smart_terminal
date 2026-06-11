@@ -1403,6 +1403,11 @@ class MainWindow(QMainWindow):
     # 窗口计数器（用于生成唯一窗口标题）
     _window_counter = 0
 
+    # 拖拽分离时鼠标在新窗口内的抓取点：X 在标题栏中间偏左，Y 在标题栏中间。
+    # 初始摆放与跟随轮询共用，必须一致，否则窗口会在拖拽开始时跳一下。
+    _DETACH_GRAB_X = 200
+    _DETACH_GRAB_Y = 15
+
     # 全局共享的窗口导航面板
     _global_window_navigator = None
     # 导航面板停靠方式：'float'=独立浮动窗口（默认）；'embed'=嵌入每个窗口左侧栏
@@ -5562,13 +5567,9 @@ class MainWindow(QMainWindow):
             pass
 
         if follow_drag:
-            # 调整窗口位置让鼠标正好在标题栏上
-            # X: 鼠标在窗口内约 200px 处（标题栏中间偏左）
-            # Y: 鼠标在标题栏中间（约 15px 处）
-            drag_offset_x = 200
-            drag_offset_y = 15
-            window_x = global_pos.x() - drag_offset_x
-            window_y = global_pos.y() - drag_offset_y
+            # 调整窗口位置让鼠标正好在标题栏上（抓取点见 _DETACH_GRAB_*）
+            window_x = global_pos.x() - self._DETACH_GRAB_X
+            window_y = global_pos.y() - self._DETACH_GRAB_Y
             # 保证窗口完整留在屏幕内：否则越界部分会被 macOS 裁掉，使「与父窗口
             # 同尺寸」的新窗口被压窄变小。
             window_x, window_y = MainWindow._clamp_window_pos(
@@ -5608,13 +5609,25 @@ class MainWindow(QMainWindow):
         if not follow_drag:
             if new_window.active_terminal:
                 new_window.active_terminal.setFocus()
-            if self.tab_widget.count() == 0:
-                self._add_new_tab()
-                self._update_running_state(False)
-            return
+        else:
+            self._start_detach_drag_follow(new_window)
 
-        # 使用 timer 轮询鼠标位置实现拖拽跟随
-        # （macOS 上 startSystemMove() 因鼠标按下事件不在新窗口上而导致窗口漂移）
+        # 如果主窗口没有标签页了，创建一个新的
+        if self.tab_widget.count() == 0:
+            self._add_new_tab()
+            self._update_running_state(False)
+
+    def _start_detach_drag_follow(self, new_window):
+        """拖拽分离后让新窗口跟随鼠标，松手时做吸附对齐。
+
+        （macOS 上 startSystemMove() 因鼠标按下事件不在新窗口上而导致窗口漂移，
+        故用 timer 轮询鼠标位置实现跟随。）
+        """
+        from PyQt6.QtWidgets import QApplication
+        from PyQt6.QtGui import QCursor
+
+        drag_offset_x = self._DETACH_GRAB_X
+        drag_offset_y = self._DETACH_GRAB_Y
         drag_timer = QTimer()
         drag_timer.setInterval(16)  # ~60fps 平滑跟随
         new_window._detach_drag_timer = drag_timer  # prevent GC
@@ -5623,8 +5636,6 @@ class MainWindow(QMainWindow):
             if sip.isdeleted(new_window):
                 drag_timer.stop()
                 return
-            from PyQt6.QtWidgets import QApplication
-            from PyQt6.QtGui import QCursor
             buttons = QApplication.mouseButtons()
             if buttons & Qt.MouseButton.LeftButton:
                 cursor_pos = QCursor.pos()
@@ -5672,11 +5683,6 @@ class MainWindow(QMainWindow):
 
         drag_timer.timeout.connect(_follow_mouse)
         drag_timer.start()
-
-        # 如果主窗口没有标签页了，创建一个新的
-        if self.tab_widget.count() == 0:
-            self._add_new_tab()
-            self._update_running_state(False)
 
     def _rebuild_tab_mappings(self):
         """重建标签页映射"""
