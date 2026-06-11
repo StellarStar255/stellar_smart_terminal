@@ -9405,6 +9405,18 @@ class MainWindow(QMainWindow):
                 MainWindow._global_window_navigator.show()
                 MainWindow._global_window_navigator.raise_()
                 MainWindow._sync_nav_checkbox_state(True)
+        # 回写所有存活导航面板的 Embed 勾选框：内嵌面板在隐藏期间不会销毁，
+        # 用户在它上面取消勾选留下的状态会一直残留，重新切回内嵌时必须同步回来
+        for nav in MainWindow._iter_navigators():
+            cb = getattr(nav, 'embed_checkbox', None)
+            if cb is None:
+                continue
+            try:
+                cb.blockSignals(True)
+                cb.setChecked(mode == 'embed')
+                cb.blockSignals(False)
+            except Exception:
+                pass
         MainWindow._persist_navigator_dock_mode()
 
     @staticmethod
