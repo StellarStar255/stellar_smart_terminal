@@ -142,6 +142,7 @@ class GitManager(QObject):
             result = subprocess.run(
                 ['git', 'rev-parse', '--show-toplevel'],
                 cwd=path, capture_output=True, text=True, timeout=5,
+                encoding='utf-8', errors='replace',
                 creationflags=SUBPROCESS_FLAGS,
             )
             if result.returncode == 0:
@@ -270,6 +271,11 @@ class GitManager(QObject):
             stdout=subprocess.PIPE,
             stderr=subprocess.PIPE,
             text=True,
+            # git 的输出（diff 内容、路径等）是 UTF-8；Windows 中文系统的默认
+            # locale 编码是 cp936/GBK，不显式指定会在 diff 含中文时抛
+            # UnicodeDecodeError（表现为生成提交信息拿不到 diff、查看 diff 报错）
+            encoding='utf-8',
+            errors='replace',
             env=env,
             start_new_session=True,
             creationflags=SUBPROCESS_FLAGS,
