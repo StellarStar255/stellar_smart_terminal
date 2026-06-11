@@ -5456,8 +5456,12 @@ class MainWindow(QMainWindow):
             pass
         return x, y
 
-    def _detach_tab(self, index, global_pos):
-        """将标签页分离为独立窗口（创建完整的 MainWindow）"""
+    def _detach_tab(self, index, global_pos, follow_drag=True):
+        """将标签页分离为独立窗口（创建完整的 MainWindow）
+
+        follow_drag=True 时新窗口跟随鼠标拖拽（拖出标签触发）；
+        False 时直接在父窗口附近层叠展开（右键菜单触发）。
+        """
         # 至少保留一个标签页
         if self.tab_widget.count() <= 1:
             return
@@ -5543,17 +5547,23 @@ class MainWindow(QMainWindow):
         except Exception:
             pass
 
-        # 调整窗口位置让鼠标正好在标题栏上
-        # X: 鼠标在窗口内约 200px 处（标题栏中间偏左）
-        # Y: 鼠标在标题栏中间（约 15px 处）
-        drag_offset_x = 200
-        drag_offset_y = 15
-        window_x = global_pos.x() - drag_offset_x
-        window_y = global_pos.y() - drag_offset_y
+        if follow_drag:
+            # 调整窗口位置让鼠标正好在标题栏上
+            # X: 鼠标在窗口内约 200px 处（标题栏中间偏左）
+            # Y: 鼠标在标题栏中间（约 15px 处）
+            drag_offset_x = 200
+            drag_offset_y = 15
+            window_x = global_pos.x() - drag_offset_x
+            window_y = global_pos.y() - drag_offset_y
+        else:
+            # 菜单触发：相对父窗口层叠偏移，不跟随鼠标
+            window_x = self.x() + 40
+            window_y = self.y() + 40
         # 保证窗口完整留在屏幕内：否则越界部分会被 macOS 裁掉，使「与父窗口同尺寸」的
         # 新窗口被压窄变小。
+        ref_point = global_pos if follow_drag else self.frameGeometry().center()
         window_x, window_y = MainWindow._clamp_window_pos(
-            window_x, window_y, self.width(), self.height(), global_pos)
+            window_x, window_y, self.width(), self.height(), ref_point)
 
         new_window.move(window_x, window_y)
         new_window.show()
@@ -5564,6 +5574,15 @@ class MainWindow(QMainWindow):
 
         # 添加到列表以跟踪
         self.detached_windows.append(new_window)
+
+        # 菜单触发时无拖拽，直接聚焦新窗口终端即可
+        if not follow_drag:
+            if new_window.active_terminal:
+                new_window.active_terminal.setFocus()
+            if self.tab_widget.count() == 0:
+                self._add_new_tab()
+                self._update_running_state(False)
+            return
 
         # 使用 timer 轮询鼠标位置实现拖拽跟随
         # （macOS 上 startSystemMove() 因鼠标按下事件不在新窗口上而导致窗口漂移）
@@ -9836,6 +9855,12 @@ class MainWindow(QMainWindow):
         # 切换工作目录到该 tab 终端的当前路径
         switch_path_action = menu.addAction(t("tab.switch_to_path"))
         switch_path_action.triggered.connect(lambda: self._switch_dir_to_tab_path(tab_index))
+
+        # 扩展为新窗口（等同拖出标签，但不需要手动拖拽）
+        detach_action = menu.addAction(t("tab.detach"))
+        detach_action.setEnabled(self.tab_widget.count() > 1)
+        detach_action.triggered.connect(
+            lambda: self._detach_tab(tab_index, None, follow_drag=False))
 
         menu.addSeparator()
 
