@@ -3934,7 +3934,7 @@ class TerminalWidget(QWidget):
         if self._RE_SSH_PWD_PROMPT.search(text):
             # 先清除再发送，避免万一回包再次触发导致重复输入错误密码
             self._pending_ssh_password = None
-            self._write_to_backend((pw + '\n').encode('utf-8'))
+            self._write_to_backend((pw + '\r').encode('utf-8'))
 
     def send_text(self, text: str):
         """发送文本到终端"""
@@ -5163,8 +5163,8 @@ if (hasFileURL) {{
             self._start_and_execute(commands)
             return
         for cmd in commands:
-            # 发送命令并加换行
-            data = (cmd + '\n').encode('utf-8')
+            # 发送命令并加回车（终端中 Enter 键发送 \r 而非 \n）
+            data = (cmd + '\r').encode('utf-8')
             if self._write_to_backend(data):
                 # 记录输入
                 if cmd.strip():
@@ -5181,7 +5181,7 @@ if (hasFileURL) {{
         def delayed_execute():
             if self._backend and self._backend.is_running:
                 for cmd in commands:
-                    data = (cmd + '\n').encode('utf-8')
+                    data = (cmd + '\r').encode('utf-8')
                     if self._write_to_backend(data):
                         if cmd.strip():
                             self.input_recorded.emit(cmd)

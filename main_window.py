@@ -5921,7 +5921,7 @@ class MainWindow(QMainWindow):
             if not commands or not terminal.is_running():
                 return
             cmd = commands.pop(0)
-            terminal.send_text(cmd + '\n')
+            terminal.send_text(cmd + '\r')
             if commands:
                 QTimer.singleShot(300, send_next)
 
