@@ -5555,18 +5555,28 @@ class MainWindow(QMainWindow):
             drag_offset_y = 15
             window_x = global_pos.x() - drag_offset_x
             window_y = global_pos.y() - drag_offset_y
+            # 保证窗口完整留在屏幕内：否则越界部分会被 macOS 裁掉，使「与父窗口
+            # 同尺寸」的新窗口被压窄变小。
+            window_x, window_y = MainWindow._clamp_window_pos(
+                window_x, window_y, self.width(), self.height(), global_pos)
+            new_window.move(window_x, window_y)
+            new_window.show()
         else:
-            # 菜单触发：与父窗口完全重合（同位置同尺寸），新窗口在最上层获得焦点
-            window_x = self.x()
-            window_y = self.y()
-        # 保证窗口完整留在屏幕内：否则越界部分会被 macOS 裁掉，使「与父窗口同尺寸」的
-        # 新窗口被压窄变小。
-        ref_point = global_pos if follow_drag else self.frameGeometry().center()
-        window_x, window_y = MainWindow._clamp_window_pos(
-            window_x, window_y, self.width(), self.height(), ref_point)
+            # 菜单触发：与父窗口逐像素重合。setGeometry 按客户区对齐（自动计入
+            # 标题栏高度）；父窗口已最大化则直接继承最大化状态。
+            target_geo = self.geometry()
+            if self.isMaximized():
+                new_window.showMaximized()
+            else:
+                new_window.setGeometry(target_geo)
+                new_window.show()
 
-        new_window.move(window_x, window_y)
-        new_window.show()
+                # macOS 首次创建原生窗口时可能自行微调位置/尺寸（级联、约束到
+                # 屏幕等），把 show 前设置的几何改掉，显示后再强制校正一次。
+                def _realign():
+                    if not sip.isdeleted(new_window) and not new_window.isMaximized():
+                        new_window.setGeometry(target_geo)
+                QTimer.singleShot(0, _realign)
 
         # 激活窗口
         new_window.raise_()
