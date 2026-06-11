@@ -2805,8 +2805,19 @@ class GitPanel(QWidget):
         - '127.0.0.1:7897'             → 'http://127.0.0.1:7897'
         - 'socks5://127.0.0.1:1080'    → 不变（其它 scheme 不动）
         - 空串                          → 空串
+
+        中文输入法很容易打出全角字符（如 'http://127.0.0.1：7897' 里的全角
+        冒号 U+FF1A），git/curl 会报 "URL using bad/illegal format" 导致
+        push/pull 全部失败，这里统一折算成半角。启动时 _apply_persisted_git_proxy
+        会用归一化结果回写配置，历史上存坏的值也能自愈。
         """
         url = (url or '').strip()
+        if not url:
+            return ''
+        # 全角 ASCII 区（U+FF01–U+FF5E）→ 半角；全角空格 → 普通空格
+        url = url.translate(
+            {c: c - 0xFEE0 for c in range(0xFF01, 0xFF5F)} | {0x3000: 0x20}
+        ).strip()
         if not url:
             return ''
         if '://' in url:
