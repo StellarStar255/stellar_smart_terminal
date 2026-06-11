@@ -7066,18 +7066,21 @@ class MainWindow(QMainWindow):
             else:
                 self._update_splitter_sizes()
         else:
+            # 有打开文件时编辑器不消失：关面板只影响左侧栏，不清掉用户正在看的
+            # 文件（减少认知负担）。必须在 hide 容器前判断可见性——编辑器若内嵌在
+            # explorer_splitter 里，容器一藏 isVisible() 就恒为 False 了。
+            keep_editor = (hasattr(self, 'editor_area')
+                           and self.editor_area.isVisible()
+                           and self._editor_has_any_file())
             self.explorer_panel_container.hide()
 
-            # 同时隐藏文件编辑器
-            if hasattr(self, 'editor_area') and self.editor_area.isVisible():
-                self.editor_area.hide()
-
-            # 如果编辑器在 main_splitter 中（水平分屏模式），归位到 explorer_splitter
-            if hasattr(self, 'editor_area') and self.main_splitter.indexOf(self.editor_area) >= 0:
-                self.editor_area.setParent(None)
-                self.explorer_splitter.addWidget(self.editor_area)
-                self.editor_area.hide()
-                self.explorer_splitter.setSizes([400, 0])
+            if keep_editor:
+                # 内嵌在 explorer_splitter 里的迁到 main_splitter 继续显示
+                if self.main_splitter.indexOf(self.editor_area) < 0:
+                    self._place_editor_in_main_splitter()
+            elif hasattr(self, 'editor_area'):
+                # 没有打开文件：隐藏并归位到默认家
+                self._home_editor_hidden()
 
             # 如果其他面板也隐藏，则隐藏整个左侧容器
             if not self.git_panel_visible and not getattr(self, 'remote_panel_visible', False):
@@ -7195,18 +7198,23 @@ class MainWindow(QMainWindow):
         self.main_splitter.setUpdatesEnabled(False)
 
         if self.git_panel_visible:
-            # 隐藏 Explorer 面板
-            self.explorer_panel_visible = False
-            self.explorer_toggle_btn.setChecked(False)
-            self.explorer_panel_container.hide()
-
             # 有打开的文件时不收起编辑器——切左侧面板不该牵连中间编辑区，
             # 大面积布局跳变会打断视觉注意力（与 Remote 面板的恢复逻辑对齐）：
             # - 编辑器已在 main_splitter（左右分屏）→ 原地不动
             # - 停在 explorer/remote_splitter（上下分屏，宿主面板即将隐藏）→
             #   迁到 main_splitter 继续以左右分屏显示，文件不消失
-            if (self._editor_has_any_file()
-                    and hasattr(self, 'editor_area') and self.editor_area.isVisible()):
+            # 必须在 hide 任何容器之前判断可见性：编辑器若内嵌在 explorer/
+            # remote 面板里，容器一藏 isVisible() 就恒为 False 了。
+            keep_editor = (hasattr(self, 'editor_area')
+                           and self.editor_area.isVisible()
+                           and self._editor_has_any_file())
+
+            # 隐藏 Explorer 面板
+            self.explorer_panel_visible = False
+            self.explorer_toggle_btn.setChecked(False)
+            self.explorer_panel_container.hide()
+
+            if keep_editor:
                 if self.main_splitter.indexOf(self.editor_area) < 0:
                     self._place_editor_in_main_splitter()
             else:
@@ -7356,9 +7364,18 @@ class MainWindow(QMainWindow):
                 else:
                     self._place_editor_in_remote_splitter()
         else:
+            # 有打开文件（含远程文件）时编辑器不消失——在 hide 容器前判断,
+            # 内嵌在 remote_splitter 里的迁到 main_splitter 继续显示
+            keep_editor = (hasattr(self, 'editor_area')
+                           and self.editor_area.isVisible()
+                           and self._editor_has_any_file())
             self.remote_panel_container.hide()
-            # 隐藏 Remote 时把编辑器收回默认家，避免遗留在隐藏的 remote_splitter 内
-            self._home_editor_hidden()
+            if keep_editor:
+                if self.main_splitter.indexOf(self.editor_area) < 0:
+                    self._place_editor_in_main_splitter()
+            else:
+                # 没有打开文件：收回默认家，避免遗留在隐藏的 remote_splitter 内
+                self._home_editor_hidden()
             if not self.explorer_panel_visible and not self.git_panel_visible:
                 self.left_panel_container.hide()
 
