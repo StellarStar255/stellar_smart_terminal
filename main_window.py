@@ -5486,6 +5486,27 @@ class MainWindow(QMainWindow):
         logger.info(
             "[align] start: parent_geo=%s parent_max=%s child_visible=%s child_geo=%s",
             target_geo, parent_maximized, new_window.isVisible(), new_window.geometry())
+
+        # 未显示的子窗口（菜单 expand 路径）：先以全透明显示，几何对齐后再显形。
+        # 系统（台前调度等）会先把新窗口放到错误位置、我们再纠正——这一来一回
+        # 在隐形期间完成，用户看到的就是窗口直接出现在正确位置，没有跳变。
+        # 拖拽路径窗口本就可见（要跟随光标），不走隐形逻辑。
+        reveal_state = {'revealed': new_window.isVisible()}
+
+        def _reveal():
+            if reveal_state['revealed'] or sip.isdeleted(new_window):
+                return
+            reveal_state['revealed'] = True
+            op = getattr(new_window, '_window_opacity', 100)
+            if not (isinstance(op, int) and 10 <= op <= 100):
+                op = 100
+            new_window.setWindowOpacity(op / 100.0)
+
+        if not reveal_state['revealed']:
+            new_window.setWindowOpacity(0.0)
+            # 兜底：即使始终对不齐，450ms 后也必须显形，绝不留下隐形窗口
+            QTimer.singleShot(450, _reveal)
+
         if parent_maximized:
             # 先尝试直接继承最大化状态（对最大化几何做 setGeometry 经常不生效）。
             # 注意 showMaximized 可能被台前调度（Stage Manager）拦下而静默失败
@@ -5536,6 +5557,7 @@ class MainWindow(QMainWindow):
             if new_window.isMaximized():
                 # 子窗口确已最大化：几何由系统接管，只校左侧栏
                 _fix_left_width()
+                _reveal()
                 stable += 1
             elif parent_maximized and attempt < 2:
                 # showMaximized 可能尚未生效（异步/动画），先等两个快速 tick。
@@ -5556,10 +5578,15 @@ class MainWindow(QMainWindow):
                 # 不会渲染出中间态。
                 new_window.resize(target_geo.width(), target_geo.height() - 1)
                 new_window.setGeometry(target_geo)
+                # 几何已到位（即便还在强制下发确认期）：左侧栏与显形都尽早做，
+                # 不必等稳定期——同一事件循环内完成，显形时画面已是最终状态
+                _fix_left_width()
+                _reveal()
                 stable = 0
             else:
                 stable += 1
                 _fix_left_width()
+                _reveal()
             if stable >= 3:
                 logger.info("[align] settled at tick %d: child_geo=%s", attempt, new_window.geometry())
                 return
