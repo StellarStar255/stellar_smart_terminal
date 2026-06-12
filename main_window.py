@@ -5475,22 +5475,24 @@ class MainWindow(QMainWindow):
 
         macOS 对新建原生窗口可能自行级联偏移、约束到屏幕（位置右移/尺寸压窄），
         且调整常发生在首帧之后——单次 setGeometry（或固定次数的少量重试）会被
-        悄悄覆盖，这正是「新窗口宽度与父窗口对不齐」的根因。这里在 ~1.5s 内反复
+        悄悄覆盖，这正是「新窗口宽度与父窗口对不齐」的根因。这里在 ~3s 内反复
         断言目标几何，连续 3 次确认无偏差才收手；每次几何就位后还把左侧栏宽度
         按共享值对齐——窗口被压窄再校正回来时 QSplitter 的比例缩放会破坏左侧栏
         的绝对像素宽度，而 _prime_left_panel_sync 的 300ms 兜底可能跑在几何
         稳定之前，必须在这里补一次。
         """
         parent_maximized = self.isMaximized()
+        target_geo = self.geometry()
         logger.info(
             "[align] start: parent_geo=%s parent_max=%s child_visible=%s child_geo=%s",
-            self.geometry(), parent_maximized, new_window.isVisible(), new_window.geometry())
+            target_geo, parent_maximized, new_window.isVisible(), new_window.geometry())
         if parent_maximized:
-            # 对最大化几何做 setGeometry 在 macOS 上经常不生效，直接继承最大化状态
+            # 先尝试直接继承最大化状态（对最大化几何做 setGeometry 经常不生效）。
+            # 注意 showMaximized 可能被台前调度（Stage Manager）拦下而静默失败
+            # ——子窗口拿到被压窄的普通几何且从未进入最大化状态。校正循环里
+            # 会检测这种情况并退回逐像素几何断言。
             new_window.showMaximized()
-            target_geo = None
         else:
-            target_geo = self.geometry()
             if new_window.isVisible():
                 # 已显示的窗口（拖拽松手路径）：当前几何必然 ≠ 目标，直接断言
                 new_window.setGeometry(target_geo)
@@ -5531,14 +5533,19 @@ class MainWindow(QMainWindow):
                 "[align] tick %d: stable=%d child_max=%s child_geo=%s frame=%s target=%s",
                 attempt, stable, new_window.isMaximized(),
                 new_window.geometry(), new_window.frameGeometry(), target_geo)
-            if target_geo is None or new_window.isMaximized():
-                # 最大化路径（或用户已自行最大化）：几何由系统接管，只校左侧栏。
-                # 最大化动画完成时机不定，不做提前收手，跑满整个校正窗口。
+            if new_window.isMaximized():
+                # 子窗口确已最大化：几何由系统接管，只校左侧栏
                 _fix_left_width()
+                stable += 1
+            elif parent_maximized and attempt < 3:
+                # showMaximized 可能尚未生效（异步/动画），先等几个 tick。
+                # 若被台前调度拦下（子窗口始终进不了最大化状态），从第 3 个
+                # tick 起退回下面的逐像素几何断言。
+                stable = 0
             elif new_window.geometry() != target_geo:
                 new_window.setGeometry(target_geo)
                 stable = 0
-            elif attempt < 5:
+            elif attempt < 8:
                 # 前几个 tick 即使 Qt 侧已读到目标几何，也强制重新下发一次：
                 # 刚显示的窗口可能被系统（台前调度 Stage Manager、屏幕约束等）
                 # 挪走而 Qt 几何缓存未同步——看似已对齐实则没有，直接 setGeometry
