@@ -821,7 +821,8 @@ class TerminalWidget(QWidget):
     move_split_left_requested = pyqtSignal()  # 请求将当前分屏向左移动
     move_split_up_requested = pyqtSignal()  # 请求将当前分屏向上移动
     rename_split_requested = pyqtSignal()  # 请求重命名当前分屏（显示/修改顶部标题栏）
-    attention_requested = pyqtSignal()  # 疑似本轮命令/Claude 执行完毕（输出停顿或响铃），请求导航提醒
+    attention_requested = pyqtSignal()  # 疑似本轮命令/Claude 执行完毕（输出停顿），请求导航提醒
+    interaction_requested = pyqtSignal()  # 终端响铃（BEL）：程序正在等待用户操作（如 Claude 确认提示）
 
     # 鲜艳的终端颜色 - One Dark Pro 风格
     DEFAULT_COLORS = {
@@ -1044,6 +1045,9 @@ class TerminalWidget(QWidget):
         # 是否有"待结算"的用户命令（提交过回车后置位，提醒发出时消费）。
         # 没有它时输出停顿不算执行完毕，避免 TUI 闲置动画产生假提醒。
         self._pending_user_command = False
+        # 上次检测到的交互提示签名：同一个确认框在 TUI 周期性重绘下会反复触发
+        # 停顿结算，凭签名去重，只对"新出现"的提示发 interaction_requested。
+        self._last_interaction_sig = None
 
         # 设置
         self.setFocusPolicy(Qt.FocusPolicy.StrongFocus)
@@ -1687,9 +1691,11 @@ class TerminalWidget(QWidget):
             text = self._RE_OSC_OTHER.sub('', text)         # 其他 OSC 序列 (7, 133 等)
 
             # 终端响铃（BEL）：Claude Code / CLI 完成一轮或需要注意时常会响铃。
-            # 此时 OSC 序列里作为终止符的 BEL 已被上面剥掉，残留的 \x07 即真正的响铃 → 即时提醒。
+            # 此时 OSC 序列里作为终止符的 BEL 已被上面剥掉，残留的 \x07 即真正的响铃。
+            # 响铃视为"需要用户操作"→ 发 interaction_requested，即使是正在看的
+            # 活动终端也点亮导航绿点（用户要求：需要指令时必提示，避免错过）。
             if '\x07' in text:
-                self.attention_requested.emit()
+                self.interaction_requested.emit()
 
             # pyte 不支持的字符串序列（内容会泄漏到显示缓冲区）
             text = self._RE_DCS.sub('', text)               # DCS 设备控制字符串
@@ -1771,18 +1777,63 @@ class TerminalWidget(QWidget):
             self._debug_capture_enabled = True
             logger.info(f"[Terminal] Debug capture ENABLED → {capture_path}")
 
+    # 交互等待页脚标记：只在程序等待用户操作期间显示、回答后即消失的文案
+    # （Claude Code 确认框的 "Esc to cancel"、CLI 的 y/n 询问等）。
+    # 不能用问题正文（如 "Do you want"）做标记——回答后正文会残留在回显里。
+    # 注意不要加 "esc to interrupt"，那是 Claude 运行中显示的，不是等待操作。
+    _INTERACTION_MARKERS = (
+        'esc to cancel',
+        'esc to exit',
+        'enter to confirm',
+        'press enter to continue',
+        '(y/n',
+        '[y/n',
+        'y/n)',
+        'yes/no',
+    )
+
+    def _detect_interaction_prompt(self):
+        """检测可见屏幕底部是否有等待用户操作的交互提示。
+
+        返回匹配行拼接成的签名字符串（供调用方去重），没有提示则返回 None。
+        """
+        try:
+            lines = self.screen.display[-15:]
+        except Exception:
+            return None
+        matched = [
+            line.strip() for line in lines
+            if any(marker in line.lower() for marker in self._INTERACTION_MARKERS)
+        ]
+        if not matched:
+            return None
+        return '\n'.join(matched)
+
     def _on_activity_settled(self):
         """输出停顿超过阈值：疑似本轮命令/Claude 执行完毕 → 请求导航提醒。
 
-        是否真正打标由 MainWindow 决定（正在看的活动终端不打扰）。这里只在确有
-        一定量输出后才上报，过滤掉纯按键回显这类微小活动。
+        若屏幕上出现等待操作的交互提示（确认框 / y/n 询问），发
+        interaction_requested——该信号即使在活动终端也会点亮导航绿点，且不依赖
+        _pending_user_command（Claude 跑到一半弹确认框时并没有新的用户回车）。
+        否则按"执行完毕"处理：是否真正打标由 MainWindow 决定（正在看的活动
+        终端不打扰）。只在确有一定量输出后才上报，过滤掉纯按键回显这类微小活动。
         """
         if not self._had_output_activity:
             return
         substantial = self._activity_bytes >= 4
         self._had_output_activity = False
         self._activity_bytes = 0
-        if substantial and self._pending_user_command:
+        if not substantial:
+            return
+        sig = self._detect_interaction_prompt()
+        if sig is not None:
+            if sig != self._last_interaction_sig:
+                self._last_interaction_sig = sig
+                self._pending_user_command = False
+                self.interaction_requested.emit()
+            return
+        self._last_interaction_sig = None
+        if self._pending_user_command:
             self._pending_user_command = False
             self.attention_requested.emit()
 
@@ -2603,6 +2654,10 @@ class TerminalWidget(QWidget):
         key = event.key()
         modifiers = event.modifiers()
         text = event.text()
+
+        # 用户按键 = 已响应当前交互提示；重置签名，让下一个确认框
+        # （哪怕页脚文案与上一个完全相同）也能再次点亮导航绿点。
+        self._last_interaction_sig = None
 
         # 调试：Ctrl+Shift+D 导出 pyte 缓冲区到文件
         if (key == Qt.Key.Key_D and

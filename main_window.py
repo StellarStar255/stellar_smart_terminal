@@ -4750,6 +4750,7 @@ class MainWindow(QMainWindow):
                     terminal.split_vertical_requested.disconnect()
                     terminal.rename_split_requested.disconnect()
                     terminal.attention_requested.disconnect()
+                    terminal.interaction_requested.disconnect()
                 except (TypeError, RuntimeError):
                     pass  # Signal may already be disconnected
 
@@ -4771,6 +4772,7 @@ class MainWindow(QMainWindow):
                 terminal.move_split_up_requested.connect(self._move_split_up)
                 terminal.rename_split_requested.connect(lambda t=terminal: self._rename_split(t))
                 terminal.attention_requested.connect(lambda t=terminal: self._on_terminal_attention(t))
+                terminal.interaction_requested.connect(lambda t=terminal: self._on_terminal_interaction(t))
                 terminal.installEventFilter(self)
 
                 # 重新设置快速命令提供者，指向当前窗口的预设
@@ -4894,6 +4896,7 @@ class MainWindow(QMainWindow):
         terminal.move_split_up_requested.connect(self._move_split_up)
         terminal.rename_split_requested.connect(lambda t=terminal: self._rename_split(t))
         terminal.attention_requested.connect(lambda t=terminal: self._on_terminal_attention(t))
+        terminal.interaction_requested.connect(lambda t=terminal: self._on_terminal_interaction(t))
 
         # 设置工作目录（用于自动启动时）
         terminal.set_working_dir(self._window_cwd)
@@ -4916,6 +4919,11 @@ class MainWindow(QMainWindow):
             # 检查是否是终端控件
             if isinstance(obj, TerminalWidget):
                 self.active_terminal = obj
+        elif event.type() == QEvent.Type.KeyPress:
+            # 用户在点亮绿点的来源终端中按键 → 视为已响应该交互提示，清除绿点。
+            # （来自其他终端/Git 面板的提醒不受影响，仍靠切窗口/切 tab 清除）
+            if obj is getattr(self, '_nav_attention_source', None):
+                self._clear_nav_attention()
         return super().eventFilter(obj, event)
 
     def _shift_held(self):
@@ -10100,18 +10108,30 @@ class MainWindow(QMainWindow):
         # 正在前台看着的活动终端不打扰
         if self.isActiveWindow() and terminal is self.active_terminal:
             return
-        self._request_nav_attention()
+        self._request_nav_attention(terminal)
 
-    def _request_nav_attention(self):
+    def _on_terminal_interaction(self, terminal):
+        """某个终端正在等待用户操作（响铃 / 确认框 / y/n 询问）。
+
+        与"执行完毕"不同：哪怕是当前激活窗口里正在看的活动终端，也点亮导航
+        绿点（用户要求：每次需要指令都提示一次，避免错过）。用户在该终端
+        按键响应后由 eventFilter 清除。
+        """
+        self._request_nav_attention(terminal)
+
+    def _request_nav_attention(self, source=None):
         """点亮本窗口的导航绿点（后台任务完成提醒的通用入口）。
 
         终端命令结束之外的来源（如 Git 面板生成提交信息完成）也可调用。
-        「前台时是否不打扰」的判断由各来源自行决定后再调用——终端要求
-        「不是正在看的活动终端」，Git 生成则要求「窗口不在前台」。
+        「前台时是否不打扰」的判断由各来源自行决定后再调用——终端"执行完毕"
+        要求「不是正在看的活动终端」，"等待操作"则无条件点亮，Git 生成要求
+        「窗口不在前台」。source 记录点亮来源终端：用户在该终端按键即视为
+        已响应并清除绿点（非终端来源传 None，只靠切窗口/切 tab 清除）。
         """
         if getattr(self, '_nav_attention', False):
             return  # 已经在提醒，避免重复刷新
         self._nav_attention = True
+        self._nav_attention_source = source
         try:
             MainWindow._broadcast_navigator_refresh(invalidate_cache=True)
         except Exception:
@@ -10119,6 +10139,7 @@ class MainWindow(QMainWindow):
 
     def _clear_nav_attention(self):
         """清除本窗口的导航提醒小标（用户已查看）"""
+        self._nav_attention_source = None
         if getattr(self, '_nav_attention', False):
             self._nav_attention = False
             try:
