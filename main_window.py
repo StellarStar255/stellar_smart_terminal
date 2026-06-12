@@ -5470,6 +5470,58 @@ class MainWindow(QMainWindow):
             pass
         return x, y
 
+    def _align_child_with_parent_geometry(self, new_window):
+        """让子窗口与本窗口逐像素重合（位置+尺寸），并持续校正 macOS 的异步微调。
+
+        macOS 对新建原生窗口可能自行级联偏移、约束到屏幕（位置右移/尺寸压窄），
+        且调整常发生在首帧之后——单次 setGeometry（或固定次数的少量重试）会被
+        悄悄覆盖，这正是「新窗口宽度与父窗口对不齐」的根因。这里在 ~1.5s 内反复
+        断言目标几何，连续 3 次确认无偏差才收手；每次几何就位后还把左侧栏宽度
+        按共享值对齐——窗口被压窄再校正回来时 QSplitter 的比例缩放会破坏左侧栏
+        的绝对像素宽度，而 _prime_left_panel_sync 的 300ms 兜底可能跑在几何
+        稳定之前，必须在这里补一次。
+        """
+        parent_maximized = self.isMaximized()
+        if parent_maximized:
+            # 对最大化几何做 setGeometry 在 macOS 上经常不生效，直接继承最大化状态
+            new_window.showMaximized()
+            target_geo = None
+        else:
+            target_geo = self.geometry()
+            new_window.setGeometry(target_geo)
+            if not new_window.isVisible():
+                new_window.show()
+
+        def _fix_left_width():
+            """左侧栏宽度对齐到共享值（偏差 >2px 才动，避免抖动）"""
+            try:
+                sw = MainWindow._shared_left_panel_width
+                if isinstance(sw, int) and sw > 0 and hasattr(new_window, 'main_splitter'):
+                    sizes = new_window.main_splitter.sizes()
+                    if sizes and sizes[0] > 0 and abs(sizes[0] - sw) > 2:
+                        new_window._apply_shared_left_panel_width(sw)
+            except Exception:
+                pass
+
+        def _realign(attempt=0, stable=0):
+            if sip.isdeleted(new_window):
+                return
+            if target_geo is None or new_window.isMaximized():
+                # 最大化路径（或用户已自行最大化）：几何由系统接管，只校左侧栏。
+                # 最大化动画完成时机不定，不做提前收手，跑满整个校正窗口。
+                _fix_left_width()
+            elif new_window.geometry() != target_geo:
+                new_window.setGeometry(target_geo)
+                stable = 0
+            else:
+                stable += 1
+                _fix_left_width()
+            if stable >= 3:
+                return
+            if attempt < 11:
+                QTimer.singleShot(120, lambda: _realign(attempt + 1, stable))
+        QTimer.singleShot(0, _realign)
+
     def _detach_tab(self, index, global_pos, follow_drag=True):
         """将标签页分离为独立窗口（创建完整的 MainWindow）
 
@@ -5586,26 +5638,9 @@ class MainWindow(QMainWindow):
             new_window.move(window_x, window_y)
             new_window.show()
         else:
-            # 菜单触发：与父窗口逐像素重合。setGeometry 按客户区对齐（自动计入
-            # 标题栏高度）；父窗口已最大化则直接继承最大化状态。
-            target_geo = self.geometry()
-            if self.isMaximized():
-                new_window.showMaximized()
-            else:
-                new_window.setGeometry(target_geo)
-                new_window.show()
-
-                # macOS 首次创建原生窗口时可能自行微调位置/尺寸（级联、约束到
-                # 屏幕等），且调整可能发生在首帧之后——显示后反复校正几次，
-                # 直到几何与父窗口一致为止（约 0/120/240/360ms 四次断言）。
-                def _realign(attempt=0):
-                    if sip.isdeleted(new_window) or new_window.isMaximized():
-                        return
-                    if new_window.geometry() != target_geo:
-                        new_window.setGeometry(target_geo)
-                    if attempt < 3:
-                        QTimer.singleShot(120, lambda: _realign(attempt + 1))
-                QTimer.singleShot(0, _realign)
+            # 菜单触发：与父窗口逐像素重合（持续校正 macOS 的异步微调，
+            # 见 _align_child_with_parent_geometry）。
+            self._align_child_with_parent_geometry(new_window)
 
         # 激活窗口
         new_window.raise_()
@@ -5665,10 +5700,22 @@ class MainWindow(QMainWindow):
                         inter = pf.intersected(nf)
                         overlap = inter.width() * inter.height()
                         if overlap >= 0.6 * nf.width() * nf.height():
-                            # 大面积叠在父窗口上 → 视为想完全重合，直接继承
-                            # 父窗口几何（位置+尺寸逐像素一致）
-                            new_window.setGeometry(self.geometry())
+                            # 大面积叠在父窗口上 → 视为想完全重合，继承父窗口
+                            # 几何（位置+尺寸逐像素一致，持续校正 macOS 微调）
+                            self._align_child_with_parent_geometry(new_window)
                         else:
+                            # 拖拽期间 macOS 可能把越界窗口悄悄压小（级联/约束
+                            # 到屏幕），松手时先把尺寸还原成父窗口尺寸再做吸附，
+                            # 位置按还原后的尺寸重新约束在屏幕内。
+                            if (not self.isMaximized()
+                                    and new_window.size() != self.size()):
+                                new_window.resize(self.size())
+                                cx, cy = MainWindow._clamp_window_pos(
+                                    new_window.x(), new_window.y(),
+                                    self.width(), self.height(),
+                                    new_window.frameGeometry().center())
+                                new_window.move(cx, cy)
+                                nf = new_window.frameGeometry()
                             SNAP = 56
                             nx, ny = new_window.x(), new_window.y()
                             # 上对齐 / 贴在父窗口正下方
