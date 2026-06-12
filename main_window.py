@@ -5482,6 +5482,9 @@ class MainWindow(QMainWindow):
         稳定之前，必须在这里补一次。
         """
         parent_maximized = self.isMaximized()
+        logger.info(
+            "[align] start: parent_geo=%s parent_max=%s child_visible=%s child_geo=%s",
+            self.geometry(), parent_maximized, new_window.isVisible(), new_window.geometry())
         if parent_maximized:
             # 对最大化几何做 setGeometry 在 macOS 上经常不生效，直接继承最大化状态
             new_window.showMaximized()
@@ -5524,6 +5527,10 @@ class MainWindow(QMainWindow):
         def _realign(attempt=0, stable=0):
             if sip.isdeleted(new_window):
                 return
+            logger.info(
+                "[align] tick %d: stable=%d child_max=%s child_geo=%s frame=%s target=%s",
+                attempt, stable, new_window.isMaximized(),
+                new_window.geometry(), new_window.frameGeometry(), target_geo)
             if target_geo is None or new_window.isMaximized():
                 # 最大化路径（或用户已自行最大化）：几何由系统接管，只校左侧栏。
                 # 最大化动画完成时机不定，不做提前收手，跑满整个校正窗口。
@@ -5531,13 +5538,28 @@ class MainWindow(QMainWindow):
             elif new_window.geometry() != target_geo:
                 new_window.setGeometry(target_geo)
                 stable = 0
+            elif attempt < 5:
+                # 前几个 tick 即使 Qt 侧已读到目标几何，也强制重新下发一次：
+                # 刚显示的窗口可能被系统（台前调度 Stage Manager、屏幕约束等）
+                # 挪走而 Qt 几何缓存未同步——看似已对齐实则没有，直接 setGeometry
+                # 会被 Qt 当作「无变化」跳过。先把高度收 1px 制造真实变化再设回
+                # 目标（向屏幕内收缩永远合法，不会反过来触发系统约束；位置偏移
+                # 则可能顶到菜单栏被再次约束）。两次调用在同一事件循环内完成，
+                # 不会渲染出中间态。
+                new_window.resize(target_geo.width(), target_geo.height() - 1)
+                new_window.setGeometry(target_geo)
+                stable = 0
             else:
                 stable += 1
                 _fix_left_width()
             if stable >= 3:
+                logger.info("[align] settled at tick %d: child_geo=%s", attempt, new_window.geometry())
                 return
-            if attempt < 11:
+            if attempt < 24:
                 QTimer.singleShot(120, lambda: _realign(attempt + 1, stable))
+            else:
+                logger.info("[align] gave up after tick %d: child_geo=%s target=%s",
+                            attempt, new_window.geometry(), target_geo)
         QTimer.singleShot(0, _realign)
 
     def _detach_tab(self, index, global_pos, follow_drag=True):
