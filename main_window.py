@@ -3626,7 +3626,8 @@ class MainWindow(QMainWindow):
         ("zoom_out",        "Ctrl+-",         "shortcuts.act.zoom_out",        "_global_zoom_out"),
         ("opacity_up",      "Ctrl+Shift+Up",  "shortcuts.act.opacity_up",      "_opacity_increase"),
         ("opacity_down",    "Ctrl+Shift+Down","shortcuts.act.opacity_down",    "_opacity_decrease"),
-        ("cheatsheet",      "Ctrl+/",         "shortcuts.act.cheatsheet",      "_show_shortcut_cheatsheet"),
+        # 注意：别用 Ctrl+/ —— 会与编辑器的注释切换同键位，构成歧义快捷键
+        ("cheatsheet",      "Ctrl+Shift+/",   "shortcuts.act.cheatsheet",      "_show_shortcut_cheatsheet"),
     ]
 
     def _setup_shortcuts(self):
@@ -3825,6 +3826,11 @@ class MainWindow(QMainWindow):
         # 编辑器键位（file_editor.py）
         editor_rows = [
             (nat("Ctrl+S"), t("shortcuts.sc.edit_save")),
+            (nat("Ctrl+/"), t("shortcuts.sc.edit_comment")),
+            (nat("Ctrl+F"), t("shortcuts.sc.edit_find")),
+            (nat("Ctrl+H"), t("shortcuts.sc.edit_replace")),
+            (nat("Ctrl+G") + " / " + nat("Ctrl+Shift+G"), t("shortcuts.sc.edit_find_next")),
+            (nat("Ctrl+\\") + " / " + nat("Ctrl+Shift+\\"), t("shortcuts.sc.edit_split")),
             ("Tab", t("shortcuts.sc.edit_ai_accept")),
             (nat("Esc"), t("shortcuts.sc.edit_ai_dismiss")),
             (nat("Alt+\\"), t("shortcuts.sc.edit_ai_trigger")),
