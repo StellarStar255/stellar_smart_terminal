@@ -5537,10 +5537,11 @@ class MainWindow(QMainWindow):
                 # 子窗口确已最大化：几何由系统接管，只校左侧栏
                 _fix_left_width()
                 stable += 1
-            elif parent_maximized and attempt < 3:
-                # showMaximized 可能尚未生效（异步/动画），先等几个 tick。
-                # 若被台前调度拦下（子窗口始终进不了最大化状态），从第 3 个
-                # tick 起退回下面的逐像素几何断言。
+            elif parent_maximized and attempt < 2:
+                # showMaximized 可能尚未生效（异步/动画），先等两个快速 tick。
+                # 若被台前调度拦下（子窗口始终进不了最大化状态），随即退回
+                # 下面的逐像素几何断言——等待期越短，窗口停在系统给的错误
+                # 位置上的可见时间就越短。
                 stable = 0
             elif new_window.geometry() != target_geo:
                 new_window.setGeometry(target_geo)
@@ -5563,7 +5564,10 @@ class MainWindow(QMainWindow):
                 logger.info("[align] settled at tick %d: child_geo=%s", attempt, new_window.geometry())
                 return
             if attempt < 24:
-                QTimer.singleShot(120, lambda: _realign(attempt + 1, stable))
+                # 前期密集校正（30ms）让窗口尽快吸附到位，减少停在系统给的
+                # 错误位置上的可见时间；后期放缓到 120ms 守护偶发的迟到微调。
+                interval = 30 if attempt < 8 else 120
+                QTimer.singleShot(interval, lambda: _realign(attempt + 1, stable))
             else:
                 logger.info("[align] gave up after tick %d: child_geo=%s target=%s",
                             attempt, new_window.geometry(), target_geo)
