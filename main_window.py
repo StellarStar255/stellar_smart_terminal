@@ -6675,11 +6675,13 @@ class MainWindow(QMainWindow):
         changed = (MainWindow._shared_left_panel_width != width)
         self._saved_left_panel_width = width
         if changed and not getattr(self, '_applying_shared_left_width', False):
-            # 节流：拖拽时宽度每像素都在变，逐像素广播会让其它窗口每像素整窗重排。
-            # 合并 80ms 内的变更只推最新值；定时器不重启，保证拖拽中也有周期性同步,
-            # 最后一次 start 覆盖松手后的最终宽度。
+            # 拖拽期间不实时联动：所有窗口共用同一个 GUI 线程，周期性让其它
+            # 5 个窗口同步整窗重排会堵死事件循环、拖拽掉帧（窗口越多越卡）。
+            # 只挂起最新值，待拖拽流静默（_end_splitter_drag_fast_resize，
+            # 160ms 视为松手）一次性广播；非拖拽来源仍走 80ms 节流定时器。
             self._left_width_broadcast_pending = width
-            if not self._left_width_broadcast_timer.isActive():
+            if (not self._splitter_drag_active
+                    and not self._left_width_broadcast_timer.isActive()):
                 self._left_width_broadcast_timer.start()
 
     def _broadcast_left_panel_width(self, width):
@@ -6689,6 +6691,10 @@ class MainWindow(QMainWindow):
             return
         for w in app.topLevelWidgets():
             if w is self or not isinstance(w, MainWindow) or sip.isdeleted(w):
+                continue
+            # 看不见的窗口不值得为同步付整窗重排的代价；
+            # 恢复/激活时 changeEvent 里有按共享宽度对齐的兜底
+            if not w.isVisible() or w.isMinimized():
                 continue
             w._apply_shared_left_panel_width(width)
 
@@ -6700,6 +6706,10 @@ class MainWindow(QMainWindow):
             or getattr(self, 'remote_panel_visible', False)
         )
         if not left_visible or not hasattr(self, 'main_splitter'):
+            return
+        # 宽度已一致时跳过：setSizes 即使数值不变也会走整窗重排，纯浪费
+        sizes = self.main_splitter.sizes()
+        if sizes and sizes[0] > 0 and abs(sizes[0] - width) <= 1:
             return
         # 标记「正在被同步」，使本窗口因 setSizes 触发的 splitterMoved 不再回传
         self._applying_shared_left_width = True
@@ -7038,6 +7048,11 @@ class MainWindow(QMainWindow):
         # 跳过即可，避免在动画帧里再调一次 setSizes。
         if getattr(self, '_applying_spring', False):
             return
+        # 被其它窗口同步左侧栏宽度期间也跳过：此刻翻转门控会启动 _animate_main_sizes
+        # 的逐帧 setSizes 动画，与同步流叠加成重排风暴。同步结束由
+        # _end_splitter_drag_fast_resize 按最终宽度补判一次。
+        if getattr(self, '_applying_shared_left_width', False):
+            return
         ed_idx = self.main_splitter.indexOf(self.editor_area) if hasattr(self, 'editor_area') else -1
         term_idx = self.main_splitter.indexOf(getattr(self, '_main_content_stack', None))
         sizes = self.main_splitter.sizes()
@@ -7192,6 +7207,13 @@ class MainWindow(QMainWindow):
         # 让动画的 finished 回调去恢复，这里不抢着关。
         if getattr(self, '_spring_anim', None) is None:
             self._set_terminals_fast_resize(False)
+        # 拖拽期间挂起的左侧栏宽度在此一次性广播给其它窗口
+        # （见 _set_left_panel_width：拖拽中不实时联动，避免堵死事件循环）
+        self._left_width_broadcast_timer.stop()
+        self._flush_left_width_broadcast()
+        # 被同步窗口在同步期间跳过了 spring 门控判定（_update_spring_width_gate
+        # 对 _applying_shared_left_width 早退），静默后按最终宽度补判一次
+        self._update_spring_width_gate()
 
     def _flush_left_width_broadcast(self):
         """节流定时器到点：把最新的左侧栏宽度推给其它窗口。"""
