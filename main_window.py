@@ -5470,6 +5470,36 @@ class MainWindow(QMainWindow):
             pass
         return x, y
 
+    @staticmethod
+    def _slide_window_to(window, x, y, duration=140):
+        """把顶层窗口平滑滑移到 frame 坐标 (x, y)（move 语义），代替瞬移吸附。
+
+        只动位置不动尺寸：逐帧 resize 会触发终端 reflow 造成卡顿。动画对象
+        挂在窗口上防 GC；重复调用会先停掉上一段动画。
+        """
+        sx, sy = window.x(), window.y()
+        if (sx, sy) == (x, y):
+            return
+        prev = getattr(window, '_slide_anim', None)
+        if prev is not None:
+            prev.stop()
+        anim = QVariantAnimation(window)
+        anim.setStartValue(0.0)
+        anim.setEndValue(1.0)
+        anim.setDuration(duration)
+        anim.setEasingCurve(QEasingCurve.Type.OutCubic)
+
+        def _step(t):
+            if sip.isdeleted(window):
+                anim.stop()
+                return
+            window.move(round(sx + (x - sx) * t), round(sy + (y - sy) * t))
+
+        anim.valueChanged.connect(_step)
+        anim.finished.connect(lambda: setattr(window, '_slide_anim', None))
+        window._slide_anim = anim
+        anim.start()
+
     def _align_child_with_parent_geometry(self, new_window):
         """让子窗口与本窗口逐像素重合（位置+尺寸），并持续校正 macOS 的异步微调。
 
@@ -5507,6 +5537,7 @@ class MainWindow(QMainWindow):
             # 兜底：即使始终对不齐，450ms 后也必须显形，绝不留下隐形窗口
             QTimer.singleShot(450, _reveal)
 
+        loop_delay = 0
         if parent_maximized:
             # 先尝试直接继承最大化状态（对最大化几何做 setGeometry 经常不生效）。
             # 注意 showMaximized 可能被台前调度（Stage Manager）拦下而静默失败
@@ -5515,8 +5546,19 @@ class MainWindow(QMainWindow):
             new_window.showMaximized()
         else:
             if new_window.isVisible():
-                # 已显示的窗口（拖拽松手路径）：当前几何必然 ≠ 目标，直接断言
-                new_window.setGeometry(target_geo)
+                # 已显示的窗口（拖拽松手路径）：吸附从瞬移改为短促平滑滑移。
+                # 尺寸差异（被系统压窄等）在动画前一次性补齐，动画只动位置；
+                # 滑移结束后由校正循环断言精确几何，修掉可能的残余偏差。
+                if new_window.size() != target_geo.size():
+                    new_window.resize(target_geo.size())
+                cur = new_window.geometry()
+                fx = new_window.x() + (target_geo.x() - cur.x())
+                fy = new_window.y() + (target_geo.y() - cur.y())
+                if (fx, fy) != (new_window.x(), new_window.y()):
+                    MainWindow._slide_window_to(new_window, fx, fy)
+                    loop_delay = 160  # 等滑移（140ms）结束再开始校正
+                else:
+                    new_window.setGeometry(target_geo)
             else:
                 # 未显示的窗口（菜单 expand 路径）：不能在 show 前就把几何设成
                 # 目标值——macOS 可能在首次显示时自行挪动/压窄原生窗口，而 Qt
@@ -5598,7 +5640,7 @@ class MainWindow(QMainWindow):
             else:
                 logger.info("[align] gave up after tick %d: child_geo=%s target=%s",
                             attempt, new_window.geometry(), target_geo)
-        QTimer.singleShot(0, _realign)
+        QTimer.singleShot(loop_delay, _realign)
 
     def _detach_tab(self, index, global_pos, follow_drag=True):
         """将标签页分离为独立窗口（创建完整的 MainWindow）
@@ -5809,7 +5851,8 @@ class MainWindow(QMainWindow):
                             elif abs((nx + nf.width()) - pf.x()) <= SNAP:
                                 nx = pf.x() - nf.width()
                             if (nx, ny) != (new_window.x(), new_window.y()):
-                                new_window.move(nx, ny)
+                                # 边缘贴齐同样用平滑滑移代替瞬移
+                                MainWindow._slide_window_to(new_window, nx, ny)
                     new_window.raise_()
                     new_window.activateWindow()
                     if new_window.active_terminal:
