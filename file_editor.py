@@ -1913,10 +1913,10 @@ class FileEditorWidget(QWidget):
         save_shortcut.setContext(Qt.ShortcutContext.WidgetWithChildrenShortcut)
         save_shortcut.activated.connect(self.save_file)
 
-        # Cmd+/ / Ctrl+/ 切换注释（仅在编辑器获焦时触发）
-        comment_shortcut = QShortcut(QKeySequence("Ctrl+/"), self.editor)
-        comment_shortcut.setContext(Qt.ShortcutContext.WidgetWithChildrenShortcut)
-        comment_shortcut.activated.connect(self._toggle_comment)
+        # Cmd+/ / Ctrl+/ 切换注释：不能用 QShortcut——主窗口注册了同键位的全局
+        # 「快捷键速查表」QAction，两者同时匹配时 Qt 判为歧义快捷键，双方都不触发
+        # （表现为 .env 等文件里 Cmd+/ 无反应）。改在 eventFilter 的
+        # ShortcutOverride 阶段声明由编辑器自行处理（见 eventFilter）。
 
         # Cmd+\ 左右分屏；Cmd+Shift+\ 上下分屏（与 VS Code 一致，作用于本窗格）
         split_h_sc = QShortcut(QKeySequence("Ctrl+\\"), self)
@@ -2315,12 +2315,29 @@ class FileEditorWidget(QWidget):
         self.editor.set_ai_completion_enabled(enabled)
 
     def eventFilter(self, obj, event):
-        """点击 / 聚焦本窗格的编辑区时，通知 EditorArea 把本窗格设为活动窗格。"""
+        """点击 / 聚焦本窗格的编辑区时，通知 EditorArea 把本窗格设为活动窗格。
+
+        另负责 Cmd+/（注释切换）：在 ShortcutOverride 阶段把该键声明为
+        「编辑器自行处理」，绕开主窗口全局 Ctrl+/（速查表）造成的歧义快捷键
+        仲裁（歧义时两边都不触发）；随后按键以普通 KeyPress 落到编辑器，
+        在这里直接调用 _toggle_comment。
+        """
         if event.type() in (
             QEvent.Type.FocusIn,
             QEvent.Type.MouseButtonPress,
         ):
             self.pane_focused.emit()
+        elif obj is self.editor and event.type() in (
+            QEvent.Type.ShortcutOverride,
+            QEvent.Type.KeyPress,
+        ):
+            # macOS 上 Qt 把 Cmd 映射为 ControlModifier，故 Cmd+/ 即 Ctrl+/
+            if (event.key() == Qt.Key.Key_Slash
+                    and event.modifiers() == Qt.KeyboardModifier.ControlModifier):
+                if event.type() == QEvent.Type.KeyPress:
+                    self._toggle_comment()
+                event.accept()
+                return True
         return super().eventFilter(obj, event)
 
     def set_active(self, active: bool, show_indicator: bool = True):
