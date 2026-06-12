@@ -924,6 +924,14 @@ class TerminalWidget(QWidget):
         # 恢复正常的pyte行为 - 不再干预清除操作
         # Claude Code的TUI需要正常的清除功能才能正确显示
         self.stream = pyte.Stream(self.screen)
+        # pyte 在 UTF-8 模式（默认）下会刻意忽略 DEC 特殊图形字符集
+        # （ESC(0 / ESC)0 指定与 SI/SO 切换），而 ncurses 在
+        # TERM=xterm-256color 下画边框/线条（curses ACS_*、stdscr.border()）
+        # 全靠这套序列 → 表现为边框显示成字母 lqkxmj。真实终端（xterm/iTerm2）
+        # 在 UTF-8 下也支持该字符集。我们喂给 Stream 的本来就是已解码的 str
+        # （解码在 _on_output 之前完成），关掉 use_utf8 只是放行字符集处理，
+        # 不影响任何解码行为。
+        self.stream.use_utf8 = False
 
         # 字体设置 - 使用真正的等宽字体，按平台选择最佳字体
         if sys.platform == "darwin":
@@ -2595,6 +2603,14 @@ class TerminalWidget(QWidget):
 
     def _compute_color(self, color, bold: bool, is_bg: bool) -> QColor:
         """计算颜色值（内部方法）"""
+        # ANSI 黑色背景（SGR 40）：调色板里的 "black"(#5c6370) 是为了让黑色
+        # **前景**在深色主题上可读而刻意调亮的灰蓝，用作**背景**会把 ncurses
+        # 应用的黑底区域（如贪吃蛇尾部擦除写入的 bg=black 空格、弹窗底色）
+        # 渲染成扎眼的灰块。真实终端里 ANSI 黑色背景与默认背景几乎一致，
+        # 这里直接映射为终端默认背景色，黑底即"看不见"。
+        if is_bg and color == 'black':
+            return QColor(self.bg_color)
+
         # RGB元组 (真彩色 24-bit)
         if isinstance(color, (tuple, list)) and len(color) == 3:
             return QColor(color[0], color[1], color[2])
