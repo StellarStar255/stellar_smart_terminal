@@ -1398,11 +1398,6 @@ class MainWindow(QMainWindow):
     # 窗口计数器（用于生成唯一窗口标题）
     _window_counter = 0
 
-    # 拖拽分离时鼠标在新窗口内的抓取点：X 在标题栏中间偏左，Y 在标题栏中间。
-    # 初始摆放与跟随轮询共用，必须一致，否则窗口会在拖拽开始时跳一下。
-    _DETACH_GRAB_X = 200
-    _DETACH_GRAB_Y = 15
-
     # 全局共享的窗口导航面板
     _global_window_navigator = None
     # 导航面板停靠方式：'float'=独立浮动窗口（默认）；'embed'=嵌入每个窗口左侧栏
@@ -5500,8 +5495,11 @@ class MainWindow(QMainWindow):
         window._slide_anim = anim
         anim.start()
 
-    def _align_child_with_parent_geometry(self, new_window):
+    def _align_child_with_parent_geometry(self, new_window, abort_check=None):
         """让子窗口与本窗口逐像素重合（位置+尺寸），并持续校正 macOS 的异步微调。
+
+        abort_check: 可选回调，返回 True 时立即停止校正并显形——拖拽分离场景
+        下用户继续拖动（接管窗口位置）后，校正循环不能再和用户抢窗口。
 
         macOS 对新建原生窗口可能自行级联偏移、约束到屏幕（位置右移/尺寸压窄），
         且调整常发生在首帧之后——单次 setGeometry（或固定次数的少量重试）会被
@@ -5591,6 +5589,11 @@ class MainWindow(QMainWindow):
 
         def _realign(attempt=0, stable=0):
             if sip.isdeleted(new_window):
+                return
+            if abort_check is not None and abort_check():
+                # 用户已接管拖拽：停止校正并立即显形，不和用户抢窗口
+                logger.info("[align] aborted by user drag at tick %d", attempt)
+                _reveal()
                 return
             logger.info(
                 "[align] tick %d: stable=%d child_max=%s child_geo=%s frame=%s target=%s",
@@ -5740,26 +5743,24 @@ class MainWindow(QMainWindow):
         except Exception:
             pass
 
-        # 新窗口初始尺寸继承产生它的父窗口（拖拽过程中作为可移动窗口跟随光标，
-        # 故不沿用最大化状态，只复制像素尺寸）
+        # 新窗口初始尺寸先继承父窗口像素尺寸，让隐形对齐期间的首次显示就在
+        # 正确大小附近；最大化状态等几何细节由下面的对齐流程接管
         try:
             new_window.resize(self.size())
         except Exception:
             pass
 
+        # 拖拽与菜单 expand 共用「原地出现」语义：新窗口直接与父窗口逐像素
+        # 重合（隐形对齐后显形，见 _align_child_with_parent_geometry）。
+        # 拖拽路径在此基础上，若用户松手前继续拖动超过阈值，则中止对齐、
+        # 转为跟随光标的相对拖拽（见 _start_detach_drag_follow）——既做到
+        # 「拖出即与父窗口同大小同位置」，又保留自由摆放能力。
         if follow_drag:
-            # 调整窗口位置让鼠标正好在标题栏上（抓取点见 _DETACH_GRAB_*）
-            window_x = global_pos.x() - self._DETACH_GRAB_X
-            window_y = global_pos.y() - self._DETACH_GRAB_Y
-            # 保证窗口完整留在屏幕内：否则越界部分会被 macOS 裁掉，使「与父窗口
-            # 同尺寸」的新窗口被压窄变小。
-            window_x, window_y = MainWindow._clamp_window_pos(
-                window_x, window_y, self.width(), self.height(), global_pos)
-            new_window.move(window_x, window_y)
-            new_window.show()
+            drag_state = {'moved': False}
+            new_window._detach_drag_state = drag_state
+            self._align_child_with_parent_geometry(
+                new_window, abort_check=lambda: drag_state['moved'])
         else:
-            # 菜单触发：与父窗口逐像素重合（持续校正 macOS 的异步微调，
-            # 见 _align_child_with_parent_geometry）。
             self._align_child_with_parent_geometry(new_window)
 
         # 激活窗口
@@ -5782,16 +5783,21 @@ class MainWindow(QMainWindow):
             self._update_running_state(False)
 
     def _start_detach_drag_follow(self, new_window):
-        """拖拽分离后让新窗口跟随鼠标，松手时做吸附对齐。
+        """拖拽分离后的跟随逻辑：窗口已「原地出现」与父窗口重合。
 
+        松手前若继续拖动超过阈值（DRAG_THRESH），中止对齐校正、转为跟随光标
+        的相对拖拽（按拖出时刻起的光标位移挪窗口）；原地松手则窗口保持与父
+        窗口逐像素重合，零移动。松手时按既有规则做吸附对齐。
         （macOS 上 startSystemMove() 因鼠标按下事件不在新窗口上而导致窗口漂移，
         故用 timer 轮询鼠标位置实现跟随。）
         """
         from PyQt6.QtWidgets import QApplication
         from PyQt6.QtGui import QCursor
 
-        drag_offset_x = self._DETACH_GRAB_X
-        drag_offset_y = self._DETACH_GRAB_Y
+        start_cursor = QCursor.pos()
+        drag_state = getattr(new_window, '_detach_drag_state', None) or {'moved': False}
+        base_pos = [0, 0]  # 转入相对拖拽时的窗口位置基准（frame 坐标）
+        DRAG_THRESH = 8
         drag_timer = QTimer()
         drag_timer.setInterval(16)  # ~60fps 平滑跟随
         new_window._detach_drag_timer = drag_timer  # prevent GC
@@ -5803,15 +5809,31 @@ class MainWindow(QMainWindow):
             buttons = QApplication.mouseButtons()
             if buttons & Qt.MouseButton.LeftButton:
                 cursor_pos = QCursor.pos()
+                dx = cursor_pos.x() - start_cursor.x()
+                dy = cursor_pos.y() - start_cursor.y()
+                if not drag_state['moved']:
+                    if abs(dx) <= DRAG_THRESH and abs(dy) <= DRAG_THRESH:
+                        return  # 还没拖出阈值：窗口保持与父窗口重合
+                    # 接管拖拽（对齐校正循环检测到后会自动退出并显形）。
+                    # 基准取「当前窗口位置 - 当前位移」，从现位置平滑续接。
+                    drag_state['moved'] = True
+                    base_pos[0] = new_window.x() - dx
+                    base_pos[1] = new_window.y() - dy
                 mx, my = MainWindow._clamp_window_pos(
-                    cursor_pos.x() - drag_offset_x,
-                    cursor_pos.y() - drag_offset_y,
+                    base_pos[0] + dx, base_pos[1] + dy,
                     new_window.width(), new_window.height(), cursor_pos)
                 new_window.move(mx, my)
             else:
                 # 鼠标释放，停止拖拽跟随
                 drag_timer.stop()
                 if not sip.isdeleted(new_window) and new_window.isVisible():
+                    # 没拖动过：窗口已与父窗口重合（或正在对齐中），无需吸附
+                    if not drag_state['moved']:
+                        new_window.raise_()
+                        new_window.activateWindow()
+                        if new_window.active_terminal:
+                            new_window.active_terminal.setFocus()
+                        return
                     # 吸附对齐：松手时若与父窗口的边缘只差一点（肉眼想对齐但差
                     # 几十像素），自动贴齐父窗口，消除"差一丁点错位"。
                     if not sip.isdeleted(self) and self.isVisible():
