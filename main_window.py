@@ -5511,9 +5511,9 @@ class MainWindow(QMainWindow):
         """
         parent_maximized = self.isMaximized()
         target_geo = self.geometry()
-        logger.info(
-            "[align] start: parent_geo=%s parent_max=%s child_visible=%s child_geo=%s",
-            target_geo, parent_maximized, new_window.isVisible(), new_window.geometry())
+        logger.debug(
+            "[align] start: parent_geo=%s parent_max=%s child_visible=%s",
+            target_geo, parent_maximized, new_window.isVisible())
 
         # 未显示的子窗口（菜单 expand 路径）：先以全透明显示，几何对齐后再显形。
         # 系统（台前调度等）会先把新窗口放到错误位置、我们再纠正——这一来一回
@@ -5592,13 +5592,9 @@ class MainWindow(QMainWindow):
                 return
             if abort_check is not None and abort_check():
                 # 用户已接管拖拽：停止校正并立即显形，不和用户抢窗口
-                logger.info("[align] aborted by user drag at tick %d", attempt)
+                logger.debug("[align] aborted by user drag at tick %d", attempt)
                 _reveal()
                 return
-            logger.info(
-                "[align] tick %d: stable=%d child_max=%s child_geo=%s frame=%s target=%s",
-                attempt, stable, new_window.isMaximized(),
-                new_window.geometry(), new_window.frameGeometry(), target_geo)
             if new_window.isMaximized():
                 # 子窗口确已最大化：几何由系统接管，只校左侧栏
                 _fix_left_width()
@@ -5633,7 +5629,7 @@ class MainWindow(QMainWindow):
                 _fix_left_width()
                 _reveal()
             if stable >= 3:
-                logger.info("[align] settled at tick %d: child_geo=%s", attempt, new_window.geometry())
+                logger.debug("[align] settled at tick %d: child_geo=%s", attempt, new_window.geometry())
                 return
             if attempt < 24:
                 # 前期密集校正（30ms）让窗口尽快吸附到位，减少停在系统给的
@@ -5641,8 +5637,8 @@ class MainWindow(QMainWindow):
                 interval = 30 if attempt < 8 else 120
                 QTimer.singleShot(interval, lambda: _realign(attempt + 1, stable))
             else:
-                logger.info("[align] gave up after tick %d: child_geo=%s target=%s",
-                            attempt, new_window.geometry(), target_geo)
+                logger.debug("[align] gave up after tick %d: child_geo=%s target=%s",
+                             attempt, new_window.geometry(), target_geo)
         QTimer.singleShot(loop_delay, _realign)
 
     def _detach_tab(self, index, global_pos, follow_drag=True):
