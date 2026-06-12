@@ -5488,8 +5488,26 @@ class MainWindow(QMainWindow):
             target_geo = None
         else:
             target_geo = self.geometry()
-            new_window.setGeometry(target_geo)
-            if not new_window.isVisible():
+            if new_window.isVisible():
+                # 已显示的窗口（拖拽松手路径）：当前几何必然 ≠ 目标，直接断言
+                new_window.setGeometry(target_geo)
+            else:
+                # 未显示的窗口（菜单 expand 路径）：不能在 show 前就把几何设成
+                # 目标值——macOS 可能在首次显示时自行挪动/压窄原生窗口，而 Qt
+                # 侧缓存仍等于目标值，之后的 setGeometry 全被当作「无变化」
+                # 跳过，一次都不会真正下发，窗口永远校不回来。拖拽路径之所以
+                # 可靠，正是因为窗口先显示在别处、对齐时必然发生一次真实的
+                # 几何变化。这里模仿它：刻意偏移一点显示，让校正循环的首次
+                # setGeometry 成为真实变化。
+                ox, oy = MainWindow._clamp_window_pos(
+                    target_geo.x() + 24, target_geo.y() + 24,
+                    target_geo.width(), target_geo.height(),
+                    target_geo.center())
+                if (ox, oy) == (target_geo.x(), target_geo.y()):
+                    # 父窗口贴满可视区时偏移会被钳回原位，强制保留 1px 差异
+                    oy += 1
+                new_window.setGeometry(
+                    ox, oy, target_geo.width(), target_geo.height())
                 new_window.show()
 
         def _fix_left_width():
