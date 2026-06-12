@@ -26,6 +26,44 @@ GIT_NETWORK_TIMEOUT = 120
 SUBPROCESS_FLAGS = subprocess.CREATE_NO_WINDOW if sys.platform == "win32" else 0
 
 
+def unquote_git_path(path: str) -> str:
+    """还原 git C 风格引号路径（如 "docs/\\345\\256\\211.md"）。
+
+    core.quotepath=false 后中文已按 UTF-8 原样输出，但路径含双引号、
+    反斜杠或控制字符时 git 仍会加引号转义，这里兜底解码。
+    八进制转义是 UTF-8 的单个字节，需先拼成字节串再整体解码。
+    非引号包裹的路径原样返回。
+    """
+    if len(path) < 2 or path[0] != '"' or path[-1] != '"':
+        return path
+    inner = path[1:-1]
+    buf = bytearray()
+    i = 0
+    simple_escapes = {'n': 0x0A, 't': 0x09, 'r': 0x0D, '\\': 0x5C, '"': 0x22,
+                      'a': 0x07, 'b': 0x08, 'f': 0x0C, 'v': 0x0B}
+    while i < len(inner):
+        ch = inner[i]
+        if ch == '\\' and i + 1 < len(inner):
+            nxt = inner[i + 1]
+            if nxt in '01234567':
+                # 最多 3 位八进制 → 一个字节
+                val = 0
+                j = 0
+                while j < 3 and i + 1 + j < len(inner) and inner[i + 1 + j] in '01234567':
+                    val = val * 8 + int(inner[i + 1 + j])
+                    j += 1
+                buf.append(val & 0xFF)
+                i += 1 + j
+                continue
+            if nxt in simple_escapes:
+                buf.append(simple_escapes[nxt])
+                i += 2
+                continue
+        buf.extend(ch.encode('utf-8'))
+        i += 1
+    return buf.decode('utf-8', errors='replace')
+
+
 class FileStatus(Enum):
     """文件状态枚举"""
     MODIFIED = 'M'      # 已修改
@@ -265,7 +303,10 @@ class GitManager(QObject):
             env['http_proxy'] = self._proxy
             env['all_proxy'] = self._proxy
         proc = subprocess.Popen(
-            ['git'] + list(args),
+            # core.quotepath=false：默认 true 时非 ASCII 文件名（中文等）在
+            # status/diff/log 输出里会变成 "\345\256\211..." 八进制转义，
+            # 面板上就显示不出中文名。关掉后按 UTF-8 原样输出。
+            ['git', '-c', 'core.quotepath=false'] + list(args),
             cwd=self._repo_path,
             stdin=stdin,
             stdout=subprocess.PIPE,
@@ -384,6 +425,9 @@ class GitManager(QObject):
             old_path = None
             if ' -> ' in path:
                 old_path, path = path.split(' -> ', 1)
+                old_path = unquote_git_path(old_path)
+            # 含特殊字符（引号/反斜杠/控制字符）的路径 git 会加引号转义，还原之
+            path = unquote_git_path(path)
 
             # 合并冲突（porcelain 的 XY 组合：UU/AA/DD/AU/UA/DU/UD）：
             # 归入"未暂存"列表并打上 is_conflict 标记，由 UI 显著提示，
@@ -591,7 +635,7 @@ class GitManager(QObject):
         success, output = self._run_git('diff', '--name-only', '--diff-filter=U')
         if not success:
             return []
-        return [line.strip() for line in output.splitlines() if line.strip()]
+        return [unquote_git_path(line.strip()) for line in output.splitlines() if line.strip()]
 
     def is_merging(self) -> bool:
         """仓库是否处于合并中（.git/MERGE_HEAD 存在）。"""
