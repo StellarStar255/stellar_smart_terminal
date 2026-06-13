@@ -97,6 +97,15 @@ jobs:
           Compress-Archive -Path dist\StellarSmartTerminal `
             -DestinationPath "dist\Stellar-Smart-Terminal-v$version-windows-x64.zip"
 
+      - name: Build installer (Inno Setup)
+        shell: pwsh
+        run: |
+          $version = $env:GITHUB_REF_NAME.TrimStart("v")
+          $iscc = "${env:ProgramFiles(x86)}\Inno Setup 6\ISCC.exe"
+          if (-not (Test-Path $iscc)) { throw "ISCC.exe not found at $iscc" }
+          & $iscc "/DMyAppVersion=$version" installer.iss
+          if ($LASTEXITCODE -ne 0) { throw "Inno Setup failed ($LASTEXITCODE)" }
+
       - name: Upload to release
         shell: bash
         env:
@@ -105,4 +114,5 @@ jobs:
           gh release create "$GITHUB_REF_NAME" --verify-tag \
             --title "$GITHUB_REF_NAME" --generate-notes || true
           gh release upload "$GITHUB_REF_NAME" --clobber \
-            dist/Stellar-Smart-Terminal-v*-windows-x64.zip
+            dist/Stellar-Smart-Terminal-v*-windows-x64.zip \
+            dist/Stellar-Smart-Terminal-v*-windows-x64-setup.exe

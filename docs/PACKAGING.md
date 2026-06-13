@@ -6,8 +6,19 @@
 
 仓库配置了 GitHub Actions(`.github/workflows/release.yml`):**推送 `v*` tag 即自动发版**——
 macOS runner 跑 `build.sh` 产出 DMG + zip,Windows runner 跑 `build.bat` 产出 onedir zip,
+并用 **Inno Setup**(`installer.iss`)额外打出 `*-windows-x64-setup.exe` 安装包,
 两个平台都先跑离屏测试套件,产物自动挂到对应 Release(已存在的 release 只补传产物,
 notes 不会被覆盖;新建的 release 用自动生成的 notes,之后可用 `gh release edit` 替换)。
+
+Windows 用户两种安装方式:
+
+- **安装包(推荐)**:下载 `*-windows-x64-setup.exe`,双击安装。用户级安装(无需管理员、不弹
+  UAC),自动建开始菜单 + 桌面快捷方式(向导里可取消勾选),自带卸载程序。
+- **免安装 zip**:下载 `*-windows-x64.zip`,解压后运行 `StellarSmartTerminal.exe`。
+
+> Inno Setup(`ISCC.exe`)已预装在 GitHub `windows-latest` runner 上,CI 无需额外安装。
+> 本地编译安装包:`"C:\Program Files (x86)\Inno Setup 6\ISCC.exe" /DMyAppVersion=1.8.0 installer.iss`
+> (需先 `build.bat` 产出 `dist\StellarSmartTerminal\`)。
 
 所以日常发版只需:
 
