@@ -523,9 +523,10 @@ class TestReflowPerformance(TerminalReflowBase):
         t0 = time.perf_counter()
         self.resize_screen(w, 24, 60)
         elapsed = time.perf_counter() - t0
-        # CI/低速机器留出余量；本机实测见任务报告（~260ms）。
-        # Windows 上 CPython + 共享 CI VM 实测 ~920ms，阈值单独放宽。
-        limit = 2.0 if sys.platform == "win32" else 0.9
+        # 本机实测 ~260ms；阈值留足余量做「数量级回退」护栏，而非精确计时——
+        # 共享 CI VM 噪声很大（Windows 实测 ~920ms、macOS 偶发 ~1018ms），
+        # 统一放宽到 2.0s 以免 flaky，仍能抓到 5~10x 的性能退化。
+        limit = 2.0
         self.assertLess(elapsed, limit,
                         f"20000 行历史 reflow 耗时 {elapsed * 1000:.0f}ms")
         # 内容完整性抽查：被折行的长 ASCII 行在 60 列下重排为 2 行
