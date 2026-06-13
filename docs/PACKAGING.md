@@ -34,6 +34,57 @@ gh run watch   # 可选:盯着跑完
 
 > 注:GitHub 托管的 macOS runner 均为 Apple Silicon,Intel mac 包需自备机器手动构建。
 
+## 用 gh 盯发版 / Monitoring releases with gh
+
+发版进度、产物、失败日志都可以用 [GitHub CLI](https://cli.github.com/)(`gh`)在命令行看,
+不用开浏览器。
+
+### 安装 gh(Windows)
+
+```powershell
+winget install --id GitHub.cli -e
+```
+
+> 装完**当前终端的 PATH 不会即时刷新**,新开一个终端 `gh` 才可用;或在当前终端执行
+> `$env:Path = [Environment]::GetEnvironmentVariable("Path","Machine") + ";" + [Environment]::GetEnvironmentVariable("Path","User")`
+> 立刻刷新。macOS 用 `brew install gh`。
+
+首次使用先登录(交互式):`gh auth login` → 选 `GitHub.com` → `HTTPS` → 浏览器授权。
+
+### 常用命令
+
+```bash
+gh run list --workflow=release.yml --limit 3   # 最近几次发版的状态
+gh run watch <run-id> --exit-status            # 盯着某次跑完
+gh run view <run-id>                           # 看各 job / 各步骤成败
+gh run view <run-id> --log-failed              # 只看失败步骤的日志
+gh release view v1.8.0 --json assets --jq '.assets[].name'  # 确认产物是否齐全
+```
+
+一次成功的发版,`gh release view` 应能看到四个产物:`*-windows-x64-setup.exe`、
+`*-windows-x64.zip`、`*-macOS-arm64.dmg`、`*-macOS-arm64.zip`。
+
+## CI 失败后重新发版 / Re-running a failed release
+
+`v*` tag 的工作流跑的是 **tag 当时指向的 commit**,所以「在 main 上修一下」不会影响已推送的
+tag——需要把 tag 移到修复后的 commit 再重新触发。两种情况:
+
+- **偶发失败(flaky),代码无需改**:直接重跑失败的 job
+  ```bash
+  gh run rerun <run-id> --failed
+  ```
+  (比如共享 CI VM 太慢卡了性能计时测试 `test_terminal_reflow.py`——阈值已放宽到 2.0s,
+  仍偶发的话重跑即可。)
+
+- **需要改代码才能修**:在 main 上提交修复,再把 tag 强制移到新 commit:
+  ```bash
+  git commit -am "fix: ..." && git push origin main
+  git tag -d v1.8.0 && git tag -a v1.8.0 -m "v1.8.0"
+  git push origin v1.8.0 --force
+  ```
+  重新触发后所有产物会重建并覆盖上传(`gh release upload --clobber`),已发布几分钟的
+  release 补成完整版。
+
 ## 前置要求 / Prerequisites
 
 - macOS(Apple Silicon 机器上打出的是 arm64 包,Intel Mac 无法运行)
