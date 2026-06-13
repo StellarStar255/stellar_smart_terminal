@@ -3611,8 +3611,9 @@ class MainWindow(QMainWindow):
         ("close_tab",       "Ctrl+W",         "shortcuts.act.close_tab",       "_close_tab_or_window"),
         ("next_tab",        "Ctrl+Tab",       "shortcuts.act.next_tab",        "_next_tab"),
         ("prev_tab",        "Ctrl+Shift+Tab", "shortcuts.act.prev_tab",        "_prev_tab"),
-        ("split_h",         "Ctrl+Shift+S",   "shortcuts.act.split_h",         "_split_current_tab"),
-        ("split_v",         "Ctrl+Shift+V",   "shortcuts.act.split_v",         "_split_vertical_current_terminal"),
+        # 拆分键位对齐 Windows Terminal：Alt+Shift+= 左右并排、Alt+Shift+- 上下叠放
+        ("split_h",         "Alt+Shift+=",    "shortcuts.act.split_h",         "_split_current_tab"),
+        ("split_v",         "Alt+Shift+-",    "shortcuts.act.split_v",         "_split_vertical_current_terminal"),
         ("close_split",     "Ctrl+Shift+X",   "shortcuts.act.close_split",     "_close_current_split"),
         ("toggle_explorer", "Ctrl+1",         "shortcuts.act.toggle_explorer", "_toggle_explorer_panel"),
         ("toggle_git",      "Ctrl+2",         "shortcuts.act.toggle_git",      "_toggle_git_panel"),
