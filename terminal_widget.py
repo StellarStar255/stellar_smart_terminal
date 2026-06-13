@@ -3429,6 +3429,21 @@ class TerminalWidget(QWidget):
             for _ in range(-diff):
                 self._write_to_backend(left_key)
 
+    def _shortcut_hint(self, action_id, default_seq):
+        """返回某分屏操作当前生效快捷键的「 (原生格式)」后缀，用于右键菜单标签。
+
+        向主窗口读取用户覆盖后的键序列（与速查表/实际绑定保持一致），找不到主窗口
+        或该项被清空时回退到默认值/空字符串。"""
+        seq = default_seq
+        window = self.window()
+        getter = getattr(window, '_effective_shortcut', None)
+        if callable(getter):
+            seq = getter(action_id, default_seq)
+        if not seq:
+            return ""
+        native = QKeySequence(seq).toString(QKeySequence.SequenceFormat.NativeText)
+        return f"  ({native or seq})"
+
     def contextMenuEvent(self, event):
         """右键菜单"""
         from PyQt6.QtWidgets import QApplication
@@ -3590,18 +3605,18 @@ class TerminalWidget(QWidget):
 
         menu.addSeparator()
 
-        # 分屏（左右）
-        split_action = QAction(t("toolbar.split"), self)
+        # 分屏（左右）—— 标签追加当前生效快捷键提示
+        split_action = QAction(t("toolbar.split") + self._shortcut_hint("split_h", "Alt+Shift+="), self)
         split_action.triggered.connect(self.split_horizontal_requested.emit)
         menu.addAction(split_action)
 
         # 上下分屏
-        vsplit_action = QAction(t("ctx.split_vertical"), self)
+        vsplit_action = QAction(t("ctx.split_vertical") + self._shortcut_hint("split_v", "Alt+Shift+-"), self)
         vsplit_action.triggered.connect(self.split_vertical_requested.emit)
         menu.addAction(vsplit_action)
 
         # 关闭当前分屏
-        close_split_action = QAction(t("ctx.close_split"), self)
+        close_split_action = QAction(t("ctx.close_split") + self._shortcut_hint("close_split", "Ctrl+Shift+X"), self)
         close_split_action.triggered.connect(self.close_split_requested.emit)
         menu.addAction(close_split_action)
 
