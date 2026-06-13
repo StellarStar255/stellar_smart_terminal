@@ -3616,7 +3616,9 @@ class TerminalWidget(QWidget):
         menu.addAction(vsplit_action)
 
         # 关闭当前分屏
-        close_split_action = QAction(t("ctx.close_split") + self._shortcut_hint("close_split", "Ctrl+Shift+X"), self)
+        # 提示用 Cmd+W：实际关闭分屏走 close_tab（多分屏时 Cmd+W 优先关当前分屏），
+        # 比少有人用的 close_split(Ctrl+Shift+X) 更贴近用户真实操作
+        close_split_action = QAction(t("ctx.close_split") + self._shortcut_hint("close_tab", "Ctrl+W"), self)
         close_split_action.triggered.connect(self.close_split_requested.emit)
         menu.addAction(close_split_action)
 
