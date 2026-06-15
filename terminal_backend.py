@@ -5,6 +5,7 @@
 import os
 import sys
 import threading
+import time
 from abc import ABC, abstractmethod
 from typing import Optional, List, Callable
 
@@ -478,15 +479,28 @@ if IS_WINDOWS:
             if self._pipe_in_write is None:
                 return False
             try:
-                written = wintypes.DWORD(0)
-                success = kernel32.WriteFile(
-                    wintypes.HANDLE(self._pipe_in_write),
-                    data,
-                    len(data),
-                    ctypes.byref(written),
-                    None,
-                )
-                return bool(success)
+                # WriteFile 也可能只写入一部分（写入 ConPTY 输入管道，缓冲区有限），
+                # 实际写入字节数在 written 里。循环写到写完，避免大段粘贴被截断。
+                mv = memoryview(data)
+                total = len(mv)
+                sent = 0
+                while sent < total:
+                    chunk = bytes(mv[sent:])
+                    written = wintypes.DWORD(0)
+                    success = kernel32.WriteFile(
+                        wintypes.HANDLE(self._pipe_in_write),
+                        chunk,
+                        len(chunk),
+                        ctypes.byref(written),
+                        None,
+                    )
+                    if not success:
+                        return False
+                    n = written.value
+                    if n <= 0:
+                        break
+                    sent += n
+                return sent == total
             except Exception as e:
                 logger.warning(f"[WindowsBackend] Write error: {e}")
                 return False
@@ -791,8 +805,25 @@ else:
             if self._master_fd is None:
                 return False
             try:
-                os.write(self._master_fd, data)
-                return True
+                # os.write 在阻塞 fd 上仍可能只写入一部分（PTY 内核缓冲区有限，
+                # 几十 KB），返回实际写入字节数。必须循环写到写完，否则大段粘贴
+                # 会被静默截断。EINTR 重试；万一 fd 被设为非阻塞，EAGAIN 时让出
+                # 片刻再试，避免忙等。
+                mv = memoryview(data)
+                total = len(mv)
+                sent = 0
+                while sent < total:
+                    try:
+                        n = os.write(self._master_fd, mv[sent:])
+                    except InterruptedError:
+                        continue
+                    except BlockingIOError:
+                        time.sleep(0.001)
+                        continue
+                    if n <= 0:
+                        break
+                    sent += n
+                return sent == total
             except Exception as e:
                 logger.warning(f"[UnixBackend] Write error: {e}")
                 return False
