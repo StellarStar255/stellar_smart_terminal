@@ -56,7 +56,7 @@ from command_palette import CommandPalette
 from file_editor import FileEditorWidget, EditorArea
 from i18n import t, set_language, get_language
 from flow_layout import FlowLayout
-from utils import read_config_json, atomic_write_json, get_config_path
+from utils import read_config_json, atomic_write_json, get_config_path, list_notify_sounds, play_notify_sound
 from app_logging import get_logger
 
 logger = get_logger(__name__)
@@ -8010,8 +8010,37 @@ class MainWindow(QMainWindow):
         shortcuts_act.triggered.connect(self._show_shortcut_settings)
         cheatsheet_act = menu.addAction(t("shortcuts.cheatsheet_menu_item"))
         cheatsheet_act.triggered.connect(self._show_shortcut_cheatsheet)
+        # 完成提示音子菜单（仅 macOS 有系统音可选）
+        sounds = list_notify_sounds()
+        if sounds:
+            self._build_notify_sound_menu(menu.addMenu(t("notify.sound_menu")), sounds)
         btn = self.toolbar_settings_btn
         menu.exec(btn.mapToGlobal(QPoint(0, btn.height())))
+
+    def _build_notify_sound_menu(self, submenu, sounds):
+        """填充「完成提示音」子菜单：无 + 各系统音，当前项打勾，点击即选即试听。"""
+        from PyQt6.QtGui import QActionGroup
+        group = QActionGroup(submenu)
+        group.setExclusive(True)
+        current = getattr(self, '_notify_sound', '')
+
+        def add(name, label):
+            act = submenu.addAction(label)
+            act.setCheckable(True)
+            act.setChecked(name == current)
+            group.addAction(act)
+            act.triggered.connect(lambda _checked, n=name: self._set_notify_sound(n))
+
+        add('', t("notify.sound_none"))
+        submenu.addSeparator()
+        for name in sounds:
+            add(name, name)
+
+    def _set_notify_sound(self, name: str):
+        """选中某个提示音：记忆、落盘并立即试听（静音项不试听）。"""
+        self._notify_sound = name
+        self._save_config()
+        play_notify_sound(name)
 
     def _show_toolbar_manager(self):
         """显示工具栏管理对话框"""
@@ -9108,6 +9137,7 @@ class MainWindow(QMainWindow):
         self._saved_nav_list_height = None    # 内嵌导航列表高度（拖拽记忆）
         self._custom_shortcuts = {}           # 用户自定义快捷键覆盖 {action_id: seq}
         self.used_label_names = []            # 用过的 标签/分屏 名称历史（可复用）
+        self._notify_sound = 'Submarine'      # 完成提示音（绿点点亮时播放；'' = 静音）
         try:
             if self.CONFIG_FILE.exists():
                 with open(self.CONFIG_FILE, 'r', encoding='utf-8') as f:
@@ -9152,6 +9182,8 @@ class MainWindow(QMainWindow):
                     self._spring_mode_enabled = config.get('spring_mode_enabled', False)
                     # 加载 AI 行内补全开关
                     self._ai_completion_enabled = config.get('ai_completion_enabled', False)
+                    # 加载完成提示音（绿点点亮时播放；'' = 静音）
+                    self._notify_sound = config.get('notify_sound', 'Submarine')
                     # 加载导航面板停靠方式（'float' / 'embed'，全局记忆）
                     _dock_mode = config.get('navigator_dock_mode', 'float')
                     if _dock_mode in ('float', 'embed'):
@@ -9378,6 +9410,7 @@ class MainWindow(QMainWindow):
                 'remote_split_horizontal': getattr(self, '_remote_split_horizontal', False),  # Remote 左右分屏偏好
                 'spring_mode_enabled': getattr(self, '_spring_mode_enabled', False),  # 保存弹簧模式偏好
                 'ai_completion_enabled': getattr(self, '_ai_completion_enabled', False),  # 保存 AI 行内补全开关
+                'notify_sound': getattr(self, '_notify_sound', 'Submarine'),  # 保存完成提示音
                 'language': get_language(),  # 保存语言设置
                 'keyboard_shortcuts': shortcuts_to_save,  # 保存自定义快捷键（带多窗口防覆盖）
                 'window_geometry': [self.x(), self.y(), self.width(), self.height()],
@@ -10347,6 +10380,12 @@ class MainWindow(QMainWindow):
             return  # 已经在提醒，避免重复刷新
         self._nav_attention = True
         self._nav_attention_source = source
+        # 完成提示音：每个提醒「点亮」时响一次（dedup 守卫保证不会连环响）。
+        # 声音内容由设置里的「完成提示音」决定，'' 表示静音。
+        try:
+            play_notify_sound(getattr(self, '_notify_sound', ''))
+        except Exception:
+            pass
         try:
             MainWindow._broadcast_navigator_refresh(invalidate_cache=True)
         except Exception:

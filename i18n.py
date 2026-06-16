@@ -10,6 +10,10 @@ TRANSLATIONS = {
     "app.name": {"zh": "智能终端", "en": "Smart Terminal"},
     "app.display_name": {"zh": "Smart Terminal", "en": "Smart Terminal"},
 
+    # ===== 通知提示音 =====
+    "notify.sound_menu": {"zh": "完成提示音", "en": "Notification Sound"},
+    "notify.sound_none": {"zh": "无（静音）", "en": "None (silent)"},
+
     # ===== 键盘快捷键设置 =====
     "shortcuts.dialog_title": {"zh": "键盘快捷键", "en": "Keyboard Shortcuts"},
     "shortcuts.menu_item": {"zh": "键盘快捷键…", "en": "Keyboard Shortcuts…"},

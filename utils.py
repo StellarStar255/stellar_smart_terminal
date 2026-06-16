@@ -5,6 +5,7 @@ import json
 import os
 import re
 import shutil
+import subprocess
 import sys
 import tempfile
 from datetime import datetime
@@ -302,3 +303,58 @@ def atomic_write_json(file_path: Path, data) -> bool:
             return True
         except OSError:
             return False
+
+
+# ===== 完成提示音（绿点点亮时播放，可在设置里选） =====
+# macOS 走系统自带音效（/System/Library/Sounds/*.aiff），用 afplay 播放最稳；
+# 其它平台暂不枚举系统音，list_notify_sounds 返回空 → 设置里只有「无」。
+
+_MAC_SOUND_DIRS = (
+    Path("/System/Library/Sounds"),
+    Path.home() / "Library" / "Sounds",
+)
+
+
+def list_notify_sounds() -> List[str]:
+    """返回可选的提示音名称列表（不含扩展名，按字母序）。
+
+    仅在 macOS 上枚举系统/用户音效目录里的 .aiff；其它平台返回空列表。
+    """
+    if sys.platform != "darwin":
+        return []
+    names = set()
+    for d in _MAC_SOUND_DIRS:
+        try:
+            for f in d.glob("*.aiff"):
+                names.add(f.stem)
+        except OSError:
+            pass
+    return sorted(names)
+
+
+def _resolve_notify_sound_path(name: str):
+    for d in _MAC_SOUND_DIRS:
+        p = d / f"{name}.aiff"
+        if p.exists():
+            return p
+    return None
+
+
+def play_notify_sound(name: str) -> None:
+    """异步播放指定提示音；name 为空或找不到文件时静默返回。
+
+    非阻塞：用 Popen 启动 afplay 后立即返回，绝不卡 GUI 线程。
+    """
+    if not name or sys.platform != "darwin":
+        return
+    path = _resolve_notify_sound_path(name)
+    if path is None:
+        return
+    try:
+        subprocess.Popen(
+            ["/usr/bin/afplay", str(path)],
+            stdout=subprocess.DEVNULL,
+            stderr=subprocess.DEVNULL,
+        )
+    except OSError:
+        pass
