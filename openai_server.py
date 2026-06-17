@@ -8,6 +8,7 @@ import uuid
 import time
 import base64
 import threading
+import contextlib
 import re
 import socket
 import os
@@ -484,20 +485,25 @@ class TerminalBridge(QObject):
         if not self.terminal or not hasattr(self.terminal, 'screen'):
             return ""
         try:
-            screen = self.terminal.screen
-            # 使用 pyte 的 display 属性（如果可用）更高效
-            if hasattr(screen, 'display'):
-                result = '\n'.join(line.rstrip() for line in screen.display)
-            else:
-                # 回退到手动读取
-                lines = []
-                buffer = screen.buffer
-                columns = screen.columns
-                for row in range(screen.lines):
-                    row_buffer = buffer[row]
-                    line = ''.join(row_buffer[col].data for col in range(columns))
-                    lines.append(line.rstrip())
-                result = '\n'.join(lines)
+            # 本方法跑在 HTTP worker 线程，而 GUI 线程会 mutate 同一个 pyte 屏幕。
+            # 持终端的屏幕锁再读，避免读到 feed/reflow 到一半的状态（撕裂/越界）。
+            # 旧终端对象可能没有该锁 → 退化为 nullcontext 保持兼容。
+            lock = getattr(self.terminal, '_screen_lock', None)
+            with (lock if lock is not None else contextlib.nullcontext()):
+                screen = self.terminal.screen
+                # 使用 pyte 的 display 属性（如果可用）更高效
+                if hasattr(screen, 'display'):
+                    result = '\n'.join(line.rstrip() for line in screen.display)
+                else:
+                    # 回退到手动读取
+                    lines = []
+                    buffer = screen.buffer
+                    columns = screen.columns
+                    for row in range(screen.lines):
+                        row_buffer = buffer[row]
+                        line = ''.join(row_buffer[col].data for col in range(columns))
+                        lines.append(line.rstrip())
+                    result = '\n'.join(lines)
 
             # 更新缓存
             self._screen_cache = result

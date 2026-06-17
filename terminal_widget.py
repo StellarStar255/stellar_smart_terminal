@@ -9,6 +9,7 @@ import sys
 import shutil
 import codecs
 import bisect
+import threading
 from collections import OrderedDict
 from typing import Optional, List
 from pathlib import Path
@@ -935,6 +936,13 @@ class TerminalWidget(QWidget):
         self.term_cols = 120
         self.term_rows = 30
 
+        # 屏幕状态锁：保护 self.screen / self.stream 的并发访问。当前所有 pyte
+        # 解析(feed)与多数读取都在 GUI 线程，唯一的跨线程读取者是 openai_server 的
+        # HTTP worker（读 screen.display/buffer）——它过去无锁，与 GUI 的 feed 竞争。
+        # 用可重入锁(RLock)：同线程内嵌套读取(render→helper)不会自锁；后续把 feed
+        # 挪到读取线程时，这把锁即提供真正的互斥。
+        self._screen_lock = threading.RLock()
+
         # pyte终端模拟 - 历史记录限制（默认 5000 行，可在设置里改；越大越占内存、
         # resize reflow 越慢）。使用兼容性修复类，解决新版 pyte 的参数问题。
         self.screen = CompatibleHistoryScreen(self.term_cols, self.term_rows,
@@ -1438,7 +1446,9 @@ class TerminalWidget(QWidget):
             self.term_rows = new_rows
 
             # 重新创建screen（HistoryScreen的resize参数顺序是lines, columns）
-            self.screen.resize(self.term_rows, self.term_cols)
+            # reflow 整屏 mutate（重建行对象/历史），与跨线程读取者互斥
+            with self._screen_lock:
+                self.screen.resize(self.term_rows, self.term_cols)
 
             # reflow 重建了行对象、改变了历史长度：
             # - 渲染快照失配 → epoch 自增，保证下次走整屏重绘（增量重绘按
@@ -1499,18 +1509,20 @@ class TerminalWidget(QWidget):
 
         # 借助 pyte 的 delete_lines 从顶部删除 k 行（底部自动补空行），再把光标上移 k 行。
         # bash 收到 SIGWINCH 后用 \r 原地重绘提示符，处理顺序在此之后，因此光标位置保持一致。
+        # 整段 mutate 在锁内一次完成，避免跨线程读取者看到删行/光标移动的中间态。
         cx = screen.cursor.x
-        saved_margins = screen.margins
-        screen.margins = None  # 临时取消滚动区域限制，确保对整屏生效
-        screen.cursor.y = 0
-        screen.cursor.x = 0
-        try:
-            screen.delete_lines(k)
-        finally:
-            screen.margins = saved_margins
-        screen.cursor.y = cy - k
-        screen.cursor.x = cx
-        screen.dirty.update(range(lines))
+        with self._screen_lock:
+            saved_margins = screen.margins
+            screen.margins = None  # 临时取消滚动区域限制，确保对整屏生效
+            screen.cursor.y = 0
+            screen.cursor.x = 0
+            try:
+                screen.delete_lines(k)
+            finally:
+                screen.margins = saved_margins
+            screen.cursor.y = cy - k
+            screen.cursor.x = cx
+            screen.dirty.update(range(lines))
 
     def _update_pty_size(self):
         """更新PTY终端大小"""
@@ -1751,31 +1763,34 @@ class TerminalWidget(QWidget):
                 self._debug_capture_file.write(repr(text) + '\n')
                 self._debug_capture_file.flush()
 
-            # 记录 feed 前的历史行数，用于滚动位置稳定化
-            old_total = self.screen._total_history_lines
+            # feed 及其直接依赖的历史行数读取在锁内完成，保证与跨线程读取者
+            # （openai_server worker）互斥，不会读到 mutate 到一半的屏幕。
+            with self._screen_lock:
+                # 记录 feed 前的历史行数，用于滚动位置稳定化
+                old_total = self.screen._total_history_lines
 
-            # 送入pyte处理（带错误恢复）
-            try:
-                self.stream.feed(text)
-            except Exception as feed_err:
-                # pyte 处理异常时尝试逐字符恢复，避免丢失整块数据
-                logger.warning(f"[Terminal] stream.feed error: {feed_err}, attempting char-by-char recovery")
-                if self._debug_capture_enabled and self._debug_capture_file:
-                    self._debug_capture_file.write(f"FEED ERROR: {feed_err}\n")
-                for ch in text:
-                    try:
-                        self.stream.feed(ch)
-                    except Exception:
-                        pass  # 跳过无法处理的单个字符
+                # 送入pyte处理（带错误恢复）
+                try:
+                    self.stream.feed(text)
+                except Exception as feed_err:
+                    # pyte 处理异常时尝试逐字符恢复，避免丢失整块数据
+                    logger.warning(f"[Terminal] stream.feed error: {feed_err}, attempting char-by-char recovery")
+                    if self._debug_capture_enabled and self._debug_capture_file:
+                        self._debug_capture_file.write(f"FEED ERROR: {feed_err}\n")
+                    for ch in text:
+                        try:
+                            self.stream.feed(ch)
+                        except Exception:
+                            pass  # 跳过无法处理的单个字符
 
-            # 滚动位置稳定化：当用户处于回滚浏览状态时，新输出不应导致显示内容跳动
-            # 通过增加 scroll_offset 来补偿新增的历史行，保持 display_start 不变
-            new_total = self.screen._total_history_lines
-            lines_added = new_total - old_total
-            if self.scroll_offset > 0 and lines_added > 0:
-                self.scroll_offset += lines_added
-                max_scroll = self._get_history_count()
-                self.scroll_offset = min(self.scroll_offset, max_scroll)
+                # 滚动位置稳定化：当用户处于回滚浏览状态时，新输出不应导致显示内容跳动
+                # 通过增加 scroll_offset 来补偿新增的历史行，保持 display_start 不变
+                new_total = self.screen._total_history_lines
+                lines_added = new_total - old_total
+                if self.scroll_offset > 0 and lines_added > 0:
+                    self.scroll_offset += lines_added
+                    max_scroll = self._get_history_count()
+                    self.scroll_offset = min(self.scroll_offset, max_scroll)
 
             # 标记内容已变化，让定时器统一处理重绘（避免高频输出时的重绘风暴）
             self._content_dirty = True
@@ -4094,7 +4109,8 @@ class TerminalWidget(QWidget):
 
     def clear_screen(self):
         """清屏"""
-        self.screen.reset()
+        with self._screen_lock:
+            self.screen.reset()
         self._invalidate_render_cache()
 
     def refresh_terminal(self):
