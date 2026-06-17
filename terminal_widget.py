@@ -840,6 +840,14 @@ class TerminalWidget(QWidget):
     rename_split_requested = pyqtSignal()  # 请求重命名当前分屏（显示/修改顶部标题栏）
     attention_requested = pyqtSignal()  # 疑似本轮命令/Claude 执行完毕（输出停顿），请求导航提醒
     interaction_requested = pyqtSignal()  # 终端响铃（BEL）：程序正在等待用户操作（如 Claude 确认提示）
+    _output_activity = pyqtSignal(int)  # 一批输出已处理（参数=字节数）：在 GUI 线程重置空闲计时器
+
+    # 是否在后端读取线程上直接解析（feed），而不是 marshal 到 GUI 线程。
+    # 默认 False（保持原行为）。开启后：多个终端的 pyte 解析在各自读取线程并行，
+    # 不再争抢唯一的 GUI 线程——这是多窗口 tmux 卡顿的根治方向。开启前必须确保
+    # 所有 screen 读取点都已持 _screen_lock（见增量 1/2）。仅 _activity_idle_timer
+    # 这类 QTimer 操作经 _output_activity 信号回到 GUI 线程执行。
+    PARSE_ON_READER_THREAD = False
 
     # 每个终端的 scrollback（历史回滚）行数上限。pyte 用 deque(maxlen) 在构造时定死，
     # 所以只对「之后新建」的终端生效。值越大越占内存、resize reflow 越慢（O(历史行数)）。
@@ -1077,6 +1085,9 @@ class TerminalWidget(QWidget):
         self._activity_idle_timer = QTimer()
         self._activity_idle_timer.setSingleShot(True)
         self._activity_idle_timer.timeout.connect(self._on_activity_settled)
+        # AutoConnection：同线程发射→直连；读取线程发射→自动排队到 GUI 线程，
+        # 保证 _activity_idle_timer.start() 始终在 GUI 线程执行。
+        self._output_activity.connect(self._on_output_activity)
         self._had_output_activity = False
         self._activity_bytes = 0
         self._ACTIVITY_IDLE_MS = 1500
@@ -1638,9 +1649,15 @@ class TerminalWidget(QWidget):
         self._signal_bridge.output_received.connect(self._on_output)
         self._signal_bridge.process_finished.connect(self._on_process_finished)
 
-        # 设置后端回调
+        # 设置后端回调（在后端读取线程上调用）
         def on_output(data: bytes):
-            self._signal_bridge.output_received.emit(data)
+            if TerminalWidget.PARSE_ON_READER_THREAD:
+                # 直接在读取线程解析：pyte feed 不再占用 GUI 线程。screen 读写由
+                # _screen_lock 互斥，QTimer 类操作经 _output_activity 信号回 GUI。
+                self._on_output(data)
+            else:
+                # 原行为：marshal 到 GUI 线程解析。
+                self._signal_bridge.output_received.emit(data)
 
         def on_exit(status: int):
             self._signal_bridge.process_finished.emit(status)
@@ -1798,13 +1815,20 @@ class TerminalWidget(QWidget):
             # 缓冲输出，由定时器统一发送（避免高频输出时的信号风暴）
             self._output_buffer.append(text)
 
-            # 记录输出活动并重置空闲计时器：停顿超过阈值即视为本轮执行完毕
+            # 记录输出活动并重置空闲计时器：停顿超过阈值即视为本轮执行完毕。
+            # _activity_idle_timer 是 QTimer，只能在 GUI 线程操作；当本方法跑在读取
+            # 线程时(PARSE_ON_READER_THREAD)，经 _output_activity 信号 marshal 回 GUI。
+            # 同线程发射时是直连(等价于原地调用)，无额外延迟。
             if text:
-                self._had_output_activity = True
-                self._activity_bytes += len(text)
-                self._activity_idle_timer.start(self._ACTIVITY_IDLE_MS)
+                self._output_activity.emit(len(text))
         except Exception as e:
             logger.exception(f"Output error: {e}")
+
+    def _on_output_activity(self, n: int):
+        """GUI 线程：标记有输出活动并重置“执行完毕”空闲计时器。"""
+        self._had_output_activity = True
+        self._activity_bytes += n
+        self._activity_idle_timer.start(self._ACTIVITY_IDLE_MS)
 
     def toggle_debug_capture(self):
         """切换原始输出诊断捕获（用于排查内容过滤问题）"""
