@@ -847,7 +847,8 @@ class TerminalWidget(QWidget):
     # 不再争抢唯一的 GUI 线程——这是多窗口 tmux 卡顿的根治方向。开启前必须确保
     # 所有 screen 读取点都已持 _screen_lock（见增量 1/2）。仅 _activity_idle_timer
     # 这类 QTimer 操作经 _output_activity 信号回到 GUI 线程执行。
-    PARSE_ON_READER_THREAD = False
+    # 用环境变量 STELLAR_PARSE_OFF_GUI=1 即可开启，方便在真实 app 上 A/B（无需改码）。
+    PARSE_ON_READER_THREAD = os.environ.get('STELLAR_PARSE_OFF_GUI') == '1'
 
     # 每个终端的 scrollback（历史回滚）行数上限。pyte 用 deque(maxlen) 在构造时定死，
     # 所以只对「之后新建」的终端生效。值越大越占内存、resize reflow 越慢（O(历史行数)）。

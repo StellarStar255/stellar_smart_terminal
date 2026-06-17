@@ -26,6 +26,8 @@ class TestScreenLockConcurrency(unittest.TestCase):
         from PyQt6.QtWidgets import QApplication
         cls.app = QApplication.instance() or QApplication([])
 
+    @unittest.skipIf(os.environ.get('STELLAR_PARSE_OFF_GUI') == '1',
+                     "env override intentionally enables off-GUI parsing")
     def test_default_flag_off(self):
         """生产默认必须仍走 GUI 线程解析，避免误开未验证的路径。"""
         from terminal_widget import TerminalWidget
