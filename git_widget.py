@@ -2455,6 +2455,10 @@ class GitPanel(QWidget):
             self.changes_widget.show()
             self.graph_widget.show()
             self.commit_widget.show()
+            # set_repository 会无条件启动 5s 轮询；若此刻面板不可见，立刻停掉，
+            # 否则隐藏状态下不会再有 hideEvent 来停它（复显时 showEvent 会恢复）。
+            if not self.isVisible():
+                self._git_manager.pause_polling()
             self._refresh_all_async()
             # 面板每次显示时，恢复用户记忆的各栏高度
             if self._desired_body_sizes:
@@ -2583,10 +2587,18 @@ class GitPanel(QWidget):
 
     def showEvent(self, event):
         super().showEvent(event)
-        # 隐藏期间跳过的定时刷新，重新可见时立刻补上
-        if self._status_stale:
-            self._status_stale = False
-            self._refresh_status()
+        # 面板重新可见：恢复 5 秒备份轮询，并补一次刷新。
+        # 无条件刷新（不只看 _status_stale）：隐藏期间轮询被停掉了，文件监视器
+        # 万一漏掉某次变动，复显时也能立刻对齐到最新状态。
+        self._git_manager.resume_polling()
+        self._status_stale = False
+        self._refresh_status()
+
+    def hideEvent(self, event):
+        super().hideEvent(event)
+        # 面板不可见：停掉 5 秒备份轮询，省掉空转（隐藏期间 _refresh_status 本就早退，
+        # 不会 spawn git；文件监视器仍在，复显时 showEvent 补刷）。
+        self._git_manager.pause_polling()
 
     def _update_merge_banner(self, unstaged: list, merging: bool = None):
         """根据 merge 状态 / 未解决冲突数更新提示条。

@@ -279,6 +279,19 @@ class GitManager(QObject):
         """定时器刷新回调"""
         self._emit_status_changed()
 
+    def pause_polling(self):
+        """暂停 5 秒备份轮询定时器（Git 面板不可见时调用，省掉无谓的空转）。
+
+        文件监视器（_watcher）保持启用：隐藏期间 .git 真有变动仍会被记录，
+        面板重新可见时由 GitWidget.showEvent 补刷一次，不会丢状态。
+        """
+        self._refresh_timer.stop()
+
+    def resume_polling(self):
+        """恢复 5 秒备份轮询（Git 面板重新可见时调用）。仅在已设置仓库时启动。"""
+        if self._repo_path and not self._refresh_timer.isActive():
+            self._refresh_timer.start()
+
     def _emit_status_changed(self):
         """发出状态变更信号"""
         self.status_changed.emit()
