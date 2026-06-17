@@ -8014,8 +8014,42 @@ class MainWindow(QMainWindow):
         sounds = list_notify_sounds()
         if sounds:
             self._build_notify_sound_menu(menu.addMenu(t("notify.sound_menu")), sounds)
+        # 终端历史行数（scrollback）子菜单
+        self._build_scrollback_menu(menu.addMenu(t("scrollback.menu")))
         btn = self.toolbar_settings_btn
         menu.exec(btn.mapToGlobal(QPoint(0, btn.height())))
+
+    @staticmethod
+    def _clamp_scrollback(value) -> int:
+        """把 scrollback 行数夹到合理区间 [500, 100000]，非法值回退默认 5000。"""
+        try:
+            v = int(value)
+        except (TypeError, ValueError):
+            return 5000
+        return max(500, min(100000, v))
+
+    def _build_scrollback_menu(self, submenu):
+        """填充「终端历史行数」子菜单：几档预设，当前值打勾。仅对之后新建的终端生效。"""
+        from PyQt6.QtGui import QActionGroup
+        group = QActionGroup(submenu)
+        group.setExclusive(True)
+        current = TerminalWidget.SCROLLBACK_LINES
+        presets = [1000, 2000, 5000, 10000, 20000]
+        # 当前值若不在预设里（用户手改过配置），也插进去保证有勾
+        if current not in presets:
+            presets = sorted(set(presets + [current]))
+        for n in presets:
+            act = submenu.addAction(f"{n:,}")
+            act.setCheckable(True)
+            act.setChecked(n == current)
+            group.addAction(act)
+            act.triggered.connect(lambda _checked, v=n: self._set_scrollback(v))
+
+    def _set_scrollback(self, value: int):
+        """改终端 scrollback 上限：记忆、落盘并提示「对之后新建的终端生效」。"""
+        TerminalWidget.SCROLLBACK_LINES = self._clamp_scrollback(value)
+        self._save_config()
+        self.statusbar.showMessage(t("scrollback.applied"), 4000)
 
     def _build_notify_sound_menu(self, submenu, sounds):
         """填充「完成提示音」子菜单：无 + 各系统音，当前项打勾，点击即选即试听。"""
@@ -9184,6 +9218,9 @@ class MainWindow(QMainWindow):
                     self._ai_completion_enabled = config.get('ai_completion_enabled', False)
                     # 加载完成提示音（绿点点亮时播放；'' = 静音）
                     self._notify_sound = config.get('notify_sound', 'Submarine')
+                    # 加载终端 scrollback 上限（进程级，影响之后新建的终端）
+                    TerminalWidget.SCROLLBACK_LINES = self._clamp_scrollback(
+                        config.get('terminal_scrollback', TerminalWidget.SCROLLBACK_LINES))
                     # 加载导航面板停靠方式（'float' / 'embed'，全局记忆）
                     _dock_mode = config.get('navigator_dock_mode', 'float')
                     if _dock_mode in ('float', 'embed'):
@@ -9411,6 +9448,7 @@ class MainWindow(QMainWindow):
                 'spring_mode_enabled': getattr(self, '_spring_mode_enabled', False),  # 保存弹簧模式偏好
                 'ai_completion_enabled': getattr(self, '_ai_completion_enabled', False),  # 保存 AI 行内补全开关
                 'notify_sound': getattr(self, '_notify_sound', 'Submarine'),  # 保存完成提示音
+                'terminal_scrollback': TerminalWidget.SCROLLBACK_LINES,  # 保存终端 scrollback 上限
                 'language': get_language(),  # 保存语言设置
                 'keyboard_shortcuts': shortcuts_to_save,  # 保存自定义快捷键（带多窗口防覆盖）
                 'window_geometry': [self.x(), self.y(), self.width(), self.height()],

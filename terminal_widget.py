@@ -824,6 +824,11 @@ class TerminalWidget(QWidget):
     attention_requested = pyqtSignal()  # 疑似本轮命令/Claude 执行完毕（输出停顿），请求导航提醒
     interaction_requested = pyqtSignal()  # 终端响铃（BEL）：程序正在等待用户操作（如 Claude 确认提示）
 
+    # 每个终端的 scrollback（历史回滚）行数上限。pyte 用 deque(maxlen) 在构造时定死，
+    # 所以只对「之后新建」的终端生效。值越大越占内存、resize reflow 越慢（O(历史行数)）。
+    # 进程级共享：由 MainWindow 从配置读出后覆盖；可在设置里改。
+    SCROLLBACK_LINES = 5000
+
     # 鲜艳的终端颜色 - One Dark Pro 风格
     DEFAULT_COLORS = {
         "black": "#5c6370",
@@ -914,9 +919,10 @@ class TerminalWidget(QWidget):
         self.term_cols = 120
         self.term_rows = 30
 
-        # pyte终端模拟 - 历史记录限制（20000行足够，减少内存占用）
-        # 使用兼容性修复类，解决新版 pyte 的参数问题
-        self.screen = CompatibleHistoryScreen(self.term_cols, self.term_rows, history=20000)
+        # pyte终端模拟 - 历史记录限制（默认 5000 行，可在设置里改；越大越占内存、
+        # resize reflow 越慢）。使用兼容性修复类，解决新版 pyte 的参数问题。
+        self.screen = CompatibleHistoryScreen(self.term_cols, self.term_rows,
+                                              history=TerminalWidget.SCROLLBACK_LINES)
         self.screen.set_mode(pyte.modes.LNM)  # 换行模式
         self.screen.set_mode(pyte.modes.DECAWM)  # 自动换行模式
         self.screen.set_mode(pyte.modes.DECTCEM)  # 显示光标

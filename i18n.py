@@ -14,6 +14,10 @@ TRANSLATIONS = {
     "notify.sound_menu": {"zh": "完成提示音", "en": "Notification Sound"},
     "notify.sound_none": {"zh": "无（静音）", "en": "None (silent)"},
 
+    # ===== 终端历史行数 (scrollback) =====
+    "scrollback.menu": {"zh": "终端历史行数", "en": "Terminal Scrollback"},
+    "scrollback.applied": {"zh": "已更新历史行数上限，对之后新建的终端生效", "en": "Scrollback limit updated; applies to newly created terminals"},
+
     # ===== 键盘快捷键设置 =====
     "shortcuts.dialog_title": {"zh": "键盘快捷键", "en": "Keyboard Shortcuts"},
     "shortcuts.menu_item": {"zh": "键盘快捷键…", "en": "Keyboard Shortcuts…"},
