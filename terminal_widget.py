@@ -774,6 +774,22 @@ class CompatibleHistoryScreen(pyte.HistoryScreen):
             self._last_drawn_char = None
         super().reset()
 
+    def clear_scrollback(self):
+        """清空回滚历史(scrollback),保留当前可见屏幕。
+
+        只清 history.top/bottom 与历史计数,不动 self.buffer(可见区),所以
+        屏幕上看到的内容不变,只是上方可回滚的历史被丢弃、内存随之释放。
+        对运行中的终端同样有效(与构造时定死的 maxlen 上限互补)。
+        """
+        history = getattr(self, 'history', None)
+        if history is None:
+            return
+        history.top.clear()
+        history.bottom.clear()
+        # position 复位到底部,避免分页状态残留(top/bottom 已被原地清空)
+        self.history = history._replace(position=history.size)
+        self._total_history_lines = 0
+
     def is_soft_wrapped(self, buffer_line) -> bool:
         """检查指定行是否因自动换行而换行"""
         return id(buffer_line) in self._soft_wrapped_ids
@@ -2096,6 +2112,20 @@ class TerminalWidget(QWidget):
             return 0
         history = self._screen_history
         return len(history.top) if history else 0
+
+    def clear_scrollback(self):
+        """一键清空当前终端的回滚历史，保留可见屏幕。
+
+        丢弃上方积累的历史行并释放其内存,然后复位滚动位置、刷新滚动条与重绘。
+        对运行中的终端立即生效。
+        """
+        screen = getattr(self, 'screen', None)
+        if screen is None or not hasattr(screen, 'clear_scrollback'):
+            return
+        screen.clear_scrollback()
+        self.scroll_offset = 0
+        self._search_line_cache.clear()
+        self._invalidate_render_cache()
 
     def _is_wide_char(self, char: str) -> bool:
         """判断字符是否为宽字符（中文等）- 带 LRU 缓存"""
@@ -3595,6 +3625,15 @@ class TerminalWidget(QWidget):
         refresh_action.setToolTip(t("ctx.refresh.tip"))
         refresh_action.triggered.connect(self.refresh_terminal)
         menu.addAction(refresh_action)
+
+        # 清空回滚历史：丢弃上方积累的历史行、释放内存（保留当前可见屏幕）。
+        # 无历史时置灰。
+        hist_n = self._get_history_count()
+        clear_sb_action = QAction(t("ctx.clear_scrollback"), self)
+        clear_sb_action.setToolTip(t("ctx.clear_scrollback.tip"))
+        clear_sb_action.setEnabled(hist_n > 0)
+        clear_sb_action.triggered.connect(self.clear_scrollback)
+        menu.addAction(clear_sb_action)
 
         menu.addSeparator()
 

@@ -767,6 +767,11 @@ TRANSLATIONS = {
         "zh": "重绘当前屏幕并通知前台程序重画（不影响已滚出的历史）",
         "en": "Redraw the current screen and notify the foreground app (does not affect scrolled-back history)",
     },
+    "ctx.clear_scrollback": {"zh": "清空回滚历史", "en": "Clear Scrollback"},
+    "ctx.clear_scrollback.tip": {
+        "zh": "丢弃上方积累的历史行并释放内存，保留当前可见屏幕（对运行中的终端也有效）",
+        "en": "Discard accumulated scrollback and free its memory, keeping the current screen (works on running terminals too)",
+    },
     "ctx.select_all": {"zh": "全选", "en": "Select All"},
     "ctx.clear_selection": {"zh": "清除选择", "en": "Clear Selection"},
     "ctx.split_horizontal": {"zh": "左右分屏", "en": "Split Horizontal"},
