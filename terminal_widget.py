@@ -2111,22 +2111,28 @@ class TerminalWidget(QWidget):
         return getattr(self.screen, 'history', None)
 
     def _get_history_top(self):
-        """获取历史记录顶部列表（避免重复 hasattr 检查）
-        备用屏幕上不显示主屏幕的历史记录。
+        """获取历史记录顶部的【快照列表】（备用屏幕不显示主屏历史）。
+
+        返回 list(history.top) 的拷贝而非活引用：history.top 是有 maxlen 的 deque，
+        feed（未来在读取线程）追加/淘汰会移动元素、令调用方迭代时索引错位甚至越界。
+        拷贝是浅拷贝——行对象本身不变（历史里的旧行 pyte 不再 mutate，id 稳定，
+        软换行判定仍有效），只把 deque 的并发变动隔离掉。持锁拍快照。
         """
-        if self.screen._in_alt_screen:
-            return []
-        history = self._screen_history
-        return history.top if history else []
+        with self._screen_lock:
+            if self.screen._in_alt_screen:
+                return []
+            history = self._screen_history
+            return list(history.top) if history else []
 
     def _get_history_count(self) -> int:
         """获取历史记录行数（避免重复 hasattr 检查）
         备用屏幕上不显示主屏幕的历史记录。
         """
-        if self.screen._in_alt_screen:
-            return 0
-        history = self._screen_history
-        return len(history.top) if history else 0
+        with self._screen_lock:
+            if self.screen._in_alt_screen:
+                return 0
+            history = self._screen_history
+            return len(history.top) if history else 0
 
     def clear_scrollback(self):
         """一键清空当前终端的回滚历史，保留可见屏幕。
@@ -2215,7 +2221,11 @@ class TerminalWidget(QWidget):
             )
 
             if need_rebuild:
-                self._rebuild_cache()
+                # 持锁重建：_rebuild_cache 会迭代 screen.buffer / history.top 的活对象，
+                # 一旦 feed 移到读取线程，并发 mutate 会撕裂迭代。在调用处持锁覆盖整段
+                # 重建（含绘图），代价是读取线程在重建期间(几 ms)短暂等待，可接受。
+                with self._screen_lock:
+                    self._rebuild_cache()
 
         opaque_bg = QColor(self.bg_color)
         opaque_bg.setAlpha(255)
@@ -5131,35 +5141,37 @@ if (hasFileURL) {{
         Args:
             abs_row: 绝对行号（包括历史记录）
         """
-        history = self._get_history_top()
-        history_count = len(history)
-        total_lines = history_count + self.term_rows
+        # 持锁迭代历史/缓冲行对象，避免与读取线程的 feed mutate 撕裂
+        with self._screen_lock:
+            history = self._get_history_top()
+            history_count = len(history)
+            total_lines = history_count + self.term_rows
 
-        if abs_row >= total_lines or abs_row < 0:
-            return ""
-
-        if abs_row < history_count:
-            buffer_line = history[abs_row]
-        else:
-            buffer_row = abs_row - history_count
-            if 0 <= buffer_row < self.term_rows:
-                buffer_line = self.screen.buffer[buffer_row]
-            else:
+            if abs_row >= total_lines or abs_row < 0:
                 return ""
 
-        chars = []
-        for col in range(self.screen.columns):
-            try:
-                char = buffer_line[col]
-                if hasattr(char, 'data'):
-                    chars.append(char.data if char.data else ' ')
-                elif isinstance(char, str):
-                    chars.append(char)
+            if abs_row < history_count:
+                buffer_line = history[abs_row]
+            else:
+                buffer_row = abs_row - history_count
+                if 0 <= buffer_row < self.term_rows:
+                    buffer_line = self.screen.buffer[buffer_row]
                 else:
+                    return ""
+
+            chars = []
+            for col in range(self.screen.columns):
+                try:
+                    char = buffer_line[col]
+                    if hasattr(char, 'data'):
+                        chars.append(char.data if char.data else ' ')
+                    elif isinstance(char, str):
+                        chars.append(char)
+                    else:
+                        chars.append(' ')
+                except (KeyError, IndexError, TypeError):
                     chars.append(' ')
-            except (KeyError, IndexError, TypeError):
-                chars.append(' ')
-        return ''.join(chars)
+            return ''.join(chars)
 
     # ==================== URL检测和打开 ====================
 
