@@ -9,6 +9,7 @@ import sys
 import shutil
 import codecs
 import bisect
+import threading
 from collections import OrderedDict
 from typing import Optional, List
 from pathlib import Path
@@ -839,6 +840,15 @@ class TerminalWidget(QWidget):
     rename_split_requested = pyqtSignal()  # 请求重命名当前分屏（显示/修改顶部标题栏）
     attention_requested = pyqtSignal()  # 疑似本轮命令/Claude 执行完毕（输出停顿），请求导航提醒
     interaction_requested = pyqtSignal()  # 终端响铃（BEL）：程序正在等待用户操作（如 Claude 确认提示）
+    _output_activity = pyqtSignal(int)  # 一批输出已处理（参数=字节数）：在 GUI 线程重置空闲计时器
+
+    # 是否在后端读取线程上直接解析（feed），而不是 marshal 到 GUI 线程。
+    # 默认 False（保持原行为）。开启后：多个终端的 pyte 解析在各自读取线程并行，
+    # 不再争抢唯一的 GUI 线程——这是多窗口 tmux 卡顿的根治方向。开启前必须确保
+    # 所有 screen 读取点都已持 _screen_lock（见增量 1/2）。仅 _activity_idle_timer
+    # 这类 QTimer 操作经 _output_activity 信号回到 GUI 线程执行。
+    # 用环境变量 STELLAR_PARSE_OFF_GUI=1 即可开启，方便在真实 app 上 A/B（无需改码）。
+    PARSE_ON_READER_THREAD = os.environ.get('STELLAR_PARSE_OFF_GUI') == '1'
 
     # 每个终端的 scrollback（历史回滚）行数上限。pyte 用 deque(maxlen) 在构造时定死，
     # 所以只对「之后新建」的终端生效。值越大越占内存、resize reflow 越慢（O(历史行数)）。
@@ -934,6 +944,13 @@ class TerminalWidget(QWidget):
         # 终端尺寸（限制行数减少空白）
         self.term_cols = 120
         self.term_rows = 30
+
+        # 屏幕状态锁：保护 self.screen / self.stream 的并发访问。当前所有 pyte
+        # 解析(feed)与多数读取都在 GUI 线程，唯一的跨线程读取者是 openai_server 的
+        # HTTP worker（读 screen.display/buffer）——它过去无锁，与 GUI 的 feed 竞争。
+        # 用可重入锁(RLock)：同线程内嵌套读取(render→helper)不会自锁；后续把 feed
+        # 挪到读取线程时，这把锁即提供真正的互斥。
+        self._screen_lock = threading.RLock()
 
         # pyte终端模拟 - 历史记录限制（默认 5000 行，可在设置里改；越大越占内存、
         # resize reflow 越慢）。使用兼容性修复类，解决新版 pyte 的参数问题。
@@ -1069,6 +1086,9 @@ class TerminalWidget(QWidget):
         self._activity_idle_timer = QTimer()
         self._activity_idle_timer.setSingleShot(True)
         self._activity_idle_timer.timeout.connect(self._on_activity_settled)
+        # AutoConnection：同线程发射→直连；读取线程发射→自动排队到 GUI 线程，
+        # 保证 _activity_idle_timer.start() 始终在 GUI 线程执行。
+        self._output_activity.connect(self._on_output_activity)
         self._had_output_activity = False
         self._activity_bytes = 0
         self._ACTIVITY_IDLE_MS = 1500
@@ -1438,7 +1458,9 @@ class TerminalWidget(QWidget):
             self.term_rows = new_rows
 
             # 重新创建screen（HistoryScreen的resize参数顺序是lines, columns）
-            self.screen.resize(self.term_rows, self.term_cols)
+            # reflow 整屏 mutate（重建行对象/历史），与跨线程读取者互斥
+            with self._screen_lock:
+                self.screen.resize(self.term_rows, self.term_cols)
 
             # reflow 重建了行对象、改变了历史长度：
             # - 渲染快照失配 → epoch 自增，保证下次走整屏重绘（增量重绘按
@@ -1499,18 +1521,20 @@ class TerminalWidget(QWidget):
 
         # 借助 pyte 的 delete_lines 从顶部删除 k 行（底部自动补空行），再把光标上移 k 行。
         # bash 收到 SIGWINCH 后用 \r 原地重绘提示符，处理顺序在此之后，因此光标位置保持一致。
+        # 整段 mutate 在锁内一次完成，避免跨线程读取者看到删行/光标移动的中间态。
         cx = screen.cursor.x
-        saved_margins = screen.margins
-        screen.margins = None  # 临时取消滚动区域限制，确保对整屏生效
-        screen.cursor.y = 0
-        screen.cursor.x = 0
-        try:
-            screen.delete_lines(k)
-        finally:
-            screen.margins = saved_margins
-        screen.cursor.y = cy - k
-        screen.cursor.x = cx
-        screen.dirty.update(range(lines))
+        with self._screen_lock:
+            saved_margins = screen.margins
+            screen.margins = None  # 临时取消滚动区域限制，确保对整屏生效
+            screen.cursor.y = 0
+            screen.cursor.x = 0
+            try:
+                screen.delete_lines(k)
+            finally:
+                screen.margins = saved_margins
+            screen.cursor.y = cy - k
+            screen.cursor.x = cx
+            screen.dirty.update(range(lines))
 
     def _update_pty_size(self):
         """更新PTY终端大小"""
@@ -1626,9 +1650,15 @@ class TerminalWidget(QWidget):
         self._signal_bridge.output_received.connect(self._on_output)
         self._signal_bridge.process_finished.connect(self._on_process_finished)
 
-        # 设置后端回调
+        # 设置后端回调（在后端读取线程上调用）
         def on_output(data: bytes):
-            self._signal_bridge.output_received.emit(data)
+            if TerminalWidget.PARSE_ON_READER_THREAD:
+                # 直接在读取线程解析：pyte feed 不再占用 GUI 线程。screen 读写由
+                # _screen_lock 互斥，QTimer 类操作经 _output_activity 信号回 GUI。
+                self._on_output(data)
+            else:
+                # 原行为：marshal 到 GUI 线程解析。
+                self._signal_bridge.output_received.emit(data)
 
         def on_exit(status: int):
             self._signal_bridge.process_finished.emit(status)
@@ -1751,31 +1781,34 @@ class TerminalWidget(QWidget):
                 self._debug_capture_file.write(repr(text) + '\n')
                 self._debug_capture_file.flush()
 
-            # 记录 feed 前的历史行数，用于滚动位置稳定化
-            old_total = self.screen._total_history_lines
+            # feed 及其直接依赖的历史行数读取在锁内完成，保证与跨线程读取者
+            # （openai_server worker）互斥，不会读到 mutate 到一半的屏幕。
+            with self._screen_lock:
+                # 记录 feed 前的历史行数，用于滚动位置稳定化
+                old_total = self.screen._total_history_lines
 
-            # 送入pyte处理（带错误恢复）
-            try:
-                self.stream.feed(text)
-            except Exception as feed_err:
-                # pyte 处理异常时尝试逐字符恢复，避免丢失整块数据
-                logger.warning(f"[Terminal] stream.feed error: {feed_err}, attempting char-by-char recovery")
-                if self._debug_capture_enabled and self._debug_capture_file:
-                    self._debug_capture_file.write(f"FEED ERROR: {feed_err}\n")
-                for ch in text:
-                    try:
-                        self.stream.feed(ch)
-                    except Exception:
-                        pass  # 跳过无法处理的单个字符
+                # 送入pyte处理（带错误恢复）
+                try:
+                    self.stream.feed(text)
+                except Exception as feed_err:
+                    # pyte 处理异常时尝试逐字符恢复，避免丢失整块数据
+                    logger.warning(f"[Terminal] stream.feed error: {feed_err}, attempting char-by-char recovery")
+                    if self._debug_capture_enabled and self._debug_capture_file:
+                        self._debug_capture_file.write(f"FEED ERROR: {feed_err}\n")
+                    for ch in text:
+                        try:
+                            self.stream.feed(ch)
+                        except Exception:
+                            pass  # 跳过无法处理的单个字符
 
-            # 滚动位置稳定化：当用户处于回滚浏览状态时，新输出不应导致显示内容跳动
-            # 通过增加 scroll_offset 来补偿新增的历史行，保持 display_start 不变
-            new_total = self.screen._total_history_lines
-            lines_added = new_total - old_total
-            if self.scroll_offset > 0 and lines_added > 0:
-                self.scroll_offset += lines_added
-                max_scroll = self._get_history_count()
-                self.scroll_offset = min(self.scroll_offset, max_scroll)
+                # 滚动位置稳定化：当用户处于回滚浏览状态时，新输出不应导致显示内容跳动
+                # 通过增加 scroll_offset 来补偿新增的历史行，保持 display_start 不变
+                new_total = self.screen._total_history_lines
+                lines_added = new_total - old_total
+                if self.scroll_offset > 0 and lines_added > 0:
+                    self.scroll_offset += lines_added
+                    max_scroll = self._get_history_count()
+                    self.scroll_offset = min(self.scroll_offset, max_scroll)
 
             # 标记内容已变化，让定时器统一处理重绘（避免高频输出时的重绘风暴）
             self._content_dirty = True
@@ -1783,13 +1816,20 @@ class TerminalWidget(QWidget):
             # 缓冲输出，由定时器统一发送（避免高频输出时的信号风暴）
             self._output_buffer.append(text)
 
-            # 记录输出活动并重置空闲计时器：停顿超过阈值即视为本轮执行完毕
+            # 记录输出活动并重置空闲计时器：停顿超过阈值即视为本轮执行完毕。
+            # _activity_idle_timer 是 QTimer，只能在 GUI 线程操作；当本方法跑在读取
+            # 线程时(PARSE_ON_READER_THREAD)，经 _output_activity 信号 marshal 回 GUI。
+            # 同线程发射时是直连(等价于原地调用)，无额外延迟。
             if text:
-                self._had_output_activity = True
-                self._activity_bytes += len(text)
-                self._activity_idle_timer.start(self._ACTIVITY_IDLE_MS)
+                self._output_activity.emit(len(text))
         except Exception as e:
             logger.exception(f"Output error: {e}")
+
+    def _on_output_activity(self, n: int):
+        """GUI 线程：标记有输出活动并重置“执行完毕”空闲计时器。"""
+        self._had_output_activity = True
+        self._activity_bytes += n
+        self._activity_idle_timer.start(self._ACTIVITY_IDLE_MS)
 
     def toggle_debug_capture(self):
         """切换原始输出诊断捕获（用于排查内容过滤问题）"""
@@ -2096,22 +2136,28 @@ class TerminalWidget(QWidget):
         return getattr(self.screen, 'history', None)
 
     def _get_history_top(self):
-        """获取历史记录顶部列表（避免重复 hasattr 检查）
-        备用屏幕上不显示主屏幕的历史记录。
+        """获取历史记录顶部的【快照列表】（备用屏幕不显示主屏历史）。
+
+        返回 list(history.top) 的拷贝而非活引用：history.top 是有 maxlen 的 deque，
+        feed（未来在读取线程）追加/淘汰会移动元素、令调用方迭代时索引错位甚至越界。
+        拷贝是浅拷贝——行对象本身不变（历史里的旧行 pyte 不再 mutate，id 稳定，
+        软换行判定仍有效），只把 deque 的并发变动隔离掉。持锁拍快照。
         """
-        if self.screen._in_alt_screen:
-            return []
-        history = self._screen_history
-        return history.top if history else []
+        with self._screen_lock:
+            if self.screen._in_alt_screen:
+                return []
+            history = self._screen_history
+            return list(history.top) if history else []
 
     def _get_history_count(self) -> int:
         """获取历史记录行数（避免重复 hasattr 检查）
         备用屏幕上不显示主屏幕的历史记录。
         """
-        if self.screen._in_alt_screen:
-            return 0
-        history = self._screen_history
-        return len(history.top) if history else 0
+        with self._screen_lock:
+            if self.screen._in_alt_screen:
+                return 0
+            history = self._screen_history
+            return len(history.top) if history else 0
 
     def clear_scrollback(self):
         """一键清空当前终端的回滚历史，保留可见屏幕。
@@ -2200,7 +2246,11 @@ class TerminalWidget(QWidget):
             )
 
             if need_rebuild:
-                self._rebuild_cache()
+                # 持锁重建：_rebuild_cache 会迭代 screen.buffer / history.top 的活对象，
+                # 一旦 feed 移到读取线程，并发 mutate 会撕裂迭代。在调用处持锁覆盖整段
+                # 重建（含绘图），代价是读取线程在重建期间(几 ms)短暂等待，可接受。
+                with self._screen_lock:
+                    self._rebuild_cache()
 
         opaque_bg = QColor(self.bg_color)
         opaque_bg.setAlpha(255)
@@ -4094,7 +4144,8 @@ class TerminalWidget(QWidget):
 
     def clear_screen(self):
         """清屏"""
-        self.screen.reset()
+        with self._screen_lock:
+            self.screen.reset()
         self._invalidate_render_cache()
 
     def refresh_terminal(self):
@@ -5115,35 +5166,37 @@ if (hasFileURL) {{
         Args:
             abs_row: 绝对行号（包括历史记录）
         """
-        history = self._get_history_top()
-        history_count = len(history)
-        total_lines = history_count + self.term_rows
+        # 持锁迭代历史/缓冲行对象，避免与读取线程的 feed mutate 撕裂
+        with self._screen_lock:
+            history = self._get_history_top()
+            history_count = len(history)
+            total_lines = history_count + self.term_rows
 
-        if abs_row >= total_lines or abs_row < 0:
-            return ""
-
-        if abs_row < history_count:
-            buffer_line = history[abs_row]
-        else:
-            buffer_row = abs_row - history_count
-            if 0 <= buffer_row < self.term_rows:
-                buffer_line = self.screen.buffer[buffer_row]
-            else:
+            if abs_row >= total_lines or abs_row < 0:
                 return ""
 
-        chars = []
-        for col in range(self.screen.columns):
-            try:
-                char = buffer_line[col]
-                if hasattr(char, 'data'):
-                    chars.append(char.data if char.data else ' ')
-                elif isinstance(char, str):
-                    chars.append(char)
+            if abs_row < history_count:
+                buffer_line = history[abs_row]
+            else:
+                buffer_row = abs_row - history_count
+                if 0 <= buffer_row < self.term_rows:
+                    buffer_line = self.screen.buffer[buffer_row]
                 else:
+                    return ""
+
+            chars = []
+            for col in range(self.screen.columns):
+                try:
+                    char = buffer_line[col]
+                    if hasattr(char, 'data'):
+                        chars.append(char.data if char.data else ' ')
+                    elif isinstance(char, str):
+                        chars.append(char)
+                    else:
+                        chars.append(' ')
+                except (KeyError, IndexError, TypeError):
                     chars.append(' ')
-            except (KeyError, IndexError, TypeError):
-                chars.append(' ')
-        return ''.join(chars)
+            return ''.join(chars)
 
     # ==================== URL检测和打开 ====================
 
