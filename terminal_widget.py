@@ -6,6 +6,7 @@
 import os
 import re
 import sys
+import time
 import shutil
 import codecs
 import bisect
@@ -841,6 +842,12 @@ class TerminalWidget(QWidget):
     attention_requested = pyqtSignal()  # 疑似本轮命令/Claude 执行完毕（输出停顿），请求导航提醒
     interaction_requested = pyqtSignal()  # 终端响铃（BEL）：程序正在等待用户操作（如 Claude 确认提示）
     _output_activity = pyqtSignal(int)  # 一批输出已处理（参数=字节数）：在 GUI 线程重置空闲计时器
+    scrollback_pressure_changed = pyqtSignal(int)  # 回滚历史"卡顿压力"等级变化（0 无 / 1 琥珀 / 2 红）
+
+    # scrollback 压力：用"预测 reflow 耗时 = 历史行数 × 实测每行毫秒"判定，超阈值才提示，
+    # 因此内容窄 / 机器快时即使顶到上限也不会误亮（避免按行数比例造成的常驻红点）。
+    _SCROLLBACK_AMBER_MS = 80    # 预测 reflow ≥ 80ms → 琥珀（开始有感）
+    _SCROLLBACK_RED_MS = 200     # 预测 reflow ≥ 200ms → 红（明显卡，建议清空）
 
     # 是否在后端读取线程上直接解析（feed），而不是 marshal 到 GUI 线程。
     # 默认 False（保持原行为）。开启后：多个终端的 pyte 解析在各自读取线程并行，
@@ -951,6 +958,13 @@ class TerminalWidget(QWidget):
         # 用可重入锁(RLock)：同线程内嵌套读取(render→helper)不会自锁；后续把 feed
         # 挪到读取线程时，这把锁即提供真正的互斥。
         self._screen_lock = threading.RLock()
+
+        # scrollback 压力指示：实测每行 reflow 毫秒（首次 resize 前用保守默认），
+        # 与当前严重度等级。预测耗时 = 历史行数 × _reflow_ms_per_line。
+        self._reflow_ms_per_line = 0.04
+        self._scrollback_level = 0
+        self._scrollback_dot_btn = None  # 右上角"清空 scrollback"指示点（懒创建）
+        self._scrollback_dot_shown_level = 0  # 指示点当前已渲染的等级（避免每帧重设样式）
 
         # pyte终端模拟 - 历史记录限制（默认 5000 行，可在设置里改；越大越占内存、
         # resize reflow 越慢）。使用兼容性修复类，解决新版 pyte 的参数问题。
@@ -1295,6 +1309,76 @@ class TerminalWidget(QWidget):
         """条件刷新 - 只在内容变化时重绘"""
         if self._content_dirty:
             self._invalidate_render_cache()
+            # 内容增长可能改变 scrollback 压力等级（节流到刷新频率，开销仅一次乘法）
+            self._update_scrollback_level()
+
+    def _update_scrollback_level(self):
+        """按"预测 reflow 耗时 = 历史行数 × 实测每行毫秒"算严重度，变化时发信号。
+
+        0 = 无压力（不显示点）/ 1 = 琥珀 / 2 = 红。备用屏（tmux/vim）历史不参与，
+        _get_history_count() 返回 0 → 自然为 0。
+        """
+        predicted_ms = self._get_history_count() * self._reflow_ms_per_line
+        if predicted_ms >= self._SCROLLBACK_RED_MS:
+            level = 2
+        elif predicted_ms >= self._SCROLLBACK_AMBER_MS:
+            level = 1
+        else:
+            level = 0
+        if level != self._scrollback_level:
+            self._scrollback_level = level
+            self.scrollback_pressure_changed.emit(level)
+        # 每次都同步右上角指示点（tooltip 里的行数/耗时会随内容增长刷新）
+        self._update_scrollback_dot_widget()
+
+    def _update_scrollback_dot_widget(self):
+        """右上角的 scrollback 压力指示点（覆盖式小圆点，点击即清空该终端历史）。
+
+        高频输出下本方法每刷新帧都会被调用，故只在【等级变化】时做重样式/重定位/
+        show 这类较重操作；tooltip 里的行数/耗时随内容变，但很便宜，每次刷新。
+        """
+        level = self._scrollback_level
+        if level <= 0:
+            if self._scrollback_dot_btn is not None:
+                self._scrollback_dot_btn.hide()
+            self._scrollback_dot_shown_level = 0
+            return
+        btn = self._scrollback_dot_btn
+        if btn is None:
+            btn = QPushButton(self)
+            btn.setFixedSize(12, 12)
+            btn.setCursor(Qt.CursorShape.PointingHandCursor)
+            btn.clicked.connect(self.clear_scrollback)
+            self._scrollback_dot_btn = btn
+        if getattr(self, '_scrollback_dot_shown_level', 0) != level:
+            color = '#e0a83a' if level == 1 else '#e0524c'  # 琥珀 / 红
+            btn.setStyleSheet(
+                f"QPushButton{{background:{color};border:1px solid rgba(0,0,0,90);"
+                f"border-radius:6px;}} QPushButton:hover{{border:1px solid #ffffff;}}")
+            self._position_scrollback_dot()
+            btn.show()
+            btn.raise_()
+            self._scrollback_dot_shown_level = level
+        btn.setToolTip(self.scrollback_tooltip())
+
+    def _position_scrollback_dot(self):
+        btn = self._scrollback_dot_btn
+        if btn is None:
+            return
+        margin = 6
+        x = self.width() - self.SCROLLBAR_WIDTH - btn.width() - margin
+        y = self._header_h + margin
+        btn.move(max(0, x), max(0, y))
+
+    def scrollback_level(self) -> int:
+        """当前 scrollback 压力等级（0/1/2），供 tab/标题栏查询。"""
+        return self._scrollback_level
+
+    def scrollback_tooltip(self) -> str:
+        """指示点的 tooltip：历史行数 + 预测 reflow 耗时 + 操作提示。"""
+        n = self._get_history_count()
+        ms = int(n * self._reflow_ms_per_line)
+        return t("term.scrollback_pressure_tip", lines=n, ms=ms)
 
     def _get_display_info(self) -> tuple:
         """获取显示信息（带缓存），返回 (history_count, total_lines, display_start)
@@ -1463,7 +1547,15 @@ class TerminalWidget(QWidget):
             # 重新创建screen（HistoryScreen的resize参数顺序是lines, columns）
             # reflow 整屏 mutate（重建行对象/历史），与跨线程读取者互斥
             with self._screen_lock:
+                reflow_lines = self._get_history_count() + old_rows  # 参与 reflow 的行数（粗略）
+                _t0 = time.perf_counter()
                 self.screen.resize(self.term_rows, self.term_cols)
+                reflow_ms = (time.perf_counter() - _t0) * 1000.0
+            # 用本次实测校准"每行毫秒"（EMA）；样本够大才更新，避免小缓冲噪声
+            if reflow_lines >= 300 and reflow_ms > 0:
+                per = reflow_ms / reflow_lines
+                self._reflow_ms_per_line = 0.6 * self._reflow_ms_per_line + 0.4 * per
+            self._update_scrollback_level()
 
             # reflow 重建了行对象、改变了历史长度：
             # - 渲染快照失配 → epoch 自增，保证下次走整屏重绘（增量重绘按
@@ -1574,6 +1666,10 @@ class TerminalWidget(QWidget):
 
         # 重新定位右缘滚动条（覆盖式子控件，轻量）
         self._position_scrollbar()
+
+        # 重新定位 scrollback 指示点
+        if self._scrollback_dot_btn is not None and self._scrollback_dot_btn.isVisible():
+            self._position_scrollback_dot()
 
         # 重新定位分屏标题栏
         if self._header_bar is not None and self._header_h:
@@ -2175,6 +2271,7 @@ class TerminalWidget(QWidget):
         self.scroll_offset = 0
         self._search_line_cache.clear()
         self._invalidate_render_cache()
+        self._update_scrollback_level()  # 历史归零 → 压力等级降回 0，指示点消失
 
     def _is_wide_char(self, char: str) -> bool:
         """判断字符是否为宽字符（中文等）- 带 LRU 缓存"""
