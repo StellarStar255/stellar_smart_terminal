@@ -9966,6 +9966,12 @@ class MainWindow(QMainWindow):
                 self._save_config()
             except Exception as e:
                 logger.warning(f"[ForceClose] _save_config failed: {e}")
+            # 编辑器未保存改动：强制路径不弹窗，但同步刷崩溃恢复备份，保证可恢复不丢
+            try:
+                if getattr(self, 'editor_area', None) is not None:
+                    self.editor_area.flush_autosave_all()
+            except Exception as e:
+                logger.warning(f"[ForceClose] editor autosave flush failed: {e}")
         except Exception as e:
             logger.warning(f"[ForceClose] save phase failed: {e}")
 
@@ -9996,6 +10002,16 @@ class MainWindow(QMainWindow):
 
         # 强制关闭路径：跳过确认弹窗（保存已在 force_close_with_save 中完成）
         force_closing = getattr(self, '_force_closing', False)
+
+        # 退出前保护编辑器里的未保存改动：逐个有改动的窗格弹 保存/丢弃/取消。
+        # 取消则中止关闭。强制路径不在此弹窗（force_close_with_save 已刷自动保存）。
+        if not force_closing and getattr(self, 'editor_area', None) is not None:
+            try:
+                if not self.editor_area.prompt_save_all():
+                    event.ignore()
+                    return
+            except Exception as e:
+                logger.warning(f"[Close] editor save prompt failed: {e}")
 
         # 检查是否有任何终端在运行
         try:

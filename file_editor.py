@@ -57,6 +57,10 @@ def _decode_with_fallback(raw: bytes) -> tuple[str, str]:
             return raw.decode('utf-8-sig'), 'utf-8-sig'
         except UnicodeDecodeError:
             pass
+    # 注：曾尝试用 charset_normalizer 做"更准"的检测以避免 gb18030/latin-1 误判，
+    # 但实测它在短文本上极不可靠（把 GB 编码的中文判成 big5 → 乱码），对以中文
+    # 文件为主的场景反而是回归。故维持 utf-8 → gb18030 → latin-1：gb18030 能正确
+    # 覆盖中文这一最常见的非 UTF-8 情形，latin-1 兜底永不失败。
     for enc in ('utf-8', 'gb18030'):
         try:
             return raw.decode(enc), enc
@@ -1749,7 +1753,9 @@ class FileEditorWidget(QWidget):
         self._file_watcher.fileChanged.connect(self._on_watched_file_changed)
         self._known_mtime: float | None = None
         # 自身 save 后短暂屏蔽 watcher 触发，避免「自己写自己的文件」也弹"重载"
-        self._suppress_external_until: float = 0.0
+        # 最近一次保存写下的字节 sha1：watcher 据此识别"这是我自己的保存"，
+        # 取代旧的时间窗屏蔽（旧法会漏掉保存后短时间内真实的外部改动）。
+        self._last_saved_hash: str | None = None
         # 用于去抖：rename 类保存会先收到 deleted 再 created
         self._external_change_timer: QTimer | None = None
 
@@ -2623,6 +2629,36 @@ class FileEditorWidget(QWidget):
             rules, blocks = _ini_rules()
             self._highlighter = GenericHighlighter(doc, rules, blocks, self.theme)
 
+    def _atomic_write_bytes(self, path: str, data: bytes):
+        """原子写入：写到同目录临时文件 → fsync → os.replace 覆盖目标。
+
+        替代 open(path,'wb').write()——后者会先把原文件 truncate 成 0 再写，
+        若写到一半崩溃 / 磁盘满 / 设备掉线，原文件就被截断或写坏。原子方案
+        保证：要么完整新内容、要么原文件原封不动，绝不出现半截文件。
+        临时文件与目标同目录，确保 os.replace 是同一文件系统内的原子 rename。
+        保存后由 _refresh_known_mtime 重新挂监听（replace 会换 inode）。
+        """
+        d = os.path.dirname(os.path.abspath(path)) or '.'
+        fd, tmp = tempfile.mkstemp(dir=d, prefix='.', suffix='.tmp')
+        try:
+            with os.fdopen(fd, 'wb') as f:
+                f.write(data)
+                f.flush()
+                os.fsync(f.fileno())
+            # 尽量保留原文件权限位
+            try:
+                if os.path.exists(path):
+                    os.chmod(tmp, os.stat(path).st_mode & 0o777)
+            except OSError:
+                pass
+            os.replace(tmp, path)
+        except Exception:
+            try:
+                os.unlink(tmp)
+            except OSError:
+                pass
+            raise
+
     def save_file(self) -> bool:
         """保存文件"""
         if not self._current_file:
@@ -2630,6 +2666,28 @@ class FileEditorWidget(QWidget):
 
         try:
             content = self.editor.toPlainText()
+
+            # 保存前冲突检测：文件自我们上次读取后在磁盘上变新（其它窗格保存过、
+            # 或外部程序写过，而 watcher 还没来得及提示），直接覆盖会悄悄丢掉那些
+            # 改动 → 先征求用户，默认「否」。这是 watcher 提示之外的最后一道防线。
+            if self._known_mtime is not None and os.path.isfile(self._current_file):
+                try:
+                    disk_mtime = os.path.getmtime(self._current_file)
+                except OSError:
+                    disk_mtime = None
+                if disk_mtime is not None and disk_mtime - self._known_mtime > 0.001:
+                    reply = QMessageBox.question(
+                        self, t("editor.save_conflict_title"),
+                        t("editor.save_conflict_msg",
+                          name=os.path.basename(self._current_file)),
+                        QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No,
+                        QMessageBox.StandardButton.No,
+                    )
+                    if reply != QMessageBox.StandardButton.Yes:
+                        return False
+                    # 用户确认覆盖 → 推进基线，避免本次写完后又自我误判
+                    self._known_mtime = disk_mtime
+
             # 用打开时检测到的编码写回（utf-8-sig 自动带 BOM）；新建文件默认 utf-8
             encoding = self._file_encoding or 'utf-8'
             try:
@@ -2639,10 +2697,11 @@ class FileEditorWidget(QWidget):
                 encoding = 'utf-8'
                 data = content.encode(encoding)
                 self._file_encoding = encoding
-            # 屏蔽 watcher：我们自己写文件不应弹"外部已改动"
-            self._suppress_external_until = time.time() + 1.5
-            with open(self._current_file, 'wb') as f:
-                f.write(data)
+            # 记下我们写下的字节指纹：watcher 据此识别"这是我自己的保存"，而不是
+            # 用一个 1.5s 时间窗盲目吞掉这期间的所有事件（那会漏掉真实的外部改动）。
+            self._last_saved_hash = hashlib.sha1(data).hexdigest()
+            # 原子写：避免写一半崩溃截断原文件（见 _atomic_write_bytes）
+            self._atomic_write_bytes(self._current_file, data)
             # 更新原始内容，这样 is_modified() 会返回 False
             self._original_content = content
             # 保存成功 → 崩溃恢复备份已无意义，删掉
@@ -2813,22 +2872,46 @@ class FileEditorWidget(QWidget):
             return None
         # 取备份时间给用户参考；meta 缺失/损坏不影响恢复
         ts_text = ""
+        backup_ts = None
         try:
             with open(meta_path, 'r', encoding='utf-8') as f:
                 meta = json.load(f)
             ts = meta.get('timestamp')
             if ts:
+                backup_ts = float(ts)
                 ts_text = time.strftime(
-                    '%Y-%m-%d %H:%M:%S', time.localtime(float(ts)))
+                    '%Y-%m-%d %H:%M:%S', time.localtime(backup_ts))
         except (OSError, ValueError, TypeError):
             pass
+
+        # 磁盘文件是否比备份更新：若是，恢复旧备份会覆盖较新的磁盘内容（数据丢失）。
+        # 这种情况下默认选「否」并改用警示文案，避免顺手回车把新内容盖掉。
+        disk_newer = False
+        disk_ts_text = ""
+        try:
+            disk_mtime = os.path.getmtime(file_path)
+            if backup_ts is not None and disk_mtime - backup_ts > 1.0:
+                disk_newer = True
+                disk_ts_text = time.strftime(
+                    '%Y-%m-%d %H:%M:%S', time.localtime(disk_mtime))
+        except OSError:
+            pass
+
+        if disk_newer:
+            msg = t("editor.autosave_restore_msg_stale",
+                    name=os.path.basename(file_path),
+                    time=ts_text or "?", disk=disk_ts_text or "?")
+            default_btn = QMessageBox.StandardButton.No
+        else:
+            msg = t("editor.autosave_restore_msg",
+                    name=os.path.basename(file_path), time=ts_text or "?")
+            default_btn = QMessageBox.StandardButton.Yes
         reply = QMessageBox.question(
             self,
             t("editor.autosave_restore_title"),
-            t("editor.autosave_restore_msg",
-              name=os.path.basename(file_path), time=ts_text or "?"),
+            msg,
             QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No,
-            QMessageBox.StandardButton.Yes,
+            default_btn,
         )
         if reply == QMessageBox.StandardButton.Yes:
             return backup_content
@@ -2869,10 +2952,8 @@ class FileEditorWidget(QWidget):
             self._file_watcher.addPath(self._current_file)
 
     def _on_watched_file_changed(self, path: str):
-        # 自己刚保存时屏蔽，避免我们自己写入触发 reload 提示
-        if time.time() < self._suppress_external_until:
-            self._refresh_known_mtime()
-            return
+        # 不再用时间窗盲目屏蔽（那会漏掉这期间真实的外部改动）。我们自己的保存
+        # 由 _handle_external_change 里的字节指纹比对识别，见 _last_saved_hash。
         if path != self._current_file:
             return
         # 去抖：rename-保存模式可能短时间内多次触发，统一延后处理
@@ -2913,6 +2994,15 @@ class FileEditorWidget(QWidget):
                 raw = f.read()
         except Exception as e:
             QMessageBox.warning(self, t("editor.error"), t("editor.read_error", error=e))
+            return
+
+        # 磁盘上正是我们自己刚写下的字节 → 是自己的保存（哪怕保存后又继续打字，
+        # 使缓冲区与磁盘已不同），不是外部改动。静默同步 mtime/监听即可，不弹窗、
+        # 不重载。这取代了旧的 1.5s 时间窗，且不会漏掉真实的外部改动。
+        if self._last_saved_hash and hashlib.sha1(raw).hexdigest() == self._last_saved_hash:
+            self._known_mtime = new_mtime
+            if path not in self._file_watcher.files():
+                self._file_watcher.addPath(path)
             return
         if _looks_binary(raw):
             QMessageBox.warning(self, t("editor.binary_title"), t("editor.binary_msg"))
@@ -2959,6 +3049,28 @@ class FileEditorWidget(QWidget):
         self._update_title()
         if path not in self._file_watcher.files():
             self._file_watcher.addPath(path)
+
+    def _prompt_save_before_quit(self) -> bool:
+        """退出应用前对本窗格的未保存改动弹确认。
+
+        返回 False = 用户点了取消（应中止关闭）；True = 已保存 / 已丢弃 / 无改动，
+        可继续退出。与 _close_editor 不同：不做控件级清理（应用即将退出，多余）。
+        保存失败也返回 False，宁可中止退出也不丢数据。
+        """
+        if not self.is_modified():
+            return True
+        reply = QMessageBox.question(
+            self, t("editor.save_changes_title"),
+            t("editor.save_changes_msg", name=os.path.basename(self._current_file or "")),
+            QMessageBox.StandardButton.Save |
+            QMessageBox.StandardButton.Discard |
+            QMessageBox.StandardButton.Cancel
+        )
+        if reply == QMessageBox.StandardButton.Save:
+            return self.save_file()
+        if reply == QMessageBox.StandardButton.Cancel:
+            return False
+        return True  # Discard
 
     def _close_editor(self):
         """关闭编辑器"""
@@ -3110,6 +3222,38 @@ class EditorArea(QWidget):
     @property
     def panes(self) -> list:
         return list(self._panes)
+
+    # ---------- 退出前的未保存防护 ----------
+
+    def has_unsaved(self) -> bool:
+        """任一窗格有未保存改动。"""
+        return any(p.is_modified() for p in self._panes)
+
+    def prompt_save_all(self) -> bool:
+        """退出前逐个提示保存有改动的窗格（供 MainWindow.closeEvent 调用）。
+
+        返回 False 表示用户在某个窗格点了取消 → 调用方应中止关闭。
+        """
+        for pane in list(self._panes):
+            try:
+                if not pane.is_modified():
+                    continue
+                self._set_active(pane)  # 让用户看清弹的是哪个文件
+                if not pane._prompt_save_before_quit():
+                    return False
+            except Exception:
+                # 单个窗格异常不阻断其它窗格的保存提示
+                pass
+        return True
+
+    def flush_autosave_all(self):
+        """强制退出路径（Ctrl+C / 强制关闭）：不弹窗，但同步刷每个有改动窗格的
+        崩溃恢复备份，保证下次打开可恢复、不丢数据。"""
+        for pane in list(self._panes):
+            try:
+                pane._autosave_tick()
+            except Exception:
+                pass
 
     def _styled_splitter(self, orientation) -> QSplitter:
         splitter = QSplitter(orientation)
