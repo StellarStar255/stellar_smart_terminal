@@ -1159,6 +1159,8 @@ class TerminalWidget(QWidget):
         self._selection_end = None    # (absolute_row, col) 选择终点
         self._is_selecting = False    # 是否正在选择
         self._shift_extend_click = False  # 本次按下是否为 Shift+点击扩展选区
+        self._shift_extend_pending = False  # Shift+按下后待定：拖动→新建，纯点击→扩展
+        self._shift_press_cell = None     # Shift+按下时的绝对格（拖动时作为新选区起点）
         self._select_all_mode = False  # 是否为全选模式（包括历史记录）
         self._selection_color = QColor(100, 149, 237, 100)  # 选区高亮颜色（半透明蓝色）
         self._cursor_color = QColor(200, 200, 200, 180)  # 光标颜色
@@ -3326,6 +3328,9 @@ class TerminalWidget(QWidget):
             current_time = time.time()
             cell = self._pos_to_cell(event.pos())  # 相对坐标，用于点击检测
             abs_cell = self._pos_to_absolute_cell(event.pos())  # 绝对坐标，用于选择
+            # 每次按下先复位 Shift 扩展状态（仅下面的扩展分支会重新置位）
+            self._shift_extend_click = False
+            self._shift_extend_pending = False
 
             # 检测多击
             if (self._last_click_pos and
@@ -3359,12 +3364,15 @@ class TerminalWidget(QWidget):
             elif (event.modifiers() & Qt.KeyboardModifier.ShiftModifier
                   and self._selection_start is not None
                   and not self._select_all_mode):
-                # Shift+点击：从已有选区的锚点扩展到点击处。支持「先选中一段 → 滚动
-                # 若干页 → 按住 Shift 点击新位置 → 中间整段连选」。锚点是最初按下的
-                # _selection_start，移动 _selection_end 到点击格；之后可继续拖动微调。
+                # Shift+按下且已有选区：先暂定为「扩展」——保留旧锚点 _selection_start，
+                # 把终点移到此处。支持「先选中一段 → 滚动若干页 → 按住 Shift 点击新位置
+                # → 中间整段连选」。但若紧接着发生拖动，说明是 Shift+拖动 → 由 mouseMove
+                # 改为从按下点新建选区，保留「按住 Shift 在鼠标模式程序里本地框选」的用法。
+                self._shift_press_cell = abs_cell
                 self._selection_end = abs_cell
                 self._is_selecting = True
                 self._shift_extend_click = True
+                self._shift_extend_pending = True
                 self._mouse_mode_click = self._mouse_mode and not force_local_selection
             else:
                 # 单击开始选择 - 使用绝对坐标
@@ -3372,7 +3380,6 @@ class TerminalWidget(QWidget):
                 self._selection_start = abs_cell
                 self._selection_end = abs_cell
                 self._is_selecting = True
-                self._shift_extend_click = False
                 self._select_all_mode = False  # 清除全选模式
                 # 记录是否处于鼠标模式，用于 release 时决定是否也转发事件
                 self._mouse_mode_click = self._mouse_mode and not force_local_selection
@@ -3410,7 +3417,15 @@ class TerminalWidget(QWidget):
 
         if self._is_selecting:
             self._last_mouse_pos = event.pos()
-            self._selection_end = self._pos_to_absolute_cell(event.pos())
+            cur = self._pos_to_absolute_cell(event.pos())
+            # Shift+按下后发生真正的拖动 → 是 Shift+拖动而非 Shift+点击 → 从按下点
+            # 新建选区（不再扩展旧锚点），保留鼠标模式程序里的本地框选用法。
+            if self._shift_extend_pending and cur != self._shift_press_cell:
+                self._selection_start = self._shift_press_cell
+                self._shift_extend_pending = False
+                self._shift_extend_click = False
+                self._select_all_mode = False
+            self._selection_end = cur
 
             # 检测是否需要自动滚动（鼠标在边缘区域）— 拉得越远滚得越快
             y = event.pos().y()

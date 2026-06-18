@@ -43,6 +43,15 @@ class TestShiftClickExtend(unittest.TestCase):
             QEvent.Type.MouseButtonRelease, QPointF(9, 9),
             Qt.MouseButton.LeftButton, Qt.MouseButton.NoButton, mods))
 
+    def _move(self, w, mods, abs_cell, rel_cell=(0, 0)):
+        from PyQt6.QtGui import QMouseEvent
+        from PyQt6.QtCore import QPointF, QEvent, Qt
+        w._pos_to_absolute_cell = lambda pos, _c=abs_cell: _c
+        w._pos_to_cell = lambda pos, _c=rel_cell: _c
+        w.mouseMoveEvent(QMouseEvent(
+            QEvent.Type.MouseMove, QPointF(9, 9),
+            Qt.MouseButton.NoButton, Qt.MouseButton.LeftButton, mods))
+
     def _drag_select(self, w, start, end):
         from PyQt6.QtCore import Qt
         self._press(w, Qt.KeyboardModifier.NoModifier, start, (start[0], start[1]))
@@ -64,6 +73,20 @@ class TestShiftClickExtend(unittest.TestCase):
         self._release(w, Qt.KeyboardModifier.ShiftModifier, (40, 3), (3, 3))
         self.assertEqual(w._selection_start, (5, 0), "释放后选区不应被清")
         self.assertEqual(w._selection_end, (40, 3))
+
+    def test_shift_drag_starts_fresh_not_extend(self):
+        """Shift+拖动应从按下点新建选区（保留鼠标模式程序里的本地框选），
+        而不是从旧锚点扩展——否则会回归。"""
+        from PyQt6.QtCore import Qt
+        w = self._widget()
+        self._drag_select(w, (5, 0), (8, 10))
+        SH = Qt.KeyboardModifier.ShiftModifier
+        self._press(w, SH, (40, 3), (3, 3))
+        self._move(w, SH, (45, 5), (5, 5))   # 真正拖动
+        self._release(w, SH, (45, 5), (5, 5))
+        self.assertEqual(w._selection_start, (40, 3), "拖动应把起点设为按下点")
+        self.assertEqual(w._selection_end, (45, 5))
+        self.assertFalse(w._shift_extend_pending)
 
     def test_plain_click_resets_selection(self):
         from PyQt6.QtCore import Qt
