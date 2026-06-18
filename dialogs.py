@@ -15,7 +15,7 @@ from PyQt6.QtWidgets import (
     QVBoxLayout, QWidget
 )
 from PyQt6.QtCore import Qt, QTimer, pyqtSignal
-from PyQt6.QtGui import QFont, QKeySequence
+from PyQt6.QtGui import QFont, QKeySequence, QTextCursor
 
 from i18n import t
 
@@ -52,6 +52,87 @@ def get_default_shell():
 
         # 最后的回退
         return 'sh'
+
+
+class _IndentingPlainTextEdit(QPlainTextEdit):
+    """命令编辑框：像代码编辑器一样用 Tab/Shift+Tab 缩进，4 空格为一级。
+
+    - Tab：有选区 → 选中的每一行整体右移 4 空格；无选区 → 光标处插入 4 空格。
+    - Shift+Tab：选中的每一行（或当前行）左移，去掉行首最多 4 个空格（兼容已有 Tab）。
+    """
+    _INDENT = "    "  # 4 空格
+
+    def keyPressEvent(self, event):
+        key = event.key()
+        mods = event.modifiers()
+        # Shift+Tab 在 Qt 里以 Key_Backtab 到达
+        if key == Qt.Key.Key_Backtab or (
+                key == Qt.Key.Key_Tab and mods & Qt.KeyboardModifier.ShiftModifier):
+            self._dedent()
+            return
+        if key == Qt.Key.Key_Tab and mods == Qt.KeyboardModifier.NoModifier:
+            if self.textCursor().hasSelection():
+                self._indent()
+            else:
+                self.insertPlainText(self._INDENT)
+            return
+        super().keyPressEvent(event)
+
+    def _block_range(self):
+        """当前选区（或光标）覆盖的 [首行号, 末行号]。"""
+        cur = self.textCursor()
+        start, end = cur.selectionStart(), cur.selectionEnd()
+        doc = self.document()
+        first = doc.findBlock(start).blockNumber()
+        last = doc.findBlock(end).blockNumber()
+        # 选区终点恰好落在行首（且非空选）→ 那一行不计入
+        if end > start and doc.findBlock(end).position() == end:
+            last = max(first, last - 1)
+        return first, last
+
+    def _reselect(self, first, last):
+        doc = self.document()
+        fb = doc.findBlockByNumber(first)
+        lb = doc.findBlockByNumber(last)
+        cur = self.textCursor()
+        cur.setPosition(fb.position())
+        cur.setPosition(lb.position() + len(lb.text()),
+                        QTextCursor.MoveMode.KeepAnchor)
+        self.setTextCursor(cur)
+
+    def _indent(self):
+        first, last = self._block_range()
+        doc = self.document()
+        cur = self.textCursor()
+        cur.beginEditBlock()
+        for bn in range(first, last + 1):
+            c = QTextCursor(doc.findBlockByNumber(bn))
+            c.movePosition(QTextCursor.MoveOperation.StartOfBlock)
+            c.insertText(self._INDENT)
+        cur.endEditBlock()
+        self._reselect(first, last)
+
+    def _dedent(self):
+        first, last = self._block_range()
+        doc = self.document()
+        cur = self.textCursor()
+        cur.beginEditBlock()
+        for bn in range(first, last + 1):
+            block = doc.findBlockByNumber(bn)
+            text = block.text()
+            remove = 0
+            while (remove < len(self._INDENT) and remove < len(text)
+                   and text[remove] == ' '):
+                remove += 1
+            if remove == 0 and text.startswith('\t'):
+                remove = 1  # 兼容历史上用 Tab 缩进的行
+            if remove:
+                c = QTextCursor(block)
+                c.movePosition(QTextCursor.MoveOperation.StartOfBlock)
+                for _ in range(remove):
+                    c.deleteChar()
+        cur.endEditBlock()
+        self._reselect(first, last)
 
 
 class PresetDialog(QDialog):
@@ -139,7 +220,7 @@ class PresetDialog(QDialog):
 
         # 命令（多行）
         right_layout.addWidget(QLabel(t("preset.commands_label")))
-        self.commands_edit = QPlainTextEdit()
+        self.commands_edit = _IndentingPlainTextEdit()
         self.commands_edit.setPlaceholderText(t("preset.commands_placeholder"))
         self.commands_edit.textChanged.connect(self._on_commands_changed)
         right_layout.addWidget(self.commands_edit)
