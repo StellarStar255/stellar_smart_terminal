@@ -1158,6 +1158,7 @@ class TerminalWidget(QWidget):
         self._selection_start = None  # (absolute_row, col) 选择起点
         self._selection_end = None    # (absolute_row, col) 选择终点
         self._is_selecting = False    # 是否正在选择
+        self._shift_extend_click = False  # 本次按下是否为 Shift+点击扩展选区
         self._select_all_mode = False  # 是否为全选模式（包括历史记录）
         self._selection_color = QColor(100, 149, 237, 100)  # 选区高亮颜色（半透明蓝色）
         self._cursor_color = QColor(200, 200, 200, 180)  # 光标颜色
@@ -3355,12 +3356,23 @@ class TerminalWidget(QWidget):
                     self._send_mouse_event(event, 'press')
                 self._select_word_at(abs_cell, self._WORD_CHARS_NARROW)
                 self._click_count = 0  # 重置
+            elif (event.modifiers() & Qt.KeyboardModifier.ShiftModifier
+                  and self._selection_start is not None
+                  and not self._select_all_mode):
+                # Shift+点击：从已有选区的锚点扩展到点击处。支持「先选中一段 → 滚动
+                # 若干页 → 按住 Shift 点击新位置 → 中间整段连选」。锚点是最初按下的
+                # _selection_start，移动 _selection_end 到点击格；之后可继续拖动微调。
+                self._selection_end = abs_cell
+                self._is_selecting = True
+                self._shift_extend_click = True
+                self._mouse_mode_click = self._mouse_mode and not force_local_selection
             else:
                 # 单击开始选择 - 使用绝对坐标
                 # 即使鼠标模式启用，也记录按下位置用于后续的单击光标定位
                 self._selection_start = abs_cell
                 self._selection_end = abs_cell
                 self._is_selecting = True
+                self._shift_extend_click = False
                 self._select_all_mode = False  # 清除全选模式
                 # 记录是否处于鼠标模式，用于 release 时决定是否也转发事件
                 self._mouse_mode_click = self._mouse_mode and not force_local_selection
@@ -3449,7 +3461,10 @@ class TerminalWidget(QWidget):
             # 使用容差判断：如果起止位置在同一行且列差距 ≤ 1，视为单击
             start_row, start_col = self._selection_start
             end_row, end_col = self._selection_end
-            is_click = (start_row == end_row and abs(start_col - end_col) <= 1)
+            # Shift+点击扩展：起点是远处的锚点而非本次按下点，is_click 的"无拖动"判定
+            # 不适用，且用户本就是要扩展选区——不要当成单击去清掉选区/移光标。
+            is_click = (not self._shift_extend_click
+                        and start_row == end_row and abs(start_col - end_col) <= 1)
             if is_click:
                 # 单击 - 尝试移动光标到点击位置（使用相对坐标）
                 display_cell = self._pos_to_cell(event.pos())
