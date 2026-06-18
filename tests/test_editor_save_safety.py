@@ -5,6 +5,7 @@
 import os
 import sys
 import tempfile
+import time
 import unittest
 
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
@@ -137,6 +138,121 @@ class TestQuitSaveGuard(_Base):
         backup_file, _meta = paths
         self.assertTrue(os.path.exists(backup_file),
                         "flush_autosave_all 应写出崩溃恢复备份")
+
+
+class TestSaveConflict(_Base):
+    """#3：保存前若磁盘已被改新（其它窗格/外部），先征求用户，默认不覆盖。"""
+
+    def _make_disk_newer(self, pane, p, content):
+        with open(p, "w") as f:
+            f.write(content)
+        future = time.time() + 10
+        os.utime(p, (future, future))
+
+    def test_conflict_no_aborts_and_preserves_disk(self):
+        from PyQt6.QtWidgets import QMessageBox
+        area, pane, p = self._area_with_file("v1\n")
+        pane.editor.setPlainText("my local edit\n")
+        self._make_disk_newer(pane, p, "external wrote this\n")
+        calls = []
+        orig = QMessageBox.question
+        QMessageBox.question = staticmethod(
+            lambda *a, **k: (calls.append(1), QMessageBox.StandardButton.No)[1])
+        try:
+            self.assertFalse(pane.save_file())  # No → 中止保存
+        finally:
+            QMessageBox.question = orig
+        self.assertTrue(calls, "应弹出保存冲突提示")
+        with open(p) as f:
+            self.assertEqual(f.read(), "external wrote this\n")  # 磁盘未被覆盖
+
+    def test_conflict_yes_overwrites(self):
+        from PyQt6.QtWidgets import QMessageBox
+        area, pane, p = self._area_with_file("v1\n")
+        pane.editor.setPlainText("force mine\n")
+        self._make_disk_newer(pane, p, "external\n")
+        orig = QMessageBox.question
+        QMessageBox.question = staticmethod(
+            lambda *a, **k: QMessageBox.StandardButton.Yes)
+        try:
+            self.assertTrue(pane.save_file())
+        finally:
+            QMessageBox.question = orig
+        with open(p) as f:
+            self.assertEqual(f.read(), "force mine\n")
+
+
+class TestExternalChangeAfterSave(_Base):
+    """#4：自己的保存靠字节指纹识别（不再用时间窗），保存后短时间内真实的外部
+    改动不再被吞掉。"""
+
+    def test_self_save_recognized_no_prompt(self):
+        from PyQt6.QtWidgets import QMessageBox
+        area, pane, p = self._area_with_file("a\n")
+        pane.editor.setPlainText("b\n")
+        self.assertTrue(pane.save_file())
+        # 保存后继续打字（缓冲区≠磁盘），再把 mtime 顶新以绕过 mtime 相等的早退，
+        # 强制走到字节指纹比对那一步
+        pane.editor.setPlainText("b kept typing\n")
+        future = time.time() + 10
+        os.utime(p, (future, future))
+        calls = []
+        orig = QMessageBox.question
+        QMessageBox.question = staticmethod(
+            lambda *a, **k: (calls.append(1), QMessageBox.StandardButton.No)[1])
+        try:
+            pane._handle_external_change()
+        finally:
+            QMessageBox.question = orig
+        self.assertEqual(calls, [], "磁盘==自己刚写的字节 → 不应弹外部改动提示")
+        self.assertEqual(pane.editor.toPlainText(), "b kept typing\n")  # 未被重载
+
+    def test_real_external_change_detected(self):
+        area, pane, p = self._area_with_file("a\n")
+        # 干净状态（无本地改动）下外部写入不同内容 → 静默重载到新内容
+        with open(p, "w") as f:
+            f.write("external new\n")
+        future = time.time() + 10
+        os.utime(p, (future, future))
+        pane._handle_external_change()
+        self.assertEqual(pane.editor.toPlainText(), "external new\n")
+
+
+class TestStaleAutosaveRestore(_Base):
+    """#5：备份比磁盘旧时，恢复对话框默认「否」并用警示文案，避免顺手回车覆盖
+    较新的磁盘内容。"""
+
+    def test_disk_newer_defaults_to_no(self):
+        from PyQt6.QtWidgets import QMessageBox
+        area, pane, p = self._area_with_file("disk v1\n")
+        # 制造一个比磁盘"旧"的崩溃恢复备份
+        pane.editor.setPlainText("old unsaved\n")
+        pane._autosave_tick()
+        paths = pane._backup_paths()
+        self.assertIsNotNone(paths)
+        self.assertTrue(os.path.exists(paths[0]))
+        # 磁盘文件随后被外部更新成更新的版本
+        with open(p, "w") as f:
+            f.write("disk v2 newer\n")
+        future = time.time() + 100
+        os.utime(p, (future, future))
+
+        captured = {}
+        orig = QMessageBox.question
+
+        def fake_q(parent, title, text, buttons, default=None):
+            captured["default"] = default
+            captured["text"] = text
+            return QMessageBox.StandardButton.No
+
+        QMessageBox.question = staticmethod(fake_q)
+        try:
+            restored = pane._maybe_restore_autosave(p, "disk v2 newer\n")
+        finally:
+            QMessageBox.question = orig
+        self.assertIsNone(restored)  # No → 不恢复
+        self.assertEqual(captured.get("default"), QMessageBox.StandardButton.No,
+                         "磁盘更新时默认按钮应为 No")
 
 
 if __name__ == "__main__":

@@ -596,6 +596,15 @@ TRANSLATIONS = {
         "zh": "检测到「{name}」有自动保存的未保存更改（{time}）。是否恢复？选择\"否\"将删除该备份。",
         "en": "Found auto-saved unsaved changes for \"{name}\" ({time}). Restore them? Choosing \"No\" deletes the backup.",
     },
+    "editor.autosave_restore_msg_stale": {
+        "zh": "检测到「{name}」有自动保存的备份（{time}），但磁盘上的文件更新（{disk}）。\n恢复备份会覆盖较新的磁盘内容。仍要恢复吗？选择\"否\"将删除该备份。",
+        "en": "Found an auto-saved backup for \"{name}\" ({time}), but the file on disk is newer ({disk}).\nRestoring will overwrite the newer disk content. Restore anyway? Choosing \"No\" deletes the backup.",
+    },
+    "editor.save_conflict_title": {"zh": "文件已被外部修改", "en": "File Changed on Disk"},
+    "editor.save_conflict_msg": {
+        "zh": "「{name}」自你打开后已在磁盘上被改动（可能是其它窗格或外部程序）。\n现在保存会覆盖那些改动。仍要保存吗？",
+        "en": "\"{name}\" changed on disk since you opened it (another pane or an external program).\nSaving now will overwrite those changes. Save anyway?",
+    },
     "editor.encoding_tooltip": {"zh": "文件编码：{encoding}（保存时按此编码写回）", "en": "File encoding: {encoding} (saved back in this encoding)"},
 
     # ===== Remote Explorer =====
