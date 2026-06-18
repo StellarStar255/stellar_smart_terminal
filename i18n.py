@@ -777,6 +777,10 @@ TRANSLATIONS = {
         "en": "Redraw the current screen and notify the foreground app (does not affect scrolled-back history)",
     },
     "ctx.clear_scrollback": {"zh": "清空回滚历史", "en": "Clear Scrollback"},
+    "term.scrollback_pressure_tip": {
+        "zh": "回滚历史已积累 {lines} 行（缩放窗口预计 reflow ≈ {ms}ms，已开始影响性能）。\n点击清空回滚历史以释放内存、加速缩放。",
+        "en": "Scrollback has grown to {lines} lines (≈ {ms}ms reflow on resize — starting to hurt performance).\nClick to clear scrollback and free memory / speed up resizing.",
+    },
     "ctx.clear_scrollback.tip": {
         "zh": "丢弃上方积累的历史行并释放内存，保留当前可见屏幕（对运行中的终端也有效）",
         "en": "Discard accumulated scrollback and free its memory, keeping the current screen (works on running terminals too)",

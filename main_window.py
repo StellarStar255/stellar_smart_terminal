@@ -4775,6 +4775,7 @@ class MainWindow(QMainWindow):
                 terminal.rename_split_requested.connect(lambda t=terminal: self._rename_split(t))
                 terminal.attention_requested.connect(lambda t=terminal: self._on_terminal_attention(t))
                 terminal.interaction_requested.connect(lambda t=terminal: self._on_terminal_interaction(t))
+                terminal.scrollback_pressure_changed.connect(lambda lv, t=terminal: self._on_scrollback_pressure(t))
                 terminal.installEventFilter(self)
 
                 # 重新设置快速命令提供者，指向当前窗口的预设
@@ -4899,6 +4900,7 @@ class MainWindow(QMainWindow):
         terminal.rename_split_requested.connect(lambda t=terminal: self._rename_split(t))
         terminal.attention_requested.connect(lambda t=terminal: self._on_terminal_attention(t))
         terminal.interaction_requested.connect(lambda t=terminal: self._on_terminal_interaction(t))
+        terminal.scrollback_pressure_changed.connect(lambda lv, t=terminal: self._on_scrollback_pressure(t))
 
         # 设置工作目录（用于自动启动时）
         terminal.set_working_dir(self._window_cwd)
@@ -5961,6 +5963,52 @@ class MainWindow(QMainWindow):
             #   故重载是安全的，不会丢失编辑。）
             if cwd_changed:
                 self._load_local_commands()
+
+    def _scrollback_dot_icon(self, level: int) -> QIcon:
+        """生成/缓存 scrollback 压力指示点图标：0=空 / 1=琥珀 / 2=红。"""
+        if level <= 0:
+            return QIcon()
+        cache = getattr(self, '_scrollback_icon_cache', None)
+        if cache is None:
+            cache = self._scrollback_icon_cache = {}
+        if level in cache:
+            return cache[level]
+        color = QColor('#e0a83a') if level == 1 else QColor('#e0524c')  # 琥珀 / 红
+        sz = 14
+        pm = QPixmap(sz, sz)
+        pm.fill(Qt.GlobalColor.transparent)
+        p = QPainter(pm)
+        p.setRenderHint(QPainter.RenderHint.Antialiasing)
+        p.setPen(Qt.PenStyle.NoPen)
+        p.setBrush(color)
+        p.drawEllipse(3, 3, sz - 6, sz - 6)
+        p.end()
+        icon = QIcon(pm)
+        cache[level] = icon
+        return icon
+
+    def _on_scrollback_pressure(self, terminal):
+        """某终端的 scrollback 压力变化 → 更新其所在 tab 的指示点（取该 tab 内最高等级）。"""
+        try:
+            for idx, terminals in self.tab_terminals.items():
+                if terminal not in terminals:
+                    continue
+                worst = None
+                level = 0
+                for t in terminals:
+                    try:
+                        lv = t.scrollback_level()
+                    except Exception:
+                        lv = 0
+                    if lv > level:
+                        level = lv
+                        worst = t
+                self.tab_widget.setTabIcon(idx, self._scrollback_dot_icon(level))
+                self.tab_widget.setTabToolTip(
+                    idx, worst.scrollback_tooltip() if worst is not None else "")
+                break
+        except Exception as e:
+            logger.warning(f"[Scrollback] update tab indicator failed: {e}")
 
     def _on_tab_session_ended(self, terminal):
         """某个标签页的会话结束"""
