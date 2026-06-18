@@ -1348,6 +1348,8 @@ class TerminalWidget(QWidget):
             btn = QPushButton(self)
             btn.setFixedSize(12, 12)
             btn.setCursor(Qt.CursorShape.PointingHandCursor)
+            # 不抢键盘焦点：点它清空 scrollback 后焦点仍留在终端，可继续打字
+            btn.setFocusPolicy(Qt.FocusPolicy.NoFocus)
             btn.clicked.connect(self.clear_scrollback)
             self._scrollback_dot_btn = btn
         if getattr(self, '_scrollback_dot_shown_level', 0) != level:
@@ -4767,8 +4769,10 @@ if (hasFileURL) {{
             self._header_h = 0
             if self._header_bar is not None:
                 self._header_bar.hide()
-        # 顶部留白变化 → 重算行数并整屏重绘，滚动条随标题栏高度重新定位
+        # 顶部留白变化 → 重算行数并整屏重绘，滚动条/指示点随标题栏高度重新定位
         self._position_scrollbar()
+        if self._scrollback_dot_btn is not None and self._scrollback_dot_btn.isVisible():
+            self._position_scrollback_dot()
         self._invalidate_render_cache()
         self._update_terminal_size()
         self.update()
