@@ -2623,6 +2623,36 @@ class FileEditorWidget(QWidget):
             rules, blocks = _ini_rules()
             self._highlighter = GenericHighlighter(doc, rules, blocks, self.theme)
 
+    def _atomic_write_bytes(self, path: str, data: bytes):
+        """原子写入：写到同目录临时文件 → fsync → os.replace 覆盖目标。
+
+        替代 open(path,'wb').write()——后者会先把原文件 truncate 成 0 再写，
+        若写到一半崩溃 / 磁盘满 / 设备掉线，原文件就被截断或写坏。原子方案
+        保证：要么完整新内容、要么原文件原封不动，绝不出现半截文件。
+        临时文件与目标同目录，确保 os.replace 是同一文件系统内的原子 rename。
+        保存后由 _refresh_known_mtime 重新挂监听（replace 会换 inode）。
+        """
+        d = os.path.dirname(os.path.abspath(path)) or '.'
+        fd, tmp = tempfile.mkstemp(dir=d, prefix='.', suffix='.tmp')
+        try:
+            with os.fdopen(fd, 'wb') as f:
+                f.write(data)
+                f.flush()
+                os.fsync(f.fileno())
+            # 尽量保留原文件权限位
+            try:
+                if os.path.exists(path):
+                    os.chmod(tmp, os.stat(path).st_mode & 0o777)
+            except OSError:
+                pass
+            os.replace(tmp, path)
+        except Exception:
+            try:
+                os.unlink(tmp)
+            except OSError:
+                pass
+            raise
+
     def save_file(self) -> bool:
         """保存文件"""
         if not self._current_file:
@@ -2641,8 +2671,8 @@ class FileEditorWidget(QWidget):
                 self._file_encoding = encoding
             # 屏蔽 watcher：我们自己写文件不应弹"外部已改动"
             self._suppress_external_until = time.time() + 1.5
-            with open(self._current_file, 'wb') as f:
-                f.write(data)
+            # 原子写：避免写一半崩溃截断原文件（见 _atomic_write_bytes）
+            self._atomic_write_bytes(self._current_file, data)
             # 更新原始内容，这样 is_modified() 会返回 False
             self._original_content = content
             # 保存成功 → 崩溃恢复备份已无意义，删掉
@@ -2960,6 +2990,28 @@ class FileEditorWidget(QWidget):
         if path not in self._file_watcher.files():
             self._file_watcher.addPath(path)
 
+    def _prompt_save_before_quit(self) -> bool:
+        """退出应用前对本窗格的未保存改动弹确认。
+
+        返回 False = 用户点了取消（应中止关闭）；True = 已保存 / 已丢弃 / 无改动，
+        可继续退出。与 _close_editor 不同：不做控件级清理（应用即将退出，多余）。
+        保存失败也返回 False，宁可中止退出也不丢数据。
+        """
+        if not self.is_modified():
+            return True
+        reply = QMessageBox.question(
+            self, t("editor.save_changes_title"),
+            t("editor.save_changes_msg", name=os.path.basename(self._current_file or "")),
+            QMessageBox.StandardButton.Save |
+            QMessageBox.StandardButton.Discard |
+            QMessageBox.StandardButton.Cancel
+        )
+        if reply == QMessageBox.StandardButton.Save:
+            return self.save_file()
+        if reply == QMessageBox.StandardButton.Cancel:
+            return False
+        return True  # Discard
+
     def _close_editor(self):
         """关闭编辑器"""
         # 如果文件已修改，提示保存
@@ -3110,6 +3162,38 @@ class EditorArea(QWidget):
     @property
     def panes(self) -> list:
         return list(self._panes)
+
+    # ---------- 退出前的未保存防护 ----------
+
+    def has_unsaved(self) -> bool:
+        """任一窗格有未保存改动。"""
+        return any(p.is_modified() for p in self._panes)
+
+    def prompt_save_all(self) -> bool:
+        """退出前逐个提示保存有改动的窗格（供 MainWindow.closeEvent 调用）。
+
+        返回 False 表示用户在某个窗格点了取消 → 调用方应中止关闭。
+        """
+        for pane in list(self._panes):
+            try:
+                if not pane.is_modified():
+                    continue
+                self._set_active(pane)  # 让用户看清弹的是哪个文件
+                if not pane._prompt_save_before_quit():
+                    return False
+            except Exception:
+                # 单个窗格异常不阻断其它窗格的保存提示
+                pass
+        return True
+
+    def flush_autosave_all(self):
+        """强制退出路径（Ctrl+C / 强制关闭）：不弹窗，但同步刷每个有改动窗格的
+        崩溃恢复备份，保证下次打开可恢复、不丢数据。"""
+        for pane in list(self._panes):
+            try:
+                pane._autosave_tick()
+            except Exception:
+                pass
 
     def _styled_splitter(self, orientation) -> QSplitter:
         splitter = QSplitter(orientation)
