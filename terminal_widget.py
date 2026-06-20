@@ -1225,6 +1225,9 @@ class TerminalWidget(QWidget):
         self._last_click_pos = None
         self._double_click_interval = 0.4  # 400ms
 
+        # 已清理标记：cleanup() 后置 True，鼠标事件处理器据此提前返回
+        self._cleaned_up = False
+
         # 自动滚动（拖动选择时）
         self._auto_scroll_timer = QTimer()
         self._auto_scroll_timer.timeout.connect(self._auto_scroll_tick)
@@ -3320,6 +3323,8 @@ class TerminalWidget(QWidget):
         - 鼠标越远离边缘（甚至超出 widget），每次 tick 滚动行数越多
         - 用户向上猛拉时立即跨大段历史，轻微靠近边缘时则慢速精细滚动
         """
+        if self._cleaned_up or self._auto_scroll_timer is None:
+            return
         if not self._is_selecting or self._auto_scroll_direction == 0:
             self._auto_scroll_timer.stop()
             return
@@ -3417,6 +3422,8 @@ class TerminalWidget(QWidget):
         鼠标模式下，单击仍然使用本地光标定位（通过方向键），
         拖动选择和其他鼠标事件则正常转发给程序。
         """
+        if self._cleaned_up:
+            return
         import time
         self.setFocus(Qt.FocusReason.MouseFocusReason)
 
@@ -3492,6 +3499,8 @@ class TerminalWidget(QWidget):
 
     def mouseMoveEvent(self, event: QMouseEvent):
         """鼠标移动 - 更新选择区域（使用绝对坐标），支持拖动时自动滚动"""
+        if self._cleaned_up:
+            return
         # 悬停反馈：未按下按钮且按住 Cmd/Alt 悬停在 URL 上时显示手型光标
         if not event.buttons():
             hovering_url = bool(
@@ -3554,6 +3563,8 @@ class TerminalWidget(QWidget):
 
     def mouseReleaseEvent(self, event: QMouseEvent):
         """鼠标释放 - 完成选择或移动光标"""
+        if self._cleaned_up:
+            return
         # 停止自动滚动
         self._auto_scroll_timer.stop()
         self._auto_scroll_direction = 0
@@ -4166,6 +4177,10 @@ class TerminalWidget(QWidget):
 
     def cleanup(self):
         """完整清理所有资源（在销毁前调用）"""
+        # 标记已清理：Qt 可能在控件销毁前仍投递排队中的鼠标事件，
+        # 事件处理器据此提前返回，避免访问已置 None 的定时器导致闪退。
+        self._cleaned_up = True
+
         # 停止所有定时器
         if hasattr(self, 'cursor_timer') and self.cursor_timer:
             self.cursor_timer.stop()
