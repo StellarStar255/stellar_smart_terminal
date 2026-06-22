@@ -3816,6 +3816,7 @@ class MainWindow(QMainWindow):
             (nat("Shift+Home") + " / " + nat("Shift+End"), t("shortcuts.sc.term_home_end")),
             (nat("Ctrl+Up") + " / " + nat("Ctrl+Down"), t("shortcuts.sc.term_jump")),
             (nat("Ctrl+Left") + " / " + nat("Ctrl+Right"), t("shortcuts.sc.term_line_ends")),
+            (nat("Ctrl+F"), t("shortcuts.sc.term_open_search")),
             (nat("Esc"), t("shortcuts.sc.term_close_search")),
         ]
 

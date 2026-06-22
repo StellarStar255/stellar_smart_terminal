@@ -70,6 +70,7 @@ TRANSLATIONS = {
     "shortcuts.sc.term_home_end": {"zh": "跳到历史最顶部/最底部", "en": "Jump to top/bottom of history"},
     "shortcuts.sc.term_jump": {"zh": "跳到历史最顶部/最底部", "en": "Jump to top/bottom of history"},
     "shortcuts.sc.term_line_ends": {"zh": "光标跳到行首/行尾", "en": "Move cursor to line start/end"},
+    "shortcuts.sc.term_open_search": {"zh": "打开终端搜索（含回滚历史）", "en": "Open terminal search (incl. scrollback)"},
     "shortcuts.sc.term_close_search": {"zh": "关闭搜索栏", "en": "Close the search bar"},
     "shortcuts.sc.edit_save": {"zh": "保存当前文件", "en": "Save current file"},
     "shortcuts.sc.edit_comment": {"zh": "切换行注释", "en": "Toggle line comment"},
@@ -771,6 +772,7 @@ TRANSLATIONS = {
     "ctx.manage_local_presets": {"zh": "管理本地预设...", "en": "Manage Local Presets..."},
     "ctx.open_current_dir": {"zh": "打开当前目录", "en": "Open Current Directory"},
     "ctx.copy_current_dir": {"zh": "复制当前路径", "en": "Copy Current Path"},
+    "ctx.search": {"zh": "搜索…", "en": "Search…"},
     "ctx.refresh": {"zh": "刷新终端", "en": "Refresh Terminal"},
     "ctx.refresh.tip": {
         "zh": "重绘当前屏幕并通知前台程序重画（不影响已滚出的历史）",

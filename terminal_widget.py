@@ -3025,6 +3025,15 @@ class TerminalWidget(QWidget):
             event.accept()
             return
 
+        # === macOS 上 Cmd+F 始终打开终端搜索（运行时也可用，便于翻日志/找报错）===
+        # Cmd+F = ControlModifier，不与 shell 的物理 Ctrl+F（MetaModifier→\x06）冲突。
+        # Win/Linux 的 StandardKey.Find = Ctrl+F 本身是 shell 的前进字符键，故运行时不抢占，
+        # 仍由下方"终端未运行时"分支处理（进程退出后才用 Ctrl+F 搜索静态缓冲）。
+        if sys.platform == 'darwin' and event.matches(QKeySequence.StandardKey.Find):
+            self._show_search_bar()
+            event.accept()
+            return
+
         # === 终端未运行时的 GUI 快捷键 ===
         if self._backend is None:
             if event.matches(QKeySequence.StandardKey.SelectAll):
@@ -3826,6 +3835,11 @@ class TerminalWidget(QWidget):
         menu.addAction(clear_sb_action)
 
         menu.addSeparator()
+
+        # 搜索（终端历史，含回滚）
+        search_action = QAction(t("ctx.search"), self)
+        search_action.triggered.connect(self._show_search_bar)
+        menu.addAction(search_action)
 
         # 全选
         select_all_action = QAction(t("ctx.select_all"), self)
