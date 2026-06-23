@@ -16,6 +16,8 @@ TRANSLATIONS = {
 
     # ===== 终端历史行数 (scrollback) =====
     "scrollback.menu": {"zh": "终端历史行数", "en": "Terminal Scrollback"},
+    "settings.parse_off_gui": {"zh": "终端解析放到后台线程（实验）", "en": "Parse terminals off the GUI thread (experimental)"},
+    "settings.parse_off_gui_applied": {"zh": "已切换终端解析线程；高频/远程输出卡顿应缓解", "en": "Toggled off-GUI terminal parsing; heavy/remote-output lag should ease"},
     "scrollback.applied": {"zh": "已更新历史行数上限，对之后新建的终端生效", "en": "Scrollback limit updated; applies to newly created terminals"},
 
     # ===== 键盘快捷键设置 =====

@@ -8065,8 +8065,20 @@ class MainWindow(QMainWindow):
             self._build_notify_sound_menu(menu.addMenu(t("notify.sound_menu")), sounds)
         # 终端历史行数（scrollback）子菜单
         self._build_scrollback_menu(menu.addMenu(t("scrollback.menu")))
+        # 终端解析放到后台线程（实验）：减轻高频/远程输出造成的全局卡顿
+        parse_act = menu.addAction(t("settings.parse_off_gui"))
+        parse_act.setCheckable(True)
+        parse_act.setChecked(TerminalWidget.PARSE_ON_READER_THREAD)
+        parse_act.toggled.connect(self._set_parse_off_gui)
         btn = self.toolbar_settings_btn
         menu.exec(btn.mapToGlobal(QPoint(0, btn.height())))
+
+    def _set_parse_off_gui(self, enabled: bool):
+        """切换"终端解析放到后台线程"。立即对所有终端生效（on_output 每次按此分流），
+        并落盘。把 pyte 解析移出唯一的 GUI 线程，是多窗口/远程高频输出卡顿的根治向。"""
+        TerminalWidget.PARSE_ON_READER_THREAD = bool(enabled)
+        self._save_config()
+        self.statusbar.showMessage(t("settings.parse_off_gui_applied"), 4000)
 
     @staticmethod
     def _clamp_scrollback(value) -> int:
@@ -9270,6 +9282,11 @@ class MainWindow(QMainWindow):
                     # 加载终端 scrollback 上限（进程级，影响之后新建的终端）
                     TerminalWidget.SCROLLBACK_LINES = self._clamp_scrollback(
                         config.get('terminal_scrollback', TerminalWidget.SCROLLBACK_LINES))
+                    # 终端解析放到后台线程：env 变量优先（已在类属性默认里处理），
+                    # 否则用配置值。未设 env 时才让配置接管，保证 env 始终能强制开启。
+                    if os.environ.get('STELLAR_PARSE_OFF_GUI') is None:
+                        TerminalWidget.PARSE_ON_READER_THREAD = bool(
+                            config.get('parse_off_gui_thread', False))
                     # 加载导航面板停靠方式（'float' / 'embed'，全局记忆）
                     _dock_mode = config.get('navigator_dock_mode', 'float')
                     if _dock_mode in ('float', 'embed'):
@@ -9498,6 +9515,7 @@ class MainWindow(QMainWindow):
                 'ai_completion_enabled': getattr(self, '_ai_completion_enabled', False),  # 保存 AI 行内补全开关
                 'notify_sound': getattr(self, '_notify_sound', 'Submarine'),  # 保存完成提示音
                 'terminal_scrollback': TerminalWidget.SCROLLBACK_LINES,  # 保存终端 scrollback 上限
+                'parse_off_gui_thread': TerminalWidget.PARSE_ON_READER_THREAD,  # 保存"解析放后台线程"开关
                 'language': get_language(),  # 保存语言设置
                 'keyboard_shortcuts': shortcuts_to_save,  # 保存自定义快捷键（带多窗口防覆盖）
                 'window_geometry': [self.x(), self.y(), self.width(), self.height()],
