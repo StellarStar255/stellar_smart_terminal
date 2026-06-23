@@ -20,6 +20,14 @@ IS_WINDOWS = sys.platform == 'win32'
 class TerminalBackend(ABC):
     """终端后端抽象基类"""
 
+    # 读取合并：在一个很短的时间窗内把陆续到达的小块攒成一次回调。
+    # 远程(ssh)下网络把输出切成大量 ~1KB 小片，且读取线程发射是非阻塞的(不会因
+    # GUI 慢而堆积)，所以必须按【时间窗】主动攒批，才能把每秒上千次 on_output
+    # 降到 ~百次，缓解 GUI 线程的跨线程信号洪流/卡顿。窗口 8ms 对交互无感
+    # (远小于 50ms 渲染节拍)；总量封顶避免单次喂过大。
+    _READ_COALESCE_WINDOW = 0.008   # 秒
+    _READ_COALESCE_MAX = 256 * 1024  # 字节
+
     def __init__(self):
         self.on_output: Optional[Callable[[bytes], None]] = None
         self.on_exit: Optional[Callable[[int], None]] = None
@@ -744,12 +752,35 @@ else:
                     if ready:
                         try:
                             data = os.read(self._master_fd, 65536)
-                            if data:
-                                if self.on_output:
-                                    self.on_output(data)
-                            else:
+                            if not data:
                                 # EOF - 进程已退出
                                 break
+                            # 读取合并（按时间窗攒批，见 _READ_COALESCE_WINDOW）：在
+                            # 极短窗口内把陆续到达的小块攒成一次回调，显著减少 on_output
+                            # 次数 → 缓解远程高频输出造成的 GUI 事件洪流。
+                            if len(data) >= self._READ_COALESCE_MAX:
+                                chunks = None
+                            else:
+                                chunks = [data]
+                                total = len(data)
+                                deadline = time.monotonic() + self._READ_COALESCE_WINDOW
+                                while total < self._READ_COALESCE_MAX and self._running:
+                                    remaining = deadline - time.monotonic()
+                                    if remaining <= 0:
+                                        break
+                                    r2, _, _ = select.select(
+                                        [self._master_fd], [], [], remaining)
+                                    if not r2:
+                                        break
+                                    more = os.read(self._master_fd, 65536)
+                                    if not more:
+                                        break
+                                    chunks.append(more)
+                                    total += len(more)
+                            if self.on_output:
+                                self.on_output(data if chunks is None
+                                               else (chunks[0] if len(chunks) == 1
+                                                     else b''.join(chunks)))
                         except OSError:
                             break
                     else:
