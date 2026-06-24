@@ -4243,17 +4243,34 @@ class MainWindow(QMainWindow):
                     font.setPointSize(target_size)
                     tree.setFont(font)
 
-        # 5. Git diff 查看器 (默认12pt, 范围6-32)
-        if hasattr(self, 'git_panel') and self.git_panel is not None:
-            target_size = gui_target(12, 6, 32)
-            if hasattr(self.git_panel, 'diff_text'):
-                font = self.git_panel.diff_text.font()
-                if font.pointSize() != target_size:
-                    font.setPointSize(target_size)
-                    self.git_panel.diff_text.setFont(font)
+        # 5. Git 面板（diff 查看器 + 提交 graph，默认12pt, 范围6-32）
+        self._apply_gui_font_to_git_panel()
 
         # 保存缩放偏移到配置
         self._save_config()
+
+    def _apply_gui_font_to_git_panel(self):
+        """把当前 GUI 字号应用到 Git 面板：diff 查看器 + 提交 graph（默认12pt，6-32）。
+
+        graph 是 QPainter 手绘文字，既不吃应用级 QSS 的 font-size，也不会跟随
+        setFont——必须显式按当前 GUI 字号重设（这正是它之前不联动的原因）。
+        在 _apply_global_zoom（改字号时）和 Git 面板创建后各调一次，保证即时联动
+        且初始也正确。
+        """
+        if not (hasattr(self, 'git_panel') and self.git_panel is not None):
+            return
+        # 与 _apply_global_zoom 的 gui_target(12, 6, 32) 同一公式
+        if self._gui_font_size > 0:
+            target = max(6, min(32, self._gui_font_size))
+        else:
+            target = max(6, min(32, 12 + self._global_zoom_delta))
+        if hasattr(self.git_panel, 'diff_text'):
+            font = self.git_panel.diff_text.font()
+            if font.pointSize() != target:
+                font.setPointSize(target)
+                self.git_panel.diff_text.setFont(font)
+        if getattr(self.git_panel, 'graph_widget', None) is not None:
+            self.git_panel.graph_widget.set_font_size(target)
 
     def _current_gui_font_scale(self) -> float:
         """当前 GUI 字体缩放比例（以 12px 为基准）。
@@ -7492,6 +7509,9 @@ class MainWindow(QMainWindow):
         # Git 面板内容
         self.git_panel = GitPanel(theme=current_theme)
         layout.addWidget(self.git_panel)
+        # 面板默认按 12pt 初始化，但 GUI 字号可能已是别的值（启动时缩放已应用过）→
+        # 创建后立刻按当前 GUI 字号重设 diff/graph，避免初始字号不联动。
+        self._apply_gui_font_to_git_panel()
 
         # 持久化提交区高度 + body 各栏尺寸：拖拽时记下，加载配置时恢复
         self.git_panel.commit_height_changed.connect(self._on_git_commit_height_changed)

@@ -1655,6 +1655,24 @@ class _GraphCanvas(QWidget):
         self.updateGeometry()
         self.update()
 
+    def set_font_size(self, size: int):
+        """按 GUI 字号设置 graph 字体，并同比例缩放行高/lane 几何，避免大字号被裁。
+
+        以 12pt 为基准（size=12 复现 __init__ 的默认 lane_w=14 / dot_r=4 /
+        left_pad=8 / row_h=24），所以默认态不跳变。
+        """
+        size = max(6, min(32, int(size)))
+        self._font = _mono_font(size)
+        scale = size / 12.0
+        self._lane_w = max(10, round(14 * scale))
+        self._dot_r = max(3, round(4 * scale))
+        self._left_pad = max(6, round(8 * scale))
+        self._row_h = max(18, QFontMetrics(self._font).height() + round(8 * scale))
+        if self._rows:
+            self.setMinimumHeight(len(self._rows) * self._row_h)
+        self.updateGeometry()
+        self.update()
+
     @staticmethod
     def _compute_lanes(commits: list) -> list:
         """把提交序列排成 lane：返回每行 {commit, above, my, below, parents, width}。
@@ -1876,6 +1894,9 @@ class GitGraphWidget(QWidget):
 
     def set_commits(self, commits: list):
         self._canvas.set_commits(commits)
+
+    def set_font_size(self, size: int):
+        self._canvas.set_font_size(size)
 
     def apply_theme(self, theme: dict):
         self.theme = theme
