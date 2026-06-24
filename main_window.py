@@ -3866,12 +3866,33 @@ class MainWindow(QMainWindow):
         combo.blockSignals(False)
 
     def _on_gui_font_size_changed(self, _index: int = -1):
-        """GUI 字体大小调整（下拉框：Auto=0 或 8–32pt）"""
+        """GUI 字体大小调整（下拉框：Auto=0 或 8–32pt）— 同步到所有窗口"""
         value = self.gui_font_spin.currentData()
         if value is None:
             return
         self._gui_font_size = int(value)
-        self._apply_global_zoom()
+        self._apply_gui_font_to_all_windows()
+
+    def _apply_gui_font_to_all_windows(self):
+        """将当前 GUI 字号应用到所有 MainWindow 窗口。
+
+        与透明度一样属于「全局」设置：在任一窗口调整都即时同步到其他已开窗口
+        （含内嵌导航栏的侧栏控件），并静默对齐它们的下拉框，避免信号回环。
+        每个窗口各自调用 _apply_global_zoom()——该方法用 self.findChildren 只能
+        缩放本窗口的控件，所以必须逐窗口分别应用，不能只在当前窗口跑一次。
+        """
+        app = QApplication.instance()
+        if not app:
+            self._apply_global_zoom()
+            return
+        for widget in app.topLevelWidgets():
+            if not isinstance(widget, MainWindow):
+                continue
+            if widget is not self:
+                widget._gui_font_size = self._gui_font_size
+                if hasattr(widget, 'gui_font_spin'):
+                    self._select_combo_value(widget.gui_font_spin, self._gui_font_size)
+            widget._apply_global_zoom()
 
     def _on_opacity_changed(self, _index: int = -1):
         """窗口透明度调整 — 同步到所有窗口"""
