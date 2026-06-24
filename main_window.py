@@ -3876,13 +3876,14 @@ class MainWindow(QMainWindow):
     def _apply_gui_font_to_all_windows(self):
         """将当前 GUI 字号应用到所有 MainWindow 窗口。
 
-        与透明度一样属于「全局」设置：在任一窗口调整都即时同步到其他已开窗口
-        （含内嵌导航栏的侧栏控件），并静默对齐它们的下拉框，避免信号回环。
+        仅在导航栏「内嵌」模式下跨窗口联动：此时各窗口共用同一套侧栏布局，
+        字号也随之全局同步，并静默对齐其他窗口的下拉框，避免信号回环。
+        浮动模式下字号是 per-window 设置，只应用到当前窗口。
         每个窗口各自调用 _apply_global_zoom()——该方法用 self.findChildren 只能
         缩放本窗口的控件，所以必须逐窗口分别应用，不能只在当前窗口跑一次。
         """
         app = QApplication.instance()
-        if not app:
+        if not app or MainWindow._navigator_dock_mode != 'embed':
             self._apply_global_zoom()
             return
         for widget in app.topLevelWidgets():
