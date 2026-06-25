@@ -7955,6 +7955,16 @@ class MainWindow(QMainWindow):
         except Exception:
             pass
 
+        # 把父窗口已缓存的密码带给新窗口（和「expand to new window」一致）。
+        # 否则新窗口 _connect_to 会弹模态密码框——而新窗口此刻正与父窗口逐像素
+        # 重合、且处于隐形对齐期，密码框会被盖住/吞掉，用户永远没法输入，后台
+        # SSH 线程就一直卡在「Connecting…」。提前预置密码即可免去这次弹框。
+        try:
+            pw = self.remote_panel.get_cached_password(alias)
+            new_window.remote_panel.prime_cached_password(alias, pw)
+        except Exception:
+            pass
+
         # 与「expand to new window」一致：新窗口直接与父窗口逐像素重合
         # （先继承父窗口尺寸，再隐形对齐后显形，见 _align_child_with_parent_geometry），
         # 而不是简单偏移 48px——后者会被 macOS 级联/约束推走、跟父窗口对不齐。
@@ -7972,6 +7982,19 @@ class MainWindow(QMainWindow):
             if sip.isdeleted(new_window):
                 return
             try:
+                # 父窗口未连接时这里会弹模态密码/passphrase 框。必须保证此刻新窗口
+                # 已经显形（不在隐形对齐期）、且在最上层，否则密码框会被压在窗口下
+                # 看不见，用户无法输入，后台 SSH 线程就一直卡在「Connecting…」。
+                # 这里在连接前强制把窗口显形并置顶，不依赖对齐循环的显形时机。
+                try:
+                    op = getattr(new_window, '_window_opacity', 100)
+                    if not (isinstance(op, int) and 10 <= op <= 100):
+                        op = 100
+                    new_window.setWindowOpacity(op / 100.0)
+                    new_window.raise_()
+                    new_window.activateWindow()
+                except Exception:
+                    pass
                 # 显示新窗口的 Remote 面板，让用户看到连上的文件树
                 if not getattr(new_window, 'remote_panel_visible', False):
                     new_window._toggle_remote_panel()
@@ -7979,7 +8002,9 @@ class MainWindow(QMainWindow):
                 new_window.remote_panel._connect_to(host_config)
             except Exception as e:
                 new_window.statusbar.showMessage(f"Failed to connect: {e}", 5000)
-        QTimer.singleShot(120, _connect_after_init)
+        # 稍微延后：让对齐循环前期密集的 setGeometry（~前 8 个 30ms tick）基本
+        # 收敛、窗口稳定下来后再连接，避免密码框弹出时还在被反复挪动/压窄。
+        QTimer.singleShot(280, _connect_after_init)
 
     @staticmethod
     def _shell_quote(s: str) -> str:
