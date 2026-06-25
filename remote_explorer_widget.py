@@ -800,6 +800,9 @@ class RemoteExplorerPanel(QWidget):
 
         self._path_edit = QLineEdit()
         self._path_edit.returnPressed.connect(self._on_path_edited)
+        # 在默认的编辑右键菜单（撤销/复制/粘贴等）之上补一个「在此打开终端」
+        self._path_edit.setContextMenuPolicy(Qt.ContextMenuPolicy.CustomContextMenu)
+        self._path_edit.customContextMenuRequested.connect(self._on_path_edit_context_menu)
         pb_layout.addWidget(self._path_edit, 1)
 
         # 视图设置按钮（齿轮）：弹出菜单，含"显示隐藏文件"开关
@@ -2229,6 +2232,11 @@ class RemoteExplorerPanel(QWidget):
             act_open = QAction(t("remote.open_in_editor"), self)
             act_open.triggered.connect(lambda: self._open_remote_file(entry))
             menu.addAction(act_open)
+            # 文件没有自身目录，终端开在它所在的父目录
+            file_dir = posixpath.dirname(entry.path.rstrip("/")) or "/"
+            act_term = QAction(t("remote.open_terminal_here"), self)
+            act_term.triggered.connect(lambda: self._open_terminal_at_path(file_dir))
+            menu.addAction(act_term)
             menu.addSeparator()
 
         if entry.is_dir:
@@ -3287,6 +3295,17 @@ class RemoteExplorerPanel(QWidget):
         if self._session is None:
             return
         self.open_terminal_at.emit(self._session.host_config, path)
+
+    def _on_path_edit_context_menu(self, pos):
+        """路径输入框右键：保留默认编辑项，并追加「在此打开终端」。"""
+        menu = self._path_edit.createStandardContextMenu()
+        path = self._path_edit.text().strip()
+        if self._session is not None and path:
+            menu.addSeparator()
+            act_term = QAction(t("remote.open_terminal_here"), menu)
+            act_term.triggered.connect(lambda: self._open_terminal_at_path(path))
+            menu.addAction(act_term)
+        menu.exec(self._path_edit.mapToGlobal(pos))
 
     def _upload_at(self, parent_path: str, parent_item: Optional[QTreeWidgetItem]):
         local_path, _ = QFileDialog.getOpenFileName(self, t("remote.upload"))
