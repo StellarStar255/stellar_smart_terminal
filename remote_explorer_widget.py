@@ -114,8 +114,10 @@ class _AddHostDialog(QDialog):
     """
 
     def __init__(self, parent=None, *, title=None, hint=None,
-                 placeholder="deploy@10.0.0.5:22", initial="", ok_label=None):
+                 placeholder="deploy@10.0.0.5:22", initial="", ok_label=None,
+                 with_alias=False):
         super().__init__(parent)
+        self._with_alias = with_alias
         title = title or t("remote.add_host_title")
         hint = hint if hint is not None else t("remote.add_host_hint")
         ok_label = ok_label or t("remote.add_host_ok")
@@ -197,6 +199,20 @@ class _AddHostDialog(QDialog):
             self._edit.selectAll()
         layout.addWidget(self._edit)
 
+        # 可选别名输入（仅「添加主机」用）：留空则后端按主机名生成
+        self._alias_edit = None
+        if with_alias:
+            alias_lbl = QLabel(t("remote.add_host_alias_label"))
+            alias_lbl.setObjectName("hint")
+            layout.addWidget(alias_lbl)
+            self._alias_edit = QLineEdit()
+            self._alias_edit.setPlaceholderText(
+                t("remote.add_host_alias_placeholder"))
+            self._alias_edit.setClearButtonEnabled(True)
+            self._alias_edit.returnPressed.connect(
+                lambda: self.accept() if self._edit.text().strip() else None)
+            layout.addWidget(self._alias_edit)
+
         btn_row = QHBoxLayout()
         btn_row.setSpacing(8)
         btn_row.addStretch(1)
@@ -225,6 +241,9 @@ class _AddHostDialog(QDialog):
 
     def value(self) -> str:
         return self._edit.text().strip()
+
+    def alias(self) -> str:
+        return self._alias_edit.text().strip() if self._alias_edit else ""
 
 
 class _RemoteTreeWidget(QTreeWidget):
@@ -1007,12 +1026,13 @@ class RemoteExplorerPanel(QWidget):
                 self._hosts_list.addItem(item)
 
     def _on_add_host_clicked(self):
-        dlg = _AddHostDialog(self)
+        dlg = _AddHostDialog(self, with_alias=True)
         if dlg.exec() != QDialog.DialogCode.Accepted:
             return
         text = dlg.value()
         if not text:
             return
+        alias = dlg.alias()
         # 解析 [user@]host[:port]
         user = ""
         port = 22
@@ -1033,8 +1053,10 @@ class RemoteExplorerPanel(QWidget):
             return
         user = user.strip()
         # 持久化到 ~/.ssh/config，使其成为系统记录、重启后仍在
+        # alias 留空时后端按主机名生成（并自动避让重名）
         try:
-            append_ssh_config_host(hostname=host, user=user, port=port)
+            append_ssh_config_host(hostname=host, user=user, port=port,
+                                   alias=alias or None)
             self._reload_hosts()  # 从 config 重新读取，新主机会出现在列表里
         except Exception as e:
             # 写盘失败（权限等）→ 退回到仅本会话内存，避免直接丢失
@@ -1042,7 +1064,8 @@ class RemoteExplorerPanel(QWidget):
                 self, t("remote.add_host_title"),
                 t("remote.add_host_save_failed").format(error=e),
             )
-            cfg = HostConfig(alias=text, hostname=host, user=user, port=port)
+            cfg = HostConfig(alias=(alias or text), hostname=host,
+                             user=user, port=port)
             self._extra_hosts.append(cfg)
             self._populate_hosts_list()
 
