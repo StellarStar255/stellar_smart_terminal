@@ -11,6 +11,9 @@ name: Release
 on:
   push:
     tags: ["v*"]
+  # 手动触发：在 Actions 页面跑一次，只构建 Linux .deb 并作为 workflow artifact
+  # 产出（无 tag、不碰 Release），用来在正式发版前试打验证。
+  workflow_dispatch:
 
 permissions:
   contents: write
@@ -20,6 +23,8 @@ jobs:
     name: macOS (arm64)
     runs-on: macos-latest
     timeout-minutes: 30
+    # 手动触发（workflow_dispatch）时跳过，只在推 tag 时发版
+    if: startsWith(github.ref, 'refs/tags/')
     steps:
       - uses: actions/checkout@v4
 
@@ -63,6 +68,7 @@ jobs:
     name: Windows (x64)
     runs-on: windows-latest
     timeout-minutes: 30
+    if: startsWith(github.ref, 'refs/tags/')
     steps:
       - uses: actions/checkout@v4
 
@@ -134,6 +140,8 @@ jobs:
           python-version: "3.12"
 
       - name: Check spec version matches tag
+        # 仅发版（tag）时校验；手动 workflow_dispatch 没有 tag，跳过
+        if: startsWith(github.ref, 'refs/tags/')
         run: |
           SPEC_V=$(grep -m1 CFBundleShortVersionString smart_terminal.spec | sed 's/[^0-9.]//g')
           case "$GITHUB_REF_NAME" in
@@ -162,6 +170,8 @@ jobs:
             --timeout=60 --timeout-method=thread
 
       - name: Upload to release
+        # 仅发版（tag）时挂到 Release
+        if: startsWith(github.ref, 'refs/tags/')
         env:
           GH_TOKEN: ${{ github.token }}
         run: |
@@ -169,3 +179,12 @@ jobs:
             --title "$GITHUB_REF_NAME" --generate-notes || true
           gh release upload "$GITHUB_REF_NAME" --clobber \
             dist/Stellar-Smart-Terminal-v*-linux-amd64.deb
+
+      - name: Upload .deb as artifact (manual run)
+        # 手动 workflow_dispatch 试打：deb 作为 workflow artifact 下载验证，不碰 Release
+        if: github.event_name == 'workflow_dispatch'
+        uses: actions/upload-artifact@v4
+        with:
+          name: linux-deb
+          path: dist/Stellar-Smart-Terminal-v*-linux-amd64.deb
+          if-no-files-found: error
