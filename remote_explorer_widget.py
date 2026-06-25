@@ -246,6 +246,20 @@ class _AddHostDialog(QDialog):
         return self._alias_edit.text().strip() if self._alias_edit else ""
 
 
+class _HostListWidget(QListWidget):
+    """主机列表：手动排序模式下支持内部拖拽改顺序。
+
+    用 dropEvent 覆写在拖放完成后发 rows_reordered，比连 model().rowsMoved
+    可靠——QListWidget 的 InternalMove 在不少 Qt 版本里是「删除+插入」实现，
+    根本不发 rowsMoved。
+    """
+    rows_reordered = pyqtSignal()
+
+    def dropEvent(self, event):
+        super().dropEvent(event)
+        self.rows_reordered.emit()
+
+
 class _RemoteTreeWidget(QTreeWidget):
     """支持文件拖入（上传）/ 拖出（下载到临时文件后给外部 URL）的远程文件树。
     并支持**内部**拖拽（同一棵远程树里把文件/目录移动到另一个文件夹）。
@@ -646,6 +660,8 @@ class RemoteExplorerPanel(QWidget):
         self._show_hidden = self._load_show_hidden()
         # 排序方式（默认按名称升序，文件夹始终置顶），从配置读取
         self._sort_key, self._sort_desc = self._load_sort()
+        # 主机列表排序模式（manual/alias/host），从配置读取
+        self._host_sort = self._load_host_sort()
         # 文件搜索状态：generation 用于丢弃过期/已取消的后台结果
         self._search_gen = 0
 
@@ -772,10 +788,15 @@ class RemoteExplorerPanel(QWidget):
         self._empty_hint.hide()
         hp_layout.addWidget(self._empty_hint)
 
-        self._hosts_list = QListWidget()
+        self._hosts_list = _HostListWidget()
         self._hosts_list.itemDoubleClicked.connect(self._on_host_activated)
         self._hosts_list.setContextMenuPolicy(Qt.ContextMenuPolicy.CustomContextMenu)
         self._hosts_list.customContextMenuRequested.connect(self._on_hosts_context_menu)
+        # 手动排序模式下允许拖拽改顺序；拖完把新顺序持久化。
+        # InternalMove 由 _populate_hosts_list 按当前模式启停。
+        self._hosts_list.setDragDropMode(QAbstractItemView.DragDropMode.NoDragDrop)
+        self._hosts_list.setDefaultDropAction(Qt.DropAction.MoveAction)
+        self._hosts_list.rows_reordered.connect(self._on_hosts_reordered)
         hp_layout.addWidget(self._hosts_list, 1)
 
         self._stack.addWidget(self._hosts_page)
@@ -1013,13 +1034,18 @@ class RemoteExplorerPanel(QWidget):
         self._populate_hosts_list()
 
     def _populate_hosts_list(self):
+        # 仅 manual 模式开启内部拖拽；切换前先按当前模式设好拖拽策略
+        manual = (self._host_sort == 'manual')
+        self._hosts_list.setDragDropMode(
+            QAbstractItemView.DragDropMode.InternalMove if manual
+            else QAbstractItemView.DragDropMode.NoDragDrop)
         self._hosts_list.clear()
         combined = list(self._hosts) + list(self._extra_hosts)
         if not combined:
             self._empty_hint.show()
         else:
             self._empty_hint.hide()
-            for h in combined:
+            for h in self._sorted_hosts(combined):
                 target = f"{h.user + '@' if h.user else ''}{h.hostname}:{h.port}"
                 item = QListWidgetItem(f"🖥  {h.alias}    {target}")
                 item.setData(_ROLE_ENTRY, h)
@@ -1102,19 +1128,17 @@ class RemoteExplorerPanel(QWidget):
         self._add_btn.hide()
 
     def _on_hosts_context_menu(self, pos):
-        """主机列表右键菜单：连接 / 重命名（改别名，方便管理）。"""
+        """主机列表右键菜单：连接 / 重命名 / 排序方式。
+
+        右键空白处也能弹（仅排序子菜单），方便没有主机或想改排序时用。
+        """
         item = self._hosts_list.itemAt(pos)
-        if item is None:
-            return
-        host: HostConfig = item.data(_ROLE_ENTRY)
-        if not host:
-            return
+        host: HostConfig = item.data(_ROLE_ENTRY) if item is not None else None
         bg_medium = self.theme.get('bg_medium', '#16213e')
         text = self.theme.get('text', '#eaeaea')
         border = self.theme.get('border', '#3d3d5c')
         accent = self.theme.get('accent', '#667eea')
-        menu = QMenu(self)
-        menu.setStyleSheet(f"""
+        menu_css = f"""
             QMenu {{
                 background-color: {bg_medium}; color: {text};
                 border: 1px solid {border}; border-radius: 4px; padding: 4px;
@@ -1122,14 +1146,28 @@ class RemoteExplorerPanel(QWidget):
             QMenu::item {{ padding: 6px 20px; border-radius: 3px; }}
             QMenu::item:selected {{ background-color: {accent}; }}
             QMenu::separator {{ height: 1px; background-color: {border}; margin: 4px 10px; }}
-        """)
-        connect_act = menu.addAction(t("remote.connect"))
-        connect_act.triggered.connect(lambda checked=False, h=host: self._connect_to(h))
-        new_win_act = menu.addAction(t("remote.connect_in_new_window"))
-        new_win_act.triggered.connect(lambda checked=False, h=host: self.open_in_new_window.emit(h))
-        menu.addSeparator()
-        rename_act = menu.addAction(t("remote.rename_host"))
-        rename_act.triggered.connect(lambda checked=False, h=host: self._rename_host(h))
+        """
+        menu = QMenu(self)
+        menu.setStyleSheet(menu_css)
+        if host is not None:
+            connect_act = menu.addAction(t("remote.connect"))
+            connect_act.triggered.connect(lambda checked=False, h=host: self._connect_to(h))
+            new_win_act = menu.addAction(t("remote.connect_in_new_window"))
+            new_win_act.triggered.connect(lambda checked=False, h=host: self.open_in_new_window.emit(h))
+            menu.addSeparator()
+            rename_act = menu.addAction(t("remote.rename_host"))
+            rename_act.triggered.connect(lambda checked=False, h=host: self._rename_host(h))
+            menu.addSeparator()
+
+        sort_menu = menu.addMenu(t("remote.sort_by"))
+        sort_menu.setStyleSheet(menu_css)
+        for mode, label_key in (('manual', 'remote.sort_manual'),
+                                ('alias', 'remote.sort_alias'),
+                                ('host', 'remote.sort_host')):
+            act = sort_menu.addAction(t(label_key))
+            act.setCheckable(True)
+            act.setChecked(self._host_sort == mode)
+            act.triggered.connect(lambda checked=False, m=mode: self._set_host_sort(m))
         menu.exec(self._hosts_list.viewport().mapToGlobal(pos))
 
     def _rename_host(self, host: HostConfig):
@@ -1433,6 +1471,69 @@ class RemoteExplorerPanel(QWidget):
         cfg[self.CONFIG_KEY_SORT_KEY] = self._sort_key
         cfg[self.CONFIG_KEY_SORT_DESC] = self._sort_desc
         atomic_write_json(p, cfg)
+
+    # ---- 主机列表排序（持久化到共享配置） ----
+    # 'manual'：用户自定顺序（可拖拽），存别名列表；'alias'/'host'：按字段升序。
+    CONFIG_KEY_HOST_SORT = 'remote_explorer_host_sort'
+    CONFIG_KEY_HOST_ORDER = 'remote_explorer_host_order'
+    _HOST_SORT_MODES = ('manual', 'alias', 'host')
+
+    def _load_host_sort(self) -> str:
+        cfg, _ok = read_config_json(self._config_file_path())
+        mode = cfg.get(self.CONFIG_KEY_HOST_SORT, 'manual')
+        return mode if mode in self._HOST_SORT_MODES else 'manual'
+
+    def _save_host_sort(self):
+        p = self._config_file_path()
+        cfg, ok = read_config_json(p)
+        if not ok:
+            return
+        cfg[self.CONFIG_KEY_HOST_SORT] = self._host_sort
+        atomic_write_json(p, cfg)
+
+    def _load_host_order(self) -> list:
+        cfg, _ok = read_config_json(self._config_file_path())
+        order = cfg.get(self.CONFIG_KEY_HOST_ORDER)
+        return [a for a in order if isinstance(a, str)] if isinstance(order, list) else []
+
+    def _save_host_order(self, order: list):
+        p = self._config_file_path()
+        cfg, ok = read_config_json(p)
+        if not ok:
+            return
+        cfg[self.CONFIG_KEY_HOST_ORDER] = list(order)
+        atomic_write_json(p, cfg)
+
+    def _sorted_hosts(self, hosts: list) -> list:
+        """按当前主机排序模式排列。manual 用保存的别名顺序（新主机/未记录的
+        排到末尾，保持彼此相对顺序）；alias/host 按对应字段不区分大小写升序。"""
+        if self._host_sort == 'alias':
+            return sorted(hosts, key=lambda h: (h.alias or '').lower())
+        if self._host_sort == 'host':
+            return sorted(hosts, key=lambda h: ((h.hostname or '').lower(), h.port))
+        # manual
+        order = self._load_host_order()
+        rank = {a: i for i, a in enumerate(order)}
+        # 未在保存顺序里的主机排到末尾，按原有相对顺序稳定保留
+        return sorted(hosts, key=lambda h: rank.get(h.alias, len(order)))
+
+    def _set_host_sort(self, mode: str):
+        if mode not in self._HOST_SORT_MODES or mode == self._host_sort:
+            return
+        self._host_sort = mode
+        self._save_host_sort()
+        self._populate_hosts_list()
+
+    def _on_hosts_reordered(self, *args):
+        """拖拽改变顺序后（仅 manual 模式）：把当前列表顺序存成新的手动顺序。"""
+        if self._host_sort != 'manual':
+            return
+        order = []
+        for i in range(self._hosts_list.count()):
+            h = self._hosts_list.item(i).data(_ROLE_ENTRY)
+            if h is not None:
+                order.append(h.alias)
+        self._save_host_order(order)
 
     def _sorted_entries(self, entries):
         """按当前排序方式排序，文件夹始终置顶（保持远程一贯行为）。
