@@ -119,6 +119,7 @@ class GitManager(QObject):
     # 信号
     status_changed = pyqtSignal()       # 状态变更信号
     error_occurred = pyqtSignal(str)    # 错误发生信号
+    status_ok = pyqtSignal()            # get_status 真正成功（用于复位错误去重）
     op_output = pyqtSignal(str, str)    # 操作输出信号 (kind, 合并后的 stdout+stderr)
 
     def __init__(self, parent=None):
@@ -425,6 +426,10 @@ class GitManager(QObject):
         if not success:
             self.error_occurred.emit(t("git_mgr.status_failed", error=output))
             return staged, unstaged
+        # 真正取到状态了 → 通知监听方复位「错误去重」标记，使仓库恢复正常后
+        # 日后再出错仍能再提示一次（注意 get_status 失败时只走上面的早退，
+        # 不会到这里，所以这条只在确实成功时发）
+        self.status_ok.emit()
 
         for line in output.splitlines():
             if len(line) < 3:

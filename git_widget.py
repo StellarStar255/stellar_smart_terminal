@@ -2225,6 +2225,7 @@ class GitPanel(QWidget):
         self._refresh_pending = False   # 进行中又被请求 → 跑完后补一次（合并）
         self._status_refresh_running = False  # 后台轻量状态刷新是否进行中
         self._status_stale = False      # 隐藏期间跳过了刷新 → 重新可见时补一次
+        self._last_error_message = None  # 上次弹过的错误文案，去重连珠弹窗（如目录被删后每次轮询都报同一错）
 
         self._setup_ui()
         self._connect_signals()
@@ -2438,6 +2439,7 @@ class GitPanel(QWidget):
         # Git 管理器信号
         self._git_manager.status_changed.connect(self._refresh_status)
         self._git_manager.error_occurred.connect(self._show_error)
+        self._git_manager.status_ok.connect(self._on_status_ok)
         self._git_manager.op_output.connect(self._on_op_output)
 
         # 头部信号
@@ -3392,8 +3394,26 @@ class GitPanel(QWidget):
             self.output_requested.emit(t("git.pull_output_title"), output)
 
     def _show_error(self, message: str):
-        """显示错误消息"""
+        """显示错误消息（同一条只弹一次）。
+
+        状态刷新是 5s 定时 + 文件监视触发的轮询：当本地仓库目录被删/改名后，
+        每次轮询 git status 都会失败并发同一条 error_occurred，若每次都弹 modal
+        就会连珠不停。这里对相同文案去重，只在它「首次出现」时弹一次；下次刷新
+        成功（_apply_*refresh 拿到 ok）会清掉去重标记，使日后真的换了别的错误
+        （或同一错误再次发生）仍能再次提示。
+        """
+        if message == self._last_error_message:
+            return
+        self._last_error_message = message
         QMessageBox.warning(self, t("git.error_title"), message)
+
+    def _on_status_ok(self):
+        """get_status 真正成功 → 复位错误去重标记。
+
+        这样仓库目录被删/改名时只弹一次警告；待用户恢复目录或切回正常仓库、
+        status 重新成功后，标记清零，日后若再发生错误仍能再次提示一次。
+        """
+        self._last_error_message = None
 
     def apply_theme(self, theme: dict):
         """应用主题"""
