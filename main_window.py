@@ -5784,6 +5784,17 @@ class MainWindow(QMainWindow):
         except Exception:
             pass
 
+        # 扩展的是远程 SSH 终端 → 让新窗口的 Remote 面板自动连到同一主机，
+        # 这样新窗口里终端 + SFTP 文件树都指向这台远端（终端已随 tab 搬过去）。
+        ssh_host = None
+        for _term in terminals:
+            hc = getattr(_term, '_ssh_host_config', None)
+            if hc is not None:
+                ssh_host = hc
+                break
+        if ssh_host is not None:
+            self._auto_connect_remote_in_window(new_window, ssh_host)
+
         # 新窗口初始尺寸先继承父窗口像素尺寸，让隐形对齐期间的首次显示就在
         # 正确大小附近；最大化状态等几何细节由下面的对齐流程接管
         try:
@@ -7703,9 +7714,7 @@ class MainWindow(QMainWindow):
         # 远程文件打开 → 注入到本地编辑器（透明处理远程保存）
         self.remote_panel.file_open_requested.connect(self._open_remote_file_in_editor)
         # 连接成功后自动开一个 SSH 终端 tab
-        self.remote_panel.host_connected.connect(
-            lambda host: self._open_ssh_terminal_tab(host, None)
-        )
+        self.remote_panel.host_connected.connect(self._on_remote_host_connected)
         # 右键 "在此处打开终端" → 同样开一个 SSH tab，且 cd 进指定目录
         self.remote_panel.open_terminal_at.connect(self._open_ssh_terminal_tab)
         # 右键 "在新窗口中连接" → 新开一个独立窗口并 SSH 进该主机
@@ -7777,6 +7786,45 @@ class MainWindow(QMainWindow):
         self.main_splitter.setUpdatesEnabled(True)
         QTimer.singleShot(0, self._flush_terminal_resizes)
 
+    def _on_remote_host_connected(self, host_config):
+        """Remote 面板连上主机 → 默认自动开一个 SSH 终端 tab。
+
+        但「扩展远程终端到新窗口」时，被扩展的终端已经在新窗口里了，会先置
+        _skip_auto_ssh_tab_once，让这一次只连 Remote 文件树、不再多开一个终端。
+        """
+        if getattr(self, '_skip_auto_ssh_tab_once', False):
+            self._skip_auto_ssh_tab_once = False
+            return
+        self._open_ssh_terminal_tab(host_config, None)
+
+    def _auto_connect_remote_in_window(self, new_window, host_config):
+        """让新窗口的 Remote 面板自动连到 host_config（扩展远程终端到新窗口时用）。
+
+        抑制一次「连上后自动开 SSH 终端」——被扩展的终端已经在新窗口里。
+        延迟到窗口初始化稳定后再连。"""
+        # 把原窗口已缓存的密码带给新窗口，避免自动连 SFTP 时再弹一次密码框
+        try:
+            pw = self.remote_panel.get_cached_password(host_config.alias)
+            new_window.remote_panel.prime_cached_password(host_config.alias, pw)
+        except Exception:
+            pass
+
+        def _go():
+            if sip.isdeleted(new_window):
+                return
+            try:
+                if not getattr(new_window, 'remote_panel_visible', False):
+                    new_window._toggle_remote_panel()
+                new_window._skip_auto_ssh_tab_once = True
+                new_window.remote_panel._connect_to(host_config)
+            except Exception as e:
+                try:
+                    new_window.statusbar.showMessage(
+                        f"Remote connect failed: {e}", 5000)
+                except Exception:
+                    pass
+        QTimer.singleShot(120, _go)
+
     def _open_ssh_terminal_tab(self, host_config, remote_cd_path):
         """新开一个 tab 跑 ssh 到远端
 
@@ -7826,6 +7874,9 @@ class MainWindow(QMainWindow):
         if not terms:
             return
         term = terms[0]
+        # 记下这个终端连的是哪台远端，供「扩展为新窗口」时让新窗口的 Remote
+        # 面板自动连到同一主机（比解析标题可靠——标题可被「重命名标签」改掉）。
+        term._ssh_host_config = host_config
         self.tab_widget.setCurrentIndex(idx)
         self.active_terminal = term
         term.setFocus()

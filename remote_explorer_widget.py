@@ -1264,6 +1264,12 @@ class RemoteExplorerPanel(QWidget):
         供主窗口打开 SSH 终端时自动回填，避免二次输入。"""
         return self._cached_passwords.get(alias)
 
+    def prime_cached_password(self, alias: str, password: Optional[str]):
+        """预置某主机的密码（内存）。用于「扩展远程终端到新窗口」时把原窗口
+        已缓存的密码带给新窗口的 Remote 面板，避免自动连接 SFTP 时再次弹框。"""
+        if alias and password:
+            self._cached_passwords[alias] = password
+
     def _on_session_connected(self, sess: SSHSession):
         if sess is not self._session:
             return
