@@ -3611,9 +3611,12 @@ class MainWindow(QMainWindow):
         ("close_tab",       "Ctrl+W",         "shortcuts.act.close_tab",       "_close_tab_or_window"),
         ("next_tab",        "Ctrl+Tab",       "shortcuts.act.next_tab",        "_next_tab"),
         ("prev_tab",        "Ctrl+Shift+Tab", "shortcuts.act.prev_tab",        "_prev_tab"),
-        # 拆分键位对齐 Windows Terminal：Alt+Shift+= 左右并排、Alt+Shift+- 上下叠放
-        ("split_h",         "Alt+Shift+=",    "shortcuts.act.split_h",         "_split_current_tab"),
-        ("split_v",         "Alt+Shift+-",    "shortcuts.act.split_v",         "_split_vertical_current_terminal"),
+        # 拆分键位：Cmd+Shift++ 左右并排、Cmd+Shift+- 上下叠放（Windows 上即 Ctrl+Shift+ +/-）。
+        # 放大已不再绑定 Cmd 加号（去掉了 Ctrl++ 别名，放大只剩 Cmd+=），腾出 + 给分屏。
+        # +/- 都是「需 Shift 才打出/会被 Shift 改写」的键，Qt 上报 Shift 的方式不一，
+        # 故 _setup_shortcuts 里给每个方向补了几种等价写法，保证稳定触发。
+        ("split_h",         "Ctrl+Shift++",   "shortcuts.act.split_h",         "_split_current_tab"),
+        ("split_v",         "Ctrl+Shift+-",   "shortcuts.act.split_v",         "_split_vertical_current_terminal"),
         ("close_split",     "Ctrl+Shift+X",   "shortcuts.act.close_split",     "_close_current_split"),
         ("toggle_explorer", "Ctrl+1",         "shortcuts.act.toggle_explorer", "_toggle_explorer_panel"),
         ("toggle_git",      "Ctrl+2",         "shortcuts.act.toggle_git",      "_toggle_git_panel"),
@@ -3642,11 +3645,20 @@ class MainWindow(QMainWindow):
             self.addAction(action)
             self.shortcut_actions[action_id] = action
 
-        # Ctrl++ 作为「放大」的固定别名（无需按 Shift），不参与自定义
-        zoom_in_alias = QAction(self)
-        zoom_in_alias.setShortcut(QKeySequence("Ctrl++"))
-        zoom_in_alias.triggered.connect(self._global_zoom_in)
-        self.addAction(zoom_in_alias)
+        # 放大只保留 Cmd+=（不再注册 Cmd 加号别名），把 Cmd 加号这个物理键让给分屏。
+        # 分屏的等价别名：Cmd+Shift+ +/- 物理上是带 Shift 的 =/- 键，Qt 对这种
+        # 「需 Shift 的字符」上报不一（⇧⌘+ / ⌘+ / ⇧⌘= 等），把等价写法都挂上保证触发。
+        # 每次物理按键只会命中其中一个 sequence，不会产生歧义。
+        for seq in ("Ctrl++", "Ctrl+Shift+="):          # 左右并排（= / + 键）
+            a = QAction(self)
+            a.setShortcut(QKeySequence(seq))
+            a.triggered.connect(self._split_current_tab)
+            self.addAction(a)
+        for seq in ("Ctrl+Shift+_", "Ctrl+_"):          # 上下叠放（- / _ 键）
+            a = QAction(self)
+            a.setShortcut(QKeySequence(seq))
+            a.triggered.connect(self._split_vertical_current_terminal)
+            self.addAction(a)
 
         # Ctrl+Shift+D 调试特殊字符（开发用，不在自定义列表中）
         debug_action = QAction(self)

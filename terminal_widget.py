@@ -3855,12 +3855,12 @@ class TerminalWidget(QWidget):
         menu.addSeparator()
 
         # 分屏（左右）—— 标签追加当前生效快捷键提示
-        split_action = QAction(t("toolbar.split") + self._shortcut_hint("split_h", "Alt+Shift+="), self)
+        split_action = QAction(t("toolbar.split") + self._shortcut_hint("split_h", "Ctrl+Shift++"), self)
         split_action.triggered.connect(self.split_horizontal_requested.emit)
         menu.addAction(split_action)
 
         # 上下分屏
-        vsplit_action = QAction(t("ctx.split_vertical") + self._shortcut_hint("split_v", "Alt+Shift+-"), self)
+        vsplit_action = QAction(t("ctx.split_vertical") + self._shortcut_hint("split_v", "Ctrl+Shift+-"), self)
         vsplit_action.triggered.connect(self.split_vertical_requested.emit)
         menu.addAction(vsplit_action)
 
