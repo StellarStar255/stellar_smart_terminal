@@ -4339,20 +4339,33 @@ class TerminalWidget(QWidget):
         self._invalidate_render_cache()
 
     def refresh_terminal(self):
-        """刷新终端显示（非破坏性）：
+        """刷新终端显示。按前台是否为全屏 TUI 程序自适应：
 
-        - 重建渲染缓存并强制重绘，修复本地渲染脏区造成的花屏/错位；
-        - 用「收窄一列再恢复」的方式抖动 PTY 尺寸，**保证**产生一次 SIGWINCH，
-          让前台 TUI 程序（vim / tmux / claude 等）整屏重画自己。
-          （直接重发当前尺寸时，尺寸未变 → 内核不发 SIGWINCH → 程序不会重画，
-          这正是之前"刷新没反应"的原因。）
-        不清空内容、不影响滚动历史，区别于 clear_screen / Ctrl+L。
+        - 普通 shell（非 alt-screen）：顺手发一个 Ctrl+L，清空可见屏幕并把提示符
+          重画到顶部（保留滚动历史、保留已输入但未回车的命令）。这样刷新有明确的
+          可见反馈，而不是"什么反应都没有"。
+        - 前台是全屏 TUI（vim / tmux / claude 等，处于 alt-screen）：**不**清屏、
+          **不**注入按键，只走下面的「重绘 + 抖动 PTY 触发 SIGWINCH」，让程序自己
+          整屏重画——对它们而言清屏是错的。
+
+        两种情况都会重建渲染缓存，修复本地渲染脏区造成的花屏/错位；都不丢滚动历史，
+        区别于 clear_screen（整屏复位）。
         """
         # 先本地重绘，修复纯渲染层的脏区
         self._invalidate_render_cache()
 
         if self._backend is None:
             return
+
+        # 普通 shell：发 Ctrl+L 清屏并重画提示符，给出可见反馈。用 _write_to_backend
+        # 原始写入而非 send_text，避免把这个控制键记进输入历史。alt-screen 下跳过，
+        # 以免往 TUI 程序里注入 ^L。
+        in_alt_screen = getattr(getattr(self, 'screen', None), '_in_alt_screen', False)
+        if not in_alt_screen:
+            try:
+                self._write_to_backend(b'\x0c')
+            except Exception as e:
+                logger.warning(f"[Terminal] refresh clear (Ctrl+L) error: {e}")
 
         # 抖动 PTY 尺寸强制 SIGWINCH：收窄一列 → 等一拍 → 恢复并再重绘。
         # 分两拍（singleShot）是为了让子进程先收到"变窄"的 SIGWINCH 再收到"恢复"的，

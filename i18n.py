@@ -785,8 +785,8 @@ TRANSLATIONS = {
     "ctx.search": {"zh": "搜索…", "en": "Search…"},
     "ctx.refresh": {"zh": "刷新终端", "en": "Refresh Terminal"},
     "ctx.refresh.tip": {
-        "zh": "重绘当前屏幕并通知前台程序重画（不影响已滚出的历史）",
-        "en": "Redraw the current screen and notify the foreground app (does not affect scrolled-back history)",
+        "zh": "普通 shell 下清空可见屏幕并重画提示符；全屏程序(vim/tmux 等)只通知其重画。均保留滚动历史",
+        "en": "Clears the visible screen and redraws the prompt in a normal shell; in full-screen apps (vim/tmux…) just asks them to redraw. Scrollback is kept",
     },
     "ctx.clear_scrollback": {"zh": "清空回滚历史", "en": "Clear Scrollback"},
     "term.scrollback_pressure_tip": {
