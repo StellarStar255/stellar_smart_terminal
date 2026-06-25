@@ -2328,10 +2328,10 @@ class RemoteExplorerPanel(QWidget):
     def _clipboard_copy_selection(self, fallback_entry: Optional[RemoteEntry] = None):
         """把当前选中的远程文件 / 目录放入跨面板剪贴板。
 
-        Cmd+C 立刻给反馈（内部剪贴板 + 系统文字），同时在后台把选中**文件**
-        下载到临时目录，全部就绪后把系统剪贴板替换成本地文件 URL —— 这样
-        用户切到 Finder / Slack / Notes 等任意应用 Cmd+V 都能直接拿到文件。
-        目录因为体量不可控，仍只放路径文本，不做预下载。
+        Cmd+C 立刻给反馈（内部剪贴板 + 系统文字），同时在后台把选中项
+        下载到临时目录（文件直接下，目录递归下），全部就绪后把系统剪贴板
+        替换成本地文件 URL —— 这样用户切到 Finder / Slack / Notes 等任意应用
+        Cmd+V 都能直接拿到真实文件 / 文件夹。
         """
         if self._session is None:
             return
@@ -2366,22 +2366,22 @@ class RemoteExplorerPanel(QWidget):
         text_snapshot = "\n".join(it[2] for it in payload)
         cb.setText(text_snapshot)
 
-        # 3) 后台把文件部分预下载到稳定的临时路径，结束后把剪贴板替换为
-        #    file:// URL（这是 Finder / Slack / 大多数 macOS 应用接受的格式）
-        file_entries = [(host_alias, e) for e in entries if not e.is_dir]
-        if not file_entries:
-            return
-        # 已经缓存的（之前打开过的）秒级就绪 → 先把它们直接写进 URLs；
-        # 还没下载的等下载完一起更新。
+        # 3) 后台把选中项预下载到稳定的临时路径，结束后把剪贴板替换为
+        #    file:// URL（这是 Finder / Slack / 大多数 macOS 应用接受的格式）。
+        #    文件和目录都纳入：文件直接下载，目录递归下载。
         ready_paths: list[str] = []
         pending: list[tuple] = []
-        for ha, e in file_entries:
-            local_path = self._temp_local_path_for(ha, e.path, e.name)
-            if (e.size and os.path.isfile(local_path)
+        for e in entries:
+            local_path = self._temp_local_path_for(host_alias, e.path, e.name)
+            # 文件且本地缓存大小一致 → 秒级就绪，直接进 URLs；
+            # 目录无法校验完整性，一律当 pending 重新拉。
+            if (not e.is_dir and e.size and os.path.isfile(local_path)
                     and os.path.getsize(local_path) == e.size):
                 ready_paths.append(local_path)
             else:
-                pending.append((ha, e, local_path))
+                pending.append((host_alias, e, local_path))
+        if not pending and not ready_paths:
+            return
 
         if ready_paths and not pending:
             self._push_files_to_system_clipboard(ready_paths, text_snapshot)
@@ -2451,13 +2451,39 @@ class RemoteExplorerPanel(QWidget):
                         QTimer.singleShot(0, finalize)
                 return cb
             try:
-                fut = sess.submit(sess.download, entry.path, local_path)
+                # 目录递归下载作为单个 worker 任务（内部不再 submit，避免单
+                # worker 串行执行时自我死锁）；文件走单次 download。
+                if entry.is_dir:
+                    fut = sess.submit(self._download_tree_sync, sess,
+                                      entry.path, local_path)
+                else:
+                    fut = sess.submit(sess.download, entry.path, local_path)
                 fut.add_done_callback(make_cb())
             except Exception as e:
                 self._error_signal.emit(f"{entry.path}: {e}")
                 done_count[0] += 1
                 if done_count[0] >= total:
                     QTimer.singleShot(0, finalize)
+
+    @staticmethod
+    def _download_tree_sync(sess: SSHSession, remote_path: str, local_path: str):
+        """在 SSH worker 线程内同步把远端文件 / 目录递归下载到 local_path。
+
+        只能从 sess.submit 的任务里调用（此时已在那个单 worker 线程上）：内部
+        直接调用 sess.stat / listdir / download，**绝不再 sess.submit**——否则会
+        排到同一个串行 worker 后面、把自己永远卡住。供剪贴板预下载用，不弹进度框。
+        """
+        entry: RemoteEntry = sess.stat(remote_path)
+        if not entry.is_dir:
+            sess.download(remote_path, local_path)
+            return
+        os.makedirs(local_path, exist_ok=True)
+        for child in sess.listdir(remote_path):
+            child_local = os.path.join(local_path, child.name)
+            if child.is_dir and not child.is_link:
+                RemoteExplorerPanel._download_tree_sync(sess, child.path, child_local)
+            else:
+                sess.download(child.path, child_local)
 
     def _push_files_to_system_clipboard(self, local_paths: list, expected_text: str):
         """把 file:// URL 写到系统剪贴板，前提是剪贴板还是我们当初放的文字。
