@@ -3223,6 +3223,16 @@ class TerminalWidget(QWidget):
                     event.accept()  # 接受事件，阻止 Qt 将其作为快捷键处理
                     return True
 
+            # Cmd + =/+/-/_ 由终端自己处理（缩放 / 分屏，见 keyPressEvent）。
+            # 必须在这里抢下来：交给 Qt 快捷键系统时，(Key_Plus, Cmd+Shift) 这种
+            # 「需 Shift 的字符」匹配不到任何 QKeySequence，事件被吞、keyPressEvent
+            # 也收不到，导致 Cmd+Shift+= 分屏无效。
+            if (modifiers & Qt.KeyboardModifier.ControlModifier) and key in (
+                    Qt.Key.Key_Plus, Qt.Key.Key_Equal,
+                    Qt.Key.Key_Minus, Qt.Key.Key_Underscore):
+                event.accept()
+                return True
+
             # Tab 键也需要自己处理
             if key == Qt.Key.Key_Tab or key == Qt.Key.Key_Backtab:
                 event.accept()

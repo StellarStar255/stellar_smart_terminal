@@ -3646,19 +3646,9 @@ class MainWindow(QMainWindow):
             self.shortcut_actions[action_id] = action
 
         # 放大只保留 Cmd+=（不再注册 Cmd 加号别名），把 Cmd 加号这个物理键让给分屏。
-        # 分屏的等价别名：Cmd+Shift+ +/- 物理上是带 Shift 的 =/- 键，Qt 对这种
-        # 「需 Shift 的字符」上报不一（⇧⌘+ / ⌘+ / ⇧⌘= 等），把等价写法都挂上保证触发。
-        # 每次物理按键只会命中其中一个 sequence，不会产生歧义。
-        for seq in ("Ctrl++", "Ctrl+Shift+="):          # 左右并排（= / + 键）
-            a = QAction(self)
-            a.setShortcut(QKeySequence(seq))
-            a.triggered.connect(self._split_current_tab)
-            self.addAction(a)
-        for seq in ("Ctrl+Shift+_", "Ctrl+_"):          # 上下叠放（- / _ 键）
-            a = QAction(self)
-            a.setShortcut(QKeySequence(seq))
-            a.triggered.connect(self._split_vertical_current_terminal)
-            self.addAction(a)
+        # 分屏的实际触发在终端 keyPressEvent 里（terminal_widget.event() 的
+        # ShortcutOverride 已把 Cmd+ =/+/-/_ 抢给终端自己处理）；这里 split_h/split_v
+        # 仍保留在 _SHORTCUT_SPECS 中，仅用于速查表展示与自定义。
 
         # Ctrl+Shift+D 调试特殊字符（开发用，不在自定义列表中）
         debug_action = QAction(self)
