@@ -1282,7 +1282,8 @@ class ExplorerPanel(QWidget):
 
     def _new_file(self, target_dir: str):
         """创建新文件并直接在文件树里原地重命名（不弹窗）"""
-        file_path = self._unique_new_path(target_dir, "untitled", ".txt")
+        # 默认无扩展名：用户在原地重命名时自己决定后缀（不强加 .txt）
+        file_path = self._unique_new_path(target_dir, "untitled", "")
         try:
             Path(file_path).touch()
         except Exception as e:

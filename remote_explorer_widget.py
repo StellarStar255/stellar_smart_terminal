@@ -3096,7 +3096,8 @@ class RemoteExplorerPanel(QWidget):
         sess = self._session
         if sess is None:
             return
-        name = self._unique_new_name(parent_item, "untitled", ".txt")
+        # 默认无扩展名：用户在原地重命名时自己决定后缀（不强加 .txt）
+        name = self._unique_new_name(parent_item, "untitled", "")
         path = posixpath.join(parent_path, name)
         self._pending_edit_path = path
         fut = sess.submit(sess.write_file, path, b"")
