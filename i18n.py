@@ -660,6 +660,7 @@ TRANSLATIONS = {
     "remote.add_host_alias_label": {"zh": "别名（可选）", "en": "Alias (optional)"},
     "remote.add_host_alias_placeholder": {"zh": "例: my-gpu-box（留空则用主机名）", "en": "e.g. my-gpu-box (defaults to hostname)"},
     "remote.add_host_cancel": {"zh": "取消", "en": "Cancel"},
+    "remote.cancel_transfer": {"zh": "取消", "en": "Cancel"},
     "remote.add_host_save_failed": {"zh": "无法写入 ~/.ssh/config（已仅本会话保留）：\n{error}", "en": "Couldn't write ~/.ssh/config (kept for this session only):\n{error}"},
     "remote.connect": {"zh": "连接", "en": "Connect"},
     "remote.connect_in_new_window": {"zh": "在新窗口中连接", "en": "Connect in New Window"},

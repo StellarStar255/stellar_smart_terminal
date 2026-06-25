@@ -38,6 +38,12 @@ from i18n import t
 # --- 连接稳定性参数 ---
 KEEPALIVE_INTERVAL = 30        # transport 层 keep-alive 间隔（秒），防 NAT/网关空闲断连
 CONNECT_TIMEOUT = 15           # 单次 TCP/SSH 握手超时（秒）
+# SFTP 数据通道读超时（秒）：网络突然切换时，socket 上的 recv 会无限期阻塞 ——
+# 没有它，sftp.get/put/listdir/stat 会永远卡住，future 永不完成，UI 随之卡死
+# （尤其上传/下载）。设了它，停顿超过该时长即抛 socket.timeout（OSError 子类），
+# 操作快速失败 → future 完成 → UI 解冻、并可走自动重连。取值要远大于活跃传输里
+# 相邻数据块的间隔（活跃传输每隔几毫秒就有数据，永远不会误触发），只在真正断流时命中。
+SFTP_OP_TIMEOUT = 20
 RECONNECT_MAX_ATTEMPTS = 3     # 自动重连最多尝试次数
 RECONNECT_BACKOFF_BASE = 1.0   # 指数退避基数（秒）：1s → 2s → 4s
 
@@ -380,6 +386,14 @@ class SSHSession(QObject):
         except Exception:
             self._close_clients([client] + jump_clients)
             raise
+        # 给 SFTP 数据通道设读超时：网络切换/断流时 recv 不再无限期阻塞，
+        # 而是抛 socket.timeout，让操作快速失败、future 完成、UI 解冻。
+        try:
+            chan = sftp.get_channel()
+            if chan is not None:
+                chan.settimeout(SFTP_OP_TIMEOUT)
+        except Exception:
+            pass
         try:
             home = sftp.normalize(".")
         except Exception:
@@ -598,6 +612,30 @@ class SSHSession(QObject):
             pass
         self._executor.shutdown(wait=False)
         self.disconnected.emit()
+
+    def abort(self):
+        """从任意线程强制中断当前连接，立刻让卡在 recv 上的 worker 操作失败。
+
+        网络切换后 worker 可能阻塞在 SFTP recv 上，此时 disconnect() 把任务排到
+        同一个单 worker 后面根本轮不到。这里**绕开 executor 直接关 transport/socket**：
+        关闭底层 socket 会让阻塞中的 recv 立即抛错，对应 future 随即完成，UI 解冻。
+        用于「取消」卡死的上传/下载。置 _was_connected=False，避免随后自动重连。
+        """
+        self._was_connected = False
+        clients = list(self._jump_clients or [])
+        if self._client is not None:
+            clients.append(self._client)
+        for c in clients:
+            try:
+                tr = c.get_transport()
+                if tr is not None:
+                    tr.close()      # 关 socket → 阻塞的 recv 立刻抛错
+            except Exception:
+                pass
+            try:
+                c.close()
+            except Exception:
+                pass
 
     def _do_disconnect(self):
         self._was_connected = False  # 主动断开后不再自动重连

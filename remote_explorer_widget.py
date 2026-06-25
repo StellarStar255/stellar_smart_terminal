@@ -2724,7 +2724,8 @@ class RemoteExplorerPanel(QWidget):
                                           self._make_live_progress_cb(live))
                         self._wait_future_with_progress([fut], t("remote.pasting_progress",
                                                                  dst=target_dir),
-                                                        sizes=[nbytes], live=live)
+                                                        sizes=[nbytes], live=live,
+                                                        abort_sessions=[sess])
                     existing.add(name)
 
                 elif kind == "remote":
@@ -2874,7 +2875,7 @@ class RemoteExplorerPanel(QWidget):
         self._wait_future_with_progress(futures, t("remote.pasting_progress",
                                                    dst=remote_dir),
                                         tolerate_errors=True, sizes=sizes,
-                                        live=live)
+                                        live=live, abort_sessions=[sess])
 
     def _remote_to_remote(self, src_sess: SSHSession, dst_sess: SSHSession,
                           src_path: str, dst_path: str):
@@ -2890,7 +2891,8 @@ class RemoteExplorerPanel(QWidget):
             else:
                 fut = src_sess.submit(src_sess.download, src_path, tmp_local)
                 self._wait_future_with_progress([fut], t("remote.pasting_progress",
-                                                         dst=dst_path))
+                                                         dst=dst_path),
+                                                abort_sessions=[src_sess])
                 try:
                     nbytes = os.path.getsize(tmp_local)
                 except OSError:
@@ -2901,7 +2903,8 @@ class RemoteExplorerPanel(QWidget):
                                        self._make_live_progress_cb(live))
                 self._wait_future_with_progress([fut2], t("remote.pasting_progress",
                                                           dst=dst_path),
-                                                sizes=[nbytes], live=live)
+                                                sizes=[nbytes], live=live,
+                                                abort_sessions=[dst_sess])
         finally:
             try:
                 import shutil as _shutil
@@ -2915,7 +2918,8 @@ class RemoteExplorerPanel(QWidget):
         if not entry.is_dir:
             fut = sess.submit(sess.download, remote_path, local_path)
             self._wait_future_with_progress([fut], t("remote.pasting_progress",
-                                                     dst=local_path))
+                                                     dst=local_path),
+                                            abort_sessions=[sess])
             return
         os.makedirs(local_path, exist_ok=True)
         children = sess.submit(sess.listdir, remote_path).result()
@@ -2926,12 +2930,14 @@ class RemoteExplorerPanel(QWidget):
             else:
                 fut = sess.submit(sess.download, child.path, child_local)
                 self._wait_future_with_progress([fut], t("remote.pasting_progress",
-                                                         dst=local_path))
+                                                         dst=local_path),
+                                                abort_sessions=[sess])
 
     def _wait_future_with_progress(self, futures: list, label: str,
                                     tolerate_errors: bool = False,
                                     sizes: Optional[list] = None,
-                                    live: Optional[dict] = None):
+                                    live: Optional[dict] = None,
+                                    abort_sessions: Optional[list] = None):
         """阻塞等待 futures 完成，跑事件循环避免 UI 卡死。
 
         sizes：与 futures 一一对应的字节数（未知填 0/None）。给出时进度框
@@ -2944,10 +2950,22 @@ class RemoteExplorerPanel(QWidget):
         不给 live 时退化为旧行为（按已完成文件粒度累计）。"""
         if not futures:
             return
-        progress = QProgressDialog(label, None, 0, len(futures), self)
+        # 有可中断的会话时给一个「取消」按钮：点了就 abort 这些会话，直接关 socket，
+        # 让卡在 recv 上的传输立刻失败、对话框随即关闭，避免网络切换时一直卡在传输框里。
+        cancel_text = t("remote.cancel_transfer") if abort_sessions else None
+        progress = QProgressDialog(label, cancel_text, 0, len(futures), self)
         progress.setWindowModality(Qt.WindowModality.WindowModal)
         progress.setMinimumDuration(300)
         progress.setValue(0)
+        if abort_sessions:
+            def _on_cancel(_sessions=list(abort_sessions)):
+                for s in _sessions:
+                    if s is not None:
+                        try:
+                            s.abort()
+                        except Exception:
+                            pass
+            progress.canceled.connect(_on_cancel)
         done = {"n": 0, "errors": [], "bytes": 0}
         total_bytes = sum(s or 0 for s in sizes) if sizes else 0
         tracker = _TransferRateTracker() if total_bytes > 0 else None
@@ -3517,7 +3535,8 @@ class RemoteExplorerPanel(QWidget):
         self._wait_future_with_progress([fut], t("remote.uploading_to",
                                                  dst=parent_path),
                                         tolerate_errors=True,
-                                        sizes=[nbytes], live=live)
+                                        sizes=[nbytes], live=live,
+                                        abort_sessions=[sess])
 
     def _upload_into(self, dir_entry: RemoteEntry, dir_item: QTreeWidgetItem):
         self._upload_at(dir_entry.path, dir_item)
