@@ -2942,18 +2942,40 @@ class TerminalWidget(QWidget):
                 event.accept()
                 return
 
-        # Ctrl+Plus/Minus/= 字体缩放 — 委托给主窗口全局缩放
+        # Cmd+= 放大 / Cmd+- 缩小；Cmd+Shift+= 左右分屏 / Cmd+Shift+- 上下分屏。
+        # 关键：用「字符键」本身区分是否按了 Shift —— =/- 是未加 Shift（缩放），
+        # +/_ 是加了 Shift（分屏）；再叠加 Shift 修饰位兜底。这样无论 Qt 在 macOS
+        # 上把「需 Shift 的字符」上报成 ⇧⌘+ / ⌘+ / ⇧⌘= 中的哪种，都能准确区分。
+        # （之前这里只看 Key_Plus/Key_Equal 不看 Shift，把 Cmd+Shift+= 也吃成放大，
+        #  导致分屏快捷键收不到事件。）
         if modifiers & Qt.KeyboardModifier.ControlModifier:
-            if key in (Qt.Key.Key_Plus, Qt.Key.Key_Equal):
-                main_win = self.window()
+            shift = bool(modifiers & Qt.KeyboardModifier.ShiftModifier)
+            main_win = self.window()
+            # 左右分屏：Cmd+Shift+=（+ 键，或 = 键且带 Shift）。直接调主窗口方法
+            # （whole_tab 默认 False=只分当前小窗口），与原键盘行为一致——不能走
+            # split_*_requested 信号，那条路会注入 _shift_held()，而这里 Shift 是
+            # 打出快捷键必须按的，会被误当成「分裂整个标签页」。
+            if key == Qt.Key.Key_Plus or (key == Qt.Key.Key_Equal and shift):
+                if hasattr(main_win, '_split_current_tab'):
+                    main_win._split_current_tab()
+                    event.accept()
+                    return
+            # 放大：纯 Cmd+=
+            if key == Qt.Key.Key_Equal:
                 if hasattr(main_win, '_global_zoom_in'):
                     main_win._global_zoom_in()
                 else:
                     self._zoom_in()
                 event.accept()
                 return
+            # 上下分屏：Cmd+Shift+-（_ 键，或 - 键且带 Shift）
+            if key == Qt.Key.Key_Underscore or (key == Qt.Key.Key_Minus and shift):
+                if hasattr(main_win, '_split_vertical_current_terminal'):
+                    main_win._split_vertical_current_terminal()
+                    event.accept()
+                    return
+            # 缩小：纯 Cmd+-
             if key == Qt.Key.Key_Minus:
-                main_win = self.window()
                 if hasattr(main_win, '_global_zoom_out'):
                     main_win._global_zoom_out()
                 else:
