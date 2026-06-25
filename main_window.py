@@ -3310,10 +3310,20 @@ class MainWindow(QMainWindow):
                 tooltip = (w.toolTip() if hasattr(w, 'toolTip') else '') or None
                 palette.register(label, w.click, group=group_name, tooltip=tooltip)
 
+    # 下拉框最多显示多少条历史目录。完整历史不受影响（仍存盘、仍可在
+    # 「History」对话框里管理）——只是限制弹窗里的条目数，避免历史越攒越多
+    # 时下拉弹窗变大变慢。history 已按频率倒序，取前 N 条即最常用的那些。
+    _DIR_DROPDOWN_MAX = 30
+
     def _populate_working_dirs(self):
-        """填充工作目录历史到下拉框"""
+        """填充工作目录历史到下拉框（只放最常用的前 N 条 + 当前目录）"""
         self.working_dir_combo.clear()
-        for dir_path in self.working_dir_history:
+        shown = list(self.working_dir_history[:self._DIR_DROPDOWN_MAX])
+        # 当前目录若被截断在 N 条之外，也补进来，保证它能被选中/高亮
+        current_dir = self._window_cwd
+        if current_dir and current_dir not in shown and current_dir in self.working_dir_history:
+            shown.append(current_dir)
+        for dir_path in shown:
             self.working_dir_combo.addItem(dir_path)
             self.working_dir_combo.setItemData(
                 self.working_dir_combo.count() - 1,
