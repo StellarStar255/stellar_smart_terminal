@@ -624,6 +624,7 @@ TRANSLATIONS = {
     "remote.reconnect": {"zh": "重新连接", "en": "Reconnect"},
     "remote.downloading": {"zh": "下载 {name}: {done} / {total}", "en": "Downloading {name}: {done} / {total}"},
     "remote.clipboard_preparing": {"zh": "为粘贴准备文件…（{done}/{total}）", "en": "Preparing files for paste… ({done}/{total})"},
+    "remote.clipboard_preparing_files": {"zh": "为粘贴准备文件…（已下载 {done}）", "en": "Preparing files for paste… ({done} downloaded)"},
     "remote.downloading_unknown": {"zh": "下载 {name}…", "en": "Downloading {name}…"},
     "remote.connect_failed_title": {"zh": "连接失败", "en": "Connection Failed"},
     "remote.connect_failed_msg": {"zh": "无法连接到 {host}:\n{error}", "en": "Could not connect to {host}:\n{error}"},

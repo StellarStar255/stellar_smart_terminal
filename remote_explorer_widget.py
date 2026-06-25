@@ -2410,7 +2410,10 @@ class RemoteExplorerPanel(QWidget):
         if sess is None:
             return
         total = len(pending)
-        done_count = [0]
+        has_dir = any(e.is_dir for _, e, _ in pending)
+        done_count = [0]          # 顶层项完成数（触发 finalize）
+        files_done = [0]          # 已下载文件数（含目录内）——给用户细粒度进度
+        ui_pending = [False]      # 合并高频进度刷新，避免给 UI 线程灌太多事件
         completed: list[str] = list(ready_paths)
         # 标记：这次 staging 的剪贴板文字快照。完成时只在剪贴板仍是该文字时才覆盖
         # （否则说明用户已经 Cmd+C 复制了别的东西，不应该越权改剪贴板）。
@@ -2418,11 +2421,26 @@ class RemoteExplorerPanel(QWidget):
 
         def update_progress():
             try:
-                self._subtitle_label.setText(
-                    t("remote.clipboard_preparing", done=done_count[0], total=total)
-                )
+                # 含目录时按文件数显示（目录无固定总数，但能让用户看到在动）；
+                # 纯文件时仍显示 顶层 done/total。
+                if has_dir:
+                    txt = t("remote.clipboard_preparing_files", done=files_done[0])
+                else:
+                    txt = t("remote.clipboard_preparing", done=done_count[0], total=total)
+                self._subtitle_label.setText(txt)
             except RuntimeError:
                 pass
+
+        def flush_progress():
+            ui_pending[0] = False
+            update_progress()
+
+        def on_file():
+            # 在 worker 线程被调用：每下完一个文件 +1，合并刷新 subtitle
+            files_done[0] += 1
+            if not ui_pending[0]:
+                ui_pending[0] = True
+                QTimer.singleShot(0, flush_progress)
 
         def finalize():
             try:
@@ -2437,11 +2455,14 @@ class RemoteExplorerPanel(QWidget):
         update_progress()
 
         for host_alias, entry, local_path in pending:
-            def make_cb(_lp=local_path, _name=entry.name):
+            def make_cb(_lp=local_path, _name=entry.name, _is_dir=entry.is_dir):
                 def cb(f):
                     try:
                         f.result()
                         completed.append(_lp)
+                        # 文件项的“+1 文件”在这里记（目录项已在 on_file 里逐个记过）
+                        if not _is_dir:
+                            files_done[0] += 1
                     except Exception as e:
                         self._error_signal.emit(f"{_name}: {e}")
                     done_count[0] += 1
@@ -2455,7 +2476,7 @@ class RemoteExplorerPanel(QWidget):
                 # worker 串行执行时自我死锁）；文件走单次 download。
                 if entry.is_dir:
                     fut = sess.submit(self._download_tree_sync, sess,
-                                      entry.path, local_path)
+                                      entry.path, local_path, on_file)
                 else:
                     fut = sess.submit(sess.download, entry.path, local_path)
                 fut.add_done_callback(make_cb())
@@ -2466,24 +2487,33 @@ class RemoteExplorerPanel(QWidget):
                     QTimer.singleShot(0, finalize)
 
     @staticmethod
-    def _download_tree_sync(sess: SSHSession, remote_path: str, local_path: str):
+    def _download_tree_sync(sess: SSHSession, remote_path: str, local_path: str,
+                            on_file=None):
         """在 SSH worker 线程内同步把远端文件 / 目录递归下载到 local_path。
 
         只能从 sess.submit 的任务里调用（此时已在那个单 worker 线程上）：内部
         直接调用 sess.stat / listdir / download，**绝不再 sess.submit**——否则会
         排到同一个串行 worker 后面、把自己永远卡住。供剪贴板预下载用，不弹进度框。
+
+        on_file()：每下完一个文件回调一次（在 worker 线程），供调用方更新进度。
+        软链接目录不递归（避免环），按普通项交给 download 处理。
         """
         entry: RemoteEntry = sess.stat(remote_path)
         if not entry.is_dir:
             sess.download(remote_path, local_path)
+            if on_file:
+                on_file()
             return
         os.makedirs(local_path, exist_ok=True)
         for child in sess.listdir(remote_path):
             child_local = os.path.join(local_path, child.name)
             if child.is_dir and not child.is_link:
-                RemoteExplorerPanel._download_tree_sync(sess, child.path, child_local)
+                RemoteExplorerPanel._download_tree_sync(sess, child.path,
+                                                        child_local, on_file)
             else:
                 sess.download(child.path, child_local)
+                if on_file:
+                    on_file()
 
     def _push_files_to_system_clipboard(self, local_paths: list, expected_text: str):
         """把 file:// URL 写到系统剪贴板，前提是剪贴板还是我们当初放的文字。
