@@ -7955,9 +7955,14 @@ class MainWindow(QMainWindow):
         except Exception:
             pass
 
-        # 相对当前窗口稍作偏移，避免完全盖住
-        new_window.move(self.x() + 48, self.y() + 48)
-        new_window.show()
+        # 与「expand to new window」一致：新窗口直接与父窗口逐像素重合
+        # （先继承父窗口尺寸，再隐形对齐后显形，见 _align_child_with_parent_geometry），
+        # 而不是简单偏移 48px——后者会被 macOS 级联/约束推走、跟父窗口对不齐。
+        try:
+            new_window.resize(self.size())
+        except Exception:
+            pass
+        self._align_child_with_parent_geometry(new_window)
         new_window.raise_()
         new_window.activateWindow()
         self.detached_windows.append(new_window)
