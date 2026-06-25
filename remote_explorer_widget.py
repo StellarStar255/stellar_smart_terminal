@@ -587,6 +587,10 @@ class RemoteExplorerPanel(QWidget):
     _refresh_subtree_signal = pyqtSignal(object, str)  # (item, path)
     _auto_refresh_result = pyqtSignal(str, object)    # (path, entries or None on error)
     _search_result_signal = pyqtSignal(int, list, bool)  # (generation, items, truncated)
+    # 剪贴板预下载（worker → UI）：进度变化 / 全部完成。必须用信号跨线程，
+    # 不能用 QTimer.singleShot —— 后者在无事件循环的 worker 线程里不会触发。
+    _clipboard_stage_tick = pyqtSignal()
+    _clipboard_stage_finalize = pyqtSignal()
 
     # 远程递归搜索上限：命中数 / 已扫描目录数 / 最大深度。
     # SFTP 是单工作线程串行的，每个目录一次网络往返，所以上限取得保守，
@@ -638,6 +642,8 @@ class RemoteExplorerPanel(QWidget):
         self._file_downloaded.connect(self._on_file_downloaded)
         self._file_ready.connect(self._on_file_ready)
         self._download_progress.connect(self._on_download_progress)
+        self._clipboard_stage_tick.connect(self._on_clipboard_stage_tick)
+        self._clipboard_stage_finalize.connect(self._on_clipboard_stage_finalize)
         # 节流下载进度文案：paramiko 回调每个 chunk 都触发，UI 100ms 一次足够
         self._last_progress_emit_ts = 0.0
         # 下载测速：滑动窗口算瞬时速率 + 平均速率估剩余时间（按当前文件）
@@ -2409,67 +2415,46 @@ class RemoteExplorerPanel(QWidget):
         sess = self._session
         if sess is None:
             return
-        total = len(pending)
-        has_dir = any(e.is_dir for _, e, _ in pending)
-        done_count = [0]          # 顶层项完成数（触发 finalize）
-        files_done = [0]          # 已下载文件数（含目录内）——给用户细粒度进度
-        ui_pending = [False]      # 合并高频进度刷新，避免给 UI 线程灌太多事件
-        completed: list[str] = list(ready_paths)
+        # staging 状态挂在 self 上，供信号槽（UI 线程）读取。一次只跑一个 staging，
+        # 新的复制会直接覆盖；剪贴板正确性由 _push 里的文字快照比对兜底。
+        self._stage_total = len(pending)
+        self._stage_has_dir = any(e.is_dir for _, e, _ in pending)
+        self._stage_done = 0       # 顶层项完成数（触发 finalize）
+        self._stage_files = 0      # 已下载文件数（含目录内）——给用户细粒度进度
+        self._stage_completed: list[str] = list(ready_paths)
+        self._stage_text = text_snapshot
+        self._stage_ui_pending = False
         # 标记：这次 staging 的剪贴板文字快照。完成时只在剪贴板仍是该文字时才覆盖
         # （否则说明用户已经 Cmd+C 复制了别的东西，不应该越权改剪贴板）。
         self._clipboard_staging_snapshot = text_snapshot
 
-        def update_progress():
-            try:
-                # 含目录时按文件数显示（目录无固定总数，但能让用户看到在动）；
-                # 纯文件时仍显示 顶层 done/total。
-                if has_dir:
-                    txt = t("remote.clipboard_preparing_files", done=files_done[0])
-                else:
-                    txt = t("remote.clipboard_preparing", done=done_count[0], total=total)
-                self._subtitle_label.setText(txt)
-            except RuntimeError:
-                pass
+        self._on_clipboard_stage_tick()  # 初始显示（UI 线程直调）
 
-        def flush_progress():
-            ui_pending[0] = False
-            update_progress()
+        def tick():
+            # worker 线程：合并刷新——已有一帧在排队时不再重复发，避免灌爆 UI。
+            if not self._stage_ui_pending:
+                self._stage_ui_pending = True
+                self._clipboard_stage_tick.emit()
 
         def on_file():
-            # 在 worker 线程被调用：每下完一个文件 +1，合并刷新 subtitle
-            files_done[0] += 1
-            if not ui_pending[0]:
-                ui_pending[0] = True
-                QTimer.singleShot(0, flush_progress)
-
-        def finalize():
-            try:
-                if completed:
-                    self._push_files_to_system_clipboard(completed, text_snapshot)
-                # 还原 subtitle
-                if self._session is not None:
-                    self._subtitle_label.setText(self._session.host_config.alias)
-            except RuntimeError:
-                pass
-
-        update_progress()
+            self._stage_files += 1
+            tick()
 
         for host_alias, entry, local_path in pending:
             def make_cb(_lp=local_path, _name=entry.name, _is_dir=entry.is_dir):
                 def cb(f):
                     try:
                         f.result()
-                        completed.append(_lp)
+                        self._stage_completed.append(_lp)
                         # 文件项的“+1 文件”在这里记（目录项已在 on_file 里逐个记过）
                         if not _is_dir:
-                            files_done[0] += 1
+                            self._stage_files += 1
                     except Exception as e:
                         self._error_signal.emit(f"{_name}: {e}")
-                    done_count[0] += 1
-                    # 进度和最终化都必须切回 UI 线程
-                    QTimer.singleShot(0, update_progress)
-                    if done_count[0] >= total:
-                        QTimer.singleShot(0, finalize)
+                    self._stage_done += 1
+                    tick()
+                    if self._stage_done >= self._stage_total:
+                        self._clipboard_stage_finalize.emit()
                 return cb
             try:
                 # 目录递归下载作为单个 worker 任务（内部不再 submit，避免单
@@ -2482,9 +2467,33 @@ class RemoteExplorerPanel(QWidget):
                 fut.add_done_callback(make_cb())
             except Exception as e:
                 self._error_signal.emit(f"{entry.path}: {e}")
-                done_count[0] += 1
-                if done_count[0] >= total:
-                    QTimer.singleShot(0, finalize)
+                self._stage_done += 1
+                if self._stage_done >= self._stage_total:
+                    self._clipboard_stage_finalize.emit()
+
+    def _on_clipboard_stage_tick(self):
+        """UI 线程：刷新预下载进度副标题。"""
+        self._stage_ui_pending = False
+        try:
+            if getattr(self, "_stage_has_dir", False):
+                txt = t("remote.clipboard_preparing_files", done=self._stage_files)
+            else:
+                txt = t("remote.clipboard_preparing",
+                        done=self._stage_done, total=self._stage_total)
+            self._subtitle_label.setText(txt)
+        except RuntimeError:
+            pass
+
+    def _on_clipboard_stage_finalize(self):
+        """UI 线程：预下载全部完成 → 把 file:// URL 写入系统剪贴板、还原副标题。"""
+        try:
+            if self._stage_completed:
+                self._push_files_to_system_clipboard(self._stage_completed,
+                                                     self._stage_text)
+            if self._session is not None:
+                self._subtitle_label.setText(self._session.host_config.alias)
+        except RuntimeError:
+            pass
 
     @staticmethod
     def _download_tree_sync(sess: SSHSession, remote_path: str, local_path: str,
