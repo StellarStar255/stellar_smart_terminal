@@ -66,6 +66,7 @@ from widgets import (
     SelectAllLineEdit, QuietPopupComboBox, CenteredComboBox,
     InlineRenameEdit, DetachableTabBar, DetachedWindow,
     _ToolbarCheckBox, _FlowSeparator, _NavResizeHandle,
+    MultiKeywordCompleter,
 )
 from dialogs import (
     get_default_shell, PresetDialog, LLMConfigDialog,
@@ -3211,6 +3212,22 @@ class MainWindow(QMainWindow):
         select_all_edit = SelectAllLineEdit(popup_owner=self.working_dir_combo)
         select_all_edit.setAlignment(Qt.AlignmentFlag.AlignLeft | Qt.AlignmentFlag.AlignVCenter)
         self.working_dir_combo.setLineEdit(select_all_edit)
+        # 目录历史多关键词补全：输入 "llm train" 即过滤出同时含两词的历史目录
+        # （与文件 quick-open 一致），不必记住完整前缀。候选在 _populate_working_dirs
+        # 里随历史更新；用整条 history（不止下拉里显示的前 N 条）做候选。
+        self._dir_completer = MultiKeywordCompleter(parent=self)
+        self._dir_completer.setCaseSensitivity(Qt.CaseSensitivity.CaseInsensitive)
+        self._dir_completer.popup().setStyleSheet("""
+            QListView {
+                background-color: #1a1a2e;
+                color: #eaeaea;
+                border: 1px solid #3d3d5c;
+                outline: none;
+            }
+            QListView::item { padding: 3px 6px; }
+            QListView::item:selected { background-color: #667eea; color: white; }
+        """)
+        self.working_dir_combo.setCompleter(self._dir_completer)
         # 🕘 按钮与输入框空白点击共用同一套精确的开/关逻辑，避免无条件 showPopup()
         # 在弹窗已开/刚被抓取关闭时反弹重开造成闪烁。按下时补记按下时刻（与原生抓取
         # 关闭弹窗同刻），松开后推迟到事件循环空闲再据此做恰好一次开/关切换。
@@ -3317,6 +3334,9 @@ class MainWindow(QMainWindow):
 
     def _populate_working_dirs(self):
         """填充工作目录历史到下拉框（只放最常用的前 N 条 + 当前目录）"""
+        # 补全候选用「完整历史」——下拉只显示前 N 条，但搜索能命中全部历史目录
+        if hasattr(self, '_dir_completer'):
+            self._dir_completer.set_items(self.working_dir_history)
         self.working_dir_combo.clear()
         shown = list(self.working_dir_history[:self._DIR_DROPDOWN_MAX])
         # 当前目录若被截断在 N 条之外，也补进来，保证它能被选中/高亮

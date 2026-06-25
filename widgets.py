@@ -5,14 +5,15 @@
 import time
 
 from PyQt6.QtWidgets import (
-    QApplication, QCheckBox, QComboBox, QLineEdit, QMainWindow,
+    QApplication, QCheckBox, QComboBox, QCompleter, QLineEdit, QMainWindow,
     QStyle, QStyledItemDelegate, QStyleOptionButton, QStyleOptionComboBox,
     QStylePainter, QTabBar, QVBoxLayout, QWidget
 )
-from PyQt6.QtCore import Qt, QTimer, QEvent, QPoint, QRectF, pyqtSignal
+from PyQt6.QtCore import Qt, QTimer, QEvent, QPoint, QRectF, QStringListModel, pyqtSignal
 from PyQt6.QtGui import QColor, QPainter, QPainterPath, QPalette, QPen
 
 from i18n import t
+from utils import parse_search_tokens, name_matches_tokens
 
 
 class SelectAllLineEdit(QLineEdit):
@@ -167,6 +168,38 @@ class SelectAllLineEdit(QLineEdit):
             QTimer.singleShot(0, self.toggle_popup)
             return
         super().mouseReleaseEvent(event)
+
+
+class MultiKeywordCompleter(QCompleter):
+    """多关键词（空格分隔、AND 子串、大小写不敏感）补全。
+
+    与文件 quick-open 一致：输入 "llm train" 命中同时含 "llm" 和 "train" 的候选
+    （如 .../zhiyuan_llm_8_gpu_machine_model_training）。用于目录历史输入框，让
+    用户不用记前缀、敲几个词就能快速跳到某个历史目录。
+
+    实现：UnfilteredPopupCompletion + 在 splitPath 里按当前输入重建候选列表，
+    弹窗即显示过滤后的全部匹配（Qt 自身不再做前缀过滤）。
+    """
+
+    def __init__(self, items=None, parent=None):
+        super().__init__(parent)
+        self._all = list(items or [])
+        self._model = QStringListModel(self._all, self)
+        self.setModel(self._model)
+        self.setCaseSensitivity(Qt.CaseSensitivity.CaseInsensitive)
+        self.setCompletionMode(QCompleter.CompletionMode.UnfilteredPopupCompletion)
+
+    def set_items(self, items):
+        self._all = list(items or [])
+
+    def splitPath(self, path):
+        tokens = parse_search_tokens(path or "")
+        if tokens:
+            filtered = [s for s in self._all if name_matches_tokens(s, tokens)]
+        else:
+            filtered = list(self._all)
+        self._model.setStringList(filtered)
+        return [path or ""]
 
 
 class QuietPopupComboBox(QComboBox):
