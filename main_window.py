@@ -3437,6 +3437,13 @@ class MainWindow(QMainWindow):
         # 加载新目录的本地快速命令
         self._load_local_commands()
 
+        # 立即刷新导航面板：列表项名按窗口工作目录显示（标题无文件夹名时回退到
+        # _window_cwd basename），改了目录就该马上跟着变，不必等 5 秒轮询。
+        try:
+            MainWindow._broadcast_navigator_refresh(invalidate_cache=True)
+        except Exception:
+            pass
+
     def _update_title_label_color(self):
         """更新标题标签颜色
 
