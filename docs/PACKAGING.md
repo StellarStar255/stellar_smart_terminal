@@ -7,8 +7,13 @@
 仓库配置了 GitHub Actions(`.github/workflows/release.yml`):**推送 `v*` tag 即自动发版**——
 macOS runner 跑 `build.sh` 产出 DMG + zip,Windows runner 跑 `build.bat` 产出 onedir zip,
 并用 **Inno Setup**(`installer.iss`)额外打出 `*-windows-x64-setup.exe` 安装包,
-两个平台都先跑离屏测试套件,产物自动挂到对应 Release(已存在的 release 只补传产物,
-notes 不会被覆盖;新建的 release 用自动生成的 notes,之后可用 `gh release edit` 替换)。
+Linux runner(Ubuntu)跑 `build.sh` 把 onedir 打成 `*-linux-amd64.deb`(含 `.desktop`
+桌面入口与图标),三个平台都跑离屏测试套件,产物自动挂到对应 Release(已存在的 release
+只补传产物,notes 不会被覆盖;新建的 release 用自动生成的 notes,之后可用 `gh release edit` 替换)。
+
+Ubuntu/Debian 用户:下载 `*-linux-amd64.deb`,`sudo apt install ./Stellar-Smart-Terminal-*.deb`
+(自动拉取 `libxcb-cursor0` 等依赖),装好后在应用菜单搜 “Stellar Smart Terminal” 或命令行
+跑 `stellar-smart-terminal`。
 
 Windows 用户两种安装方式:
 

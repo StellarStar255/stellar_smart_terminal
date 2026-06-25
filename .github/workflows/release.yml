@@ -121,3 +121,51 @@ jobs:
           gh release upload "$GITHUB_REF_NAME" --clobber \
             dist/Stellar-Smart-Terminal-v*-windows-x64.zip \
             dist/Stellar-Smart-Terminal-v*-windows-x64-setup.exe
+
+  linux:
+    name: Linux (amd64)
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - name: Check spec version matches tag
+        run: |
+          SPEC_V=$(grep -m1 CFBundleShortVersionString smart_terminal.spec | sed 's/[^0-9.]//g')
+          case "$GITHUB_REF_NAME" in
+            "v$SPEC_V"|"v$SPEC_V"-*) echo "spec $SPEC_V matches tag $GITHUB_REF_NAME" ;;
+            *) echo "::error::smart_terminal.spec version ($SPEC_V) does not match tag ($GITHUB_REF_NAME) — bump the version before tagging (see docs/PACKAGING.md)"; exit 1 ;;
+          esac
+
+      - name: Install system deps
+        # PyQt6 在 Linux 上导入/离屏运行需要这些系统库；imagemagick 给图标缩放，
+        # dpkg-dev 提供 dpkg-deb。libxcb-cursor0 是 Qt6 xcb 平台插件的运行期依赖。
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends \
+            libegl1 libxkbcommon0 libdbus-1-3 libxcb-cursor0 \
+            imagemagick dpkg-dev
+
+      - name: Build .deb
+        run: ./build.sh
+
+      - name: Run tests (offscreen)
+        # 与 Windows 一致：不 gate 打包，超时快速失败并 dump 卡死栈
+        continue-on-error: true
+        run: |
+          .venv-build/bin/python -m pip install pytest pytest-timeout --quiet
+          QT_QPA_PLATFORM=offscreen .venv-build/bin/python -m pytest tests/ -q \
+            --timeout=60 --timeout-method=thread
+
+      - name: Upload to release
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          gh release create "$GITHUB_REF_NAME" --verify-tag \
+            --title "$GITHUB_REF_NAME" --generate-notes || true
+          gh release upload "$GITHUB_REF_NAME" --clobber \
+            dist/Stellar-Smart-Terminal-v*-linux-amd64.deb

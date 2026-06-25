@@ -62,7 +62,72 @@ if [ "$(uname)" = "Darwin" ]; then
 fi
 
 # ---------------------------------------------------------------------------
-# 5. 输出位置提示
+# 5. Linux: 把 onedir 打成 .deb（供 Ubuntu/Debian 用 apt/dpkg 安装）
+#    布局：程序 → /opt/StellarSmartTerminal，/usr/bin 放启动包装，
+#    外加 .desktop 桌面入口与 hicolor 图标，让应用出现在菜单/Dock。
+# ---------------------------------------------------------------------------
+DEB=""
+if [ "$(uname)" = "Linux" ]; then
+    VERSION=$(grep -m1 'CFBundleShortVersionString' smart_terminal.spec | sed 's/[^0-9.]//g')
+    ARCH=$(dpkg --print-architecture 2>/dev/null || echo amd64)
+    PKG="stellar-smart-terminal"
+    DEB="dist/Stellar-Smart-Terminal-v${VERSION}-linux-${ARCH}.deb"
+    echo "==> Creating $DEB"
+    ROOT=$(mktemp -d)
+
+    install -d "$ROOT/opt/StellarSmartTerminal"
+    cp -R dist/StellarSmartTerminal/. "$ROOT/opt/StellarSmartTerminal/"
+
+    install -d "$ROOT/usr/bin"
+    cat > "$ROOT/usr/bin/$PKG" <<'EOF'
+#!/bin/sh
+exec /opt/StellarSmartTerminal/StellarSmartTerminal "$@"
+EOF
+    chmod 755 "$ROOT/usr/bin/$PKG"
+
+    install -d "$ROOT/usr/share/icons/hicolor/512x512/apps"
+    if command -v convert >/dev/null 2>&1; then
+        convert assets/smart_terminal.png -resize 512x512 \
+            "$ROOT/usr/share/icons/hicolor/512x512/apps/$PKG.png"
+    else
+        cp assets/smart_terminal.png \
+            "$ROOT/usr/share/icons/hicolor/512x512/apps/$PKG.png"
+    fi
+
+    install -d "$ROOT/usr/share/applications"
+    cat > "$ROOT/usr/share/applications/$PKG.desktop" <<EOF
+[Desktop Entry]
+Type=Application
+Name=Stellar Smart Terminal
+Comment=Smart terminal with file explorer, Git GUI, and LLM proxy
+Exec=$PKG
+Icon=$PKG
+Terminal=false
+Categories=Development;Utility;
+EOF
+
+    install -d "$ROOT/DEBIAN"
+    INSTALLED_KB=$(du -sk "$ROOT/opt" | cut -f1)
+    cat > "$ROOT/DEBIAN/control" <<EOF
+Package: $PKG
+Version: $VERSION
+Section: utils
+Priority: optional
+Architecture: $ARCH
+Depends: libc6, libxcb-cursor0
+Installed-Size: $INSTALLED_KB
+Maintainer: huangqiliang <goosehuangmatt@gmail.com>
+Description: Stellar Smart Terminal
+ A PyQt6-based smart terminal with file explorer, Git GUI, LLM proxy,
+ and VS Code extension browser.
+EOF
+
+    dpkg-deb --root-owner-group --build "$ROOT" "$DEB"
+    rm -rf "$ROOT"
+fi
+
+# ---------------------------------------------------------------------------
+# 6. 输出位置提示
 # ---------------------------------------------------------------------------
 echo ""
 echo "==> Build finished."
@@ -70,5 +135,9 @@ if [ "$(uname)" = "Darwin" ]; then
     echo "    App bundle : dist/Stellar Smart Terminal.app"
     echo "    DMG        : $DMG"
     echo "    Run        : open \"dist/Stellar Smart Terminal.app\""
+fi
+if [ "$(uname)" = "Linux" ]; then
+    echo "    Deb        : $DEB"
+    echo "    Install    : sudo apt install \"./$DEB\""
 fi
 echo "    Onedir     : dist/StellarSmartTerminal/"
