@@ -51,10 +51,18 @@ def _decode_with_fallback(raw: bytes) -> tuple[str, str]:
 
     返回 (文本, 编码名)；latin-1 兜底永不失败。带 BOM 的 UTF-8 记作
     utf-8-sig（BOM 不进编辑器缓冲区，保存时按 utf-8-sig 写回以保留 BOM）。
+
+    行尾统一归一为 \\n：QPlainTextEdit 载入时本就把 CRLF/CR 折成 LF，而
+    is_modified()/外部改动比对拿 toPlainText()（恒为 LF）对照 _original_content，
+    若这里不归一，CRLF 文件（Windows 常见）一打开就被判成"已修改"，进而误弹
+    外部改动对话框（离屏测试里会卡死）。保存本就只写 LF，归一与之一致。
     """
+    def _norm(text: str) -> str:
+        return text.replace('\r\n', '\n').replace('\r', '\n')
+
     if raw.startswith(b'\xef\xbb\xbf'):
         try:
-            return raw.decode('utf-8-sig'), 'utf-8-sig'
+            return _norm(raw.decode('utf-8-sig')), 'utf-8-sig'
         except UnicodeDecodeError:
             pass
     # 注：曾尝试用 charset_normalizer 做"更准"的检测以避免 gb18030/latin-1 误判，
@@ -63,10 +71,10 @@ def _decode_with_fallback(raw: bytes) -> tuple[str, str]:
     # 覆盖中文这一最常见的非 UTF-8 情形，latin-1 兜底永不失败。
     for enc in ('utf-8', 'gb18030'):
         try:
-            return raw.decode(enc), enc
+            return _norm(raw.decode(enc)), enc
         except UnicodeDecodeError:
             continue
-    return raw.decode('latin-1'), 'latin-1'
+    return _norm(raw.decode('latin-1')), 'latin-1'
 
 
 # AI 补全：文件扩展名 → 语言名（用于给模型的提示词上下文）

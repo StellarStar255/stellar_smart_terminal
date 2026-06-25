@@ -218,6 +218,49 @@ class TestExternalChangeAfterSave(_Base):
         self.assertEqual(pane.editor.toPlainText(), "external new\n")
 
 
+class TestCRLFLineEndings(_Base):
+    """CRLF（Windows 常见）文件：QPlainTextEdit 载入会把 \\r\\n 折成 \\n，若
+    _original_content 仍保留 \\r\\n，文件一打开就被误判“已修改”，干净状态下的
+    外部改动会错误地弹模态确认框——离屏/CI 里无人应答就卡死。"""
+
+    def _area_with_crlf_file(self, content_lf="a\nb\n"):
+        from file_editor import EditorArea
+        d = tempfile.mkdtemp()
+        p = os.path.join(d, "crlf.txt")
+        # 直接写 CRLF 字节，跨平台稳定复现 Windows 行尾（不依赖文本模式翻译）
+        with open(p, "wb") as f:
+            f.write(content_lf.replace("\n", "\r\n").encode("utf-8"))
+        area = EditorArea(theme={})
+        self.assertTrue(area.open_file_in_active(p))
+        return area, area.active_pane, p
+
+    def test_crlf_file_not_modified_on_load(self):
+        area, pane, p = self._area_with_crlf_file("a\nb\n")
+        # 行尾应归一为 \n，且不被判成已修改
+        self.assertEqual(pane.editor.toPlainText(), "a\nb\n")
+        self.assertFalse(pane.is_modified(),
+                         "CRLF 文件刚载入不应被判为已修改")
+
+    def test_crlf_external_change_reloads_without_prompt(self):
+        from PyQt6.QtWidgets import QMessageBox
+        area, pane, p = self._area_with_crlf_file("a\nb\n")
+        with open(p, "wb") as f:
+            f.write(b"external\r\nnew\r\n")
+        future = time.time() + 10
+        os.utime(p, (future, future))
+        # 即便误弹，也 patch 成不阻塞，并断言根本不该问
+        calls = []
+        orig = QMessageBox.question
+        QMessageBox.question = staticmethod(
+            lambda *a, **k: (calls.append(1), QMessageBox.StandardButton.No)[1])
+        try:
+            pane._handle_external_change()
+        finally:
+            QMessageBox.question = orig
+        self.assertEqual(calls, [], "干净的 CRLF 文件遇外部改动应静默重载，不弹框")
+        self.assertEqual(pane.editor.toPlainText(), "external\nnew\n")
+
+
 class TestStaleAutosaveRestore(_Base):
     """#5：备份比磁盘旧时，恢复对话框默认「否」并用警示文案，避免顺手回车覆盖
     较新的磁盘内容。"""
