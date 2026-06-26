@@ -2447,6 +2447,21 @@ class FileEditorWidget(QWidget):
 
         return True
 
+    def goto_line(self, line_no: int):
+        """把光标移动到第 line_no 行（1 基）并滚动到可见处。
+        用于从内容搜索结果跳转。图片模式或无效行号时静默忽略。"""
+        if self._in_image_mode or line_no is None or line_no < 1:
+            return
+        doc = self.editor.document()
+        block = doc.findBlockByLineNumber(line_no - 1)
+        if not block.isValid():
+            # 行号超出范围（文件可能已变化）→ 退到末行
+            block = doc.lastBlock()
+        cur = QTextCursor(block)
+        self.editor.setTextCursor(cur)
+        self.editor.centerCursor()
+        self.editor.setFocus()
+
     def _open_image_file(self, file_path: str) -> bool:
         """把图片读进 QPixmap 并显示在图片预览页"""
         reader = QImageReader(file_path)
@@ -3465,6 +3480,10 @@ class EditorArea(QWidget):
         if self._active is None:
             return False
         return self._active.open_file(file_path)
+
+    def goto_line_in_active(self, line_no: int):
+        if self._active is not None:
+            self._active.goto_line(line_no)
 
     def save_active(self) -> bool:
         return bool(self._active and self._active.save_file())

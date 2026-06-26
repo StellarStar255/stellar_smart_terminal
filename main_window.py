@@ -6733,14 +6733,19 @@ class MainWindow(QMainWindow):
         else:
             self.explorer_panel.clear_editing_file()
 
-    def _open_file_in_editor(self, file_path: str):
-        """在内置编辑器中打开文件（落到当前活动窗格）"""
+    def _open_file_in_editor(self, file_path: str, line_no: int = 0):
+        """在内置编辑器中打开文件（落到当前活动窗格）。
+        line_no > 0 时（来自内容搜索结果）打开后跳转到该行。"""
         if not hasattr(self, 'editor_area'):
             return
 
         # 在活动窗格中打开文件
         if not self.editor_area.open_file_in_active(file_path):
             return
+
+        # 内容搜索：打开后跳到命中行
+        if line_no and line_no > 0:
+            self.editor_area.goto_line_in_active(line_no)
 
         # 通知资源管理器当前正在编辑的文件
         if hasattr(self, 'explorer_panel'):

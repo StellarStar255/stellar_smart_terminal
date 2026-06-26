@@ -349,7 +349,8 @@ class ExplorerPanel(QWidget):
 
     # 信号
     file_double_clicked = pyqtSignal(str)  # 文件双击信号
-    file_edit_requested = pyqtSignal(str)  # 请求在内置编辑器中打开文件
+    # 请求在内置编辑器中打开文件；第二个参数是跳转行号（0 = 不跳转）
+    file_edit_requested = pyqtSignal(str, int)
     save_file_requested = pyqtSignal()  # 请求保存当前编辑的文件
     save_file_as_requested = pyqtSignal()  # 请求另存为当前编辑的文件
     # 后台搜索结果回 UI 线程：(generation, items, truncated)
@@ -1176,8 +1177,10 @@ class ExplorerPanel(QWidget):
                     idx, QAbstractItemView.ScrollHint.PositionAtCenter)
                 self.tree_view.expand(idx)
         elif os.path.isfile(abs_path):
+            # 内容命中带行号 → 打开后跳到该行；文件名命中 line_no 为 None/0
+            line_no = data[2] if len(data) > 2 and data[2] else 0
             self.file_double_clicked.emit(abs_path)
-            self.file_edit_requested.emit(abs_path)
+            self.file_edit_requested.emit(abs_path, line_no)
 
     def _auto_refresh_tick(self):
         """60s 安全网：QFileSystemModel + FSEvents 已经处理大多数情况，
@@ -1242,9 +1245,9 @@ class ExplorerPanel(QWidget):
 
         file_path = self._proxy.filePath(index)
         if os.path.isfile(file_path):
-            # 双击文件，发射信号请求在内置编辑器中打开
+            # 双击文件，发射信号请求在内置编辑器中打开（行号 0 = 不跳转）
             self.file_double_clicked.emit(file_path)
-            self.file_edit_requested.emit(file_path)
+            self.file_edit_requested.emit(file_path, 0)
 
     def _open_file(self, file_path: str):
         """使用系统默认应用打开文件"""
