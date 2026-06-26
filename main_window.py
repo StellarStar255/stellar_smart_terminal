@@ -3658,6 +3658,8 @@ class MainWindow(QMainWindow):
         ("toggle_explorer", "Ctrl+1",         "shortcuts.act.toggle_explorer", "_toggle_explorer_panel"),
         ("toggle_git",      "Ctrl+2",         "shortcuts.act.toggle_git",      "_toggle_git_panel"),
         ("toggle_remote",   "Ctrl+3",         "shortcuts.act.toggle_remote",   "_toggle_remote_panel"),
+        # Ctrl+R 在 macOS 上由 Qt 自动映射为 Cmd+R，等价于资源管理器头部的 ↻ 刷新按钮
+        ("refresh",         "Ctrl+R",         "shortcuts.act.refresh",         "_refresh_explorer_panel"),
         ("zoom_in",         "Ctrl+=",         "shortcuts.act.zoom_in",         "_global_zoom_in"),
         ("zoom_out",        "Ctrl+-",         "shortcuts.act.zoom_out",        "_global_zoom_out"),
         ("opacity_up",      "Ctrl+Shift+Up",  "shortcuts.act.opacity_up",      "_opacity_increase"),
@@ -6580,7 +6582,7 @@ class MainWindow(QMainWindow):
                 color: #eaeaea;
             }
         """)
-        refresh_btn.clicked.connect(lambda: self.explorer_panel.refresh() if hasattr(self, 'explorer_panel') else None)
+        refresh_btn.clicked.connect(self._refresh_explorer_panel)
         explorer_header_layout.addWidget(refresh_btn)
 
         # 隐藏按钮
@@ -7472,6 +7474,11 @@ class MainWindow(QMainWindow):
             self.explorer_splitter.addWidget(self.editor_area)
             self.editor_area.hide()
             self.explorer_splitter.setSizes([400, 0])
+
+    def _refresh_explorer_panel(self):
+        """刷新文件浏览器（等价于 Explorer 头部的 ↻ 按钮，绑定 Cmd+R）。"""
+        if hasattr(self, 'explorer_panel'):
+            self.explorer_panel.refresh()
 
     def _toggle_explorer_panel(self):
         """切换 Explorer 面板显示"""

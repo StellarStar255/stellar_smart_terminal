@@ -48,6 +48,7 @@ TRANSLATIONS = {
     "shortcuts.act.toggle_explorer": {"zh": "切换 Explorer 面板", "en": "Toggle Explorer Panel"},
     "shortcuts.act.toggle_git": {"zh": "切换 Git 面板", "en": "Toggle Git Panel"},
     "shortcuts.act.toggle_remote": {"zh": "切换 Remote 面板", "en": "Toggle Remote Panel"},
+    "shortcuts.act.refresh": {"zh": "刷新文件浏览器", "en": "Refresh Explorer"},
     "shortcuts.act.zoom_in": {"zh": "放大字体", "en": "Zoom In"},
     "shortcuts.act.zoom_out": {"zh": "缩小字体", "en": "Zoom Out"},
     "shortcuts.act.opacity_up": {"zh": "提高不透明度", "en": "Increase Opacity"},
