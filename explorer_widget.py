@@ -360,8 +360,18 @@ class ExplorerPanel(QWidget):
     _SEARCH_MAX_RESULTS = 2000
     _SEARCH_MAX_SCANNED = 200000
 
+    # 始终不递归进入的大型/缓存/构建目录（文件名与内容搜索共用）。
+    # 关键：即便用户开了"显示隐藏文件"，也不应该走进 .git 对象库或 Maven 本地仓库
+    # (.m2，常有十万级文件)，否则会把扫描预算耗光、看起来"点了搜索没反应"。
+    _SEARCH_SKIP_DIRS = frozenset({
+        '.git', '.hg', '.svn', '.m2', '.gradle', 'node_modules', 'target',
+        'build', 'dist', '.next', 'out', '.venv', 'venv', '__pycache__',
+        '.idea', '.vscode', 'Pods', '.tox', '.mypy_cache', '.pytest_cache',
+        '.cache', '.gradle',
+    })
+
     # 内容搜索（纯 Python 回退路径用）：跳过的二进制扩展名、单文件大小上限、
-    # 始终跳过的大型/无意义目录、单文件最多取的命中行数。
+    # 单文件最多取的命中行数、命中行预览长度、最多扫描的文件数（防失控）。
     _CONTENT_SKIP_EXT = frozenset({
         '.png', '.jpg', '.jpeg', '.gif', '.bmp', '.ico', '.webp', '.tiff',
         '.pdf', '.zip', '.gz', '.tar', '.bz2', '.xz', '.7z', '.rar',
@@ -370,13 +380,10 @@ class ExplorerPanel(QWidget):
         '.mp3', '.mp4', '.mov', '.avi', '.mkv', '.flv', '.wav', '.flac', '.aac',
         '.woff', '.woff2', '.ttf', '.otf', '.eot', '.psd', '.sketch', '.svg',
     })
-    _CONTENT_SKIP_DIRS = frozenset({
-        '.git', 'node_modules', '.venv', 'venv', '__pycache__', '.idea',
-        '.vscode', 'dist', 'build', '.next', 'target', '.gradle', 'Pods',
-    })
     _CONTENT_MAX_FILE_BYTES = 2 * 1024 * 1024  # 单文件超过 2MB 跳过
     _CONTENT_MAX_PER_FILE = 50  # 单文件最多展示的命中行数
     _CONTENT_PREVIEW_LEN = 200  # 命中行预览最大字符数
+    _CONTENT_MAX_FILES = 60000  # 纯 Python 内容搜索最多读取的文件数
 
     # 配置文件里"是否显示隐藏文件"的键名（与 main_window 共用 .smart_terminal_config.json）
     CONFIG_KEY_SHOW_HIDDEN = 'explorer_show_hidden'
@@ -958,11 +965,17 @@ class ExplorerPanel(QWidget):
             for dirpath, dirnames, filenames in os.walk(root):
                 if gen != self._search_gen:
                     return  # 查询已变化，丢弃本轮
-                if not show_hidden:
-                    # 原地裁剪隐藏目录，避免走进 .git / .venv 等
-                    dirnames[:] = [d for d in dirnames if not d.startswith('.')]
+                # 可见目录：隐藏开关决定是否包含点开头目录（仍可被名字匹配/展示）。
+                # 注意要做成独立列表 —— 下面 dirnames[:] 原地裁剪不能反过来影响它，
+                # 否则 .git/target 这类被剔除递归的目录连名字都匹配不到了。
+                visible_dirs = (list(dirnames) if show_hidden
+                                else [d for d in dirnames if not d.startswith('.')])
+                # 但递归时再剔除重型/缓存目录（.git/.m2/target/node_modules…），
+                # 避免在 Maven/Node 仓库里把扫描预算耗尽却找不到东西。
+                dirnames[:] = [d for d in visible_dirs
+                               if d not in self._SEARCH_SKIP_DIRS]
                 # 分别遍历目录/文件，避免 `name in dirnames` 的 O(n²) 成员判断
-                for is_dir, names in ((True, dirnames), (False, filenames)):
+                for is_dir, names in ((True, visible_dirs), (False, filenames)):
                     for name in names:
                         if not show_hidden and name.startswith('.'):
                             continue
@@ -1013,7 +1026,11 @@ class ExplorerPanel(QWidget):
             '--max-count', str(self._CONTENT_MAX_PER_FILE),
         ]
         if show_hidden:
+            # 显示隐藏文件时也搜隐藏文件、无视 .gitignore，但仍要排除重型目录，
+            # 否则 rg 会一头扎进 .git/.m2/target，慢且全是噪音。
             cmd += ['--hidden', '--no-ignore']
+            for d in self._SEARCH_SKIP_DIRS:
+                cmd += ['-g', f'!{d}']
         cmd += ['--', query, root]
         try:
             proc = subprocess.Popen(
@@ -1076,6 +1093,7 @@ class ExplorerPanel(QWidget):
         """纯 Python 回退：逐文件逐行查找，跳过二进制/超大文件与噪音目录。"""
         results = []
         truncated = False
+        files_scanned = 0
         needle = query.lower()
         try:
             for dirpath, dirnames, filenames in os.walk(root):
@@ -1083,13 +1101,18 @@ class ExplorerPanel(QWidget):
                     return
                 if not show_hidden:
                     dirnames[:] = [d for d in dirnames if not d.startswith('.')]
-                # 始终跳过 .git / node_modules 等大型目录，避免纯 Python 扫描卡死
-                dirnames[:] = [d for d in dirnames if d not in self._CONTENT_SKIP_DIRS]
+                # 始终跳过 .git / .m2 / node_modules 等大型目录，避免纯 Python 扫描卡死
+                dirnames[:] = [d for d in dirnames if d not in self._SEARCH_SKIP_DIRS]
                 for name in filenames:
                     if not show_hidden and name.startswith('.'):
                         continue
                     if os.path.splitext(name)[1].lower() in self._CONTENT_SKIP_EXT:
                         continue
+                    # 读取文件数兜底：极端情况下（巨量纯文本）也能在有限时间内收尾
+                    files_scanned += 1
+                    if files_scanned > self._CONTENT_MAX_FILES:
+                        truncated = True
+                        break
                     abs_path = os.path.join(dirpath, name)
                     try:
                         if os.path.getsize(abs_path) > self._CONTENT_MAX_FILE_BYTES:
