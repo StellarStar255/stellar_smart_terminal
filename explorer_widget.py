@@ -5,6 +5,7 @@ Explorer 文件浏览器面板
 import os
 import posixpath
 import sys
+import re
 import subprocess
 import shutil
 import shlex
@@ -1004,34 +1005,49 @@ class ExplorerPanel(QWidget):
     # ---------- 内容搜索（在文件正文中查找，类似 grep） ----------
 
     def _run_content_search(self, gen: int, root: str, query: str, show_hidden: bool):
-        """后台线程入口：优先用 ripgrep（快、自动跳过二进制），缺失则纯 Python 回退。"""
+        """后台线程入口：优先用 ripgrep（快、自动跳过二进制），缺失则纯 Python 回退。
+        query 支持空格分隔的多关键词：同一行需包含全部关键词（AND，忽略顺序/大小写）。"""
+        tokens = parse_search_tokens(query)  # 已小写化、去重
+        if not tokens:
+            if gen == self._search_gen:
+                self._search_result_signal.emit(gen, [], False)
+            return
         rg = shutil.which('rg')
         if rg:
-            ok = self._run_content_search_rg(gen, root, query, show_hidden, rg)
+            ok = self._run_content_search_rg(gen, root, tokens, show_hidden, rg)
             if ok:
                 return
-            # rg 启动失败（极少见）→ 回退纯 Python
-        self._run_content_search_py(gen, root, query, show_hidden)
+            # rg 启动失败 / 不支持 PCRE2 → 回退纯 Python
+        self._run_content_search_py(gen, root, tokens, show_hidden)
 
-    def _run_content_search_rg(self, gen, root, query, show_hidden, rg) -> bool:
-        """用 ripgrep 做固定字符串、忽略大小写的内容搜索；流式读取以便随时中断。
-        返回 False 表示进程没能启动，调用方应回退到纯 Python。"""
+    def _run_content_search_rg(self, gen, root, tokens, show_hidden, rg) -> bool:
+        """用 ripgrep 忽略大小写地搜内容；流式读取以便随时中断。
+        单关键词走固定字符串；多关键词用 PCRE2 前瞻实现"同行包含全部词"。
+        返回 False 表示进程没能启动/出错，调用方应回退到纯 Python。"""
         results = []
         truncated = False
         # --null：文件名后跟 NUL 分隔，避免路径里的冒号干扰解析（Windows C:\ 等）
         cmd = [
             rg, '--line-number', '--no-heading', '--color', 'never', '--null',
-            '--fixed-strings', '--ignore-case',
+            '--ignore-case',
             '--max-columns', str(self._CONTENT_PREVIEW_LEN), '--max-columns-preview',
             '--max-count', str(self._CONTENT_MAX_PER_FILE),
         ]
+        if len(tokens) == 1:
+            cmd.append('--fixed-strings')
+            pattern = tokens[0]
+        else:
+            # 多关键词：用前瞻把每个词都要求出现在同一行（顺序无关），再用 .* 形成实际匹配。
+            # --ignore-case 已处理大小写，故不再加 (?i)；re.escape 让关键词按字面量匹配。
+            cmd.append('--pcre2')
+            pattern = ''.join(f'(?=.*{re.escape(tok)})' for tok in tokens) + '.*'
         if show_hidden:
             # 显示隐藏文件时也搜隐藏文件、无视 .gitignore，但仍要排除重型目录，
             # 否则 rg 会一头扎进 .git/.m2/target，慢且全是噪音。
             cmd += ['--hidden', '--no-ignore']
             for d in self._SEARCH_SKIP_DIRS:
                 cmd += ['-g', f'!{d}']
-        cmd += ['--', query, root]
+        cmd += ['--', pattern, root]
         try:
             proc = subprocess.Popen(
                 cmd, stdout=subprocess.PIPE, stderr=subprocess.DEVNULL,
@@ -1089,12 +1105,12 @@ class ExplorerPanel(QWidget):
             rel = abs_path
         return (abs_path, False, rel, line_no, preview)
 
-    def _run_content_search_py(self, gen, root, query, show_hidden):
-        """纯 Python 回退：逐文件逐行查找，跳过二进制/超大文件与噪音目录。"""
+    def _run_content_search_py(self, gen, root, tokens, show_hidden):
+        """纯 Python 回退：逐文件逐行查找，跳过二进制/超大文件与噪音目录。
+        tokens 为已小写化的关键词列表，命中要求同一行包含全部关键词（AND）。"""
         results = []
         truncated = False
         files_scanned = 0
-        needle = query.lower()
         try:
             for dirpath, dirnames, filenames in os.walk(root):
                 if gen != self._search_gen:
@@ -1133,7 +1149,8 @@ class ExplorerPanel(QWidget):
                             for line_no, text_line in enumerate(f, 1):
                                 if gen != self._search_gen:
                                     return
-                                if needle in text_line.lower():
+                                low = text_line.lower()
+                                if all(tok in low for tok in tokens):
                                     preview = text_line.strip()[:self._CONTENT_PREVIEW_LEN]
                                     results.append((abs_path, False, rel, line_no, preview))
                                     per_file += 1
