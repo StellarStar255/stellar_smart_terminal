@@ -23,7 +23,8 @@ from PyQt6.QtWidgets import (
     QWidget, QVBoxLayout, QHBoxLayout, QFrame, QLabel,
     QPushButton, QTreeView, QMenu, QLineEdit, QMessageBox,
     QAbstractItemView, QFileDialog, QApplication, QProgressDialog,
-    QStyledItemDelegate, QFileIconProvider, QListWidget, QListWidgetItem
+    QStyledItemDelegate, QFileIconProvider, QListWidget, QListWidgetItem,
+    QToolButton,
 )
 from PyQt6.QtCore import (
     Qt, QDir, QModelIndex, QPersistentModelIndex, pyqtSignal, QTimer,
@@ -358,6 +359,24 @@ class ExplorerPanel(QWidget):
     _SEARCH_MAX_RESULTS = 2000
     _SEARCH_MAX_SCANNED = 200000
 
+    # 内容搜索（纯 Python 回退路径用）：跳过的二进制扩展名、单文件大小上限、
+    # 始终跳过的大型/无意义目录、单文件最多取的命中行数。
+    _CONTENT_SKIP_EXT = frozenset({
+        '.png', '.jpg', '.jpeg', '.gif', '.bmp', '.ico', '.webp', '.tiff',
+        '.pdf', '.zip', '.gz', '.tar', '.bz2', '.xz', '.7z', '.rar',
+        '.dmg', '.pkg', '.iso', '.exe', '.dll', '.so', '.dylib', '.bin',
+        '.o', '.a', '.lib', '.class', '.pyc', '.pyo', '.jar',
+        '.mp3', '.mp4', '.mov', '.avi', '.mkv', '.flv', '.wav', '.flac', '.aac',
+        '.woff', '.woff2', '.ttf', '.otf', '.eot', '.psd', '.sketch', '.svg',
+    })
+    _CONTENT_SKIP_DIRS = frozenset({
+        '.git', 'node_modules', '.venv', 'venv', '__pycache__', '.idea',
+        '.vscode', 'dist', 'build', '.next', 'target', '.gradle', 'Pods',
+    })
+    _CONTENT_MAX_FILE_BYTES = 2 * 1024 * 1024  # 单文件超过 2MB 跳过
+    _CONTENT_MAX_PER_FILE = 50  # 单文件最多展示的命中行数
+    _CONTENT_PREVIEW_LEN = 200  # 命中行预览最大字符数
+
     # 配置文件里"是否显示隐藏文件"的键名（与 main_window 共用 .smart_terminal_config.json）
     CONFIG_KEY_SHOW_HIDDEN = 'explorer_show_hidden'
     # 排序方式 / 升降序的键名
@@ -379,6 +398,8 @@ class ExplorerPanel(QWidget):
 
         # 文件搜索状态：generation 用于丢弃过期的后台结果
         self._search_gen = 0
+        # 搜索模式：'name' 按文件名 / 'content' 按文件内容
+        self._search_mode = 'name'
 
         self._setup_ui()
         self._connect_signals()
@@ -490,12 +511,29 @@ class ExplorerPanel(QWidget):
         layout.setContentsMargins(0, 0, 0, 0)
         layout.setSpacing(0)
 
-        # 顶部搜索框：多关键词（空格分隔）递归搜索当前根目录下的文件/文件夹
+        # 顶部搜索栏：左侧模式切换按钮（文件名 / 文件内容）+ 搜索框。
+        # 文件名模式：多关键词（空格分隔）递归匹配名称；
+        # 内容模式：在文件内容中递归查找（优先用 ripgrep，缺失则纯 Python 回退）。
+        search_bar = QHBoxLayout()
+        search_bar.setContentsMargins(4, 4, 4, 4)
+        search_bar.setSpacing(4)
+
+        self.search_mode_btn = QToolButton()
+        self.search_mode_btn.setCheckable(True)
+        self.search_mode_btn.setText("Aa")
+        self.search_mode_btn.setToolTip(t("search.mode_filename"))
+        self.search_mode_btn.setCursor(Qt.CursorShape.PointingHandCursor)
+        self.search_mode_btn.setFocusPolicy(Qt.FocusPolicy.NoFocus)
+        self.search_mode_btn.toggled.connect(self._on_search_mode_toggled)
+        search_bar.addWidget(self.search_mode_btn)
+
         self.search_edit = QLineEdit()
         self.search_edit.setPlaceholderText(t("search.placeholder"))
         self.search_edit.setClearButtonEnabled(True)
         self.search_edit.textChanged.connect(self._on_search_text_changed)
-        layout.addWidget(self.search_edit)
+        search_bar.addWidget(self.search_edit, 1)
+
+        layout.addLayout(search_bar)
 
         # 搜索结果列表（扁平展示命中项；默认隐藏，搜索时替换 tree_view）。
         # 在此处先创建，确保 _update_style() 引用时已存在；稍后再加入布局。
@@ -696,7 +734,7 @@ class ExplorerPanel(QWidget):
             }}
         """)
 
-        # 搜索框
+        # 搜索框（已置于带 4px 外边距的 search_bar 里，故自身不再加 margin）
         self.search_edit.setStyleSheet(f"""
             QLineEdit {{
                 background-color: {bg_medium};
@@ -704,9 +742,26 @@ class ExplorerPanel(QWidget):
                 border: 1px solid {border};
                 border-radius: 4px;
                 padding: 4px 8px;
-                margin: 4px;
             }}
             QLineEdit:focus {{ border: 1px solid {accent}; }}
+        """)
+
+        # 文件名 / 内容 搜索模式切换按钮：选中（内容模式）时高亮
+        self.search_mode_btn.setStyleSheet(f"""
+            QToolButton {{
+                background-color: {bg_medium};
+                color: {text_dim};
+                border: 1px solid {border};
+                border-radius: 4px;
+                padding: 4px 6px;
+                font-weight: bold;
+            }}
+            QToolButton:hover {{ color: {text}; border: 1px solid {accent}; }}
+            QToolButton:checked {{
+                background-color: {accent};
+                color: white;
+                border: 1px solid {accent};
+            }}
         """)
 
         # 搜索结果列表
@@ -834,6 +889,25 @@ class ExplorerPanel(QWidget):
             return
         self._search_timer.start()
 
+    def _on_search_mode_toggled(self, checked: bool):
+        """切换文件名 / 文件内容搜索：更新按钮与占位文案，并按新模式重搜。"""
+        self._search_mode = 'content' if checked else 'name'
+        if checked:
+            self.search_mode_btn.setText("≡")
+            self.search_mode_btn.setToolTip(t("search.mode_content"))
+            self.search_edit.setPlaceholderText(t("search.placeholder_content"))
+        else:
+            self.search_mode_btn.setText("Aa")
+            self.search_mode_btn.setToolTip(t("search.mode_filename"))
+            self.search_edit.setPlaceholderText(t("search.placeholder"))
+        # 让上一轮后台结果作废；有内容则用新模式重搜，否则退出搜索态
+        self._search_gen += 1
+        if self.search_edit.text().strip():
+            self._search_timer.start()
+        else:
+            self._search_timer.stop()
+            self._exit_search()
+
     def _exit_search(self):
         """退出搜索态：隐藏结果列表，恢复正常文件树。"""
         self.search_results.setVisible(False)
@@ -846,10 +920,12 @@ class ExplorerPanel(QWidget):
         if not query:
             self._exit_search()
             return
-        tokens = parse_search_tokens(query)
-        if not tokens:
-            self._exit_search()
-            return
+        mode = self._search_mode
+        if mode == 'name':
+            tokens = parse_search_tokens(query)
+            if not tokens:
+                self._exit_search()
+                return
         # 每次发起都占一个唯一 generation，避免重复调用时两个后台线程同 gen 并行
         self._search_gen += 1
         gen = self._search_gen
@@ -863,10 +939,13 @@ class ExplorerPanel(QWidget):
         placeholder.setFlags(Qt.ItemFlag.NoItemFlags)
         self.search_results.addItem(placeholder)
 
-        t_thread = threading.Thread(
-            target=self._run_search, args=(gen, root, tokens, show_hidden),
-            daemon=True,
-        )
+        if mode == 'content':
+            target = self._run_content_search
+            args = (gen, root, query, show_hidden)
+        else:
+            target = self._run_search
+            args = (gen, root, tokens, show_hidden)
+        t_thread = threading.Thread(target=target, args=args, daemon=True)
         t_thread.start()
 
     def _run_search(self, gen: int, root: str, tokens: list, show_hidden: bool):
@@ -890,13 +969,157 @@ class ExplorerPanel(QWidget):
                         if name_matches_tokens(name, tokens):
                             abs_path = os.path.join(dirpath, name)
                             rel = os.path.relpath(abs_path, root)
-                            results.append((abs_path, is_dir, rel))
+                            # 统一为 5 元组 (abs, is_dir, rel, line_no, preview)，
+                            # 文件名命中没有行号/预览，用 None 占位。
+                            results.append((abs_path, is_dir, rel, None, None))
                             if len(results) >= self._SEARCH_MAX_RESULTS:
                                 truncated = True
                                 break
                         if scanned >= self._SEARCH_MAX_SCANNED:
                             truncated = True
                             break
+                    if truncated:
+                        break
+                if truncated:
+                    break
+        except Exception:
+            pass
+        if gen == self._search_gen:
+            self._search_result_signal.emit(gen, results, truncated)
+
+    # ---------- 内容搜索（在文件正文中查找，类似 grep） ----------
+
+    def _run_content_search(self, gen: int, root: str, query: str, show_hidden: bool):
+        """后台线程入口：优先用 ripgrep（快、自动跳过二进制），缺失则纯 Python 回退。"""
+        rg = shutil.which('rg')
+        if rg:
+            ok = self._run_content_search_rg(gen, root, query, show_hidden, rg)
+            if ok:
+                return
+            # rg 启动失败（极少见）→ 回退纯 Python
+        self._run_content_search_py(gen, root, query, show_hidden)
+
+    def _run_content_search_rg(self, gen, root, query, show_hidden, rg) -> bool:
+        """用 ripgrep 做固定字符串、忽略大小写的内容搜索；流式读取以便随时中断。
+        返回 False 表示进程没能启动，调用方应回退到纯 Python。"""
+        results = []
+        truncated = False
+        # --null：文件名后跟 NUL 分隔，避免路径里的冒号干扰解析（Windows C:\ 等）
+        cmd = [
+            rg, '--line-number', '--no-heading', '--color', 'never', '--null',
+            '--fixed-strings', '--ignore-case',
+            '--max-columns', str(self._CONTENT_PREVIEW_LEN), '--max-columns-preview',
+            '--max-count', str(self._CONTENT_MAX_PER_FILE),
+        ]
+        if show_hidden:
+            cmd += ['--hidden', '--no-ignore']
+        cmd += ['--', query, root]
+        try:
+            proc = subprocess.Popen(
+                cmd, stdout=subprocess.PIPE, stderr=subprocess.DEVNULL,
+                text=True, errors='replace',
+            )
+        except Exception:
+            return False
+        try:
+            for line in proc.stdout:
+                if gen != self._search_gen:
+                    proc.kill()
+                    return True  # 查询已变化，丢弃本轮（不再回退）
+                parsed = self._parse_rg_line(line, root)
+                if parsed is None:
+                    continue
+                results.append(parsed)
+                if len(results) >= self._SEARCH_MAX_RESULTS:
+                    truncated = True
+                    proc.kill()
+                    break
+            proc.wait()
+        except Exception:
+            try:
+                proc.kill()
+            except Exception:
+                pass
+            return False  # rg 读取异常 → 回退纯 Python
+        # rg 退出码：0=有命中，1=无命中（均正常），>=2 表示出错（如旧版本不识别参数）。
+        # 出错且未截断时回退纯 Python，避免静默地把「报错」显示成「无结果」。
+        if not truncated and (proc.returncode or 0) >= 2:
+            return False
+        if gen == self._search_gen:
+            self._search_result_signal.emit(gen, results, truncated)
+        return True
+
+    def _parse_rg_line(self, line: str, root: str):
+        """解析一行 rg --null 输出：`abs_path\\0line_no:content` → 5 元组。"""
+        line = line.rstrip('\n')
+        nul = line.find('\0')
+        if nul < 0:
+            return None
+        abs_path = line[:nul]
+        rest = line[nul + 1:]
+        colon = rest.find(':')
+        if colon < 0:
+            return None
+        try:
+            line_no = int(rest[:colon])
+        except ValueError:
+            return None
+        preview = rest[colon + 1:].strip()[:self._CONTENT_PREVIEW_LEN]
+        try:
+            rel = os.path.relpath(abs_path, root)
+        except ValueError:
+            rel = abs_path
+        return (abs_path, False, rel, line_no, preview)
+
+    def _run_content_search_py(self, gen, root, query, show_hidden):
+        """纯 Python 回退：逐文件逐行查找，跳过二进制/超大文件与噪音目录。"""
+        results = []
+        truncated = False
+        needle = query.lower()
+        try:
+            for dirpath, dirnames, filenames in os.walk(root):
+                if gen != self._search_gen:
+                    return
+                if not show_hidden:
+                    dirnames[:] = [d for d in dirnames if not d.startswith('.')]
+                # 始终跳过 .git / node_modules 等大型目录，避免纯 Python 扫描卡死
+                dirnames[:] = [d for d in dirnames if d not in self._CONTENT_SKIP_DIRS]
+                for name in filenames:
+                    if not show_hidden and name.startswith('.'):
+                        continue
+                    if os.path.splitext(name)[1].lower() in self._CONTENT_SKIP_EXT:
+                        continue
+                    abs_path = os.path.join(dirpath, name)
+                    try:
+                        if os.path.getsize(abs_path) > self._CONTENT_MAX_FILE_BYTES:
+                            continue
+                    except OSError:
+                        continue
+                    # 快速二进制判定：头部含 NUL 字节则跳过
+                    try:
+                        with open(abs_path, 'rb') as bf:
+                            if b'\0' in bf.read(2048):
+                                continue
+                    except OSError:
+                        continue
+                    rel = os.path.relpath(abs_path, root)
+                    per_file = 0
+                    try:
+                        with open(abs_path, 'r', encoding='utf-8', errors='ignore') as f:
+                            for line_no, text_line in enumerate(f, 1):
+                                if gen != self._search_gen:
+                                    return
+                                if needle in text_line.lower():
+                                    preview = text_line.strip()[:self._CONTENT_PREVIEW_LEN]
+                                    results.append((abs_path, False, rel, line_no, preview))
+                                    per_file += 1
+                                    if len(results) >= self._SEARCH_MAX_RESULTS:
+                                        truncated = True
+                                        break
+                                    if per_file >= self._CONTENT_MAX_PER_FILE:
+                                        break
+                    except (OSError, UnicodeError):
+                        continue
                     if truncated:
                         break
                 if truncated:
@@ -916,13 +1139,19 @@ class ExplorerPanel(QWidget):
             empty.setFlags(Qt.ItemFlag.NoItemFlags)
             self.search_results.addItem(empty)
             return
-        # 文件夹在前，再按相对路径排序，观感稳定
-        results.sort(key=lambda r: (not r[1], r[2].lower()))
-        for abs_path, is_dir, rel in results:
-            icon = "📁  " if is_dir else "📄  "
-            item = QListWidgetItem(icon + rel)
-            item.setData(Qt.ItemDataRole.UserRole, (abs_path, is_dir))
-            item.setToolTip(abs_path)
+        # 文件夹在前，再按相对路径排序；内容命中再按行号排序，观感稳定
+        results.sort(key=lambda r: (not r[1], r[2].lower(), r[3] or 0))
+        for abs_path, is_dir, rel, line_no, preview in results:
+            if line_no is None:
+                # 文件名/文件夹命中
+                icon = "📁  " if is_dir else "📄  "
+                item = QListWidgetItem(icon + rel)
+                item.setToolTip(abs_path)
+            else:
+                # 内容命中：展示「相对路径:行号  命中行预览」
+                item = QListWidgetItem(f"{rel}:{line_no}    {preview}")
+                item.setToolTip(f"{abs_path}:{line_no}")
+            item.setData(Qt.ItemDataRole.UserRole, (abs_path, is_dir, line_no))
             self.search_results.addItem(item)
         if truncated:
             note = QListWidgetItem(
@@ -935,7 +1164,7 @@ class ExplorerPanel(QWidget):
         data = item.data(Qt.ItemDataRole.UserRole)
         if not data:
             return
-        abs_path, is_dir = data
+        abs_path, is_dir = data[0], data[1]
         if is_dir:
             # 不改变根目录（否则会与工具栏目录脱节且无法返回），
             # 而是退出搜索、在原有文件树里定位并展开该文件夹。

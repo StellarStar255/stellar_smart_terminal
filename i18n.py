@@ -399,6 +399,9 @@ TRANSLATIONS = {
     "search.searching": {"zh": "搜索中…", "en": "Searching…"},
     "search.no_results": {"zh": "没有匹配的文件", "en": "No matching files"},
     "search.truncated": {"zh": "结果较多，仅显示前 {count} 项", "en": "Too many results — showing first {count}"},
+    "search.placeholder_content": {"zh": "搜索文件内容（递归当前目录）", "en": "Search in file contents (recursive)"},
+    "search.mode_filename": {"zh": "按文件名搜索（点击切换为内容搜索）", "en": "Search by file name (click to search contents)"},
+    "search.mode_content": {"zh": "搜索文件内容（点击切换为文件名搜索）", "en": "Search in file contents (click to search file names)"},
 
     # ===== Git 面板 =====
     "git.source_control": {"zh": "Source Control", "en": "Source Control"},
