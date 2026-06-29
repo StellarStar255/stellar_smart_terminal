@@ -5,7 +5,7 @@
 from PyQt6.QtWidgets import (
     QDialog, QVBoxLayout, QHBoxLayout, QTableWidget,
     QTableWidgetItem, QPushButton, QLabel, QMessageBox,
-    QHeaderView, QTextEdit, QSplitter, QWidget, QComboBox
+    QHeaderView, QTextEdit, QSplitter, QWidget, QComboBox, QSizePolicy
 )
 from PyQt6.QtCore import Qt
 from PyQt6.QtGui import QFont, QColor
@@ -94,10 +94,12 @@ class HistoryDialog(QDialog):
 
         layout = QVBoxLayout(self)
 
-        # 标题
+        # 标题（固定高度：否则它与 splitter 同为 Preferred 策略，会平分多余垂直空间，
+        # 白占半个对话框，把下面的表格/预览挤到看不全）
         title = QLabel(t("history.main_title"))
         title.setFont(QFont("Arial", 16, QFont.Weight.Bold))
         title.setStyleSheet("color: #667eea; margin-bottom: 10px;")
+        title.setSizePolicy(QSizePolicy.Policy.Preferred, QSizePolicy.Policy.Fixed)
         layout.addWidget(title)
 
         # 分割器
@@ -159,7 +161,8 @@ class HistoryDialog(QDialog):
         splitter.addWidget(right_widget)
         splitter.setSizes([400, 500])
 
-        layout.addWidget(splitter)
+        # 伸缩因子 1：多余垂直空间全归 splitter，表格/预览撑满，标题不再抢高度
+        layout.addWidget(splitter, 1)
 
         # 关闭按钮
         close_layout = QHBoxLayout()
