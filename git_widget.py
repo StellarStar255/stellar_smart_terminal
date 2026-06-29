@@ -179,16 +179,22 @@ STATUS_ICONS = {
 }
 
 
-def _mono_font(size: int = 12) -> QFont:
+def _mono_font(size: int = 12, *, pixel: bool = False) -> QFont:
     """跨平台等宽字体。
 
     Menlo 只在 macOS 存在；Windows 上每次 QFont("Menlo") 都要走一遍
     字体回退/别名查询。用 setFamilies 给出各平台首选，命中即停。
+
+    pixel=True 时按像素设字号（与 UI 其余处的 QSS `font-size: Npx` 对齐）；
+    默认按 point 设字号。point 在多数屏上比同数值的 px 视觉更大。
     """
     f = QFont()
     f.setFamilies(["Menlo", "Consolas", "Cascadia Mono",
                    "DejaVu Sans Mono", "Courier New"])
-    f.setPointSize(size)
+    if pixel:
+        f.setPixelSize(size)
+    else:
+        f.setPointSize(size)
     f.setStyleHint(QFont.StyleHint.Monospace)
     f.setFixedPitch(True)
     return f
@@ -1644,7 +1650,8 @@ class _GraphCanvas(QWidget):
         self._dot_r = 4
         self._left_pad = 8
         self._hover = -1
-        self._font = _mono_font(12)
+        # 用像素字号，和导航/列表的 QSS `font-size: Npx` 视觉一致（point 会偏大偏"肥"）
+        self._font = _mono_font(12, pixel=True)
         self.setMouseTracking(True)
         self.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Expanding)
 
@@ -1662,7 +1669,7 @@ class _GraphCanvas(QWidget):
         left_pad=8 / row_h=24），所以默认态不跳变。
         """
         size = max(6, min(32, int(size)))
-        self._font = _mono_font(size)
+        self._font = _mono_font(size, pixel=True)
         scale = size / 12.0
         self._lane_w = max(10, round(14 * scale))
         self._dot_r = max(3, round(4 * scale))
