@@ -396,7 +396,14 @@ class CollapsibleSection(QWidget):
         header_layout.addWidget(self.toggle_icon)
 
         # 标题
+        self._title_text = title
         self.title_label = QLabel(title)
+        # 让标题可被压缩到很窄：侧栏过窄时优先保住右侧操作按钮，标题文字用省略号收尾，
+        # 而不是把固定尺寸的按钮容器挤出可视区（设置键在另一布局里，不受此影响）。
+        self.title_label.setSizePolicy(
+            QSizePolicy.Policy.Ignored, QSizePolicy.Policy.Preferred
+        )
+        self.title_label.setMinimumWidth(0)
         self.title_label.setStyleSheet(f"""
             QLabel {{
                 color: {self.theme.get('text', '#eaeaea')};
@@ -404,9 +411,11 @@ class CollapsibleSection(QWidget):
                 font-size: 12px;
             }}
         """)
-        header_layout.addWidget(self.title_label)
+        header_layout.addWidget(self.title_label, 1)
+        # 标题宽度随侧栏变化时，用省略号重算可见文字（…），避免单纯裁剪把字截成半个
+        self.title_label.resizeEvent = self._elide_title
 
-        header_layout.addStretch()
+        header_layout.addStretch(0)
 
         # 操作按钮容器
         self.action_container = QWidget()
@@ -449,9 +458,19 @@ class CollapsibleSection(QWidget):
             }}
         """)
 
+    def _elide_title(self, event=None):
+        """按当前标签宽度对标题做省略号处理（窄到放不下时显示 'Staged Cha…'）"""
+        fm = self.title_label.fontMetrics()
+        elided = fm.elidedText(
+            self._title_text, Qt.TextElideMode.ElideRight, self.title_label.width()
+        )
+        # 直接 setText 才能让 QLabel 真正显示省略后的文字（不触发递归：宽度未变）
+        QLabel.setText(self.title_label, elided)
+
     def set_title(self, title: str):
         """设置标题"""
-        self.title_label.setText(title)
+        self._title_text = title
+        self._elide_title()
 
     def add_action_button(self, text: str, tooltip: str = "") -> QPushButton:
         """添加操作按钮"""
