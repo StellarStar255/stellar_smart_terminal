@@ -7257,6 +7257,21 @@ class MainWindow(QMainWindow):
             finally:
                 self._applying_spring = False
 
+    def _reconcile_spring_after_layout_change(self):
+        """侧栏 Git/Explorer 切换会重排 editor/终端但不挪键盘焦点，导致
+        _spring_current_side / 实际布局 / 焦点三者脱节：之后点击「焦点本就在
+        那一侧」的窗格不产生 focusChanged，弹簧不重排——表现为「切完侧栏直接点
+        终端没反应，必须先点编辑器再点终端」。这里在切换收尾按当前焦点主动把弹簧
+        对齐到一侧，使三者一致，无需用户多点一次。与 _toggle_editor_collapsed
+        （Cmd+E）末尾 setFocus 修的是同一类焦点-布局失同步问题。
+        """
+        self._update_spring_width_gate()
+        if not self._spring_applicable():
+            return
+        target = (self._spring_target_for_widget(QApplication.focusWidget())
+                  or self._spring_current_side or 'editor')
+        self._apply_spring(target)
+
     def _set_terminals_fast_resize(self, on: bool):
         """弹簧动画期间让 main_splitter 里的终端走「缩放旧缓存」而非每帧整屏重建，
         消除连续 resize 的卡顿；动画结束再恢复并重建为清晰文本。"""
@@ -7479,6 +7494,7 @@ class MainWindow(QMainWindow):
         # 先恢复绘制让 UI 立即呈现，终端 resize 延迟到下一事件循环
         self.left_panel_container.setUpdatesEnabled(True)
         self.main_splitter.setUpdatesEnabled(True)
+        self._reconcile_spring_after_layout_change()
         QTimer.singleShot(0, self._flush_terminal_resizes)
 
     def _setup_git_panel(self):
@@ -7631,6 +7647,7 @@ class MainWindow(QMainWindow):
         self._sync_embedded_nav()
         self._update_splitter_sizes()
         self.main_splitter.setUpdatesEnabled(True)
+        self._reconcile_spring_after_layout_change()
         QTimer.singleShot(0, self._flush_terminal_resizes)
 
     def _setup_remote_panel(self):
@@ -7769,6 +7786,7 @@ class MainWindow(QMainWindow):
         self._sync_embedded_nav()
         self._update_splitter_sizes()
         self.main_splitter.setUpdatesEnabled(True)
+        self._reconcile_spring_after_layout_change()
         QTimer.singleShot(0, self._flush_terminal_resizes)
 
     def _on_remote_host_connected(self, host_config):
