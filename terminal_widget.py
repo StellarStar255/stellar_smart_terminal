@@ -3632,13 +3632,24 @@ class TerminalWidget(QWidget):
             is_click = (not self._shift_extend_click
                         and start_row == end_row and abs(start_col - end_col) <= 1)
             if is_click:
-                # 单击 - 尝试移动光标到点击位置（使用相对坐标）
-                display_cell = self._pos_to_cell(event.pos())
-                self._move_cursor_to_click(display_cell)
+                if self._mouse_mode_click:
+                    # 程序启用了鼠标上报模式（mouse mode）：把这次单击作为
+                    # press+release 转发给程序，让 TUI 里的可点击界面能响应点击
+                    # ——例如 Claude Code 的选项菜单、lazygit、fzf、htop 等。
+                    # 否则单击会被吞掉（既不转发、又错发方向键），表现为“点了选项
+                    # 没反应、菜单还被打乱”。本地行编辑光标定位只适用于未开鼠标
+                    # 模式的普通 shell / REPL。
+                    self._send_mouse_event(event, 'press')
+                    self._send_mouse_event(event, 'release')
+                else:
+                    # 非鼠标模式 - 尝试移动光标到点击位置（使用相对坐标）
+                    display_cell = self._pos_to_cell(event.pos())
+                    self._move_cursor_to_click(display_cell)
                 # 清除选择状态
                 self._selection_start = None
                 self._selection_end = None
 
+            self._mouse_mode_click = False
             self.update()
         super().mouseReleaseEvent(event)
 
