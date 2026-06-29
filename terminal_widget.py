@@ -3303,13 +3303,25 @@ class TerminalWidget(QWidget):
             event.accept()
             return
 
+        going_up = delta > 0
+
+        # 备用屏幕里运行的全屏 TUI（Claude Code / vim / less / tmux 等）若启用了
+        # 鼠标报告，就把滚轮作为鼠标事件转发给程序，让它滚动自己的内容。备用屏幕
+        # 没有本地 scrollback，不转发滚轮就会落空，表现为"无法向上回看历史"。
+        # 仅限备用屏幕：主屏幕始终保留本地回滚，绝不把滚轮从用户手里夺走。
+        if self._mouse_mode and getattr(self.screen, '_in_alt_screen', False):
+            notches = max(1, int(round(abs(delta) / 120.0)))
+            self._send_wheel_to_app(going_up, event.position().toPoint(), notches)
+            self._scroll_accum = 0.0
+            event.accept()
+            return
+
         # 计算可滚动的最大行数
         # 历史记录 + 当前屏幕缓冲区的总行数
         history_lines = self._get_history_count()
         # 最大scroll_offset应该是历史记录的行数（这样可以滚动到最顶部）
         max_scroll = history_lines
 
-        going_up = delta > 0
         at_top = self.scroll_offset >= max_scroll
         at_bottom = self.scroll_offset <= 0
 
@@ -3454,6 +3466,20 @@ class TerminalWidget(QWidget):
         # 坐标是1-based
         seq = f'\x1b[<{button};{col + 1};{row + 1}{suffix}'
         self._write_to_backend(seq.encode())
+
+    def _send_wheel_to_app(self, going_up: bool, pos: QPoint, notches: int):
+        """鼠标模式下把滚轮转发给程序（SGR 1006：64=上滚 / 65=下滚，按下用 M）。
+
+        全屏 TUI（Claude Code / vim / less / tmux 等）切到备用屏幕后没有本地
+        scrollback，滚轮必须交给程序让它滚自己的内容，否则会落空、看起来"无法
+        回看历史"。按滚动格数发送多次，使程序滚动量与用户滚轮一致。
+        """
+        if self._backend is None:
+            return
+        row, col = self._pos_to_cell(pos)
+        button = 64 if going_up else 65
+        seq = f'\x1b[<{button};{col + 1};{row + 1}M'
+        self._write_to_backend(seq.encode() * max(1, notches))
 
     def mousePressEvent(self, event: QMouseEvent):
         """鼠标按下 - 开始选择，支持双击选词、三击选行、Cmd+点击URL
