@@ -111,11 +111,21 @@ class HistoryDialog(QDialog):
         left_layout.setContentsMargins(0, 0, 0, 0)
 
         self.table = QTableWidget()
-        self.table.setColumnCount(4)
-        self.table.setHorizontalHeaderLabels([t("history.col_session_id"), t("history.col_command"), t("history.col_start_time"), t("history.col_entry_count")])
+        self.table.setColumnCount(5)
+        self.table.setHorizontalHeaderLabels([
+            t("history.col_session_id"), t("history.col_command"),
+            t("history.col_source"), t("history.col_start_time"),
+            t("history.col_entry_count"),
+        ])
         self.table.setSelectionBehavior(QTableWidget.SelectionBehavior.SelectRows)
         self.table.setSelectionMode(QTableWidget.SelectionMode.SingleSelection)
-        self.table.horizontalHeader().setSectionResizeMode(QHeaderView.ResizeMode.Stretch)
+        # 列宽可拖拽（Interactive），给出合理初始宽度；来源目录列(路径长)设为 Stretch
+        # 吸收剩余宽度，避免右侧留白，也不会把「条目数」这种小列拉宽。
+        header = self.table.horizontalHeader()
+        header.setSectionResizeMode(QHeaderView.ResizeMode.Interactive)
+        header.setSectionResizeMode(2, QHeaderView.ResizeMode.Stretch)  # 来源目录
+        for col, width in ((0, 150), (1, 150), (3, 150), (4, 80)):
+            self.table.setColumnWidth(col, width)
         self.table.verticalHeader().setVisible(False)
         self.table.itemSelectionChanged.connect(self._on_selection_changed)
 
@@ -189,8 +199,12 @@ class HistoryDialog(QDialog):
 
             self.table.setItem(row, 0, QTableWidgetItem(session['session_id']))
             self.table.setItem(row, 1, QTableWidgetItem(session['command']))
-            self.table.setItem(row, 2, QTableWidgetItem(session['start_time']))
-            self.table.setItem(row, 3, QTableWidgetItem(str(session['entry_count'])))
+            src = session.get('working_directory', '') or t("history.source_unknown")
+            src_item = QTableWidgetItem(src)
+            src_item.setToolTip(src)  # 路径较长时悬停看全
+            self.table.setItem(row, 2, src_item)
+            self.table.setItem(row, 3, QTableWidgetItem(session['start_time']))
+            self.table.setItem(row, 4, QTableWidgetItem(str(session['entry_count'])))
 
     def _on_selection_changed(self):
         """选择变化"""

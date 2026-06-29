@@ -729,6 +729,8 @@ TRANSLATIONS = {
     "history.main_title": {"zh": "历史会话记录", "en": "Session History"},
     "history.col_session_id": {"zh": "会话ID", "en": "Session ID"},
     "history.col_command": {"zh": "命令", "en": "Command"},
+    "history.col_source": {"zh": "来源目录", "en": "Source"},
+    "history.source_unknown": {"zh": "（未记录）", "en": "(not recorded)"},
     "history.col_start_time": {"zh": "开始时间", "en": "Start Time"},
     "history.col_entry_count": {"zh": "条目数", "en": "Entries"},
     "history.view_detail": {"zh": "查看详情", "en": "View Details"},

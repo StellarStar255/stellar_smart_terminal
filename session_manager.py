@@ -209,6 +209,7 @@ class SessionManager:
                     'start_time': data['start_time'],
                     'end_time': data.get('end_time', 'N/A'),
                     'command': data['command'],
+                    'working_directory': data.get('working_directory', ''),
                     'entry_count': len(data.get('entries', []))
                 })
             except (json.JSONDecodeError, KeyError):
