@@ -130,7 +130,10 @@ jobs:
 
   linux:
     name: Linux (amd64)
-    runs-on: ubuntu-latest
+    # 钉到 22.04 而非 ubuntu-latest(24.04)：PyInstaller 二进制链接构建机的 glibc，
+    # 在 24.04(glibc 2.39) 上编的会引用 GLIBC_2.38/2.39 符号，装到 22.04(2.35) 起不来
+    # （表现为"装上打不开"）。glibc 向后兼容，老机器编的能在新机器跑，故取最老可用 runner。
+    runs-on: ubuntu-22.04
     timeout-minutes: 30
     steps:
       - uses: actions/checkout@v4

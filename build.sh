@@ -114,7 +114,7 @@ Version: $VERSION
 Section: utils
 Priority: optional
 Architecture: $ARCH
-Depends: libc6, libxcb-cursor0
+Depends: libc6, libxcb-cursor0, libegl1, libxkbcommon0, libdbus-1-3
 Installed-Size: $INSTALLED_KB
 Maintainer: huangqiliang <goosehuangmatt@gmail.com>
 Description: Stellar Smart Terminal
