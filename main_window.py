@@ -306,59 +306,9 @@ class WindowNavigatorPanel(QWidget):
 
         compact_row.addStretch()
 
-        # 字体大小调节
+        # 列表字体大小：固定值（此前的可调下拉已移除）。仍读取历史持久化值，
+        # 让老用户外观不突变；_apply_list_font_size() 据此渲染。
         self._font_size = 12  # 默认字体大小
-        font_size_label = QLabel("A")
-        font_size_label.setStyleSheet("color: #aaaaaa; font-size: 11px; border: none;")
-        compact_row.addWidget(font_size_label)
-
-        # 用下拉框（CenteredComboBox）代替 SpinBox：8–24px
-        self.font_size_spin = CenteredComboBox()
-        self.font_size_spin.setToolTip(t("window.font_size_tooltip"))
-        self.font_size_spin.setFixedWidth(68)
-        self.font_size_spin.setMinimumPopupWidth(68)
-        for _px in range(8, 25):
-            self.font_size_spin.addItem(f"{_px}px", _px)
-        # 弹窗高度取选项总数的 2/3（其余项靠滚轮/触控板滚动访问）。
-        self.font_size_spin.setMaxVisibleItems(
-            max(1, self.font_size_spin.count() * 2 // 3))
-        _fs_idx = self.font_size_spin.findData(self._font_size)
-        self.font_size_spin.setCurrentIndex(_fs_idx if _fs_idx >= 0 else 0)
-        self.font_size_spin.setStyleSheet("""
-            QComboBox {
-                background-color: #16213e;
-                border: 1px solid #3d3d5c;
-                border-radius: 3px;
-                padding: 1px 6px;
-                color: #eaeaea;
-                font-size: 11px;
-                combobox-popup: 0;
-            }
-            QComboBox:hover {
-                border-color: #667eea;
-            }
-            QComboBox::drop-down {
-                border: none;
-                width: 16px;
-            }
-            QComboBox QAbstractItemView {
-                background-color: #16213e;
-                color: #eaeaea;
-                selection-background-color: #667eea;
-                selection-color: #ffffff;
-                border: 1px solid #3d3d5c;
-                border-radius: 4px;
-                outline: none;
-                padding: 4px;
-            }
-            QComboBox QAbstractItemView::item {
-                min-height: 24px;
-                padding: 0px 6px;
-                border-radius: 4px;
-            }
-        """)
-        self.font_size_spin.currentIndexChanged.connect(self._on_font_size_changed)
-        compact_row.addWidget(self.font_size_spin)
 
         # 设置按钮（小齿轮）：与 Compact/Quick Close/Embed/字号 同在一行，靠最右。
         # 用矢量绘制的齿轮图标（_make_git_tool_icon），避免 macOS 上 ⚙ 字形被渲染成
@@ -510,15 +460,6 @@ class WindowNavigatorPanel(QWidget):
         self.compact_checkbox.setChecked(compact)
         self.compact_checkbox.blockSignals(False)
         self._force_refresh()
-
-    def _on_font_size_changed(self, _index=None):
-        """字体大小变更"""
-        size = self.font_size_spin.currentData()
-        if size is None:
-            return
-        self._font_size = size
-        self._apply_list_font_size()
-        self._save_navigator_config()
 
     def _apply_list_font_size(self):
         """应用字体大小到列表"""
@@ -1105,15 +1046,10 @@ class WindowNavigatorPanel(QWidget):
             if config_file.exists():
                 with open(config_file, 'r', encoding='utf-8') as f:
                     config = json.load(f)
-                # 恢复字体大小
+                # 恢复字体大小（下拉控件已移除，仅沿用历史值渲染列表，避免外观突变）
                 font_size = config.get('navigator_font_size', 12)
                 if 8 <= font_size <= 24:
                     self._font_size = font_size
-                    _idx = self.font_size_spin.findData(font_size)
-                    if _idx >= 0:
-                        self.font_size_spin.blockSignals(True)
-                        self.font_size_spin.setCurrentIndex(_idx)
-                        self.font_size_spin.blockSignals(False)
                     self._apply_list_font_size()
                 # 恢复 Quick Close 偏好
                 quick_close = bool(config.get('navigator_quick_close', False))
