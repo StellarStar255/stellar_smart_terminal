@@ -40,6 +40,11 @@ if 'b' not in pyte.Stream.csi:
 # 这类行即使上一行被填满，也不应被并入上一行，必须保留换行。
 _LIST_MARKER_RE = re.compile(r'^(?:[-*+•‣◦·]|\d{1,3}[.)]|[A-Za-z][.)]|#{1,6}|>)\s')
 
+# 强 token 分隔符：URL/路径/命令/参数里常见，散文里几乎不出现。断点处的串含这些
+# 字符即可判定为「被行宽截断的长 token」而非散文折行（'.'、'-' 二者皆有歧义，故
+# 不收入此集合，改由「整段长度放不下一行」这一信号兜底）。
+_TOKEN_SEP_RE = re.compile(r'[/:@=?&%#~\\]')
+
 
 def _need_boundary_space(last_char: str, first_char: str) -> bool:
     """判断应用层软换行拼接时是否需要在边界处插入空格"""
@@ -118,10 +123,29 @@ def merge_extracted_lines(rows, columns: int) -> str:
         if (can_h and last_col >= 0 and next_core
                 and run_max[i] >= threshold_low
                 and not _LIST_MARKER_RE.match(next_core)):
-            if spaceless:
-                if last_col >= columns - 2 and not nxt[0].isspace():
-                    wrap_type = 3
-            else:
+            # 本行是否填满到终端右边缘（放不下才断行的硬信号）
+            filled_to_edge = last_col >= columns - 2
+            # 断点两侧各自的连续非空白串（拼起来即被截断的 token 候选）
+            tail = text[text.rfind(' ') + 1:] if text else ''      # 本行末尾连续非空白
+            head = next_core.split(None, 1)[0] if next_core else ''  # 下一行开头连续非空白
+            # 断点是否把一个连续 token 从中间截断：填满到边缘、断点两侧都非空白、
+            # 下一行无前导缩进，且这个 token 要么含强分隔符（URL/路径/命令），要么长到
+            # 一行根本放不下（必为宽度截断）。满足则无缝拼接、绝不补空格/换行。只看断点
+            # 本身、与整行是否含空格无关：修复 "docker push <长URL>" 这种前缀有空格、却在
+            # URL 中段折断、被误当散文折行而插入空格/换行的老问题；同时用「强分隔符 + 整段
+            # 长度」两个条件把「散文恰好填满到边缘」误判为 token 的风险压到最低。
+            boundary_mid_token = (
+                filled_to_edge
+                and text[-1:] and not text[-1].isspace()
+                and not nxt[0].isspace()
+                and (len(tail) + len(head) >= columns
+                     or _TOKEN_SEP_RE.search(tail) or _TOKEN_SEP_RE.search(head))
+            )
+            if boundary_mid_token:
+                wrap_type = 3
+            elif not spaceless:
+                # 散文按词边界折行：下一行首词在本行放不下（本行未填满到边缘，留有
+                # 空位）→ 是被折断的续行，拼接时按需补回一个词间空格。
                 first_word = next_core.split(None, 1)[0]
                 gap = run_max[i] - last_col  # 本行尾部到折行宽度的剩余列数
                 if gap <= len(first_word) + 1:
