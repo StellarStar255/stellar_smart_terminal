@@ -51,6 +51,7 @@ from openai_server import OpenAIServerManager
 from git_widget import GitPanel, GitDiffView, GitOutputView, _make_git_tool_icon
 from remote_explorer_widget import RemoteExplorerPanel
 from explorer_widget import ExplorerPanel
+import explorer_favorites
 from toolbar_manager import ToolbarManagerDialog
 from command_palette import CommandPalette
 from file_editor import FileEditorWidget, EditorArea
@@ -6484,6 +6485,25 @@ class MainWindow(QMainWindow):
         self._spring_checkbox.stateChanged.connect(self._on_spring_mode_toggled)
         explorer_header_layout.addWidget(self._spring_checkbox)
 
+        # 快捷方式（收藏）★ 按钮：下拉列出收藏，文件夹点了切换目录、文件点了打开
+        self._explorer_favorites_btn = QPushButton()
+        self._explorer_favorites_btn.setFixedSize(24, 24)
+        self._explorer_favorites_btn.setIconSize(QSize(16, 16))
+        self._explorer_favorites_btn.setIcon(_make_git_tool_icon('star', '#888'))
+        self._explorer_favorites_btn.setToolTip(t("explorer.favorites_tooltip"))
+        self._explorer_favorites_btn.setStyleSheet("""
+            QPushButton {
+                background-color: transparent;
+                border: none;
+            }
+            QPushButton:hover {
+                background-color: rgba(255, 255, 255, 0.08);
+                border-radius: 4px;
+            }
+        """)
+        self._explorer_favorites_btn.clicked.connect(self._show_explorer_favorites_menu)
+        explorer_header_layout.addWidget(self._explorer_favorites_btn)
+
         # 视图设置按钮（齿轮）：弹出菜单，含"显示隐藏文件"开关
         self._explorer_settings_btn = QPushButton()
         self._explorer_settings_btn.setFixedSize(24, 24)
@@ -6561,6 +6581,8 @@ class MainWindow(QMainWindow):
 
         # 连接文件编辑请求信号
         self.explorer_panel.file_edit_requested.connect(self._open_file_in_editor)
+        # 快捷方式增删后刷新 ★ 按钮提示（菜单本身每次打开都重读，故无需更多同步）
+        self.explorer_panel.favorites_changed.connect(self._on_explorer_favorites_changed)
 
         # 内置文件编辑器（编辑器组：支持无限层级 split / v-split 并排查看不同文件）
         self.editor_area = EditorArea(theme=current_theme)
@@ -6644,6 +6666,88 @@ class MainWindow(QMainWindow):
         menu.exec(self._explorer_settings_btn.mapToGlobal(
             self._explorer_settings_btn.rect().bottomLeft()
         ))
+
+    def _on_explorer_favorites_changed(self):
+        """快捷方式增删后的钩子：★ 下拉每次打开都重读，这里仅刷新提示气泡。"""
+        if hasattr(self, '_explorer_favorites_btn'):
+            n = len(explorer_favorites.list_all())
+            tip = t("explorer.favorites_tooltip")
+            self._explorer_favorites_btn.setToolTip(
+                f"{tip} ({n})" if n else tip)
+
+    def _show_explorer_favorites_menu(self):
+        """Explorer ★ 按钮：下拉列出所有快捷方式。
+
+        文件夹 → 切换工作目录（Explorer 根目录随之移动，且不会被后续 cwd 同步撤销）；
+        文件 → 在内置编辑器打开。底部可一键清空。
+        """
+        menu = QMenu(self)
+        menu.setStyleSheet("""
+            QMenu {
+                background-color: #2d2d44;
+                color: #eaeaea;
+                border: 1px solid #3d3d5c;
+                border-radius: 6px;
+                padding: 4px;
+            }
+            QMenu::item {
+                padding: 6px 24px 6px 12px;
+                border-radius: 4px;
+            }
+            QMenu::item:selected {
+                background-color: #667eea;
+            }
+            QMenu::separator {
+                height: 1px;
+                background-color: #3d3d5c;
+                margin: 4px 10px;
+            }
+        """)
+
+        entries = explorer_favorites.list_all()
+        if not entries:
+            empty = menu.addAction(t("explorer.favorites_empty"))
+            empty.setEnabled(False)
+        else:
+            for p in entries:
+                is_dir = os.path.isdir(p)
+                missing = not os.path.exists(p)
+                base = os.path.basename(p.rstrip(os.sep)) or p
+                label = base + (os.sep if is_dir else "")
+                if missing:
+                    label += "  (?)"
+                act = menu.addAction(label)
+                act.setToolTip(p)
+                act.triggered.connect(
+                    lambda checked=False, path=p: self._open_explorer_favorite(path))
+            menu.addSeparator()
+            clear_act = menu.addAction(t("explorer.favorites_clear"))
+            clear_act.triggered.connect(self._clear_explorer_favorites)
+
+        menu.exec(self._explorer_favorites_btn.mapToGlobal(
+            self._explorer_favorites_btn.rect().bottomLeft()
+        ))
+
+    def _open_explorer_favorite(self, path: str):
+        """打开一个快捷方式：文件夹切换工作目录，文件在编辑器打开。"""
+        if not os.path.exists(path):
+            # 失效（被移动/删除）：移除并提示，避免留下死链
+            explorer_favorites.remove(path)
+            self._on_explorer_favorites_changed()
+            self.statusbar.showMessage(
+                t("explorer.favorite_removed_missing", path=path), 4000)
+            return
+        if os.path.isdir(path):
+            # 复用工作目录切换逻辑：Explorer 根目录、Git 仓库、终端 cwd 一并对齐
+            self.working_dir_combo.setCurrentText(path)
+            self._apply_working_dir()
+        else:
+            self._open_file_in_editor(path)
+
+    def _clear_explorer_favorites(self):
+        """清空全部快捷方式。"""
+        explorer_favorites.clear()
+        self._on_explorer_favorites_changed()
 
     @property
     def file_editor(self):

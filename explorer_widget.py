@@ -15,6 +15,7 @@ from typing import Optional
 
 from i18n import t
 import explorer_clipboard
+import explorer_favorites
 from utils import (
     read_config_json, atomic_write_json, get_config_path,
     parse_search_tokens, name_matches_tokens,
@@ -354,6 +355,7 @@ class ExplorerPanel(QWidget):
     file_edit_requested = pyqtSignal(str, int)
     save_file_requested = pyqtSignal()  # 请求保存当前编辑的文件
     save_file_as_requested = pyqtSignal()  # 请求另存为当前编辑的文件
+    favorites_changed = pyqtSignal()  # 快捷方式（收藏）增删后通知外部刷新 ★ 菜单
     # 后台搜索结果回 UI 线程：(generation, items, truncated)
     _search_result_signal = pyqtSignal(int, list, bool)
 
@@ -1497,6 +1499,18 @@ class ExplorerPanel(QWidget):
 
             menu.addSeparator()
 
+            # 快捷方式（收藏）：文件夹点了切换目录、文件点了在编辑器打开（见 ★ 下拉）
+            if explorer_favorites.is_favorite(file_path):
+                fav_action = menu.addAction(t("explorer.favorite_remove"))
+                fav_action.triggered.connect(
+                    lambda checked=False, p=file_path: self._toggle_favorite(p, add=False))
+            else:
+                fav_action = menu.addAction(t("explorer.favorite_add"))
+                fav_action.triggered.connect(
+                    lambda checked=False, p=file_path: self._toggle_favorite(p, add=True))
+
+            menu.addSeparator()
+
             # 在 Finder 中显示
             if sys.platform == 'darwin':
                 reveal_action = menu.addAction(t("explorer.reveal_in_finder"))
@@ -1551,6 +1565,14 @@ class ExplorerPanel(QWidget):
             refresh_action.triggered.connect(self.refresh)
 
         menu.exec(QCursor.pos())
+
+    def _toggle_favorite(self, path: str, add: bool):
+        """把文件/文件夹加入或移出快捷方式（收藏）。落盘即生效，跨窗口共享。"""
+        if add:
+            explorer_favorites.add(path)
+        else:
+            explorer_favorites.remove(path)
+        self.favorites_changed.emit()
 
     def _new_file(self, target_dir: str):
         """创建新文件并直接在文件树里原地重命名（不弹窗）"""
