@@ -247,6 +247,15 @@ class GitFileItem(QWidget):
         if is_conflict:
             filename_text += f"  ({t('git.conflict_suffix')})"
         self.filename_label = QLabel(filename_text)
+        # 让文件名可被压缩到很窄：路径很长时优先保住分区/行尾的操作按钮（+/- 等），
+        # 文件名用省略号收尾，而不是把整行撑得比可视区还宽、把右侧按钮顶出去看不见
+        # （这正是分区标题 title_label 已采用的同一套办法）。中间省略保留目录头与文件名尾。
+        self._filename_text = filename_text
+        self.filename_label.setSizePolicy(
+            QSizePolicy.Policy.Ignored, QSizePolicy.Policy.Preferred
+        )
+        self.filename_label.setMinimumWidth(0)
+        self.filename_label.setToolTip(self.git_file.path)  # 完整路径仍可悬停查看
         if is_conflict:
             self.filename_label.setStyleSheet("""
                 QLabel {
@@ -261,6 +270,8 @@ class GitFileItem(QWidget):
                 }}
             """)
         layout.addWidget(self.filename_label, 1)
+        # 宽度随侧栏变化时用省略号重算可见文字（…），避免把字硬裁成半个
+        self.filename_label.resizeEvent = self._elide_filename
 
         # 操作按钮容器
         self.btn_container = QWidget()
@@ -306,6 +317,15 @@ class GitFileItem(QWidget):
 
         # 设置鼠标跟踪
         self.setMouseTracking(True)
+
+    def _elide_filename(self, event=None):
+        """按当前标签宽度对文件路径做中间省略（保留目录头与文件名尾）。"""
+        fm = self.filename_label.fontMetrics()
+        elided = fm.elidedText(
+            self._filename_text, Qt.TextElideMode.ElideMiddle, self.filename_label.width()
+        )
+        # 直接 setText 才能让 QLabel 真正显示省略后的文字（宽度未变，不触发递归）
+        QLabel.setText(self.filename_label, elided)
 
     def enterEvent(self, event):
         """鼠标进入"""
