@@ -4942,6 +4942,13 @@ class MainWindow(QMainWindow):
             # 检查是否是终端控件
             if isinstance(obj, TerminalWidget):
                 self.active_terminal = obj
+        elif event.type() == QEvent.Type.MouseButtonPress:
+            # 点击终端时「确定性」触发弹簧。focusChanged 在终端已持有键盘焦点时
+            # 不会再次发出（Ubuntu/X11 上尤其常见——运行 Claude Code 时终端长期
+            # 持焦），仅靠 focusChanged 会导致点了也不展宽。这里按点击目标侧补一次
+            # 重排；若该侧已展开则内部提前返回，不产生多余动画。
+            if isinstance(obj, TerminalWidget):
+                self._spring_to_side_on_click('terminal')
         elif event.type() == QEvent.Type.KeyPress:
             # 用户在点亮绿点的来源终端中按键 → 视为已响应该交互提示，清除绿点。
             # （来自其他终端/Git 面板的提醒不受影响，仍靠切窗口/切 tab 清除）
@@ -7357,6 +7364,20 @@ class MainWindow(QMainWindow):
         if target is None or target == self._spring_current_side:
             return
         self._apply_spring(target)
+
+    def _spring_to_side_on_click(self, side):
+        """鼠标点击某一侧时确定性地触发弹簧——不依赖 focusChanged。
+
+        与 _on_focus_changed_for_spring 同逻辑，但目标侧由点击对象直接给出，
+        从而覆盖「该侧已持有键盘焦点、点击不再发出 focusChanged」的情况
+        （这是 Ubuntu 上点终端常常不展宽的根因）。
+        """
+        self._update_spring_width_gate()
+        if not self._spring_applicable():
+            return
+        if side == self._spring_current_side:
+            return
+        self._apply_spring(side)
 
     def _apply_spring(self, target, animate=True):
         """把 main_splitter 中编辑器/终端的合计宽度按弹簧比例分配给指定一侧。"""
