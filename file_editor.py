@@ -711,6 +711,12 @@ class CodeEditor(QPlainTextEdit):
         if self._ai is not None:
             self._ai.set_enabled(bool(enabled))
 
+    def set_word_wrap(self, enabled: bool):
+        """切换自动换行：开 → 按控件宽度整行换行；关 → 不换行（横向滚动）。"""
+        self.setLineWrapMode(
+            QPlainTextEdit.LineWrapMode.WidgetWidth if enabled
+            else QPlainTextEdit.LineWrapMode.NoWrap)
+
     def set_ai_ghost_color(self, color):
         if self._ai is not None:
             self._ai.set_color(color)
@@ -801,6 +807,17 @@ class CodeEditor(QPlainTextEdit):
         pane_for_save = self._find_pane()
         act_save.setEnabled(bool(pane_for_save and pane_for_save.get_current_file()))
         act_save.triggered.connect(self._context_save)
+
+        # 自动换行（全局开关，所有窗格统一、重启记住）。改动经 area 信号冒泡到主窗口落盘。
+        act_wrap = menu.addAction(t("editor.word_wrap_menu"))
+        act_wrap.setCheckable(True)
+        act_wrap.setChecked(bool(area.is_word_wrap_enabled()) if area is not None else False)
+        if area is not None:
+            act_wrap.triggered.connect(
+                lambda checked: area.word_wrap_toggled.emit(bool(checked)))
+        else:
+            act_wrap.setEnabled(False)
+
         menu.addSeparator()
         act_h = menu.addAction(self._split_menu_icon('h', icon_color), t("editor.split_h_menu"))
         act_h.triggered.connect(self.split_h_requested.emit)
@@ -2328,6 +2345,10 @@ class FileEditorWidget(QWidget):
             self.ai_btn.blockSignals(False)
         self.editor.set_ai_completion_enabled(enabled)
 
+    def set_word_wrap(self, enabled: bool):
+        """设置本窗格自动换行（下发到内部 CodeEditor）。"""
+        self.editor.set_word_wrap(bool(enabled))
+
     def eventFilter(self, obj, event):
         """点击 / 聚焦本窗格的编辑区时，通知 EditorArea 把本窗格设为活动窗格。
 
@@ -3158,6 +3179,7 @@ class EditorArea(QWidget):
     active_changed = pyqtSignal()   # 活动窗格发生变化
     file_saved = pyqtSignal(str)    # 任一窗格保存文件（转发）
     ai_completion_toggled = pyqtSignal(bool)  # 任一窗格切换 AI 补全（转发给主窗口）
+    word_wrap_toggled = pyqtSignal(bool)  # 右键菜单切换自动换行（转发给主窗口落盘）
 
     def __init__(self, theme: dict = None, parent=None):
         super().__init__(parent)
@@ -3168,6 +3190,8 @@ class EditorArea(QWidget):
         self._editor_point_size: int = 12
         # AI 补全开关（全局一致）；新建窗格继承它
         self._ai_completion_enabled: bool = False
+        # 自动换行开关（全局一致）；新建窗格继承它
+        self._word_wrap_enabled: bool = False
 
         self._layout = QVBoxLayout(self)
         self._layout.setContentsMargins(0, 0, 0, 0)
@@ -3196,6 +3220,8 @@ class EditorArea(QWidget):
         self._apply_point_size_to_pane(pane, self._editor_point_size)
         # 新窗格继承当前 AI 补全开关
         pane.set_ai_completion_enabled(self._ai_completion_enabled)
+        # 新窗格继承当前自动换行开关
+        pane.set_word_wrap(self._word_wrap_enabled)
         return pane
 
     def set_ai_completion_enabled(self, enabled: bool):
@@ -3203,6 +3229,16 @@ class EditorArea(QWidget):
         self._ai_completion_enabled = bool(enabled)
         for p in self._panes:
             p.set_ai_completion_enabled(self._ai_completion_enabled)
+
+    def set_word_wrap_enabled(self, enabled: bool):
+        """统一设置所有窗格的自动换行，并记住它供新窗格继承。"""
+        self._word_wrap_enabled = bool(enabled)
+        for p in self._panes:
+            p.set_word_wrap(self._word_wrap_enabled)
+
+    def is_word_wrap_enabled(self) -> bool:
+        """当前自动换行状态（供右键菜单显示勾选态）。"""
+        return self._word_wrap_enabled
 
     def _apply_point_size_to_pane(self, pane: 'FileEditorWidget', point_size: int):
         pane.set_editor_point_size(point_size)

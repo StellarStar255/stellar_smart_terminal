@@ -36,6 +36,7 @@ TRANSLATIONS = {
     "shortcuts.saved": {"zh": "快捷键已保存", "en": "Shortcuts saved"},
     # 各操作的可读名称
     "shortcuts.act.toggle_editor": {"zh": "收起/展开文件区", "en": "Collapse/Expand Editor"},
+    "shortcuts.act.toggle_word_wrap": {"zh": "编辑器自动换行", "en": "Toggle Word Wrap"},
     "shortcuts.act.history": {"zh": "历史记录", "en": "History"},
     "shortcuts.act.new_session": {"zh": "新建会话", "en": "New Session"},
     "shortcuts.act.new_tab": {"zh": "新建标签页", "en": "New Tab"},
@@ -559,6 +560,7 @@ TRANSLATIONS = {
     "editor.close_tooltip": {"zh": "关闭编辑器", "en": "Close Editor"},
     "editor.split_h_tooltip": {"zh": "左右分屏 ⌘\\（并排查看另一个文件）", "en": "Split editor right ⌘\\ (view another file side by side)"},
     "editor.split_v_tooltip": {"zh": "上下分屏 ⌘⇧\\（堆叠查看另一个文件）", "en": "Split editor down ⌘⇧\\ (view another file stacked)"},
+    "editor.word_wrap_menu": {"zh": "自动换行", "en": "Word Wrap"},
     "editor.split_h_menu": {"zh": "Split  ⌘\\", "en": "Split  ⌘\\"},
     "editor.split_v_menu": {"zh": "V-Split  ⌘⇧\\", "en": "V-Split  ⌘⇧\\"},
     "editor.close_split_menu": {"zh": "Close Split", "en": "Close Split"},

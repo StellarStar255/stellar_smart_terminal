@@ -3579,6 +3579,7 @@ class MainWindow(QMainWindow):
     # (action_id, 默认键序列, i18n标签key, 触发方法名)
     _SHORTCUT_SPECS = [
         ("toggle_editor",   "Ctrl+E",         "shortcuts.act.toggle_editor",   "_toggle_editor_collapsed"),
+        ("toggle_word_wrap","Alt+Z",          "shortcuts.act.toggle_word_wrap","_toggle_word_wrap"),
         ("history",         "Ctrl+Shift+H",   "shortcuts.act.history",         "_show_history"),
         ("new_session",     "Ctrl+Shift+N",   "shortcuts.act.new_session",     "_start_session"),
         ("new_tab",         "Ctrl+T",         "shortcuts.act.new_tab",         "_add_new_tab"),
@@ -6589,8 +6590,11 @@ class MainWindow(QMainWindow):
         self.editor_area.all_closed.connect(self._on_editor_closed)
         self.editor_area.active_changed.connect(self._on_active_pane_changed)
         self.editor_area.ai_completion_toggled.connect(self._on_ai_completion_toggled)
+        self.editor_area.word_wrap_toggled.connect(self._on_word_wrap_toggled)
         # 应用已记忆的 AI 补全开关到编辑器
         self.editor_area.set_ai_completion_enabled(getattr(self, '_ai_completion_enabled', False))
+        # 应用已记忆的自动换行开关到编辑器
+        self.editor_area.set_word_wrap_enabled(getattr(self, '_editor_word_wrap', False))
         self.editor_area.hide()  # 默认隐藏
         self.explorer_splitter.addWidget(self.editor_area)
 
@@ -7162,6 +7166,33 @@ class MainWindow(QMainWindow):
             widget._ai_completion_enabled = enabled
             if hasattr(widget, 'editor_area') and widget.editor_area is not None:
                 widget.editor_area.set_ai_completion_enabled(enabled)
+
+    def _on_word_wrap_toggled(self, enabled: bool):
+        """切换编辑器自动换行（右键菜单或 Alt+Z）：应用到本窗口所有窗格、广播、落盘。"""
+        enabled = bool(enabled)
+        self._editor_word_wrap = enabled
+        if hasattr(self, 'editor_area') and self.editor_area is not None:
+            self.editor_area.set_word_wrap_enabled(enabled)
+        self._broadcast_word_wrap_state()
+        self._save_config()
+
+    def _broadcast_word_wrap_state(self):
+        """把自动换行开关同步到所有 MainWindow 窗口（含其编辑器窗格），
+        避免多窗口下旧窗口退出时把 editor_word_wrap 覆盖回旧值。"""
+        enabled = self._editor_word_wrap
+        app = QApplication.instance()
+        if not app:
+            return
+        for widget in app.topLevelWidgets():
+            if widget is self or not isinstance(widget, MainWindow):
+                continue
+            widget._editor_word_wrap = enabled
+            if hasattr(widget, 'editor_area') and widget.editor_area is not None:
+                widget.editor_area.set_word_wrap_enabled(enabled)
+
+    def _toggle_word_wrap(self):
+        """Alt+Z：翻转全局自动换行（走与右键菜单相同的落盘/广播路径）。"""
+        self._on_word_wrap_toggled(not getattr(self, '_editor_word_wrap', False))
 
     def _on_spring_mode_toggled(self, state):
         """弹簧模式开关（Explorer 与 Remote 两处复选框共用，保持同步）。"""
@@ -9439,6 +9470,7 @@ class MainWindow(QMainWindow):
         self.llm_configs = []  # LLM API 配置列表
         self.default_llm_config = 0  # 默认 LLM 配置索引
         self._ai_completion_enabled = False  # AI 行内补全开关（默认关闭）
+        self._editor_word_wrap = False  # 编辑器自动换行开关（默认关闭）
         self._saved_window_geometry = None  # 窗口位置和大小 [x, y, w, h]
         self._saved_window_maximized = False  # 窗口是否最大化
         self._saved_explorer_panel_visible = False  # Explorer 面板可见性
@@ -9509,6 +9541,7 @@ class MainWindow(QMainWindow):
                     self._spring_mode_enabled = config.get('spring_mode_enabled', False)
                     # 加载 AI 行内补全开关
                     self._ai_completion_enabled = config.get('ai_completion_enabled', False)
+                    self._editor_word_wrap = config.get('editor_word_wrap', False)
                     # 加载完成提示音（绿点点亮时播放；'' = 静音）
                     self._notify_sound = config.get('notify_sound', 'Submarine')
                     # 加载终端 scrollback 上限（进程级，影响之后新建的终端）
@@ -9745,6 +9778,7 @@ class MainWindow(QMainWindow):
                 'remote_split_horizontal': getattr(self, '_remote_split_horizontal', False),  # Remote 左右分屏偏好
                 'spring_mode_enabled': getattr(self, '_spring_mode_enabled', False),  # 保存弹簧模式偏好
                 'ai_completion_enabled': getattr(self, '_ai_completion_enabled', False),  # 保存 AI 行内补全开关
+                'editor_word_wrap': getattr(self, '_editor_word_wrap', False),  # 保存编辑器自动换行开关
                 'notify_sound': getattr(self, '_notify_sound', 'Submarine'),  # 保存完成提示音
                 'terminal_scrollback': TerminalWidget.SCROLLBACK_LINES,  # 保存终端 scrollback 上限
                 'parse_off_gui_thread': TerminalWidget.PARSE_ON_READER_THREAD,  # 保存"解析放后台线程"开关
