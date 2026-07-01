@@ -7367,17 +7367,45 @@ class MainWindow(QMainWindow):
             return
         self._apply_spring(target)
 
-    def _spring_to_side_on_click(self, side):
-        """鼠标点击某一侧时确定性地触发弹簧——不依赖 focusChanged。
+    def _spring_actual_side(self):
+        """按 main_splitter 的实际尺寸判断当前哪侧更宽：'editor'/'terminal'/None。
 
-        与 _on_focus_changed_for_spring 同逻辑，但目标侧由点击对象直接给出，
-        从而覆盖「该侧已持有键盘焦点、点击不再发出 focusChanged」的情况
-        （这是 Ubuntu 上点终端常常不展宽的根因）。
+        用「实际布局」而非记录值 _spring_current_side 判断，能自愈各种脱节：从别的
+        程序切回窗口（deactivate/activate 往返不发 focusChanged）后，_spring_current_side
+        可能停在旧值，与真实布局不符——若仍按记录值判断，会出现「点了那侧却因记录里
+        已是那侧而不重排」。None 表示大致均衡（留出 15% 迟滞，避免均衡态反复抖动）。
+        """
+        if not hasattr(self, 'editor_area'):
+            return None
+        sizes = self.main_splitter.sizes()
+        ed_idx = self.main_splitter.indexOf(self.editor_area)
+        term_idx = self.main_splitter.indexOf(self._main_content_stack)
+        if ed_idx < 0 or term_idx < 0 or max(ed_idx, term_idx) >= len(sizes):
+            return None
+        ed, tm = sizes[ed_idx], sizes[term_idx]
+        if ed + tm <= 0:
+            return None
+        if tm >= ed * 1.15:
+            return 'terminal'
+        if ed >= tm * 1.15:
+            return 'editor'
+        return None
+
+    def _spring_to_side_on_click(self, side):
+        """鼠标点击某一侧时确定性地触发弹簧——不依赖 focusChanged，也不依赖记录值。
+
+        目标侧由点击对象直接给出，并按「实际布局」判断是否已展开：
+          · 覆盖「该侧已持有键盘焦点、点击不再发出 focusChanged」（Ubuntu 点终端常见）；
+          · 覆盖「从别的程序切回窗口后 _spring_current_side 与真实布局脱节」——此时
+            terminal 明明是窄的，却因记录里已是 'terminal' 而点了不弹。改用实际更宽的
+            那一侧判断即可自愈：只要点击侧当前不是更宽的那侧，就展开它。
         """
         self._update_spring_width_gate()
         if not self._spring_applicable():
             return
-        if side == self._spring_current_side:
+        if self._spring_actual_side() == side:
+            # 实际布局已在该侧展开：仅校正记录值、不重排（避免多余动画）
+            self._spring_current_side = side
             return
         self._apply_spring(side)
 
