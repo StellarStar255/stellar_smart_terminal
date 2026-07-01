@@ -135,17 +135,20 @@ def merge_extracted_lines(rows, columns: int) -> str:
             head = next_core.split(None, 1)[0] if next_core else ''  # 下一行开头连续非空白
             combined = len(tail) + len(head)
             has_sep = bool(_TOKEN_SEP_RE.search(tail) or _TOKEN_SEP_RE.search(head))
-            # 断点是否把一个连续 token 从中间截断：填满到折行宽、断点两侧都非空白、下一行
-            # 无前导缩进，且拼起来确是「一个较长的 token」——含强分隔符(URL/路径/命令)且够
-            # 长(≥threshold_low)，或长到铺满整行宽(即便无分隔符也必是被宽度截断)。满足则
-            # 无缝拼接、绝不补空格/换行。只看断点本身、与整行是否含空格无关：修复
-            # "docker push <长URL>" / "cd <长路径>" 这类前缀有空格、却在 token 中段折断、
-            # 被误当散文折行而插入空格/换行的老问题。「够长」这个下限把「散文恰好在含分隔符
-            # 的短 token 处填满边缘」误判为 token 的风险压到最低。
+            # 续行是否带前导缩进：Claude Code 等把列表项 "- <url>" 折行时，续行会缩进
+            # 对齐到列表内容起点（悬挂缩进），此时 nxt[0] 是空格。
+            next_indented = bool(nxt) and nxt[0].isspace()
+            # 断点是否把一个连续 token 从中间截断：填满到折行宽、本行结尾非空白，且拼起来
+            # 确是「一个较长的 token」——含强分隔符(URL/路径/命令)且够长(≥threshold_low)，
+            # 或长到铺满整行宽(即便无分隔符也必是被宽度截断)。满足则无缝拼接、绝不补空格/
+            # 换行。修复 "docker push <长URL>" / "cd <长路径>" / 列表项 "- 下载源:<长URL>"
+            # 折行(续行带悬挂缩进)这类被误当散文折行而插入空格的老问题。
+            # 关键：带悬挂缩进的续行只有在断点确含强分隔符(URL/路径)时才认定为 token 续行
+            # ——否则(缩进的散文续行、无分隔符)照旧按散文处理，避免把缩进散文误粘成一坨。
             boundary_mid_token = (
                 filled_to_edge
                 and text[-1:] and not text[-1].isspace()
-                and not nxt[0].isspace()
+                and (not next_indented or has_sep)
                 and ((has_sep and combined >= threshold_low)
                      or combined >= wrap_edge)
             )
@@ -165,8 +168,12 @@ def merge_extracted_lines(rows, columns: int) -> str:
     for i, (text, wrap_type) in enumerate(resolved):
         if i > 0:
             prev_wrap = resolved[i - 1][1]
-            if prev_wrap == 1 or prev_wrap == 3:
-                pass  # 终端软换行 / token 截断折行：直接无缝拼接，不补空格
+            if prev_wrap == 1:
+                pass  # 终端软换行：无缝拼接，保留原字符（含真实的前导空格）
+            elif prev_wrap == 3:
+                # 应用层 token 截断折行：续行可能带对齐悬挂缩进（列表项 "- <url>" 折行
+                # 对齐），去掉后无缝拼接，绝不补空格——否则 URL 里会凭空多出一个空格。
+                text = text.lstrip()
             elif prev_wrap == 2:
                 # 散文续行：把对齐缩进折叠掉，必要时补回一个词间空格
                 text = text.lstrip()
