@@ -1271,6 +1271,10 @@ class TerminalWidget(QWidget):
         # 鼠标模式跟踪（TUI 程序如 Gemini 会启用鼠标模式）
         self._mouse_mode = False  # 是否启用了鼠标报告模式
         self._mouse_mode_click = False  # 当前点击是否在鼠标模式下发起
+        # 是否把鼠标「点击/拖动」转发给开启鼠标上报的程序（如 Claude Code 选项菜单、
+        # lazygit、fzf、htop）。默认关闭：避免在 Claude Code 里误点选项。滚轮上报不受此
+        # 开关影响（另有单独路径）。由主窗口按用户设置下发。
+        self._mouse_click_forward_enabled = False
 
         # 快速命令提供者回调（由主窗口设置，返回预设列表）
         self.quick_commands_provider = None
@@ -3468,6 +3472,20 @@ class TerminalWidget(QWidget):
             return absolute_row - display_start
         return -1
 
+    def _mouse_fwd(self, force_local_selection):
+        """当前是否应把鼠标点击/拖动转发给程序。
+
+        需同时满足：程序开启了鼠标上报、未强制本地选择、且用户打开了「点击转发」
+        开关。开关默认关闭，避免在 Claude Code 选项菜单里误点触发。滚轮上报走单独
+        路径，不受此开关影响。
+        """
+        return (self._mouse_mode and not force_local_selection
+                and self._mouse_click_forward_enabled)
+
+    def set_mouse_click_forward_enabled(self, enabled: bool):
+        """设置是否把鼠标点击转发给开启鼠标上报的 TUI 程序（默认关闭）。"""
+        self._mouse_click_forward_enabled = bool(enabled)
+
     def _send_mouse_event(self, event: QMouseEvent, event_type: str):
         """发送鼠标事件到终端程序（SGR 1006 格式）"""
         if self._backend is None:
@@ -3549,12 +3567,12 @@ class TerminalWidget(QWidget):
 
             if self._click_count == 2:
                 # 双击：选「宽」词——整条路径/URL（只在空格处截断）
-                if self._mouse_mode and not force_local_selection:
+                if self._mouse_fwd(force_local_selection):
                     self._send_mouse_event(event, 'press')
                 self._select_word_at(abs_cell)
             elif self._click_count >= 3:
                 # 三击：选「窄」词——只取 / @ . : - ~ 之间的一段（如 huangqiliang）
-                if self._mouse_mode and not force_local_selection:
+                if self._mouse_fwd(force_local_selection):
                     self._send_mouse_event(event, 'press')
                 self._select_word_at(abs_cell, self._WORD_CHARS_NARROW)
                 self._click_count = 0  # 重置
@@ -3570,7 +3588,7 @@ class TerminalWidget(QWidget):
                 self._is_selecting = True
                 self._shift_extend_click = True
                 self._shift_extend_pending = True
-                self._mouse_mode_click = self._mouse_mode and not force_local_selection
+                self._mouse_mode_click = self._mouse_fwd(force_local_selection)
             else:
                 # 单击开始选择 - 使用绝对坐标
                 # 即使鼠标模式启用，也记录按下位置用于后续的单击光标定位
@@ -3579,10 +3597,10 @@ class TerminalWidget(QWidget):
                 self._is_selecting = True
                 self._select_all_mode = False  # 清除全选模式
                 # 记录是否处于鼠标模式，用于 release 时决定是否也转发事件
-                self._mouse_mode_click = self._mouse_mode and not force_local_selection
+                self._mouse_mode_click = self._mouse_fwd(force_local_selection)
 
             self.update()
-        elif self._mouse_mode and not force_local_selection:
+        elif self._mouse_fwd(force_local_selection):
             # 非左键在鼠标模式下转发给程序
             self._send_mouse_event(event, 'press')
         # 接受事件，确保 Qt 将后续的 mouseReleaseEvent 发送给本控件
@@ -3610,7 +3628,7 @@ class TerminalWidget(QWidget):
 
         # 如果鼠标模式启用且没有强制本地选择，且正在拖动（按住按钮）
         # 但如果 _is_selecting 为 True（左键单击流程），继续本地选择而不转发
-        if self._mouse_mode and not force_local_selection and event.buttons() and not self._is_selecting:
+        if self._mouse_fwd(force_local_selection) and event.buttons() and not self._is_selecting:
             self._send_mouse_event(event, 'move')
             return
 
@@ -3665,7 +3683,7 @@ class TerminalWidget(QWidget):
         force_local_selection = (event.modifiers() & Qt.KeyboardModifier.ShiftModifier) or self.scroll_offset > 0
 
         # 如果鼠标模式启用且没有强制本地选择，且不在本地选择流程中
-        if self._mouse_mode and not force_local_selection and not self._is_selecting:
+        if self._mouse_fwd(force_local_selection) and not self._is_selecting:
             self._send_mouse_event(event, 'release')
             return
 

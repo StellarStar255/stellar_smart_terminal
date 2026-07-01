@@ -4881,6 +4881,8 @@ class MainWindow(QMainWindow):
         terminal = TerminalWidget()
         terminal.image_prefix_enabled = self.image_prefix_enabled
         terminal.image_save_local = self.image_save_local
+        terminal.set_mouse_click_forward_enabled(
+            getattr(self, '_mouse_click_forward_enabled', False))
 
         # 设置快速命令提供者回调
         terminal.quick_commands_provider = lambda: self.presets
@@ -8354,6 +8356,12 @@ class MainWindow(QMainWindow):
         parse_act.setCheckable(True)
         parse_act.setChecked(TerminalWidget.PARSE_ON_READER_THREAD)
         parse_act.toggled.connect(self._set_parse_off_gui)
+        # 鼠标点击转发给 TUI（默认关闭，避免在 Claude Code 选项里误点）
+        click_fwd_act = menu.addAction(t("settings.mouse_click_forward"))
+        click_fwd_act.setCheckable(True)
+        click_fwd_act.setChecked(getattr(self, '_mouse_click_forward_enabled', False))
+        click_fwd_act.setToolTip(t("settings.mouse_click_forward_tooltip"))
+        click_fwd_act.toggled.connect(self._set_mouse_click_forward)
         btn = self.toolbar_settings_btn
         menu.exec(btn.mapToGlobal(QPoint(0, btn.height())))
 
@@ -8363,6 +8371,34 @@ class MainWindow(QMainWindow):
         TerminalWidget.PARSE_ON_READER_THREAD = bool(enabled)
         self._save_config()
         self.statusbar.showMessage(t("settings.parse_off_gui_applied"), 4000)
+
+    def _set_mouse_click_forward(self, enabled: bool):
+        """切换「鼠标点击转发给 TUI」。立即对所有窗口的所有终端生效并落盘。
+
+        关闭时（默认）：终端里单击不再转发给开启鼠标上报的程序——Claude Code 的
+        选项菜单不会被误点触发；文本选择、滚轮上报不受影响。打开时：恢复点击
+        lazygit / fzf / htop 等界面的能力。
+        """
+        self._mouse_click_forward_enabled = bool(enabled)
+        self._apply_mouse_click_forward_to_terminals()
+        # 广播到其它窗口，避免多窗口下旧值回写覆盖
+        app = QApplication.instance()
+        if app:
+            for widget in app.topLevelWidgets():
+                if widget is self or not isinstance(widget, MainWindow):
+                    continue
+                widget._mouse_click_forward_enabled = bool(enabled)
+                widget._apply_mouse_click_forward_to_terminals()
+        self._save_config()
+        self.statusbar.showMessage(
+            t("settings.mouse_click_forward_on" if enabled
+              else "settings.mouse_click_forward_off"), 4000)
+
+    def _apply_mouse_click_forward_to_terminals(self):
+        """把当前「点击转发」开关下发给本窗口所有已存在的终端。"""
+        enabled = getattr(self, '_mouse_click_forward_enabled', False)
+        for term in self.findChildren(TerminalWidget):
+            term.set_mouse_click_forward_enabled(enabled)
 
     @staticmethod
     def _clamp_scrollback(value) -> int:
@@ -9483,6 +9519,9 @@ class MainWindow(QMainWindow):
         self.last_preset_index = 0  # 默认选中第一个
         self.image_prefix_enabled = False  # 图片路径是否加@前缀
         self.image_save_local = True  # 图片是否保存到工作目录（默认开启，方便Gemini访问）
+        # 是否把鼠标点击转发给开启鼠标上报的 TUI（Claude Code 选项菜单 / lazygit / fzf /
+        # htop）。默认关闭，避免在 Claude Code 里误点选项。滚轮上报不受此开关影响。
+        self._mouse_click_forward_enabled = False
         self.working_dir_history = []  # 工作目录历史
         self._working_dir_freq = {}  # 工作目录使用频率 {path: count}
         self._dir_history_pending_removals = set()  # 用户显式删除、待从共享配置剔除的路径
@@ -9526,6 +9565,7 @@ class MainWindow(QMainWindow):
                     self.last_preset_index = config.get('last_preset_index', 0)
                     self.image_prefix_enabled = config.get('image_prefix_enabled', False)
                     self.image_save_local = config.get('image_save_local', True)
+                    self._mouse_click_forward_enabled = config.get('mouse_click_forward_enabled', False)
                     self.used_label_names = config.get('used_label_names', [])
                     self.working_dir_history = config.get('working_dir_history', [])
                     self._working_dir_freq = config.get('working_dir_freq', {})
@@ -9782,6 +9822,7 @@ class MainWindow(QMainWindow):
                 'last_preset_index': current_index,
                 'image_prefix_enabled': image_prefix,
                 'image_save_local': image_local,
+                'mouse_click_forward_enabled': getattr(self, '_mouse_click_forward_enabled', False),
                 'working_dir_history': dir_history,
                 'used_label_names': self._merged_label_names(existing_config),
                 'working_dir_freq': self._working_dir_freq if hasattr(self, '_working_dir_freq') else {},
