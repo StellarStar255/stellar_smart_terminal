@@ -114,7 +114,12 @@ class _LocalDropTreeView(QTreeView):
                     if idx.isValid() and idx != self.rootIndex():
                         self._cancel_pending_rename()
                         self.setCurrentIndex(idx)
-                        self.edit(idx)
+                        # 延迟到下一个事件循环再进入编辑，不在 keyPressEvent 内同步 edit()。
+                        # Linux 上同步开编辑器时，刚弹出的 QLineEdit 会被“同一次回车事件继续
+                        # 派发/键释放”立刻提交关闭，表现为「文件夹/zip 等回车没反应」；macOS
+                        # 恰好同步也能用。改为延迟对文件、文件夹、任意扩展名都一致生效。
+                        self._pending_rename_index = QPersistentModelIndex(idx)
+                        self._rename_timer.start(0)
                         event.accept()
                         return
         super().keyPressEvent(event)
