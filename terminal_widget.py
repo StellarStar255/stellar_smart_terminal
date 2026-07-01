@@ -123,23 +123,31 @@ def merge_extracted_lines(rows, columns: int) -> str:
         if (can_h and last_col >= 0 and next_core
                 and run_max[i] >= threshold_low
                 and not _LIST_MARKER_RE.match(next_core)):
-            # 本行是否填满到终端右边缘（放不下才断行的硬信号）
-            filled_to_edge = last_col >= columns - 2
+            # 折行宽度参照：整行单 token（spaceless，如 ls -1 的独立路径）必须真的写满
+            # 终端右边缘(columns)才算被宽度截断，避免把多条独立路径误并；带前缀的行
+            # （如 "cd <path>"、"docker push <url>"）用本块实测折行宽 run_max —— 兼容
+            # 应用按比终端更窄的盒子边距折行，以及「Claude Code 折完行后终端又被拉宽
+            # （弹簧展宽等）」导致行尾早于终端右缘的常见情形。
+            wrap_edge = columns if spaceless else run_max[i]
+            filled_to_edge = last_col >= wrap_edge - 2
             # 断点两侧各自的连续非空白串（拼起来即被截断的 token 候选）
             tail = text[text.rfind(' ') + 1:] if text else ''      # 本行末尾连续非空白
             head = next_core.split(None, 1)[0] if next_core else ''  # 下一行开头连续非空白
-            # 断点是否把一个连续 token 从中间截断：填满到边缘、断点两侧都非空白、
-            # 下一行无前导缩进，且这个 token 要么含强分隔符（URL/路径/命令），要么长到
-            # 一行根本放不下（必为宽度截断）。满足则无缝拼接、绝不补空格/换行。只看断点
-            # 本身、与整行是否含空格无关：修复 "docker push <长URL>" 这种前缀有空格、却在
-            # URL 中段折断、被误当散文折行而插入空格/换行的老问题；同时用「强分隔符 + 整段
-            # 长度」两个条件把「散文恰好填满到边缘」误判为 token 的风险压到最低。
+            combined = len(tail) + len(head)
+            has_sep = bool(_TOKEN_SEP_RE.search(tail) or _TOKEN_SEP_RE.search(head))
+            # 断点是否把一个连续 token 从中间截断：填满到折行宽、断点两侧都非空白、下一行
+            # 无前导缩进，且拼起来确是「一个较长的 token」——含强分隔符(URL/路径/命令)且够
+            # 长(≥threshold_low)，或长到铺满整行宽(即便无分隔符也必是被宽度截断)。满足则
+            # 无缝拼接、绝不补空格/换行。只看断点本身、与整行是否含空格无关：修复
+            # "docker push <长URL>" / "cd <长路径>" 这类前缀有空格、却在 token 中段折断、
+            # 被误当散文折行而插入空格/换行的老问题。「够长」这个下限把「散文恰好在含分隔符
+            # 的短 token 处填满边缘」误判为 token 的风险压到最低。
             boundary_mid_token = (
                 filled_to_edge
                 and text[-1:] and not text[-1].isspace()
                 and not nxt[0].isspace()
-                and (len(tail) + len(head) >= columns
-                     or _TOKEN_SEP_RE.search(tail) or _TOKEN_SEP_RE.search(head))
+                and ((has_sep and combined >= threshold_low)
+                     or combined >= wrap_edge)
             )
             if boundary_mid_token:
                 wrap_type = 3
