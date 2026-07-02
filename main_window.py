@@ -8438,11 +8438,15 @@ class MainWindow(QMainWindow):
                 # 加载终端 scrollback 上限（进程级，影响之后新建的终端）
                 TerminalWidget.SCROLLBACK_LINES = self._clamp_scrollback(
                     config.get('terminal_scrollback', TerminalWidget.SCROLLBACK_LINES))
-                # 终端解析放到后台线程：env 变量优先（已在类属性默认里处理），
-                # 否则用配置值。未设 env 时才让配置接管，保证 env 始终能强制开启。
+                # 终端解析放到后台线程：env 变量优先（已在类属性默认里处理，
+                # 可 =0 强制关 / =1 强制开），否则用配置值。
+                # 键名从 parse_off_gui_thread 换成 parse_on_reader_thread：
+                # 旧键被 _save_config 无条件写入过，老配置里存着旧默认 false，
+                # 沿用旧键会把新默认压回关闭。旧键值不迁移（false 是旧默认而非
+                # 用户选择，无法区分），统一按新默认 True 起步，菜单仍可关。
                 if os.environ.get('STELLAR_PARSE_OFF_GUI') is None:
                     TerminalWidget.PARSE_ON_READER_THREAD = bool(
-                        config.get('parse_off_gui_thread', False))
+                        config.get('parse_on_reader_thread', True))
                 # 加载导航面板停靠方式（'float' / 'embed'，全局记忆）
                 _dock_mode = config.get('navigator_dock_mode', 'float')
                 if _dock_mode in ('float', 'embed'):
@@ -8676,7 +8680,7 @@ class MainWindow(QMainWindow):
                 'editor_word_wrap': getattr(self, '_editor_word_wrap', False),  # 保存编辑器自动换行开关
                 'notify_sound': getattr(self, '_notify_sound', 'Submarine'),  # 保存完成提示音
                 'terminal_scrollback': TerminalWidget.SCROLLBACK_LINES,  # 保存终端 scrollback 上限
-                'parse_off_gui_thread': TerminalWidget.PARSE_ON_READER_THREAD,  # 保存"解析放后台线程"开关
+                'parse_on_reader_thread': TerminalWidget.PARSE_ON_READER_THREAD,  # 保存"解析放后台线程"开关（旧键 parse_off_gui_thread 已废弃）
                 'language': get_language(),  # 保存语言设置
                 'keyboard_shortcuts': shortcuts_to_save,  # 保存自定义快捷键（带多窗口防覆盖）
                 'window_geometry': [self.x(), self.y(), self.width(), self.height()],
@@ -8708,6 +8712,8 @@ class MainWindow(QMainWindow):
             # 原地合并：保留由其它组件维护、本函数未列出的字段（如 git_widget
             # 写入的 git_proxy / git_proxies）。写盘由 app_config 在锁内原子完成。
             existing_config.update(config)
+            # 清理已废弃的旧键（解析开关换键名后，旧键会因合并写永久残留）
+            existing_config.pop('parse_off_gui_thread', None)
 
     def get_llm_config(self, name: str = None) -> dict:
         """获取指定名称的 LLM 配置，若不指定则返回默认配置

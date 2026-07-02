@@ -16,7 +16,7 @@ TRANSLATIONS = {
 
     # ===== 终端历史行数 (scrollback) =====
     "scrollback.menu": {"zh": "终端历史行数", "en": "Terminal Scrollback"},
-    "settings.parse_off_gui": {"zh": "终端解析放到后台线程（实验）", "en": "Parse terminals off the GUI thread (experimental)"},
+    "settings.parse_off_gui": {"zh": "终端解析放到后台线程", "en": "Parse terminals off the GUI thread"},
     "settings.parse_off_gui_applied": {"zh": "已切换终端解析线程；高频/远程输出卡顿应缓解", "en": "Toggled off-GUI terminal parsing; heavy/remote-output lag should ease"},
     "settings.mouse_click_forward": {"zh": "鼠标点击转发给 TUI（lazygit/fzf 等）", "en": "Forward mouse clicks to TUI apps (lazygit/fzf…)"},
     "settings.mouse_click_forward_tooltip": {"zh": "关闭时终端单击不会触发 Claude Code 选项等可点击界面，避免误触；滚轮与文本选择不受影响", "en": "When off, a click in the terminal won't trigger Claude Code options or other clickable UIs (avoids misclicks); wheel and text selection are unaffected"},

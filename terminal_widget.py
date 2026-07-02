@@ -893,12 +893,15 @@ class TerminalWidget(QWidget):
     _SCROLLBACK_RED_MS = 200     # 预测 reflow ≥ 200ms → 红（明显卡，建议清空）
 
     # 是否在后端读取线程上直接解析（feed），而不是 marshal 到 GUI 线程。
-    # 默认 False（保持原行为）。开启后：多个终端的 pyte 解析在各自读取线程并行，
-    # 不再争抢唯一的 GUI 线程——这是多窗口 tmux 卡顿的根治方向。开启前必须确保
-    # 所有 screen 读取点都已持 _screen_lock（见增量 1/2）。仅 _activity_idle_timer
-    # 这类 QTimer 操作经 _output_activity 信号回到 GUI 线程执行。
-    # 用环境变量 STELLAR_PARSE_OFF_GUI=1 即可开启，方便在真实 app 上 A/B（无需改码）。
-    PARSE_ON_READER_THREAD = os.environ.get('STELLAR_PARSE_OFF_GUI') == '1'
+    # 默认 True（2026-07 起）：多个终端的 pyte 解析在各自读取线程并行，
+    # 不再争抢唯一的 GUI 线程——多窗口 tmux/远程高频输出卡顿的根治。
+    # 前提是所有 screen 读取点持 _screen_lock、QTimer 类操作经信号回 GUI，
+    # 已经完整并发审计 + 压测（见 tests/test_parse_reader_thread.py、
+    # tests/test_screen_lock_concurrency.py）。
+    # 环境变量可强制两个方向（优先级最高，便于 A/B 回退）：
+    #   STELLAR_PARSE_OFF_GUI=0 → 强制关（回到 GUI 线程解析）
+    #   STELLAR_PARSE_OFF_GUI=1 → 强制开
+    PARSE_ON_READER_THREAD = os.environ.get('STELLAR_PARSE_OFF_GUI', '1') != '0'
 
     # 每个终端的 scrollback（历史回滚）行数上限。pyte 用 deque(maxlen) 在构造时定死，
     # 所以只对「之后新建」的终端生效。值越大越占内存、resize reflow 越慢（O(历史行数)）。

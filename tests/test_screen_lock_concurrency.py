@@ -26,12 +26,13 @@ class TestScreenLockConcurrency(unittest.TestCase):
         from PyQt6.QtWidgets import QApplication
         cls.app = QApplication.instance() or QApplication([])
 
-    @unittest.skipIf(os.environ.get('STELLAR_PARSE_OFF_GUI') == '1',
-                     "env override intentionally enables off-GUI parsing")
-    def test_default_flag_off(self):
-        """生产默认必须仍走 GUI 线程解析，避免误开未验证的路径。"""
+    @unittest.skipIf(os.environ.get('STELLAR_PARSE_OFF_GUI') is not None,
+                     "env override forces the flag explicitly")
+    def test_default_flag_on(self):
+        """生产默认走读取线程解析（2026-07 并发审计 + 压测后翻转，
+        根治多窗口 tmux 卡顿）。误改回 False 会让卡顿回归。"""
         from terminal_widget import TerminalWidget
-        self.assertFalse(TerminalWidget.PARSE_ON_READER_THREAD)
+        self.assertTrue(TerminalWidget.PARSE_ON_READER_THREAD)
 
     def test_concurrent_feed_and_reads(self):
         from terminal_widget import TerminalWidget
