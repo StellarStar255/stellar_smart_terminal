@@ -44,6 +44,12 @@ class TestGitAsyncOps(unittest.TestCase):
 
         from git_widget import GitPanel
         self.panel = GitPanel()
+        # 失败路径会经 error_occurred 弹模态 QMessageBox，offscreen 下会永久阻塞；
+        # 测试只关心异步行为与仓库结果，断开错误弹窗
+        try:
+            self.panel._git_manager.error_occurred.disconnect()
+        except TypeError:
+            pass
         self.panel.set_repository(self.repo)
         self._wait_workers()  # set_repository 触发的初始刷新先跑完
 

@@ -13,7 +13,7 @@ import re
 import socket
 import os
 from pathlib import Path
-from http.server import HTTPServer, BaseHTTPRequestHandler
+from http.server import HTTPServer, ThreadingHTTPServer, BaseHTTPRequestHandler
 from typing import Optional, Dict, List, Set
 from dataclasses import dataclass, field
 from queue import Queue, Empty
@@ -320,6 +320,8 @@ class TerminalBridge(QObject):
         self.config = config
         self.output_buffer = Queue(maxsize=self.MAX_QUEUE_SIZE)
         self.is_collecting = False
+        # 服务器停止时置位；HTTP 线程的长收集循环轮询它以便尽快退出
+        self.shutdown_event = threading.Event()
         self._lock = threading.Lock()
         self._connected = False
         self._request_active = False  # 是否有活跃请求
@@ -364,6 +366,16 @@ class TerminalBridge(QObject):
         # 释放大字符串
         self._last_screen_content = ""
         logger.debug(f"[TerminalBridge] Cleanup completed after {self._request_count} requests")
+
+    def send_input(self, data):
+        """线程安全地向终端发送输入：经信号排队到 GUI 线程执行。
+
+        HTTP 工作线程禁止直接 os.write(master_fd)：与 GUI 线程的并发写会
+        字节交错；tab 关闭后 fd 编号被复用还可能写进别的终端。
+        """
+        if isinstance(data, bytes):
+            data = data.decode('utf-8', errors='replace')
+        self.send_input_requested.emit(data)
 
     def _do_send_input(self, text: str):
         """在主线程中发送输入到终端"""
@@ -1054,11 +1066,11 @@ class OpenAIRequestHandler(BaseHTTPRequestHandler):
 
             # 如果启用了清除会话，先发送 /clear 命令
             if self.config.clear_after_query:
-                self._send_clear_command_sync(master_fd)
+                self._send_clear_command_sync()
 
-            # 发送输入文本（不带回车）
+            # 发送输入文本（不带回车）——经 bridge 信号排队到 GUI 线程写入
             logger.debug(f"[OpenAI Server] Sending input to terminal: {len(input_text)} chars")
-            os.write(master_fd, input_text.encode('utf-8'))
+            self.bridge.send_input(input_text)
             logger.debug(f"[OpenAI Server] Text sent: {len(input_text)} chars, waiting for paste detection...")
 
             # 等待检测到 [Pasted text 出现，然后发送回车
@@ -1070,13 +1082,13 @@ class OpenAIRequestHandler(BaseHTTPRequestHandler):
                     paste_detected = True
                     logger.debug("[OpenAI Server] Paste detected, sending Enter...")
                     time.sleep(0.1)
-                    os.write(master_fd, b'\r')
+                    self.bridge.send_input('\r')
                     break
 
             if not paste_detected:
                 # 如果没检测到粘贴提示（可能是单行输入），直接发送回车
                 logger.debug("[OpenAI Server] No paste prompt, sending Enter directly...")
-                os.write(master_fd, b'\r')
+                self.bridge.send_input('\r')
 
             # 收集响应
             response_content = self._collect_response(input_text)
@@ -1135,6 +1147,11 @@ class OpenAIRequestHandler(BaseHTTPRequestHandler):
         while True:
             iteration_count += 1
 
+            # 服务器停止：立刻放弃等待，让 stop() 不被长请求拖住
+            if self.bridge.shutdown_event.is_set():
+                logger.debug("[OpenAI Server] Shutdown requested, aborting collect")
+                break
+
             # 安全措施：防止无限循环（最多 30000 次迭代，约 50 分钟）
             if iteration_count > 30000:
                 logger.debug(f"[OpenAI Server] Max iterations reached: {iteration_count}")
@@ -1182,7 +1199,7 @@ class OpenAIRequestHandler(BaseHTTPRequestHandler):
                     if stuck_duration > 60 and not stuck_interrupt_sent and master_fd:
                         logger.debug(f"[OpenAI Server] Claude stuck for {stuck_duration:.0f}s, sending Escape to interrupt...")
                         try:
-                            os.write(master_fd, b'\x1b')  # Send Escape
+                            self.bridge.send_input('\x1b')  # Send Escape
                             time.sleep(0.5)
                             stuck_interrupt_sent = True
                         except Exception as e:
@@ -1331,11 +1348,11 @@ class OpenAIRequestHandler(BaseHTTPRequestHandler):
 
             # 如果启用了清除会话，先发送 /clear 命令
             if self.config.clear_after_query:
-                self._send_clear_command_sync(master_fd)
+                self._send_clear_command_sync()
 
-            # 发送输入文本（不带回车）
+            # 发送输入文本（不带回车）——经 bridge 信号排队到 GUI 线程写入
             logger.debug(f"[OpenAI Server] Stream: Sending input to terminal: {len(input_text)} chars")
-            os.write(master_fd, input_text.encode('utf-8'))
+            self.bridge.send_input(input_text)
             logger.debug(f"[OpenAI Server] Stream: Text sent: {len(input_text)} chars, waiting for paste detection...")
 
             # 等待检测到 [Pasted text 出现，然后发送回车
@@ -1347,13 +1364,13 @@ class OpenAIRequestHandler(BaseHTTPRequestHandler):
                     paste_detected = True
                     logger.debug("[OpenAI Server] Stream: Paste detected, sending Enter...")
                     time.sleep(0.1)
-                    os.write(master_fd, b'\r')
+                    self.bridge.send_input('\r')
                     break
 
             if not paste_detected:
                 # 如果没检测到粘贴提示（可能是单行输入），直接发送回车
                 logger.debug("[OpenAI Server] Stream: No paste prompt, sending Enter directly...")
-                os.write(master_fd, b'\r')
+                self.bridge.send_input('\r')
 
             # 流式收集：等待响应完成，然后从屏幕读取
             last_activity_time = time.time()
@@ -1378,6 +1395,11 @@ class OpenAIRequestHandler(BaseHTTPRequestHandler):
 
             while True:
                 iteration_count += 1
+
+                # 服务器停止：立刻放弃等待，让 stop() 不被长请求拖住
+                if self.bridge.shutdown_event.is_set():
+                    logger.debug("[OpenAI Server] Stream: Shutdown requested, aborting collect")
+                    break
 
                 # 安全措施：防止无限循环
                 if iteration_count > 30000:
@@ -1440,7 +1462,7 @@ class OpenAIRequestHandler(BaseHTTPRequestHandler):
                         if stuck_duration > 60 and not stuck_interrupt_sent:
                             logger.debug(f"[OpenAI Server] Stream: Claude stuck for {stuck_duration:.0f}s, sending Escape...")
                             try:
-                                os.write(master_fd, b'\x1b')  # Send Escape
+                                self.bridge.send_input('\x1b')  # Send Escape
                                 time.sleep(0.5)
                                 stuck_interrupt_sent = True
                             except Exception as e:
@@ -1566,11 +1588,12 @@ class OpenAIRequestHandler(BaseHTTPRequestHandler):
         finally:
             self.bridge.end_request()
 
-    def _send_clear_command_sync(self, master_fd: int, force: bool = False):
+    def _send_clear_command_sync(self, force: bool = False):
         """同步发送 /clear 命令清除 Claude 会话（在新 query 开始前执行）
 
+        所有写入经 bridge 信号排队到 GUI 线程执行（禁止直接写 master_fd）。
+
         Args:
-            master_fd: 终端的 master file descriptor
             force: 是否强制执行（跳过时间间隔检查）
         """
         try:
@@ -1600,7 +1623,7 @@ class OpenAIRequestHandler(BaseHTTPRequestHandler):
             # 如果在思考状态，先发送 Escape 中断
             if is_thinking:
                 logger.debug("[OpenAI Server] Claude is thinking, sending Escape to interrupt...")
-                os.write(master_fd, b'\x1b')  # Send Escape
+                self.bridge.send_input('\x1b')  # Send Escape
                 time.sleep(1.0)
 
                 # 再次检查是否还在思考
@@ -1608,7 +1631,7 @@ class OpenAIRequestHandler(BaseHTTPRequestHandler):
                 if self.parser.is_thinking_status(screen):
                     # 第二次发送 Escape
                     logger.debug("[OpenAI Server] Still thinking, sending Escape again...")
-                    os.write(master_fd, b'\x1b')
+                    self.bridge.send_input('\x1b')
                     time.sleep(1.0)
 
                 # 等待 Claude 响应中断
@@ -1627,7 +1650,7 @@ class OpenAIRequestHandler(BaseHTTPRequestHandler):
                     if force:
                         logger.debug("[OpenAI Server] Force mode: proceeding with /clear despite thinking state")
                         # 再发一次 Escape 然后继续
-                        os.write(master_fd, b'\x1b')
+                        self.bridge.send_input('\x1b')
                         time.sleep(0.5)
                     else:
                         logger.warning("[OpenAI Server] WARNING: Claude still thinking, skipping /clear")
@@ -1635,11 +1658,11 @@ class OpenAIRequestHandler(BaseHTTPRequestHandler):
                         return
 
             logger.debug(f"[OpenAI Server] Sending /clear command (query #{queries})...")
-            os.write(master_fd, b'/clear')
+            self.bridge.send_input('/clear')
             time.sleep(0.5)
-            os.write(master_fd, b'\r')  # 发送回车确认选择
+            self.bridge.send_input('\r')  # 发送回车确认选择
             time.sleep(0.5)
-            os.write(master_fd, b'\r')  # 再发送一次回车执行命令
+            self.bridge.send_input('\r')  # 再发送一次回车执行命令
             time.sleep(1.5)  # 等待 clear 完成
 
             # 等待终端回到空闲状态
@@ -1697,9 +1720,14 @@ class OpenAIRequestHandler(BaseHTTPRequestHandler):
 
 
 class OpenAICompatServer(QThread):
-    """OpenAI 兼容服务器线程"""
+    """OpenAI 兼容服务器线程
 
-    started = pyqtSignal(int)
+    用 ThreadingHTTPServer（daemon 线程）并发处理请求：单线程 HTTPServer
+    会被一个长 chat 请求（最长约 50 分钟）独占，期间 /health、新请求、
+    stop() 全部无响应。聊天请求本身仍由 bridge.start_request() 互斥。
+    """
+
+    listening = pyqtSignal(int)  # 注意别叫 started —— 会遮蔽 QThread 内建同名信号
     stopped = pyqtSignal()
     error = pyqtSignal(str)
 
@@ -1708,8 +1736,7 @@ class OpenAICompatServer(QThread):
         self.config = config
         self.bridge = TerminalBridge(terminal_widget, config)
         self.parser = ResponseParser(config)
-        self.server: Optional[HTTPServer] = None
-        self._should_stop = False
+        self.server: Optional[ThreadingHTTPServer] = None
 
     def run(self):
         try:
@@ -1721,26 +1748,38 @@ class OpenAICompatServer(QThread):
                 def __init__(self, *args, **kwargs):
                     super().__init__(*args, bridge=bridge, parser=parser, config=config, **kwargs)
 
-            self.server = HTTPServer((self.config.host, self.config.port), HandlerFactory)
-            self.server.timeout = 1.0
-            self.started.emit(self.config.port)
+            self.server = ThreadingHTTPServer(
+                (self.config.host, self.config.port), HandlerFactory)
+            self.server.daemon_threads = True
+            self.listening.emit(self.config.port)
 
-            while not self._should_stop:
-                self.server.handle_request()
-
+            # serve_forever 由 stop() 里的 server.shutdown() 结束
+            self.server.serve_forever(poll_interval=0.5)
             self.server.server_close()
+
+            # 给在途请求一点时间退出（shutdown_event 已置位，收集循环会
+            # 尽快返回），再清理 bridge —— 清理与在途请求并发会竞态
+            deadline = time.monotonic() + 2.0
+            while self.bridge._request_active and time.monotonic() < deadline:
+                time.sleep(0.05)
+            self.bridge.cleanup()
             self.stopped.emit()
 
         except Exception as e:
             self.error.emit(str(e))
 
     def stop(self):
-        self._should_stop = True
-        if self.bridge:
-            self.bridge.cleanup()
-        # 等待线程完成
-        if self.isRunning():
-            self.wait(3000)  # 最多等待 3 秒
+        """非阻塞停止：置停止标志并结束 accept 循环，清理在 run() 尾部完成。
+
+        旧实现的两个问题：在 GUI 线程 wait(3000) 卡界面；bridge.cleanup()
+        在此处执行会与仍在跑的请求处理竞态。
+        """
+        self.bridge.shutdown_event.set()
+        srv = self.server
+        if srv is not None:
+            # shutdown() 会阻塞到 serve_forever 退出（最多一个 poll_interval），
+            # 放到一次性线程里执行，GUI 线程完全不等
+            threading.Thread(target=srv.shutdown, daemon=True).start()
 
 
 class PortAllocator:
@@ -1813,7 +1852,7 @@ class OpenAIServerManager(QObject):
         # tab 索引是位置性的，关闭/分离其他 tab 后会变化；把当前索引存在 server 上，
         # 信号回调动态读取 server.tab_index，配合 remap_indices() 重新映射，避免指向错误 tab。
         server.tab_index = tab_index
-        server.started.connect(lambda p, s=server: self.server_started.emit(s.tab_index, p))
+        server.listening.connect(lambda p, s=server: self.server_started.emit(s.tab_index, p))
         server.stopped.connect(lambda s=server: self._on_server_stopped(s.tab_index))
         server.error.connect(lambda e, s=server: self.server_error.emit(s.tab_index, e))
         self.servers[tab_index] = server
@@ -1825,7 +1864,11 @@ class OpenAIServerManager(QObject):
             self.servers[tab_index].stop()
 
     def _on_server_stopped(self, tab_index: int):
-        if tab_index in self.servers:
+        server = self.servers.get(tab_index)
+        if server is not None:
+            # stopped 信号在 run() 末尾发出，此刻线程即将退出；等它真正结束
+            # 再丢弃引用（QThread 对象必须活得比线程久），通常瞬时完成
+            server.wait(1000)
             del self.servers[tab_index]
         self.port_allocator.release(tab_index)
         self.server_stopped.emit(tab_index)
@@ -1837,8 +1880,18 @@ class OpenAIServerManager(QObject):
         return self.port_allocator.get_port(tab_index)
 
     def stop_all(self):
+        """停掉所有服务器（应用退出路径）：先全部发停止，再有界等待线程退出。
+
+        单个 stop() 是非阻塞的；这里统一等待可避免进程退出时 QThread
+        仍在运行（"Destroyed while thread is still running"）。
+        """
+        servers = list(self.servers.values())
         for tab_index in list(self.servers.keys()):
             self.stop_server(tab_index)
+        deadline = time.monotonic() + 3.0
+        for server in servers:
+            remaining = max(0.05, deadline - time.monotonic())
+            server.wait(int(remaining * 1000))
 
     def remap_indices(self, old_to_new: Dict[int, int]):
         """tab 关闭/分离后位置变化，按 old→new 重新映射 server 与端口分配的 key。

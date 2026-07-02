@@ -5,7 +5,7 @@
 - 输入停顿后防抖触发；返回的建议以灰字“幽灵文本”叠加在光标处，Tab 接受、Esc 取消。
 - 用 generation 计数让过期请求结果自动作废（用户继续输入即失效）。
 
-本模块只依赖 PyQt6 与 requests，不反向依赖 file_editor，便于复用与测试。
+本模块只依赖 PyQt6、requests 与 app_logging，不反向依赖 file_editor，便于复用与测试。
 """
 
 import json
@@ -13,6 +13,10 @@ import re
 
 from PyQt6.QtCore import Qt, QObject, QThread, QTimer, pyqtSignal
 from PyQt6.QtGui import QColor, QTextCursor
+
+from app_logging import get_logger
+
+logger = get_logger(__name__)
 
 
 # 单次请求上下文上限（字符数），避免把整份大文件塞进去浪费 token。
@@ -153,6 +157,9 @@ class CompletionWorker(QThread):
             proxy = (cfg.get('proxy') or '').strip()
             proxies = {'http': proxy, 'https': proxy} if proxy else None
             timeout = cfg.get('timeout') or 30
+            # (连接, 读取) 分开设超时：cancel() 只能关已建立的 Response，
+            # 连接建立阶段无法打断，若用单一超时最长会白等 30s
+            timeout = (3.05, timeout)
 
             if self._cancelled:
                 return
@@ -265,6 +272,37 @@ class InlineCompletionController(QObject):
         self._timer = QTimer(self)
         self._timer.setSingleShot(True)
         self._timer.timeout.connect(self._start_request)
+
+        # 编辑器销毁前取消所有在途请求：destroyed 在其子对象（含本
+        # controller）析构之前发出，此时调用自身方法仍安全
+        editor.destroyed.connect(self._on_editor_destroyed)
+
+    def _on_editor_destroyed(self):
+        self.shutdown(wait_ms=0)
+
+    def shutdown(self, wait_ms: int = 1000):
+        """取消所有在途请求；wait_ms > 0 时等待线程退出。
+
+        worker 未设 Qt 父对象，不会被编辑器析构递归销毁；cancel() 会关闭
+        底层 socket，run() 随即返回，无需依赖等待也能安全退出。
+        """
+        try:
+            self._timer.stop()
+        except RuntimeError:
+            pass
+        self._active_worker = None
+        for w in list(self._workers):
+            try:
+                w.cancel()
+            except Exception:
+                pass
+        if wait_ms > 0:
+            for w in list(self._workers):
+                try:
+                    if w.isRunning():
+                        w.wait(wait_ms)
+                except RuntimeError:
+                    pass
 
     # ---------- 开关 / 外观 ----------
 
@@ -406,7 +444,11 @@ class InlineCompletionController(QObject):
         self._anchor_midline = midline
         self._req_suffix = suffix  # 用于在结果里识别“抄 suffix”的回声
 
-        worker = CompletionWorker(cfg, prefix, suffix, language, gen, self)
+        # 不设 Qt 父对象：worker 若挂在 controller→editor 父链上，编辑器
+        # 关闭时 Qt 会递归销毁仍在运行的 QThread（"QThread: Destroyed
+        # while thread is still running"，可致崩溃）。由 _workers 持引用
+        # 防 GC，销毁编辑器时走 shutdown() 取消。
+        worker = CompletionWorker(cfg, prefix, suffix, language, gen)
         worker.chunk.connect(self._on_chunk)
         worker.done.connect(self._on_done)
         worker.failed.connect(self._on_failed)
@@ -423,8 +465,8 @@ class InlineCompletionController(QObject):
         worker.deleteLater()
 
     def _on_failed(self, gen: int, msg: str):
-        # 静默失败（不打扰编辑）；如需调试可在此打印
-        pass
+        # 静默失败（不打扰编辑），但记一行日志，否则配置错误无从排查
+        logger.debug(f"[AICompletion] request failed (gen={gen}): {msg}")
 
     def _on_chunk(self, gen: int, acc: str):
         """流式过程中边收边显示，灰字尽快出现、逐步变长。"""
