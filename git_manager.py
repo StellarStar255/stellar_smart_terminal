@@ -1177,17 +1177,20 @@ class GitManager(QObject):
                 pass
         return (0, 0)
 
-    def get_log(self, limit: int = 150, all_branches: bool = True) -> List[dict]:
+    def get_log(self, limit: int = 150, all_branches: bool = True,
+                skip: int = 0) -> List[dict]:
         """获取提交历史（含父提交，用于画 graph）。
 
         返回 [{hash, short, parents:[...], author, subject, refs:[...]}, ...]，
-        按 --date-order 排列（新→旧）。
+        按 --date-order 排列（新→旧）。skip>0 时跳过前 N 条（graph 增量翻页用）。
         """
         if not self._repo_path:
             return []
         sep = '\x1f'
         fmt = sep.join(['%H', '%P', '%an', '%s', '%D'])
         args = ['log', '--date-order', f'--pretty=format:{fmt}', f'-n{limit}']
+        if skip > 0:
+            args.append(f'--skip={skip}')
         if all_branches:
             args.insert(1, '--all')
         ok, out = self._run_git(*args, check=False)

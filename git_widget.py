@@ -791,9 +791,12 @@ class _RefreshWorker(QThread):
     """
     loaded = pyqtSignal(dict)
 
-    def __init__(self, git_manager, parent=None):
+    def __init__(self, git_manager, log_limit: int = 150, parent=None):
         super().__init__(parent)
         self._gm = git_manager
+        # 用户在 graph 里翻页加载过更多提交时，全量刷新按已加载条数重取，
+        # 避免刷新把列表缩回第一页、丢掉滚动位置。
+        self._log_limit = max(150, int(log_limit))
 
     def run(self):
         data = {'ok': False}
@@ -806,13 +809,34 @@ class _RefreshWorker(QThread):
             data['branches'] = gm.get_branches()
             data['tags'] = gm.get_tags()
             data['head_ref'] = gm.get_head_ref()
-            data['commits'] = gm.get_log(limit=150, all_branches=True)
+            data['commits'] = gm.get_log(limit=self._log_limit, all_branches=True)
+            data['log_limit'] = self._log_limit
             data['merging'] = gm.is_merging()
             data['ok'] = True
         except Exception:
             logger.exception("git refresh worker failed")
             data['ok'] = False
         self.loaded.emit(data)
+
+
+class _LogPageWorker(QThread):
+    """后台取提交历史的下一页（graph 滚动到底时增量加载用）。"""
+    loaded = pyqtSignal(list, int)  # (commits, skip)
+
+    def __init__(self, git_manager, skip: int, limit: int, parent=None):
+        super().__init__(parent)
+        self._gm = git_manager
+        self._skip = skip
+        self._limit = limit
+
+    def run(self):
+        try:
+            commits = self._gm.get_log(limit=self._limit, all_branches=True,
+                                       skip=self._skip)
+        except Exception:
+            logger.exception("git log page worker failed")
+            commits = []
+        self.loaded.emit(commits, self._skip)
 
 
 class _StatusWorker(QThread):
@@ -1922,10 +1946,16 @@ class GitGraphWidget(QWidget):
     revert_requested = pyqtSignal(str)
     reset_requested = pyqtSignal(str, str)
     copy_hash_requested = pyqtSignal(str)
+    load_more_requested = pyqtSignal(int)   # 已加载条数（= 下一页的 skip）
+
+    LOAD_MORE_MARGIN = 240  # 滚动到距底部这么多像素内就预取下一页
 
     def __init__(self, theme: dict = None, parent=None):
         super().__init__(parent)
         self.theme = theme or {}
+        self._commits = []       # 已加载的全部提交（含翻页追加的）
+        self._has_more = False   # 仓库里是否还有更旧的提交没加载
+        self._loading = False    # 下一页请求是否在途（防重复触发）
         self._setup_ui()
 
     def _setup_ui(self):
@@ -1945,12 +1975,50 @@ class GitGraphWidget(QWidget):
         self._canvas.reset_requested.connect(self.reset_requested.emit)
         self._canvas.copy_hash_requested.connect(self.copy_hash_requested.emit)
         self._scroll.setWidget(self._canvas)
+        self._scroll.verticalScrollBar().valueChanged.connect(self._maybe_load_more)
         layout.addWidget(self._scroll, 1)
 
         self.apply_theme(self.theme)
 
-    def set_commits(self, commits: list):
-        self._canvas.set_commits(commits)
+    def set_commits(self, commits: list, has_more: bool = False):
+        """全量刷新：替换整个列表（翻页在途的旧请求会因 skip 不匹配被丢弃）。"""
+        self._commits = list(commits)
+        self._has_more = has_more
+        self._loading = False
+        self._canvas.set_commits(self._commits)
+
+    def commit_count(self) -> int:
+        return len(self._commits)
+
+    def append_commits(self, commits: list, skip: int, has_more: bool):
+        """追加下一页提交并重算 graph 连线。
+
+        skip 与当前已加载条数不符说明期间发生过全量刷新，这页数据基于旧
+        偏移量取的，直接丢弃（用户再滚到底会按新偏移重新取）。
+        """
+        self._loading = False
+        if skip != len(self._commits):
+            return
+        self._has_more = has_more and bool(commits)
+        if not commits:
+            return
+        # 两次取页之间如果有新提交进来，--skip 偏移会错位造成重复，按 hash 去重
+        seen = {c['hash'] for c in self._commits}
+        fresh = [c for c in commits if c['hash'] not in seen]
+        if not fresh:
+            return
+        self._commits.extend(fresh)
+        self._canvas.set_commits(self._commits)
+
+    def _maybe_load_more(self, *_):
+        if not self._has_more or self._loading:
+            return
+        sb = self._scroll.verticalScrollBar()
+        if sb.maximum() <= 0:
+            return
+        if sb.value() >= sb.maximum() - self.LOAD_MORE_MARGIN:
+            self._loading = True
+            self.load_more_requested.emit(len(self._commits))
 
     def set_font_size(self, size: int):
         self._canvas.set_font_size(size)
@@ -2283,6 +2351,7 @@ class GitPanel(QWidget):
         self._refresh_running = False   # 后台全量刷新是否进行中
         self._refresh_pending = False   # 进行中又被请求 → 跑完后补一次（合并）
         self._status_refresh_running = False  # 后台轻量状态刷新是否进行中
+        self._log_page_running = False  # graph 翻页加载是否进行中
         self._status_stale = False      # 隐藏期间跳过了刷新 → 重新可见时补一次
         self._last_error_message = None  # 上次弹过的错误文案，去重连珠弹窗（如目录被删后每次轮询都报同一错）
 
@@ -2368,6 +2437,7 @@ class GitPanel(QWidget):
         self.graph_widget.revert_requested.connect(self._on_revert_commit)
         self.graph_widget.reset_requested.connect(self._on_reset_commit)
         self.graph_widget.copy_hash_requested.connect(self._on_copy_commit_hash)
+        self.graph_widget.load_more_requested.connect(self._on_load_more_commits)
         self.body_splitter.addWidget(self.graph_widget)
 
         # 变更列表 + graph 吃掉多余空间，提交区默认停在它的自然高度
@@ -2615,7 +2685,9 @@ class GitPanel(QWidget):
             self._refresh_pending = True
             return
         self._refresh_running = True
-        worker = _RefreshWorker(self._git_manager, self)
+        worker = _RefreshWorker(self._git_manager,
+                                log_limit=self.graph_widget.commit_count(),
+                                parent=self)
         worker.loaded.connect(self._apply_refresh)
         worker.finished.connect(self._on_refresh_all_finished)
         self._register_worker(worker)
@@ -2634,8 +2706,27 @@ class GitPanel(QWidget):
         self.changes_widget.update_files(data['staged'], data['unstaged'])
         self.commit_widget.set_ahead_behind(data['ahead'], data['behind'])
         self.header.update_branches(data['branches'], data['head_ref'], data['tags'])
-        self.graph_widget.set_commits(data['commits'])
+        limit = data.get('log_limit', 150)
+        self.graph_widget.set_commits(data['commits'],
+                                      has_more=len(data['commits']) >= limit)
         self._update_merge_banner(data['unstaged'], merging=data.get('merging', False))
+
+    def _on_load_more_commits(self, skip: int):
+        """graph 滚动到底 → 后台取下一页提交并追加（每页 150 条）。"""
+        if self._log_page_running or self._git_manager._repo_path is None:
+            return
+        self._log_page_running = True
+        worker = _LogPageWorker(self._git_manager, skip, 150, self)
+        worker.loaded.connect(self._apply_log_page)
+        worker.finished.connect(
+            lambda: setattr(self, '_log_page_running', False))
+        self._register_worker(worker)
+        worker.start()
+
+    def _apply_log_page(self, commits: list, skip: int):
+        """在 UI 线程把下一页提交追加进 graph。取满一页说明后面可能还有。"""
+        self.graph_widget.append_commits(commits, skip,
+                                         has_more=len(commits) >= 150)
 
     def _refresh_status(self):
         """刷新文件状态（轻量：status + ahead/behind + merge 态，后台线程收集）。
