@@ -1736,6 +1736,21 @@ class OpenAIRequestHandler(BaseHTTPRequestHandler):
         return extract_response_from_screen(screen_content, input_text)
 
 
+class _FastBindHTTPServer(ThreadingHTTPServer):
+    """ThreadingHTTPServer，但跳过 server_bind 里的 socket.getfqdn() 反向 DNS。
+
+    标准 HTTPServer.server_bind 会用 getfqdn(host) 设 server_name，在反向 DNS
+    不可用/慢的网络（很多 CI runner、公司内网）上会阻塞数秒，把服务器启动
+    连带 listening 信号拖慢。server_name 对本地 API 无用，直接取 host 即可。
+    """
+    def server_bind(self):
+        import socketserver
+        socketserver.TCPServer.server_bind(self)
+        host, port = self.server_address[:2]
+        self.server_name = host
+        self.server_port = port
+
+
 class OpenAICompatServer(QThread):
     """OpenAI 兼容服务器线程
 
@@ -1765,7 +1780,7 @@ class OpenAICompatServer(QThread):
                 def __init__(self, *args, **kwargs):
                     super().__init__(*args, bridge=bridge, parser=parser, config=config, **kwargs)
 
-            self.server = ThreadingHTTPServer(
+            self.server = _FastBindHTTPServer(
                 (self.config.host, self.config.port), HandlerFactory)
             self.server.daemon_threads = True
             self.listening.emit(self.config.port)

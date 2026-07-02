@@ -54,13 +54,18 @@ class TestServerLifecycle(unittest.TestCase):
         server = OpenAICompatServer(_FakeTerminal(), ServerConfig(port=port))
         listening = []
         stopped = []
+        errors = []
         server.listening.connect(lambda p: listening.append(p))
         server.stopped.connect(lambda: stopped.append(True))
+        server.error.connect(lambda e: errors.append(e))
         server.start()
-        deadline = time.monotonic() + 5.0
-        while not listening and time.monotonic() < deadline:
+        # 慢反向 DNS 的环境（CI runner）曾把 server_bind 拖慢；产品已改用
+        # _FastBindHTTPServer 跳过 getfqdn，这里仍给足冗余并捕获 error 快速失败
+        deadline = time.monotonic() + 10.0
+        while not listening and not errors and time.monotonic() < deadline:
             self.app.processEvents()
             time.sleep(0.01)
+        self.assertFalse(errors, f"server failed to start: {errors}")
         self.assertTrue(listening, "server did not start listening")
         return server, port, stopped
 
