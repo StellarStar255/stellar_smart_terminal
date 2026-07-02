@@ -912,6 +912,7 @@ TRANSLATIONS = {
     "status.load_local_commands_error": {"zh": "加载本地命令失败: {error}", "en": "Failed to load local commands: {error}"},
     "status.save_local_commands_error": {"zh": "保存本地命令失败: {error}", "en": "Failed to save local commands: {error}"},
     "status.config_dir_error": {"zh": "创建配置目录失败: {error}", "en": "Failed to create config directory: {error}"},
+    "status.config_save_failed": {"zh": "配置保存失败（磁盘空间/权限？），本次更改未写入", "en": "Failed to save settings (disk full/permission?) — changes not written"},
     "status.cannot_create_config": {"zh": "无法在系统目录 {cwd} 创建配置", "en": "Cannot create config in system directory {cwd}"},
 
     # ===== main_window.py - 对话框/消息 =====

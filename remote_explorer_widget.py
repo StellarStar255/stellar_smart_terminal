@@ -36,10 +36,8 @@ from ssh_session import (
     rename_ssh_config_host, remove_ssh_config_host, update_ssh_config_host,
 )
 from git_widget import _make_git_tool_icon  # 复用统一风格的矢量线条图标
-from utils import (
-    read_config_json, atomic_write_json, get_config_path,
-    parse_search_tokens, name_matches_tokens,
-)
+from utils import parse_search_tokens, name_matches_tokens
+import app_config
 from app_logging import get_logger
 
 logger = get_logger(__name__)
@@ -1652,30 +1650,20 @@ class RemoteExplorerPanel(QWidget):
 
     CONFIG_KEY_SHOW_HIDDEN = 'remote_explorer_show_hidden'
 
-    def _config_file_path(self) -> Path:
-        """主配置文件位置（与 main_window / git_widget 共用）。"""
-        return get_config_path()
-
     def _load_show_hidden(self) -> bool:
-        cfg, _ok = read_config_json(self._config_file_path())
+        cfg = app_config.read_config()
         return bool(cfg.get(self.CONFIG_KEY_SHOW_HIDDEN, True))
 
     def _save_show_hidden(self):
-        # 读-改-写：只在读到完整配置时才回写，避免多窗口下覆盖别人刚写的字段
-        p = self._config_file_path()
-        cfg, ok = read_config_json(p)
-        if not ok:
-            return
-        cfg[self.CONFIG_KEY_SHOW_HIDDEN] = self._show_hidden
-        atomic_write_json(p, cfg)
+        app_config.update_config({self.CONFIG_KEY_SHOW_HIDDEN: self._show_hidden},
+                                 description='remote-explorer')
 
     # ---- 每台主机的默认启动目录（按别名持久化到共享配置） ----
 
     CONFIG_KEY_DEFAULT_DIRS = 'remote_explorer_default_dirs'
 
     def _load_default_dirs(self) -> dict:
-        cfg, _ok = read_config_json(self._config_file_path())
-        dirs = cfg.get(self.CONFIG_KEY_DEFAULT_DIRS)
+        dirs = app_config.read_config().get(self.CONFIG_KEY_DEFAULT_DIRS)
         return dict(dirs) if isinstance(dirs, dict) else {}
 
     def _get_default_dir(self, alias: str) -> Optional[str]:
@@ -1686,25 +1674,21 @@ class RemoteExplorerPanel(QWidget):
         return val if isinstance(val, str) and val else None
 
     def _set_default_dir(self, alias: str, path: Optional[str]):
-        """记住 / 清除某台主机的默认启动目录（path=None 表示清除）。
-
-        读-改-写：只在读到完整配置时才回写，避免多窗口下覆盖别人刚写的字段。
-        """
+        """记住 / 清除某台主机的默认启动目录（path=None 表示清除）。"""
         if not alias:
             return
-        p = self._config_file_path()
-        cfg, ok = read_config_json(p)
-        if not ok:
-            return
-        dirs = cfg.get(self.CONFIG_KEY_DEFAULT_DIRS)
-        if not isinstance(dirs, dict):
-            dirs = {}
-        if path:
-            dirs[alias] = path
-        else:
-            dirs.pop(alias, None)
-        cfg[self.CONFIG_KEY_DEFAULT_DIRS] = dirs
-        atomic_write_json(p, cfg)
+
+        def _apply(cfg):
+            dirs = cfg.get(self.CONFIG_KEY_DEFAULT_DIRS)
+            if not isinstance(dirs, dict):
+                dirs = {}
+            if path:
+                dirs[alias] = path
+            else:
+                dirs.pop(alias, None)
+            cfg[self.CONFIG_KEY_DEFAULT_DIRS] = dirs
+
+        app_config.update_config_with(_apply, description='remote-default-dir')
 
     def _set_current_as_default_dir(self):
         """把当前所在目录设为当前主机的默认启动目录。"""
@@ -1726,20 +1710,17 @@ class RemoteExplorerPanel(QWidget):
     _SORT_KEYS = ('name', 'modified', 'size', 'type')
 
     def _load_sort(self) -> tuple:
-        cfg, _ok = read_config_json(self._config_file_path())
+        cfg = app_config.read_config()
         key = cfg.get(self.CONFIG_KEY_SORT_KEY, 'name')
         if key not in self._SORT_KEYS:
             key = 'name'
         return key, bool(cfg.get(self.CONFIG_KEY_SORT_DESC, False))
 
     def _save_sort(self):
-        p = self._config_file_path()
-        cfg, ok = read_config_json(p)
-        if not ok:
-            return
-        cfg[self.CONFIG_KEY_SORT_KEY] = self._sort_key
-        cfg[self.CONFIG_KEY_SORT_DESC] = self._sort_desc
-        atomic_write_json(p, cfg)
+        app_config.update_config({
+            self.CONFIG_KEY_SORT_KEY: self._sort_key,
+            self.CONFIG_KEY_SORT_DESC: self._sort_desc,
+        }, description='remote-sort')
 
     # ---- 主机列表排序（持久化到共享配置） ----
     # 'manual'：用户自定顺序（可拖拽），存别名列表；'alias'/'host'：按字段升序。
@@ -1748,30 +1729,20 @@ class RemoteExplorerPanel(QWidget):
     _HOST_SORT_MODES = ('manual', 'alias', 'host')
 
     def _load_host_sort(self) -> str:
-        cfg, _ok = read_config_json(self._config_file_path())
-        mode = cfg.get(self.CONFIG_KEY_HOST_SORT, 'manual')
+        mode = app_config.read_config().get(self.CONFIG_KEY_HOST_SORT, 'manual')
         return mode if mode in self._HOST_SORT_MODES else 'manual'
 
     def _save_host_sort(self):
-        p = self._config_file_path()
-        cfg, ok = read_config_json(p)
-        if not ok:
-            return
-        cfg[self.CONFIG_KEY_HOST_SORT] = self._host_sort
-        atomic_write_json(p, cfg)
+        app_config.update_config({self.CONFIG_KEY_HOST_SORT: self._host_sort},
+                                 description='remote-host-sort')
 
     def _load_host_order(self) -> list:
-        cfg, _ok = read_config_json(self._config_file_path())
-        order = cfg.get(self.CONFIG_KEY_HOST_ORDER)
+        order = app_config.read_config().get(self.CONFIG_KEY_HOST_ORDER)
         return [a for a in order if isinstance(a, str)] if isinstance(order, list) else []
 
     def _save_host_order(self, order: list):
-        p = self._config_file_path()
-        cfg, ok = read_config_json(p)
-        if not ok:
-            return
-        cfg[self.CONFIG_KEY_HOST_ORDER] = list(order)
-        atomic_write_json(p, cfg)
+        app_config.update_config({self.CONFIG_KEY_HOST_ORDER: list(order)},
+                                 description='remote-host-order')
 
     def _sorted_hosts(self, hosts: list) -> list:
         """按当前主机排序模式排列。manual 用保存的别名顺序（新主机/未记录的

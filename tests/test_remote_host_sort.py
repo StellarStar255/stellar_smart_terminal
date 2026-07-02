@@ -18,12 +18,21 @@ class _Base(unittest.TestCase):
         from PyQt6.QtWidgets import QApplication
         cls.app = QApplication.instance() or QApplication([])
 
+    def setUp(self):
+        # 配置读写经 app_config 单点；重定向到临时文件，避免污染真实配置、
+        # 也避免用例间通过共享配置互相串扰（host_order 持久化）
+        import app_config
+        self._tmp_cfg = Path(tempfile.mkdtemp()) / "cfg.json"
+        self._orig_get_path = app_config.get_config_path
+        app_config.get_config_path = lambda: self._tmp_cfg
+
+    def tearDown(self):
+        import app_config
+        app_config.get_config_path = self._orig_get_path
+
     def _panel(self, hosts):
         from remote_explorer_widget import RemoteExplorerPanel
         panel = RemoteExplorerPanel(theme={})
-        # 配置写到临时文件，避免污染真实 ~/.config
-        tmp = Path(tempfile.mkdtemp()) / "cfg.json"
-        panel._config_file_path = lambda: tmp
         panel._hosts = list(hosts)
         panel._extra_hosts = []
         return panel

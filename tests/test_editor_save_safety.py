@@ -18,6 +18,34 @@ class _Base(unittest.TestCase):
         from PyQt6.QtWidgets import QApplication
         cls.app = QApplication.instance() or QApplication([])
 
+    def setUp(self):
+        self._areas = []
+
+    def tearDown(self):
+        # 每个 EditorArea 打开文件后装了 QFileSystemWatcher；os.utime 触发的
+        # fileChanged 信号会异步排队。若不销毁，这些信号会残留到事件队列，
+        # 在后续测试（如 git 面板）processEvents 时投递 → 在已改动的 editor
+        # 上弹模态框 → 离屏环境 abort，污染整个 suite。
+        # 关键：先把每个 pane 的 watcher 彻底断开（移除路径 + 断信号），
+        # 否则光 deleteLater + processEvents 反而会在此处投递信号弹模态。
+        for area in self._areas:
+            for pane in list(getattr(area, '_panes', [])):
+                fw = getattr(pane, '_file_watcher', None)
+                if fw is not None:
+                    try:
+                        files = fw.files()
+                        if files:
+                            fw.removePaths(files)
+                        fw.fileChanged.disconnect()
+                    except (TypeError, RuntimeError):
+                        pass
+            try:
+                area.deleteLater()
+            except Exception:
+                pass
+        self._areas = []
+        self.app.processEvents()
+
     def _area_with_file(self, content="original\n"):
         from file_editor import EditorArea
         d = tempfile.mkdtemp()
@@ -26,6 +54,7 @@ class _Base(unittest.TestCase):
             f.write(content)
         area = EditorArea(theme={})
         self.assertTrue(area.open_file_in_active(p))
+        self._areas.append(area)
         return area, area.active_pane, p
 
 
@@ -232,6 +261,7 @@ class TestCRLFLineEndings(_Base):
             f.write(content_lf.replace("\n", "\r\n").encode("utf-8"))
         area = EditorArea(theme={})
         self.assertTrue(area.open_file_in_active(p))
+        self._areas.append(area)
         return area, area.active_pane, p
 
     def test_crlf_file_not_modified_on_load(self):

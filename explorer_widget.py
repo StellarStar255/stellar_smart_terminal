@@ -16,10 +16,8 @@ from typing import Optional
 from i18n import t
 import explorer_clipboard
 import explorer_favorites
-from utils import (
-    read_config_json, atomic_write_json, get_config_path,
-    parse_search_tokens, name_matches_tokens,
-)
+from utils import parse_search_tokens, name_matches_tokens
+import app_config
 
 from PyQt6.QtWidgets import (
     QWidget, QVBoxLayout, QHBoxLayout, QFrame, QLabel,
@@ -439,41 +437,28 @@ class ExplorerPanel(QWidget):
 
     # ---- 隐藏文件显示开关（持久化到共享配置） ----
 
-    def _config_file_path(self) -> Path:
-        """主配置文件位置（与 main_window / git_widget 共用）。"""
-        return get_config_path()
-
     def _load_show_hidden(self) -> bool:
-        cfg, _ok = read_config_json(self._config_file_path())
+        cfg = app_config.read_config()
         return bool(cfg.get(self.CONFIG_KEY_SHOW_HIDDEN, True))
 
     def _save_show_hidden(self):
-        # 读-改-写：只在读到完整配置时才回写，避免多窗口下覆盖别人刚写的字段
-        p = self._config_file_path()
-        cfg, ok = read_config_json(p)
-        if not ok:
-            return
-        cfg[self.CONFIG_KEY_SHOW_HIDDEN] = self._show_hidden
-        atomic_write_json(p, cfg)
+        app_config.update_config({self.CONFIG_KEY_SHOW_HIDDEN: self._show_hidden},
+                                 description='explorer')
 
     # ---- 排序方式（持久化到共享配置） ----
 
     def _load_sort(self) -> tuple:
-        cfg, _ok = read_config_json(self._config_file_path())
+        cfg = app_config.read_config()
         key = cfg.get(self.CONFIG_KEY_SORT_KEY, 'name')
         if key not in self._SORT_COLUMN:
             key = 'name'
         return key, bool(cfg.get(self.CONFIG_KEY_SORT_DESC, False))
 
     def _save_sort(self):
-        # 读-改-写：只在读到完整配置时才回写，避免多窗口下覆盖别人刚写的字段
-        p = self._config_file_path()
-        cfg, ok = read_config_json(p)
-        if not ok:
-            return
-        cfg[self.CONFIG_KEY_SORT_KEY] = self._sort_key
-        cfg[self.CONFIG_KEY_SORT_DESC] = self._sort_desc
-        atomic_write_json(p, cfg)
+        app_config.update_config({
+            self.CONFIG_KEY_SORT_KEY: self._sort_key,
+            self.CONFIG_KEY_SORT_DESC: self._sort_desc,
+        }, description='explorer-sort')
 
     def _apply_sort(self):
         """把当前排序方式应用到 QFileSystemModel（会立即反映到视图）。"""

@@ -153,7 +153,7 @@ def _make_git_tool_icon(kind: str, color: str, px: int = 16) -> QIcon:
 
 from git_manager import GitManager, GitFile, FileStatus
 from i18n import t, get_language
-from utils import read_config_json, atomic_write_json, get_config_path
+import app_config
 
 
 # 文件状态颜色
@@ -2817,31 +2817,12 @@ class GitPanel(QWidget):
 
     # ---------- Git 设置（代理等） ----------
 
-    def _config_file_path(self) -> Path:
-        """主配置文件位置（与 main_window 共用 .smart_terminal_config.json）。"""
-        return get_config_path()
-
     def _load_config(self) -> dict:
-        cfg, _ok = read_config_json(self._config_file_path())
-        return cfg
+        return app_config.read_config()
 
     def _save_config(self, patch: dict):
-        """把 patch 合并写回主配置文件。
-
-        多窗口共享同一份配置，需特别小心：
-        - 文件存在但解析失败时（另一个进程正在写入半截 JSON），放弃本次写入，
-          否则会把对方刚保存的 presets / git_proxy 等字段清空。
-        - 用原子写（先写临时文件再 rename），避免本次写入也产生半截文件。
-        """
-        try:
-            p = self._config_file_path()
-            cfg, ok = read_config_json(p)
-            if not ok:
-                return
-            cfg.update(patch)
-            atomic_write_json(p, cfg)
-        except Exception:
-            pass
+        """把 patch 合并写回主配置文件（app_config 单点：锁 + 原子写 + 失败日志）。"""
+        app_config.update_config(patch, description='git-panel')
 
     def _apply_persisted_git_proxy(self):
         """启动时从配置文件读取 git_proxy 并应用到 GitManager。

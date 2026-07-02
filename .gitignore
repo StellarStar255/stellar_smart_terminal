@@ -94,3 +94,6 @@ build/
 .venv-build/
 assets/smart_terminal.icns
 *.spec.bak
+
+# app_config inter-process lock (runtime, never commit)
+.smart_terminal_config.lock

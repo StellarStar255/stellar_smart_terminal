@@ -57,7 +57,8 @@ from command_palette import CommandPalette
 from file_editor import FileEditorWidget, EditorArea
 from i18n import t, set_language, get_language
 from flow_layout import FlowLayout
-from utils import read_config_json, atomic_write_json, get_config_path, list_notify_sounds, play_notify_sound
+from utils import atomic_write_json, get_config_path, list_notify_sounds, play_notify_sound
+import app_config
 from app_logging import get_logger
 
 logger = get_logger(__name__)
@@ -1022,31 +1023,25 @@ class WindowNavigatorPanel(QWidget):
         super().hideEvent(event)
 
     def _save_navigator_config(self):
-        """保存导航面板设置到主配置文件"""
+        """保存导航面板设置到主配置文件（app_config 单点：锁 + 原子写 + 失败日志）"""
         try:
-            config_file = get_config_path()
-            existing, ok = read_config_json(config_file)
-            # 文件存在但解析失败：可能正被别的进程写到一半，放弃本次保存，
-            # 否则会把对方的更改（如 git_proxy）当作"已损坏"全部覆盖掉。
-            if not ok:
-                return
+            patch = {
+                'navigator_font_size': self._font_size,
+                'navigator_quick_close': bool(self._quick_close),
+                'navigator_compact': bool(self._compact_mode),
+            }
             # 内嵌模式下 self.x()/y() 是控件在父布局里的坐标，没有意义，不写几何
             if not self._embedded:
-                existing['navigator_geometry'] = [self.x(), self.y(), self.width(), self.height()]
-            existing['navigator_font_size'] = self._font_size
-            existing['navigator_quick_close'] = bool(self._quick_close)
-            existing['navigator_compact'] = bool(self._compact_mode)
-            atomic_write_json(config_file, existing)
+                patch['navigator_geometry'] = [self.x(), self.y(), self.width(), self.height()]
+            app_config.update_config(patch, description='navigator')
         except Exception:
             pass
 
     def _load_navigator_config(self):
         """从主配置文件加载导航面板设置"""
         try:
-            config_file = get_config_path()
-            if config_file.exists():
-                with open(config_file, 'r', encoding='utf-8') as f:
-                    config = json.load(f)
+            config = app_config.read_config()
+            if config:
                 # 恢复字体大小（下拉控件已移除，仅沿用历史值渲染列表，避免外观突变）
                 font_size = config.get('navigator_font_size', 12)
                 if 8 <= font_size <= 24:
@@ -4400,9 +4395,8 @@ class MainWindow(QMainWindow):
     def _reload_dir_history_from_config(self):
         """从配置文件重新加载目录历史（确保多窗口间同步）"""
         try:
-            if self.CONFIG_FILE.exists():
-                with open(self.CONFIG_FILE, 'r', encoding='utf-8') as f:
-                    config = json.load(f)
+            config = app_config.read_config()
+            if config:
                 saved_history = config.get('working_dir_history', [])
                 saved_freq = config.get('working_dir_freq', {})
                 # 合并：以文件中的数据为基础，同时保留本窗口新增但尚未保存的条目
@@ -9587,107 +9581,106 @@ class MainWindow(QMainWindow):
         self.used_label_names = []            # 用过的 标签/分屏 名称历史（可复用）
         self._notify_sound = 'Submarine'      # 完成提示音（绿点点亮时播放；'' = 静音）
         try:
-            if self.CONFIG_FILE.exists():
-                with open(self.CONFIG_FILE, 'r', encoding='utf-8') as f:
-                    config = json.load(f)
-                    self.presets = config.get('presets', [])
-                    self.last_preset_index = config.get('last_preset_index', 0)
-                    self.image_prefix_enabled = config.get('image_prefix_enabled', False)
-                    self.image_save_local = config.get('image_save_local', True)
-                    self._mouse_click_forward_enabled = config.get('mouse_click_forward_enabled', False)
-                    self.used_label_names = config.get('used_label_names', [])
-                    self.working_dir_history = config.get('working_dir_history', [])
-                    self._working_dir_freq = config.get('working_dir_freq', {})
-                    # 兼容旧配置：为没有频率记录的历史路径补默认值
-                    for p in self.working_dir_history:
-                        if p not in self._working_dir_freq:
-                            self._working_dir_freq[p] = 1
-                    # 按频率倒序排列
-                    self.working_dir_history.sort(key=lambda p: self._working_dir_freq.get(p, 0), reverse=True)
-                    self.last_working_dir = config.get('last_working_dir', None)
-                    # 加载主题设置
-                    saved_theme = config.get('theme', '深蓝')
-                    if saved_theme in self.THEMES:
-                        self.current_theme = saved_theme
-                    # 加载图标蒙版设置
-                    self._use_icon_tint = config.get('icon_tint', False)
-                    # 加载工具栏配置
-                    self.toolbar_config = config.get('toolbar_config', None)
-                    # 加载 LLM 配置
-                    self.llm_configs = config.get('llm_configs', [])
-                    self.default_llm_config = config.get('default_llm_config', 0)
-                    # 加载全局缩放偏移
-                    self._global_zoom_delta = config.get('global_zoom_delta', 0)
-                    # 加载 GUI 字体大小
-                    self._gui_font_size = config.get('gui_font_size', 0)
-                    # 加载固定第二排工具栏设置
-                    self._pin_toolbar_row2 = config.get('pin_toolbar_row2', False)
-                    # 加载窗口透明度
-                    self._window_opacity = config.get('window_opacity', 100)
-                    # 加载左右分屏偏好（Explorer / Remote 各自记忆）
-                    self._explorer_split_horizontal = config.get('explorer_split_horizontal', False)
-                    self._remote_split_horizontal = config.get('remote_split_horizontal', False)
-                    # 加载弹簧模式偏好
-                    self._spring_mode_enabled = config.get('spring_mode_enabled', False)
-                    # 加载 AI 行内补全开关
-                    self._ai_completion_enabled = config.get('ai_completion_enabled', False)
-                    self._editor_word_wrap = config.get('editor_word_wrap', False)
-                    # 加载完成提示音（绿点点亮时播放；'' = 静音）
-                    self._notify_sound = config.get('notify_sound', 'Submarine')
-                    # 加载终端 scrollback 上限（进程级，影响之后新建的终端）
-                    TerminalWidget.SCROLLBACK_LINES = self._clamp_scrollback(
-                        config.get('terminal_scrollback', TerminalWidget.SCROLLBACK_LINES))
-                    # 终端解析放到后台线程：env 变量优先（已在类属性默认里处理），
-                    # 否则用配置值。未设 env 时才让配置接管，保证 env 始终能强制开启。
-                    if os.environ.get('STELLAR_PARSE_OFF_GUI') is None:
-                        TerminalWidget.PARSE_ON_READER_THREAD = bool(
-                            config.get('parse_off_gui_thread', False))
-                    # 加载导航面板停靠方式（'float' / 'embed'，全局记忆）
-                    _dock_mode = config.get('navigator_dock_mode', 'float')
-                    if _dock_mode in ('float', 'embed'):
-                        MainWindow._navigator_dock_mode = _dock_mode
-                    # 加载用户自定义快捷键覆盖
-                    ks = config.get('keyboard_shortcuts', {})
-                    if isinstance(ks, dict):
-                        self._custom_shortcuts = {
-                            str(k): str(v) for k, v in ks.items() if isinstance(v, str)
-                        }
-                    # 加载语言设置
-                    saved_lang = config.get('language', 'zh')
-                    if saved_lang in ('zh', 'en'):
-                        set_language(saved_lang)
-                    # 加载窗口几何与面板可见性
-                    self._saved_window_geometry = config.get('window_geometry', None)
-                    self._saved_window_maximized = config.get('window_maximized', False)
-                    self._saved_explorer_panel_visible = config.get('explorer_panel_visible', False)
-                    self._saved_git_panel_visible = config.get('git_panel_visible', False)
-                    self._saved_log_panel_visible = config.get('log_panel_visible', False)
-                    self._saved_navigator_enabled = config.get('navigator_enabled', False)
-                    # 加载记忆的资源管理器/编辑器尺寸
-                    main_sizes = config.get('explorer_main_splitter_sizes', None)
-                    if isinstance(main_sizes, list) and len(main_sizes) == 4 and all(isinstance(s, int) and s >= 0 for s in main_sizes):
-                        self._saved_explorer_main_sizes = main_sizes
-                    internal_sizes = config.get('explorer_internal_splitter_sizes', None)
-                    if isinstance(internal_sizes, list) and len(internal_sizes) == 2 and all(isinstance(s, int) and s >= 0 for s in internal_sizes):
-                        self._saved_explorer_internal_sizes = internal_sizes
-                    remote_internal = config.get('remote_internal_splitter_sizes', None)
-                    if isinstance(remote_internal, list) and len(remote_internal) == 2 and all(isinstance(s, int) and s >= 0 for s in remote_internal):
-                        self._saved_remote_internal_sizes = remote_internal
-                    # 左侧栏宽度是进程级共享的：只让第一个窗口从磁盘播种，之后开的
-                    # 窗口沿用已有的实时共享值，避免用磁盘上的旧值覆盖别的窗口刚拖出的新宽度。
-                    left_width = config.get('left_panel_width', None)
-                    if (isinstance(left_width, int) and left_width > 0
-                            and MainWindow._shared_left_panel_width is None):
-                        self._saved_left_panel_width = left_width
-                    git_commit_h = config.get('git_commit_height', None)
-                    if isinstance(git_commit_h, int) and git_commit_h > 0:
-                        self._saved_git_commit_height = git_commit_h
-                    git_body_sizes = config.get('git_body_splitter_sizes', None)
-                    if isinstance(git_body_sizes, list) and git_body_sizes and all(isinstance(s, int) and s >= 0 for s in git_body_sizes):
-                        self._saved_git_body_sizes = git_body_sizes
-                    nav_list_h = config.get('nav_list_height', None)
-                    if isinstance(nav_list_h, int) and nav_list_h > 0:
-                        self._saved_nav_list_height = nav_list_h
+            config = app_config.read_config()
+            if config:
+                self.presets = config.get('presets', [])
+                self.last_preset_index = config.get('last_preset_index', 0)
+                self.image_prefix_enabled = config.get('image_prefix_enabled', False)
+                self.image_save_local = config.get('image_save_local', True)
+                self._mouse_click_forward_enabled = config.get('mouse_click_forward_enabled', False)
+                self.used_label_names = config.get('used_label_names', [])
+                self.working_dir_history = config.get('working_dir_history', [])
+                self._working_dir_freq = config.get('working_dir_freq', {})
+                # 兼容旧配置：为没有频率记录的历史路径补默认值
+                for p in self.working_dir_history:
+                    if p not in self._working_dir_freq:
+                        self._working_dir_freq[p] = 1
+                # 按频率倒序排列
+                self.working_dir_history.sort(key=lambda p: self._working_dir_freq.get(p, 0), reverse=True)
+                self.last_working_dir = config.get('last_working_dir', None)
+                # 加载主题设置
+                saved_theme = config.get('theme', '深蓝')
+                if saved_theme in self.THEMES:
+                    self.current_theme = saved_theme
+                # 加载图标蒙版设置
+                self._use_icon_tint = config.get('icon_tint', False)
+                # 加载工具栏配置
+                self.toolbar_config = config.get('toolbar_config', None)
+                # 加载 LLM 配置
+                self.llm_configs = config.get('llm_configs', [])
+                self.default_llm_config = config.get('default_llm_config', 0)
+                # 加载全局缩放偏移
+                self._global_zoom_delta = config.get('global_zoom_delta', 0)
+                # 加载 GUI 字体大小
+                self._gui_font_size = config.get('gui_font_size', 0)
+                # 加载固定第二排工具栏设置
+                self._pin_toolbar_row2 = config.get('pin_toolbar_row2', False)
+                # 加载窗口透明度
+                self._window_opacity = config.get('window_opacity', 100)
+                # 加载左右分屏偏好（Explorer / Remote 各自记忆）
+                self._explorer_split_horizontal = config.get('explorer_split_horizontal', False)
+                self._remote_split_horizontal = config.get('remote_split_horizontal', False)
+                # 加载弹簧模式偏好
+                self._spring_mode_enabled = config.get('spring_mode_enabled', False)
+                # 加载 AI 行内补全开关
+                self._ai_completion_enabled = config.get('ai_completion_enabled', False)
+                self._editor_word_wrap = config.get('editor_word_wrap', False)
+                # 加载完成提示音（绿点点亮时播放；'' = 静音）
+                self._notify_sound = config.get('notify_sound', 'Submarine')
+                # 加载终端 scrollback 上限（进程级，影响之后新建的终端）
+                TerminalWidget.SCROLLBACK_LINES = self._clamp_scrollback(
+                    config.get('terminal_scrollback', TerminalWidget.SCROLLBACK_LINES))
+                # 终端解析放到后台线程：env 变量优先（已在类属性默认里处理），
+                # 否则用配置值。未设 env 时才让配置接管，保证 env 始终能强制开启。
+                if os.environ.get('STELLAR_PARSE_OFF_GUI') is None:
+                    TerminalWidget.PARSE_ON_READER_THREAD = bool(
+                        config.get('parse_off_gui_thread', False))
+                # 加载导航面板停靠方式（'float' / 'embed'，全局记忆）
+                _dock_mode = config.get('navigator_dock_mode', 'float')
+                if _dock_mode in ('float', 'embed'):
+                    MainWindow._navigator_dock_mode = _dock_mode
+                # 加载用户自定义快捷键覆盖
+                ks = config.get('keyboard_shortcuts', {})
+                if isinstance(ks, dict):
+                    self._custom_shortcuts = {
+                        str(k): str(v) for k, v in ks.items() if isinstance(v, str)
+                    }
+                # 加载语言设置
+                saved_lang = config.get('language', 'zh')
+                if saved_lang in ('zh', 'en'):
+                    set_language(saved_lang)
+                # 加载窗口几何与面板可见性
+                self._saved_window_geometry = config.get('window_geometry', None)
+                self._saved_window_maximized = config.get('window_maximized', False)
+                self._saved_explorer_panel_visible = config.get('explorer_panel_visible', False)
+                self._saved_git_panel_visible = config.get('git_panel_visible', False)
+                self._saved_log_panel_visible = config.get('log_panel_visible', False)
+                self._saved_navigator_enabled = config.get('navigator_enabled', False)
+                # 加载记忆的资源管理器/编辑器尺寸
+                main_sizes = config.get('explorer_main_splitter_sizes', None)
+                if isinstance(main_sizes, list) and len(main_sizes) == 4 and all(isinstance(s, int) and s >= 0 for s in main_sizes):
+                    self._saved_explorer_main_sizes = main_sizes
+                internal_sizes = config.get('explorer_internal_splitter_sizes', None)
+                if isinstance(internal_sizes, list) and len(internal_sizes) == 2 and all(isinstance(s, int) and s >= 0 for s in internal_sizes):
+                    self._saved_explorer_internal_sizes = internal_sizes
+                remote_internal = config.get('remote_internal_splitter_sizes', None)
+                if isinstance(remote_internal, list) and len(remote_internal) == 2 and all(isinstance(s, int) and s >= 0 for s in remote_internal):
+                    self._saved_remote_internal_sizes = remote_internal
+                # 左侧栏宽度是进程级共享的：只让第一个窗口从磁盘播种，之后开的
+                # 窗口沿用已有的实时共享值，避免用磁盘上的旧值覆盖别的窗口刚拖出的新宽度。
+                left_width = config.get('left_panel_width', None)
+                if (isinstance(left_width, int) and left_width > 0
+                        and MainWindow._shared_left_panel_width is None):
+                    self._saved_left_panel_width = left_width
+                git_commit_h = config.get('git_commit_height', None)
+                if isinstance(git_commit_h, int) and git_commit_h > 0:
+                    self._saved_git_commit_height = git_commit_h
+                git_body_sizes = config.get('git_body_splitter_sizes', None)
+                if isinstance(git_body_sizes, list) and git_body_sizes and all(isinstance(s, int) and s >= 0 for s in git_body_sizes):
+                    self._saved_git_body_sizes = git_body_sizes
+                nav_list_h = config.get('nav_list_height', None)
+                if isinstance(nav_list_h, int) and nav_list_h > 0:
+                    self._saved_nav_list_height = nav_list_h
         except Exception:
             self.presets = []
 
@@ -9761,15 +9754,9 @@ class MainWindow(QMainWindow):
         self._dir_history_pending_removals，并集时主动剔除，否则会被磁盘版本复活。
         """
         try:
-            saved_history, saved_freq = [], {}
-            if self.CONFIG_FILE.exists():
-                try:
-                    with open(self.CONFIG_FILE, 'r', encoding='utf-8') as f:
-                        cfg = json.load(f)
-                    saved_history = cfg.get('working_dir_history', []) or []
-                    saved_freq = cfg.get('working_dir_freq', {}) or {}
-                except Exception:
-                    saved_history, saved_freq = [], {}
+            cfg = app_config.read_config()
+            saved_history = cfg.get('working_dir_history', []) or []
+            saved_freq = cfg.get('working_dir_freq', {}) or {}
 
             removals = getattr(self, '_dir_history_pending_removals', None) or set()
             mem_history = self.working_dir_history if hasattr(self, 'working_dir_history') else []
@@ -9798,22 +9785,31 @@ class MainWindow(QMainWindow):
             pass
 
     def _save_config(self):
-        """保存配置"""
+        """保存配置（app_config 单点：进程间文件锁 + 原子写 + 失败可见）"""
         try:
             # 先把磁盘上其它窗口新增的目录历史并入本窗口，避免后写覆盖先写
             self._merge_dir_history_for_save()
-            # 一次性读取磁盘上的现有配置：既用于"未修改预设时回退到磁盘版本"，
-            # 又用于把本函数没列出的字段（如 git_widget 写入的 git_proxy /
-            # git_proxies）原样保留下来。两段逻辑共用同一次读取，避免重复 I/O
-            # 也减少与其它进程的写入交错窗口。
-            existing_config, read_ok = read_config_json(self.CONFIG_FILE)
-            # 文件存在但解析失败：很可能是另一个 Smart Terminal 进程正在写到
-            # 一半（多窗口共用同一份配置文件）。此时若强行用内存里"没有
-            # git_proxy"的配置覆盖，对方刚保存的代理 / 预设就会被清空。放弃
-            # 本次保存让对方的写入留下来，等下次稳定状态再保存即可。
-            if not read_ok:
-                return
+            # 读-合-写全程在 app_config 的锁内执行；文件损坏时放弃本次保存
+            # （宁可不存，也不能把其它进程维护的字段当"损坏"覆盖掉）
+            ok = app_config.update_config_with(
+                self._build_config_for_save, description='main-window')
+            if not ok:
+                # 写失败不再无声丢失（磁盘满/权限/文件损坏），状态栏提示
+                try:
+                    self.statusbar.showMessage(t("status.config_save_failed"), 5000)
+                except Exception:
+                    pass
+        except Exception:
+            pass
 
+    def _build_config_for_save(self, existing_config: dict):
+        """在 app_config 锁内执行：把本窗口的设置原地合并进 existing_config。
+
+        existing_config 是磁盘上的现有配置：既用于"未修改预设时回退到磁盘
+        版本"，又把本函数没列出的字段（如 git_widget 写入的 git_proxy /
+        git_proxies）原样保留下来。
+        """
+        if True:  # 与旧 try 块保持同缩进层级，减小 diff
             # 获取当前选中的预设索引
             current_index = self.preset_combo.currentIndex() if hasattr(self, 'preset_combo') else 0
             image_prefix = self.image_prefix_checkbox.isChecked() if hasattr(self, 'image_prefix_checkbox') else False
@@ -9901,18 +9897,9 @@ class MainWindow(QMainWindow):
                     config['navigator_geometry'] = existing_config['navigator_geometry']
                 if 'navigator_font_size' in existing_config:
                     config['navigator_font_size'] = existing_config['navigator_font_size']
-            # 合并写入：保留由其它组件维护、本函数未列出的字段（如 git_widget
-            # 写入的 git_proxy / git_proxies）。直接整体覆盖会把这些键清空，
-            # 导致退出后再次打开时丢失代理等设置。
-            merged = dict(existing_config)
-            merged.update(config)
-            # 原子写：先写临时文件再 rename，避免多进程并发写入时另一个进程
-            # 读到半截 JSON。直接 `open(...'w')` 会先 truncate，期间另一个进程
-            # 解析失败 → 按"已损坏"处理 → 反过来覆盖掉本次刚写的内容，造成
-            # git_proxy 等字段莫名清零。
-            atomic_write_json(self.CONFIG_FILE, merged)
-        except Exception:
-            pass
+            # 原地合并：保留由其它组件维护、本函数未列出的字段（如 git_widget
+            # 写入的 git_proxy / git_proxies）。写盘由 app_config 在锁内原子完成。
+            existing_config.update(config)
 
     def get_llm_config(self, name: str = None) -> dict:
         """获取指定名称的 LLM 配置，若不指定则返回默认配置
@@ -10140,26 +10127,15 @@ class MainWindow(QMainWindow):
     @staticmethod
     def _persist_navigator_dock_mode():
         """把当前停靠方式写入主配置文件。"""
-        try:
-            existing, ok = read_config_json(MainWindow.CONFIG_FILE)
-            if not ok:
-                return
-            existing['navigator_dock_mode'] = MainWindow._navigator_dock_mode
-            atomic_write_json(MainWindow.CONFIG_FILE, existing)
-        except Exception:
-            pass
+        app_config.update_config(
+            {'navigator_dock_mode': MainWindow._navigator_dock_mode},
+            description='navigator-dock-mode')
 
     @staticmethod
     def _persist_navigator_enabled(enabled: bool):
         """把 Window Navigator 开关状态写入主配置文件（供下次启动恢复）。"""
-        try:
-            existing, ok = read_config_json(MainWindow.CONFIG_FILE)
-            if not ok:
-                return
-            existing['navigator_enabled'] = bool(enabled)
-            atomic_write_json(MainWindow.CONFIG_FILE, existing)
-        except Exception:
-            pass
+        app_config.update_config({'navigator_enabled': bool(enabled)},
+                                 description='navigator-enabled')
 
     @staticmethod
     def _iter_navigators():
@@ -10311,8 +10287,9 @@ class MainWindow(QMainWindow):
         }
 
         try:
-            with open(config_path, 'w', encoding='utf-8') as f:
-                json.dump(data, f, ensure_ascii=False, indent=2)
+            # 原子写：直写会先 truncate，写一半崩溃/磁盘满会留下半截 JSON
+            if not atomic_write_json(config_path, data):
+                raise OSError(f"write failed: {config_path}")
             return True
         except PermissionError:
             self._styled_message_box(
