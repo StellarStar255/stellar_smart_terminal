@@ -17,6 +17,9 @@ from i18n import t
 import explorer_clipboard
 import explorer_favorites
 from utils import parse_search_tokens, name_matches_tokens
+from app_logging import get_logger
+
+logger = get_logger(__name__)
 import app_config
 
 from PyQt6.QtWidgets import (
@@ -991,7 +994,8 @@ class ExplorerPanel(QWidget):
                 if truncated:
                     break
         except Exception:
-            pass
+            # 意外错误不能静默——否则搜索出错和"真的没命中"在 UI 上无法区分
+            logger.exception("filename search failed under %s", root)
         if gen == self._search_gen:
             self._search_result_signal.emit(gen, results, truncated)
 
@@ -1159,7 +1163,8 @@ class ExplorerPanel(QWidget):
                 if truncated:
                     break
         except Exception:
-            pass
+            # 意外错误不能静默——否则搜索出错和"真的没命中"在 UI 上无法区分
+            logger.exception("content search failed under %s", root)
         if gen == self._search_gen:
             self._search_result_signal.emit(gen, results, truncated)
 

@@ -154,6 +154,9 @@ def _make_git_tool_icon(kind: str, color: str, px: int = 16) -> QIcon:
 from git_manager import GitManager, GitFile, FileStatus
 from i18n import t, get_language
 import app_config
+from app_logging import get_logger
+
+logger = get_logger(__name__)
 
 
 # 文件状态颜色
@@ -774,6 +777,7 @@ class _GitOpWorker(QThread):
         try:
             ok = bool(self._fn())
         except Exception:
+            logger.exception("git op '%s' failed", self._kind)
             ok = False
         self.done.emit(ok, self._kind)
 
@@ -806,6 +810,7 @@ class _RefreshWorker(QThread):
             data['merging'] = gm.is_merging()
             data['ok'] = True
         except Exception:
+            logger.exception("git refresh worker failed")
             data['ok'] = False
         self.loaded.emit(data)
 
@@ -832,6 +837,7 @@ class _StatusWorker(QThread):
             data['merging'] = gm.is_merging()
             data['ok'] = True
         except Exception:
+            logger.exception("git status worker failed")
             data['ok'] = False
         self.loaded.emit(data)
 

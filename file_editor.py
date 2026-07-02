@@ -92,6 +92,9 @@ _AI_LANG_BY_EXT = {
 
 from ai_completion import InlineCompletionController
 from i18n import t
+from app_logging import get_logger
+
+logger = get_logger(__name__)
 
 
 # OneDark 调色板（与现有 PythonHighlighter / MarkdownHighlighter 一致）
@@ -3312,7 +3315,9 @@ class EditorArea(QWidget):
             try:
                 pane._autosave_tick()
             except Exception:
-                pass
+                # 崩溃恢复的最后防线：一个窗格失败不能拖累其它窗格备份，
+                # 但绝不能静默——否则用户以为已备份、实则丢数据无从排查
+                logger.exception("crash-recovery autosave flush failed for a pane")
 
     def _styled_splitter(self, orientation) -> QSplitter:
         splitter = QSplitter(orientation)

@@ -8110,7 +8110,9 @@ class MainWindow(QMainWindow):
             pw = self.remote_panel.get_cached_password(alias)
             new_window.remote_panel.prime_cached_password(alias, pw)
         except Exception:
-            pass
+            # 预置失败不致命（新窗口会自行弹密码框），但要记日志：
+            # 曾因静默吞异常导致「SSH 密码框死锁」难以定位
+            logger.exception("failed to prime cached SSH password for %s", alias)
 
         # 与「expand to new window」一致：新窗口直接与父窗口逐像素重合
         # （先继承父窗口尺寸，再隐形对齐后显形，见 _align_child_with_parent_geometry），
