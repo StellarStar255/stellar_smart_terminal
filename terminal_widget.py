@@ -884,6 +884,7 @@ class TerminalWidget(QWidget):
     attention_requested = pyqtSignal()  # 疑似本轮命令/Claude 执行完毕（输出停顿），请求导航提醒
     interaction_requested = pyqtSignal()  # 终端响铃（BEL）：程序正在等待用户操作（如 Claude 确认提示）
     _output_activity = pyqtSignal(int)  # 一批输出已处理（参数=字节数）：在 GUI 线程重置空闲计时器
+    _history_grew = pyqtSignal(int)  # feed 新增历史行数：读取线程 marshal 回 GUI 线程做回滚位置补偿
     scrollback_pressure_changed = pyqtSignal(int)  # 回滚历史"卡顿压力"等级变化（0 无 / 1 琥珀 / 2 红）
 
     # scrollback 压力：用"预测 reflow 耗时 = 历史行数 × 实测每行毫秒"判定，超阈值才提示，
@@ -1122,6 +1123,9 @@ class TerminalWidget(QWidget):
 
         # 输出记录缓冲区 - 批量发送以减少信号开销
         self._output_buffer = []
+        # 保护 _output_buffer：读取线程 append、GUI 定时器换出，二者需互斥，
+        # 否则 join 与 clear 之间 append 的块会被 clear 抹掉 → 录制丢字
+        self._output_buffer_lock = threading.Lock()
         self._output_buffer_timer = QTimer()
         self._output_buffer_timer.timeout.connect(self._flush_output_buffer)
         self._output_buffer_timer.start(100)  # 每100ms刷新一次
@@ -1145,6 +1149,9 @@ class TerminalWidget(QWidget):
         # AutoConnection：同线程发射→直连；读取线程发射→自动排队到 GUI 线程，
         # 保证 _activity_idle_timer.start() 始终在 GUI 线程执行。
         self._output_activity.connect(self._on_output_activity)
+        # scroll_offset 只由 GUI 线程读写：读取线程 feed 新增历史行时经此信号
+        # marshal 回 GUI 做回滚位置补偿，避免两线程并发改 scroll_offset
+        self._history_grew.connect(self._on_history_grew)
         self._had_output_activity = False
         self._activity_bytes = 0
         self._ACTIVITY_IDLE_MS = 1500
@@ -1970,20 +1977,22 @@ class TerminalWidget(QWidget):
                         except Exception:
                             pass  # 跳过无法处理的单个字符
 
-                # 滚动位置稳定化：当用户处于回滚浏览状态时，新输出不应导致显示内容跳动
-                # 通过增加 scroll_offset 来补偿新增的历史行，保持 display_start 不变
                 new_total = self.screen._total_history_lines
                 lines_added = new_total - old_total
-                if self.scroll_offset > 0 and lines_added > 0:
-                    self.scroll_offset += lines_added
-                    max_scroll = self._get_history_count()
-                    self.scroll_offset = min(self.scroll_offset, max_scroll)
+
+            # 滚动位置稳定化：用户回滚浏览时新输出不应让显示内容跳动。补偿逻辑
+            # 改 scroll_offset，而 scroll_offset 由 GUI 线程独占读写——读取线程
+            # 经信号 marshal 回 GUI 执行（同线程直连、跨线程排队），避免并发改。
+            # 常见情形（在底部 scroll_offset==0）不发信号，零开销。
+            if lines_added > 0 and self.scroll_offset > 0:
+                self._history_grew.emit(lines_added)
 
             # 标记内容已变化，让定时器统一处理重绘（避免高频输出时的重绘风暴）
             self._content_dirty = True
 
             # 缓冲输出，由定时器统一发送（避免高频输出时的信号风暴）
-            self._output_buffer.append(text)
+            with self._output_buffer_lock:
+                self._output_buffer.append(text)
 
             # 记录输出活动并重置空闲计时器：停顿超过阈值即视为本轮执行完毕。
             # _activity_idle_timer 是 QTimer，只能在 GUI 线程操作；当本方法跑在读取
@@ -1999,6 +2008,17 @@ class TerminalWidget(QWidget):
         self._had_output_activity = True
         self._activity_bytes += n
         self._activity_idle_timer.start(self._ACTIVITY_IDLE_MS)
+
+    def _on_history_grew(self, lines_added: int):
+        """GUI 线程：读取线程 feed 新增历史行后，补偿回滚浏览位置。
+
+        仅在用户回滚浏览（scroll_offset>0）时把 scroll_offset 上移等量行数，
+        保持 display_start 不变、可见内容不跳动。scroll_offset 全程 GUI 独占。
+        """
+        if lines_added <= 0 or self.scroll_offset <= 0:
+            return
+        max_scroll = self._get_history_count()
+        self.scroll_offset = min(self.scroll_offset + lines_added, max_scroll)
 
     def toggle_debug_capture(self):
         """切换原始输出诊断捕获（用于排查内容过滤问题）"""
@@ -2037,7 +2057,10 @@ class TerminalWidget(QWidget):
         返回匹配行拼接成的签名字符串（供调用方去重），没有提示则返回 None。
         """
         try:
-            lines = self.screen.display[-15:]
+            # screen.display 会遍历各行 cell dict 生成字符串；读取线程并发 feed
+            # 会往行 dict 插键 → "dict changed size during iteration"，故持锁快照
+            with self._screen_lock:
+                lines = self.screen.display[-15:]
         except Exception:
             return None
         matched = [
@@ -2086,11 +2109,14 @@ class TerminalWidget(QWidget):
 
     def _flush_output_buffer(self):
         """刷新输出缓冲区，批量发送 output_recorded 信号"""
-        if self._output_buffer:
-            # 合并缓冲区内容一次性发送
-            combined = ''.join(self._output_buffer)
-            self._output_buffer.clear()
-            self.output_recorded.emit(combined)
+        # 原子换出：持锁把整个 buffer 换成新列表，锁外再 join/emit，
+        # 避免 join 与 clear 之间读取线程 append 的块丢失
+        with self._output_buffer_lock:
+            if not self._output_buffer:
+                return
+            buf = self._output_buffer
+            self._output_buffer = []
+        self.output_recorded.emit(''.join(buf))
 
     def _debug_save_cache_pixmap(self):
         """保存当前 cache pixmap 为 PNG，便于和屏幕实际显示对比。"""
@@ -2355,8 +2381,11 @@ class TerminalWidget(QWidget):
         screen = getattr(self, 'screen', None)
         if screen is None or not hasattr(screen, 'clear_scrollback'):
             return
-        screen.clear_scrollback()
-        self.scroll_offset = 0
+        # 持锁清空：读取线程可能正 feed 向 history deque append，
+        # 无锁清空会触发 "deque mutated during iteration" 崩溃
+        with self._screen_lock:
+            screen.clear_scrollback()
+            self.scroll_offset = 0
         self._search_line_cache.clear()
         self._invalidate_render_cache()
         self._update_scrollback_level()  # 历史归零 → 压力等级降回 0，指示点消失
@@ -4221,7 +4250,17 @@ class TerminalWidget(QWidget):
         return (visible_start_row, visible_start_col, visible_end_row, visible_end_col)
 
     def _get_selected_text(self) -> str:
-        """获取选中的文本（使用绝对行号，支持跨页选择）"""
+        """获取选中的文本（自持锁，可安全并发于读取线程 feed）。
+
+        _screen_lock 是 RLock：内部再调 _get_all_content / _get_history_top
+        会重入同一把锁，安全。读 live screen.buffer 全程持锁，避免
+        "dict changed size during iteration"。
+        """
+        with self._screen_lock:
+            return self._get_selected_text_locked()
+
+    def _get_selected_text_locked(self) -> str:
+        """获取选中的文本（使用绝对行号，支持跨页选择）。调用方需持 _screen_lock。"""
         # 如果是全选模式，返回所有内容（包括历史记录）
         if self._select_all_mode:
             return self._get_all_content()
@@ -4332,6 +4371,7 @@ class TerminalWidget(QWidget):
     def _copy_selection_to_clipboard(self):
         """复制选中内容到剪贴板"""
         if self._has_selection():
+            # _get_selected_text 自持 _screen_lock，可安全并发于读取线程 feed
             text = self._get_selected_text()
             # 兜底再去一次尾部空白：软换行行会保留尾部空格，整段末尾的空白
             # 没有意义且会污染剪贴板（复制登录 URL / 授权码时末尾多空格会导致粘贴失效）
@@ -4365,7 +4405,16 @@ class TerminalWidget(QWidget):
         self.update()
 
     def _get_all_content(self) -> str:
-        """获取所有内容（历史记录 + 当前屏幕）- 优化版本"""
+        """获取所有内容（历史记录 + 当前屏幕，自持锁）。
+
+        _screen_lock 是 RLock，重入安全；读 live screen.buffer 全程持锁，
+        避免与读取线程 feed 并发导致 "dict changed size during iteration"。
+        """
+        with self._screen_lock:
+            return self._get_all_content_locked()
+
+    def _get_all_content_locked(self) -> str:
+        """获取所有内容（历史记录 + 当前屏幕）- 优化版本。调用方需持 _screen_lock。"""
         columns = self.screen.columns
         is_wide = self._is_wide_char
         screen = self.screen
@@ -5729,6 +5778,7 @@ if (hasFileURL) {{
         )
 
         if file_path:
+            # _get_all_content 自持 _screen_lock，防与读取线程 feed 竞态
             content = self._get_all_content()
             try:
                 with open(file_path, 'w', encoding='utf-8') as f:

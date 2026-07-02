@@ -262,6 +262,8 @@ if IS_WINDOWS:
             self._pipe_out_write = None  # 管道写入端（给 ConPTY）
             self._reader_thread: Optional[threading.Thread] = None
             self._attr_list_buf = None   # 保持 attribute list 内存存活
+            # 串行化 write（同 UnixBackend）：读取线程回应答与 GUI 键入并发写
+            self._write_lock = threading.Lock()
 
         def start(self, command: List[str], cwd: Optional[str] = None,
                   cols: int = 80, rows: int = 24) -> bool:
@@ -492,22 +494,23 @@ if IS_WINDOWS:
                 mv = memoryview(data)
                 total = len(mv)
                 sent = 0
-                while sent < total:
-                    chunk = bytes(mv[sent:])
-                    written = wintypes.DWORD(0)
-                    success = kernel32.WriteFile(
-                        wintypes.HANDLE(self._pipe_in_write),
-                        chunk,
-                        len(chunk),
-                        ctypes.byref(written),
-                        None,
-                    )
-                    if not success:
-                        return False
-                    n = written.value
-                    if n <= 0:
-                        break
-                    sent += n
+                with self._write_lock:
+                    while sent < total:
+                        chunk = bytes(mv[sent:])
+                        written = wintypes.DWORD(0)
+                        success = kernel32.WriteFile(
+                            wintypes.HANDLE(self._pipe_in_write),
+                            chunk,
+                            len(chunk),
+                            ctypes.byref(written),
+                            None,
+                        )
+                        if not success:
+                            return False
+                        n = written.value
+                        if n <= 0:
+                            break
+                        sent += n
                 return sent == total
             except Exception as e:
                 logger.warning(f"[WindowsBackend] Write error: {e}")
@@ -615,6 +618,10 @@ else:
             self._reader_thread: Optional[threading.Thread] = None
             self._cols = 80
             self._rows = 24
+            # 串行化 write：PARSE_ON_READER_THREAD 开启后，读取线程会为
+            # DSR/DA 等查询回写应答，与 GUI 线程的键入并发写同一 master fd。
+            # 单次 os.write 的多段循环若交错会在 PTY 里字节错位。
+            self._write_lock = threading.Lock()
 
         def start(self, command: List[str], cwd: Optional[str] = None,
                   cols: int = 80, rows: int = 24) -> bool:
@@ -840,20 +847,23 @@ else:
                 # 几十 KB），返回实际写入字节数。必须循环写到写完，否则大段粘贴
                 # 会被静默截断。EINTR 重试；万一 fd 被设为非阻塞，EAGAIN 时让出
                 # 片刻再试，避免忙等。
+                # 整个多段循环持锁：否则两个线程的循环交错会把各自的字节段
+                # 穿插进 PTY（读取线程回应答 vs GUI 键入）。
                 mv = memoryview(data)
                 total = len(mv)
                 sent = 0
-                while sent < total:
-                    try:
-                        n = os.write(self._master_fd, mv[sent:])
-                    except InterruptedError:
-                        continue
-                    except BlockingIOError:
-                        time.sleep(0.001)
-                        continue
-                    if n <= 0:
-                        break
-                    sent += n
+                with self._write_lock:
+                    while sent < total:
+                        try:
+                            n = os.write(self._master_fd, mv[sent:])
+                        except InterruptedError:
+                            continue
+                        except BlockingIOError:
+                            time.sleep(0.001)
+                            continue
+                        if n <= 0:
+                            break
+                        sent += n
                 return sent == total
             except Exception as e:
                 logger.warning(f"[UnixBackend] Write error: {e}")
