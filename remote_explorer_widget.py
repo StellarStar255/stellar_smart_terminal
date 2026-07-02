@@ -297,7 +297,8 @@ class _HostAliasDelegate(QStyledItemDelegate):
 
 
 class _HostListWidget(QListWidget):
-    """主机列表：手动排序模式下支持内部拖拽改顺序；Enter / F2 原地重命名别名。
+    """主机列表：手动排序模式下支持内部拖拽改顺序；Enter/F2 或 Finder 式单击原地
+    重命名别名；双击保留给「连接」。
 
     用 dropEvent 覆写在拖放完成后发 rows_reordered，比连 model().rowsMoved
     可靠——QListWidget 的 InternalMove 在不少 Qt 版本里是「删除+插入」实现，
@@ -305,9 +306,40 @@ class _HostListWidget(QListWidget):
     """
     rows_reordered = pyqtSignal()
 
+    def __init__(self, parent=None):
+        super().__init__(parent)
+        # 关掉自动编辑触发：否则条目一旦可编辑，双击/点已选中项会「自动进入编辑」，
+        # 和「双击=连接」冲突。改为完全由我们显式控制（Enter/F2 + 延迟单击）。
+        self.setEditTriggers(QAbstractItemView.EditTrigger.NoEditTriggers)
+        # Finder 风格：单击已选中的条目 → 延迟进入原地重命名；双击则取消、走连接。
+        self._pending_rename_item = None
+        self._rename_timer = QTimer(self)
+        self._rename_timer.setSingleShot(True)
+        self._rename_timer.timeout.connect(self._fire_pending_rename)
+
     def dropEvent(self, event):
         super().dropEvent(event)
         self.rows_reordered.emit()
+
+    # ----- 原地重命名交互 -----
+
+    def _cancel_pending_rename(self):
+        self._rename_timer.stop()
+        self._pending_rename_item = None
+
+    def _fire_pending_rename(self):
+        item = self._pending_rename_item
+        self._pending_rename_item = None
+        if item is None:
+            return
+        try:
+            if sip.isdeleted(self) or sip.isdeleted(item):
+                return
+        except Exception:
+            pass
+        # 仍是唯一选中项才进入编辑（延迟期间用户可能已切走 / 双击已连接）
+        if self.row(item) >= 0 and item.isSelected() and len(self.selectedItems()) == 1:
+            self.editItem(item)
 
     def keyPressEvent(self, event):
         # 选中单台主机时，Enter / F2 → 原地编辑别名（配合 _HostAliasDelegate 只改 alias）。
@@ -315,12 +347,44 @@ class _HostListWidget(QListWidget):
             items = self.selectedItems()
             if len(items) == 1 and items[0].data(_ROLE_ENTRY) is not None:
                 item = items[0]
+                self._cancel_pending_rename()
                 # 延迟到下一个事件循环再开编辑器：在 Linux 上，keyPressEvent 内同步开的
                 # 编辑器会被同一次回车事件继续派发/键释放立刻关掉（表现为回车没反应）。
                 QTimer.singleShot(0, lambda it=item: self._safe_edit(it))
                 event.accept()
                 return
         super().keyPressEvent(event)
+
+    def mousePressEvent(self, event):
+        # Finder 式：左键无修饰点中「本次点击前已是唯一选中项」的主机 → 等双击窗口
+        # 过后再进入重命名。这样第一次点只选中，再点（单击）才编辑；双击则由
+        # mouseDoubleClickEvent 取消，走「连接」。
+        if (event.button() == Qt.MouseButton.LeftButton
+                and event.modifiers() == Qt.KeyboardModifier.NoModifier):
+            item = self.itemAt(event.position().toPoint())
+            if item is not None and item.data(_ROLE_ENTRY) is not None:
+                if item.isSelected() and len(self.selectedItems()) == 1:
+                    self._pending_rename_item = item
+                    self._rename_timer.start(QApplication.doubleClickInterval() + 80)
+                else:
+                    self._cancel_pending_rename()
+            else:
+                self._cancel_pending_rename()
+        else:
+            self._cancel_pending_rename()
+        super().mousePressEvent(event)
+
+    def mouseDoubleClickEvent(self, event):
+        # 双击 → 取消延迟重命名，让 itemDoubleClicked 走「连接」。
+        self._cancel_pending_rename()
+        super().mouseDoubleClickEvent(event)
+
+    def mouseMoveEvent(self, event):
+        # 按住左键拖动（可能是拖拽改序）→ 取消延迟重命名。
+        if (event.buttons() & Qt.MouseButton.LeftButton
+                and self._pending_rename_item is not None):
+            self._cancel_pending_rename()
+        super().mouseMoveEvent(event)
 
     def _safe_edit(self, item):
         try:
