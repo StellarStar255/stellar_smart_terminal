@@ -10,6 +10,7 @@ import time
 import shutil
 import codecs
 import bisect
+import itertools
 import threading
 from collections import OrderedDict
 from typing import Optional, List
@@ -1204,6 +1205,7 @@ class TerminalWidget(QWidget):
         # 状态完全一致且在底部（无回滚）时，只重绘 pyte 标脏的行。
         self._last_render_state = None
         self._render_epoch = 0
+        self._scroll_blit_hits = 0  # 回看滚动走 pixmap 平移复用的次数（调试/测试用）
 
         # 实例级别的终端颜色（支持主题切换）
         self._current_colors = self.DEFAULT_COLORS.copy()
@@ -1307,6 +1309,24 @@ class TerminalWidget(QWidget):
         fmf = QFontMetricsF(self.term_font)
         self.char_width, self.char_height, self.char_ascent = self._terminal_cell_metrics(fmf)
         self._font_metrics = QFontMetrics(self.term_font)
+        self._ascii_batch_ok = self._probe_ascii_batch(fmf, self.char_width)
+
+    @staticmethod
+    def _probe_ascii_batch(font_metrics, cell_width: float) -> bool:
+        """判断能否把同色连续 ASCII 合成一个字符串一次 drawText。
+
+        串内字形按字体自身推进排布，只有当字体等宽（各 ASCII 推进一致）
+        且推进恰好等于列宽时才与 int() 取整的列栅格对齐；cell 宽度可能被
+        CJK fallback 撑大（_terminal_cell_metrics 取 max），此时必须逐格画。
+        """
+        try:
+            adv = float(font_metrics.horizontalAdvance('W'))
+            if abs(adv - cell_width) > 0.01:
+                return False
+            probe = 'iMl.x0!~'
+            return abs(float(font_metrics.horizontalAdvance(probe)) - len(probe) * adv) < 0.5
+        except Exception:
+            return False
 
     @staticmethod
     def _terminal_cell_metrics(font_metrics):
@@ -2272,6 +2292,7 @@ class TerminalWidget(QWidget):
             self.char_width = painter_width
             self.char_height = painter_height
             self.char_ascent = painter_ascent
+            self._ascii_batch_ok = self._probe_ascii_batch(fm, self.char_width)
             logger.debug(
                 f"[Terminal] Calibration: "
                 f"{old_cw:.1f}x{old_ch:.1f} -> {self.char_width:.1f}x{self.char_height:.1f}"
@@ -2297,6 +2318,23 @@ class TerminalWidget(QWidget):
                 return []
             history = self._screen_history
             return list(history.top) if history else []
+
+    def _get_history_slice(self, start: int, stop: int) -> list:
+        """按 [start, stop) 区间拷贝历史行快照（语义同 _get_history_top，只拷区间）。
+
+        渲染每帧都会取历史行；整拷 5000 行 deque 在 20fps 内容帧下是白白的
+        每帧开销，绝大多数时间（scroll_offset == 0）可见行全部来自
+        screen.buffer，根本不需要碰历史。
+        """
+        if stop <= start:
+            return []
+        with self._screen_lock:
+            if self.screen._in_alt_screen:
+                return []
+            history = self._screen_history
+            if not history:
+                return []
+            return list(itertools.islice(history.top, start, stop))
 
     def _get_history_count(self) -> int:
         """获取历史记录行数（避免重复 hasattr 检查）
@@ -2415,6 +2453,13 @@ class TerminalWidget(QWidget):
             # 拉伸/压缩；动画结束后 set_fast_resize(False) 按最终尺寸重建。
             painter.drawPixmap(0, 0, self._cache_pixmap)
         painter.setCompositionMode(QPainter.CompositionMode.CompositionMode_SourceOver)
+
+        # 滚动指示器（右上角）。画在缓存外：回看滚动时缓存可整体平移复用，
+        # 不必为了指示器重绘顶部行
+        if self.scroll_offset > 0:
+            painter.setPen(QColor("#667eea"))
+            painter.drawText(self.width() - 180, 20,
+                             f"[History: +{self.scroll_offset} lines]")
 
         # 选区高亮单独绘制（不在缓存中，避免拖动时重建缓存）
         if self._has_selection():
@@ -2572,18 +2617,22 @@ class TerminalWidget(QWidget):
         # 记录本次渲染使用的 display_start，供鼠标坐标转换使用
         self._rendered_display_start = start_line
 
-        # 获取历史记录的引用（不转换为列表以提高性能）
-        history = self._get_history_top()
-
         # 计算结束行
         end_line = min(total_lines, start_line + self.term_rows)
+
+        # 只拷可见区间的历史行；scroll_offset == 0（绝大多数帧）时
+        # start_line >= history_count，可见行全部来自 screen.buffer，零拷贝
+        if start_line < history_count:
+            history = self._get_history_slice(start_line, min(end_line, history_count))
+        else:
+            history = []
 
         # 准备要显示的行 - 只获取需要的部分，避免复制整个历史记录
         display_lines = []
         for line_idx in range(start_line, end_line):
             if line_idx < history_count:
-                # 从历史记录中获取（直接索引访问）
-                display_lines.append(history[line_idx])
+                # 从历史切片中获取（切片以 start_line 为原点）
+                display_lines.append(history[line_idx - start_line])
             else:
                 # 从当前屏幕缓冲区获取
                 buffer_row = line_idx - history_count
@@ -2639,11 +2688,75 @@ class TerminalWidget(QWidget):
                 screen_dirty.clear()
                 return
             rows_to_draw = dirty_rows
+        elif (not pixmap_recreated
+                and screen_dirty is not None
+                and not screen_dirty
+                and self._last_render_state is not None
+                and self._last_render_state[2:] == render_state[2:]):
+            # ---- 回看滚动的平移复用 ----
+            # 除可见窗口位置（start/end_line）外渲染状态完全一致且无脏行：
+            # 内容只是整体上下平移。把已有 pixmap 内容按行距平移，只重绘
+            # 新露出的行，避免滚轮每 tick 都整屏逐格重画。
+            last_start, last_end = self._last_render_state[0], self._last_render_state[1]
+            visible_rows = end_line - start_line
+            delta = start_line - last_start
+            dpr_i = round(dpr)
+            if delta == 0:
+                # 位置也没变（如回看期间光标闪烁触发的重绘）→ 无事可做
+                rows_to_draw = set()
+            elif (abs(delta) < visible_rows
+                    and last_end - last_start == visible_rows
+                    and abs(dpr - dpr_i) < 1e-6):
+                # 行距通常是分数像素（CJK 度量撑出），各行像素带高在 ±1px 间
+                # 波动：新旧带高一致的行成段 1:1 blit，带高不同的行加入重绘集，
+                # 保证任何行距下都与整屏重绘逐像素一致（宁多画几行勿花屏）。
+                # drawPixmap 的源矩形按【物理像素】解释（源 pixmap 需带 DPR），
+                # 故源坐标乘 dpr；分数 DPR 下物理坐标不精确，回退整屏重绘。
+                pad_top_f = self.PADDING + self._header_h
+                ch_f = self.char_height
+                if delta > 0:
+                    # 向下滚（内容上移）：新露出的是底部 delta 行
+                    kept = range(visible_rows - delta)
+                    rows_to_draw = set(range(visible_rows - delta, visible_rows))
+                else:
+                    # 向上滚（内容下移）：新露出的是顶部 |delta| 行
+                    kept = range(-delta, visible_rows)
+                    rows_to_draw = set(range(-delta))
+                src = self._cache_pixmap.copy()
+                src.setDevicePixelRatio(dpr)
+                w_phys = src.width()
+                painter.save()
+                painter.setCompositionMode(
+                    QPainter.CompositionMode.CompositionMode_Source)
+                seg_y_new = seg_y_old = seg_h = 0
+                for r in kept:
+                    y_new = int(pad_top_f + r * ch_f)
+                    h_new = int(pad_top_f + (r + 1) * ch_f) - y_new
+                    y_old = int(pad_top_f + (r + delta) * ch_f)
+                    h_old = int(pad_top_f + (r + delta + 1) * ch_f) - y_old
+                    if h_new != h_old:
+                        rows_to_draw.add(r)
+                        if seg_h:
+                            painter.drawPixmap(0, seg_y_new, src,
+                                               0, seg_y_old * dpr_i,
+                                               w_phys, seg_h * dpr_i)
+                            seg_h = 0
+                        continue
+                    if seg_h == 0:
+                        seg_y_new, seg_y_old = y_new, y_old
+                    seg_h += h_new
+                if seg_h:
+                    painter.drawPixmap(0, seg_y_new, src,
+                                       0, seg_y_old * dpr_i,
+                                       w_phys, seg_h * dpr_i)
+                painter.restore()
+                self._scroll_blit_hits += 1
 
         char_width = self.char_width
         char_height = self.char_height
         bg_default = opaque_bg
         last_fg_color = None  # 缓存上一个前景色，减少 setPen 调用
+        batch_ok = getattr(self, '_ascii_batch_ok', False)
         padding = self.PADDING  # 局部变量加速（横向用）
         pad_top = self.PADDING + self._header_h  # 纵向起点（含标题栏占用）
         if rows_to_draw is None:
@@ -2721,26 +2834,62 @@ class TerminalWidget(QWidget):
                 if has_bg:
                     painter.fillRect(cell_x, row_y, char_draw_width, row_h, bg_color)
 
-            for cell_x, _char_draw_width, char_text, fg_color, bg_color, _has_bg in row_cells:
-                # 字符严格按 pyte 的 cell 坐标绘制。pyte 已用 wcwidth 为 CJK
-                # 留出 stub cell；额外按 glyph advance 推动 x 会在 Claude/Ink
-                # 提交后局部重绘时累积偏移，导致中文只显示半个或错位。
-                if char_text and char_text != ' ':
-                    fg_color = self._ensure_visible(fg_color, bg_color)
-                    if fg_color != last_fg_color:
-                        painter.setPen(fg_color)
-                        last_fg_color = fg_color
-                    painter.drawText(cell_x, text_y, char_text)
+            # 字符严格按 pyte 的 cell 坐标绘制。pyte 已用 wcwidth 为 CJK
+            # 留出 stub cell；额外按 glyph advance 推动 x 会在 Claude/Ink
+            # 提交后局部重绘时累积偏移，导致中文只显示半个或错位。
+            #
+            # 合批：同色、列连续的单宽可打印 ASCII 合成一个字符串一次
+            # drawText（batch_ok 保证等宽推进 == 列宽，串内不会漂离栅格），
+            # 全屏重绘从数千次 drawText 降到每行个位数；CJK/制表符/emoji
+            # 等一律保持逐格绘制，维持上述对齐行为。
+            run_x = 0
+            run_next = -1
+            run_color = None
+            run_parts = []
+            for cell_x, cell_w, char_text, fg_color, bg_color, _has_bg in row_cells:
+                if not char_text or char_text == ' ':
+                    # 空格无字形；恰好接在 run 尾部时并入串保持推进，避免
+                    # "hello world" 因中间空格断成两次 drawText
+                    if run_parts and char_text == ' ' and cell_x == run_next:
+                        run_parts.append(' ')
+                        run_next = cell_x + cell_w
+                    continue
+                fg = self._ensure_visible(fg_color, bg_color)
+                if batch_ok and len(char_text) == 1 and '!' <= char_text <= '~':
+                    if run_parts and fg == run_color and cell_x == run_next:
+                        run_parts.append(char_text)
+                        run_next = cell_x + cell_w
+                        continue
+                    if run_parts:
+                        if run_color != last_fg_color:
+                            painter.setPen(run_color)
+                            last_fg_color = run_color
+                        painter.drawText(run_x, text_y, ''.join(run_parts))
+                    run_parts = [char_text]
+                    run_x = cell_x
+                    run_next = cell_x + cell_w
+                    run_color = fg
+                    continue
+                # 非合批字符：先冲刷未完成的 run，再按 cell 坐标逐格画
+                if run_parts:
+                    if run_color != last_fg_color:
+                        painter.setPen(run_color)
+                        last_fg_color = run_color
+                    painter.drawText(run_x, text_y, ''.join(run_parts))
+                    run_parts = []
+                    run_next = -1
+                if fg != last_fg_color:
+                    painter.setPen(fg)
+                    last_fg_color = fg
+                painter.drawText(cell_x, text_y, char_text)
+            if run_parts:
+                if run_color != last_fg_color:
+                    painter.setPen(run_color)
+                    last_fg_color = run_color
+                painter.drawText(run_x, text_y, ''.join(run_parts))
 
-        # 注意：选区高亮和搜索高亮已移至 paintEvent 中单独绘制，
-        # 这样拖动选择时不会触发缓存重建，大幅提升性能
-
-        # 滚动指示器（显示在右上角）
-        # （仅整屏路径会走到：增量路径要求 scroll_offset == 0）
-        if self.scroll_offset > 0:
-            painter.setPen(QColor("#667eea"))
-            indicator_text = f"[History: +{self.scroll_offset} lines]"
-            painter.drawText(self.width() - 180, 20, indicator_text)
+        # 注意：选区高亮、搜索高亮、滚动指示器已移至 paintEvent 中单独绘制，
+        # 缓存里只有内容行，滚动时才能整体平移复用
 
         painter.end()
         self._cache_valid = True
