@@ -175,5 +175,46 @@ class TestCopyPasteShortcuts(KeyboardBase):
         self.assertEqual(w.writes, [], "按键本身不应透传给终端")
 
 
+class TestBracketedPasteWrite(KeyboardBase):
+    """_write_paste 的 Bracketed Paste 包裹与「末尾换行」处理。
+
+    回归：Claude Code 登录「Paste code here」是单行输入且启用了 bracketed paste。
+    三击整行复制 OAuth code 时剪贴板常带尾随换行，_prepare_paste_text 会把它变成
+    末尾的 \\r。若不剥掉，\\r 会被夹进 ESC[200~…ESC[201~，成为 code 的一部分，
+    导致 "Invalid code / 请确认复制了完整 code"。cmd(Windows Terminal) 会剥掉，
+    故 cmd 正常而本终端报错。
+    """
+
+    CODE = "abcDEF123-_xyz#xJruZmAv0LHZK9_hRNb79-nhLXqiKKXlmoKNmZ7lHSQ"
+
+    def _paste(self, w, text, bracketed):
+        w.screen._bracketed_paste = bracketed
+        w.writes = []
+        w._write_paste(w._prepare_paste_text(text))
+        return w.writes[0]
+
+    def test_bracketed_strips_trailing_newline(self):
+        w = self.make_widget()
+        for suffix in ("", "\n", "\r\n", "\r", "\n\n"):
+            with self.subTest(suffix=repr(suffix)):
+                out = self._paste(w, self.CODE + suffix, bracketed=True)
+                self.assertEqual(
+                    out,
+                    b"\x1b[200~" + self.CODE.encode() + b"\x1b[201~",
+                    "bracketed 粘贴的 code 里不应残留尾随 \\r（否则校验失败）")
+
+    def test_bracketed_preserves_internal_newlines(self):
+        # 多行粘进 TUI 编辑器：行内换行要保留（转成 \r），只剥末尾那个。
+        w = self.make_widget()
+        out = self._paste(w, "line1\nline2\n", bracketed=True)
+        self.assertEqual(out, b"\x1b[200~line1\rline2\x1b[201~")
+
+    def test_non_bracketed_keeps_trailing_cr(self):
+        # 普通 shell 粘贴（未启用 bracketed）：末尾 \r 保留，多行命令照旧逐行执行。
+        w = self.make_widget()
+        out = self._paste(w, self.CODE + "\n", bracketed=False)
+        self.assertEqual(out, self.CODE.encode() + b"\r")
+
+
 if __name__ == "__main__":
     unittest.main(verbosity=2)

@@ -4834,8 +4834,19 @@ class TerminalWidget(QWidget):
         当应用（如 Claude Code）启用了 DECSET 2004 时，终端需要把粘贴内容
         包裹在 ESC[200~ ... ESC[201~ 之间，应用据此识别"整块粘贴"（而不是
         逐字键入），从而可以对粘贴的图片路径进行特殊处理（例如显示 [Image #N]）。
+
+        括起来时还要去掉「末尾换行」：_prepare_paste_text 会把换行统一成 \\r，
+        这在非 bracketed 的 shell 粘贴里是对的（每行当作一条命令回车执行），但在
+        bracketed 模式下，末尾那个 \\r 会被夹进 ESC[200~…ESC[201~ 里，成为粘贴
+        内容的一部分。像 Claude Code 登录时「Paste code here」这种单行输入框，会把
+        末尾的 \\r 一并算进 code，导致校验失败（"Invalid code / 请确认复制了完整
+        code"）。用户三击整行复制 OAuth code 时剪贴板常带尾随换行，正是此症。
+        Windows Terminal(cmd) 在 bracketed 粘贴时也会剥掉尾随换行 —— 所以 cmd 正常、
+        本终端却报错。这里只剥「末尾」的 \\r，行内换行照旧保留（多行粘进 TUI 编辑器
+        仍然逐行生效）。
         """
         if self._is_bracketed_paste_enabled():
+            data = data.rstrip(b'\r\n')
             data = b'\x1b[200~' + data + b'\x1b[201~'
         return self._write_to_backend(data)
 
