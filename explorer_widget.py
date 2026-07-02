@@ -38,6 +38,7 @@ from PyQt6.QtGui import (
     QIcon, QPixmap, QPainter,
 )
 from PyQt6.QtCore import QUrl
+from PyQt6 import sip  # 用于检查 C++ 对象是否已被删除
 
 
 class _LocalDropTreeView(QTreeView):
@@ -1963,21 +1964,31 @@ class ExplorerPanel(QWidget):
         action = "overwrite" if clicked is overwrite_btn else "keep"
         return (action, apply_all.isChecked())
 
+    def _await_remote(self, session, fn, *args, label: str):
+        """提交单个远端操作，在事件循环等待中返回结果。
+
+        远端 → 本地粘贴流程里的 stat/listdir 一律走这里，
+        禁止直接 fut.result()——网络一慢就是整窗无限期冻结。
+        """
+        fut = session.submit(fn, *args)
+        self._wait_future_with_progress([fut], label, abort_sessions=[session])
+        return fut.result()
+
     def _download_remote_recursive(self, session, remote_path: str, local_path: str):
         """通过 SSH session 把远程文件 / 目录递归下载到 local_path（阻塞，含进度对话框）"""
         # 先 stat 看是不是目录
-        fut_stat = session.submit(session.stat, remote_path)
-        entry = fut_stat.result()
+        entry = self._await_remote(session, session.stat, remote_path,
+                                   label=t("explorer.pasting"))
         if not entry.is_dir:
             fut = session.submit(session.download, remote_path, local_path)
             self._wait_future_with_progress(
-                [fut], t("explorer.pasting"),
+                [fut], t("explorer.pasting"), abort_sessions=[session],
             )
             return
         # 递归：先 mkdir，再列出，再为每个子项递归
         os.makedirs(local_path, exist_ok=True)
-        fut_list = session.submit(session.listdir, remote_path)
-        children = fut_list.result()
+        children = self._await_remote(session, session.listdir, remote_path,
+                                      label=t("explorer.pasting"))
         # 一层一层下载，文件并发用同一 session executor 排队即可
         for child in children:
             child_local = os.path.join(local_path, child.name)
@@ -1985,16 +1996,32 @@ class ExplorerPanel(QWidget):
                 self._download_remote_recursive(session, child.path, child_local)
             else:
                 fut = session.submit(session.download, child.path, child_local)
-                self._wait_future_with_progress([fut], t("explorer.pasting"))
+                self._wait_future_with_progress([fut], t("explorer.pasting"),
+                                                abort_sessions=[session])
 
-    def _wait_future_with_progress(self, futures: list, label: str):
-        """阻塞等待 futures，但跑一个事件循环让 UI 不卡。"""
+    def _wait_future_with_progress(self, futures: list, label: str,
+                                   abort_sessions: Optional[list] = None):
+        """阻塞等待 futures，但跑一个事件循环让 UI 不卡。
+
+        abort_sessions：给出时进度框带「取消」按钮，点击后 abort 这些
+        会话直接关 socket，让卡住的传输立刻失败返回。
+        """
         if not futures:
             return
-        progress = QProgressDialog(label, None, 0, len(futures), self)
+        cancel_text = t("remote.cancel_transfer") if abort_sessions else None
+        progress = QProgressDialog(label, cancel_text, 0, len(futures), self)
         progress.setWindowModality(Qt.WindowModality.WindowModal)
         progress.setMinimumDuration(300)
         progress.setValue(0)
+        if abort_sessions:
+            def _on_cancel(_sessions=list(abort_sessions)):
+                for s in _sessions:
+                    if s is not None:
+                        try:
+                            s.abort()
+                        except Exception:
+                            pass
+            progress.canceled.connect(_on_cancel)
         done = {"n": 0, "errors": []}
 
         def make_cb(_):
@@ -2013,14 +2040,28 @@ class ExplorerPanel(QWidget):
         timer = QTimer()
         timer.setInterval(80)
         def tick():
-            progress.setValue(done["n"])
-            if done["n"] >= len(futures):
+            # 父 widget 可能在等待期间被销毁（如用户关掉 panel/窗口），
+            # 此时 progress 也已 deleteLater'd → 任何访问都会段错误
+            try:
+                if sip.isdeleted(progress):
+                    timer.stop()
+                    loop.quit()
+                    return
+                progress.setValue(done["n"])
+                if done["n"] >= len(futures):
+                    timer.stop()
+                    loop.quit()
+            except RuntimeError:
                 timer.stop()
                 loop.quit()
         timer.timeout.connect(tick)
         timer.start()
         loop.exec()
-        progress.setValue(len(futures))
+        try:
+            if not sip.isdeleted(progress):
+                progress.setValue(len(futures))
+        except RuntimeError:
+            pass
         if done["errors"]:
             raise RuntimeError("; ".join(done["errors"]))
 

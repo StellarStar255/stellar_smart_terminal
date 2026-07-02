@@ -3048,8 +3048,8 @@ class RemoteExplorerPanel(QWidget):
         失败时返回空 set，调用方会回落到单次 stat 判定（next_free_name 内会 stat）。
         """
         try:
-            fut = sess.submit(sess.listdir, path)
-            entries = fut.result()
+            entries = self._await_remote(sess, sess.listdir, path,
+                                         label=t("remote.pasting_progress", dst=path))
             return {e.name for e in entries}
         except Exception:
             return set()
@@ -3086,26 +3086,27 @@ class RemoteExplorerPanel(QWidget):
                 return
         self._populate_tree_root()
 
-    def _remote_exists(self, sess: SSHSession, path: str) -> bool:
-        fut = sess.submit(sess.stat, path)
-        try:
-            fut.result()
-            return True
-        except Exception:
-            return False
+    def _await_remote(self, sess: SSHSession, fn, *args, label: str):
+        """提交单个远端操作，在事件循环等待中返回结果。
+
+        粘贴/覆盖删除流程里的 stat/listdir/remove 一律走这里，
+        禁止直接 fut.result()——网络一慢就是整窗无限期冻结。
+        """
+        fut = sess.submit(fn, *args)
+        self._wait_future_with_progress([fut], label, abort_sessions=[sess])
+        return fut.result()
 
     def _remote_remove(self, sess: SSHSession, path: str):
         """删除远端文件或目录（递归）"""
-        fut_stat = sess.submit(sess.stat, path)
+        label = t("remote.pasting_progress", dst=path)
         try:
-            entry: RemoteEntry = fut_stat.result()
+            entry: RemoteEntry = self._await_remote(sess, sess.stat, path, label=label)
         except Exception:
             return
         if entry.is_dir and not entry.is_link:
-            fut = sess.submit(sess.remove_tree, path)
+            self._await_remote(sess, sess.remove_tree, path, label=label)
         else:
-            fut = sess.submit(sess.remove, path)
-        fut.result()
+            self._await_remote(sess, sess.remove, path, label=label)
 
     def _upload_local_dir(self, sess: SSHSession, local_dir: str, remote_dir: str):
         """把本地目录递归上传到 remote_dir"""
@@ -3150,7 +3151,9 @@ class RemoteExplorerPanel(QWidget):
                           src_path: str, dst_path: str):
         """跨/同 session 远程 → 远程：经本地 temp 中转"""
         # 先 stat 源判断是不是目录
-        entry: RemoteEntry = src_sess.submit(src_sess.stat, src_path).result()
+        entry: RemoteEntry = self._await_remote(
+            src_sess, src_sess.stat, src_path,
+            label=t("remote.pasting_progress", dst=dst_path))
         tmp_root = tempfile.mkdtemp(prefix="smart_terminal_paste_")
         try:
             tmp_local = os.path.join(tmp_root, os.path.basename(src_path.rstrip("/")) or "item")
@@ -3183,7 +3186,9 @@ class RemoteExplorerPanel(QWidget):
 
     def _download_remote_recursive(self, sess: SSHSession, remote_path: str, local_path: str):
         """通过 src session 把远程文件 / 目录递归下载到 local_path（阻塞）"""
-        entry: RemoteEntry = sess.submit(sess.stat, remote_path).result()
+        entry: RemoteEntry = self._await_remote(
+            sess, sess.stat, remote_path,
+            label=t("remote.pasting_progress", dst=local_path))
         if not entry.is_dir:
             fut = sess.submit(sess.download, remote_path, local_path)
             self._wait_future_with_progress([fut], t("remote.pasting_progress",
@@ -3191,7 +3196,9 @@ class RemoteExplorerPanel(QWidget):
                                             abort_sessions=[sess])
             return
         os.makedirs(local_path, exist_ok=True)
-        children = sess.submit(sess.listdir, remote_path).result()
+        children = self._await_remote(
+            sess, sess.listdir, remote_path,
+            label=t("remote.pasting_progress", dst=local_path))
         for child in children:
             child_local = os.path.join(local_path, child.name)
             if child.is_dir and not child.is_link:

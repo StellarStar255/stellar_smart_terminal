@@ -5,11 +5,13 @@
 import json
 import re
 import tempfile
+from concurrent.futures import Future, ThreadPoolExecutor
 from datetime import datetime
 from pathlib import Path
 from typing import List, Optional, Dict, Any
-from dataclasses import dataclass, field, asdict
+from dataclasses import dataclass, field
 
+from app_logging import get_logger
 from utils import (
     get_sessions_dir,
     generate_session_id,
@@ -17,17 +19,75 @@ from utils import (
     format_timestamp
 )
 
+logger = get_logger(__name__)
 
-@dataclass
+
 class SessionEntry:
-    """会话条目"""
-    type: str  # 'input' 或 'output'
-    content: str
-    timestamp: str
-    files: List[str] = field(default_factory=list)
+    """会话条目
+
+    content 内部按分段列表存储：追加只做 list.append，读取时才 join。
+    连续输出合并到同一条目时，`+=` 会把整串复制一遍（总代价 O(n²)），
+    长会话大输出下会拖死 GUI 线程，故必须走 append_content。
+    """
+
+    # 单条目内容上限（字符数），超过后从最旧内容开始滚动截断
+    MAX_CONTENT_CHARS = 10 * 1024 * 1024
+    TRUNCATION_MARK = '[...内容过长，较早输出已截断...]\n'
+
+    __slots__ = ('type', 'timestamp', 'files', '_parts', '_length', '_truncated')
+
+    def __init__(self, type: str, content: str = '', timestamp: str = '',
+                 files: Optional[List[str]] = None):
+        self.type = type  # 'input' 或 'output'
+        self.timestamp = timestamp
+        self.files: List[str] = files if files is not None else []
+        self._parts: List[str] = [content] if content else []
+        self._length = len(content)
+        self._truncated = False
+
+    @property
+    def content(self) -> str:
+        if len(self._parts) > 1:
+            # join 后合并为单段，缓存结果避免重复 join
+            self._parts = [''.join(self._parts)]
+        body = self._parts[0] if self._parts else ''
+        if self._truncated:
+            return self.TRUNCATION_MARK + body
+        return body
+
+    @content.setter
+    def content(self, value: str):
+        self._parts = [value] if value else []
+        self._length = len(value)
+        self._truncated = False
+
+    @property
+    def content_length(self) -> int:
+        """当前内容长度（不触发 join）"""
+        return self._length
+
+    def append_content(self, text: str):
+        """追加内容，超过上限时滚动丢弃最旧的分段"""
+        self._parts.append(text)
+        self._length += len(text)
+        if self._length > self.MAX_CONTENT_CHARS:
+            while self._length > self.MAX_CONTENT_CHARS and len(self._parts) > 1:
+                removed = self._parts.pop(0)
+                self._length -= len(removed)
+                self._truncated = True
+            if self._length > self.MAX_CONTENT_CHARS:
+                kept = self._parts[0][-self.MAX_CONTENT_CHARS:]
+                self._parts = [kept]
+                self._length = len(kept)
+                self._truncated = True
 
     def to_dict(self) -> dict:
-        return asdict(self)
+        return {
+            'type': self.type,
+            'content': self.content,
+            'timestamp': self.timestamp,
+            'files': list(self.files),
+        }
 
     @classmethod
     def from_dict(cls, data: dict) -> 'SessionEntry':
@@ -45,6 +105,8 @@ class Session:
     entries: List[SessionEntry] = field(default_factory=list)
     end_time: Optional[str] = None
     working_directory: str = ""
+    # 单调递增的修订号，任何内容变更都会 +1，供 auto_save 跳过无变化的保存
+    revision: int = field(default=0, compare=False)
 
     def to_dict(self) -> dict:
         return {
@@ -82,6 +144,17 @@ class SessionManager:
     def __init__(self):
         self.sessions_dir = get_sessions_dir()
         self.current_session: Optional[Session] = None
+        # auto_save 的序列化和磁盘写入放到后台线程，避免长会话时
+        # 每 30 秒在 GUI 线程 json.dump 整个会话造成周期性卡顿
+        self._save_executor = ThreadPoolExecutor(
+            max_workers=1, thread_name_prefix='session-save')
+        self._pending_save: Optional[Future] = None
+        self._last_saved_sig: Optional[tuple] = None
+
+    @staticmethod
+    def _session_signature(session: Session) -> tuple:
+        """会话内容签名，用于跳过无变化的自动保存"""
+        return (session.session_id, session.revision)
 
     def create_session(self, command: str = "claude") -> Session:
         """创建新会话"""
@@ -108,6 +181,7 @@ class SessionManager:
             files=files
         )
         self.current_session.entries.append(entry)
+        self.current_session.revision += 1
         return entry
 
     def add_output(self, content: str) -> SessionEntry:
@@ -122,7 +196,8 @@ class SessionManager:
         if (self.current_session.entries and
             self.current_session.entries[-1].type == 'output'):
             last_entry = self.current_session.entries[-1]
-            last_entry.content += content
+            last_entry.append_content(content)
+            self.current_session.revision += 1
             # 性能优化：合并时不更新时间戳，减少函数调用
             return last_entry
 
@@ -134,6 +209,7 @@ class SessionManager:
             files=[]  # 延迟提取
         )
         self.current_session.entries.append(entry)
+        self.current_session.revision += 1
         return entry
 
     def end_session(self) -> Optional[Session]:
@@ -161,8 +237,24 @@ class SessionManager:
         return bool(self._SESSION_ID_RE.match(session_id))
 
     def save_session(self, session: Session) -> Path:
-        """保存会话到文件（原子写入防止损坏）"""
-        file_path = self.sessions_dir / f"{session.session_id}.json"
+        """同步保存会话到文件（原子写入防止损坏）"""
+        # 等待在途的后台保存，避免旧快照晚于新数据落盘
+        self._wait_pending_save()
+        data = session.to_dict()
+        self._last_saved_sig = self._session_signature(session)
+        return self._write_session_data(data, session.session_id)
+
+    def _wait_pending_save(self, timeout: float = 10.0):
+        future = self._pending_save
+        self._pending_save = None
+        if future is not None:
+            try:
+                future.result(timeout=timeout)
+            except Exception:
+                pass  # 写入失败已在 _write_session_data 内记录
+
+    def _write_session_data(self, data: dict, session_id: str) -> Path:
+        file_path = self.sessions_dir / f"{session_id}.json"
         # Write to a temp file first, then atomically replace
         try:
             fd, tmp_path = tempfile.mkstemp(
@@ -170,7 +262,7 @@ class SessionManager:
             )
             try:
                 with open(fd, 'w', encoding='utf-8') as f:
-                    json.dump(session.to_dict(), f, ensure_ascii=False, indent=2)
+                    json.dump(data, f, ensure_ascii=False, indent=2)
                 Path(tmp_path).replace(file_path)
             except BaseException:
                 Path(tmp_path).unlink(missing_ok=True)
@@ -178,7 +270,7 @@ class SessionManager:
         except OSError:
             # Fallback to direct write if temp file fails
             with open(file_path, 'w', encoding='utf-8') as f:
-                json.dump(session.to_dict(), f, ensure_ascii=False, indent=2)
+                json.dump(data, f, ensure_ascii=False, indent=2)
         return file_path
 
     def load_session(self, session_id: str) -> Optional[Session]:
@@ -228,6 +320,30 @@ class SessionManager:
         return False
 
     def auto_save(self):
-        """自动保存当前会话（不结束）"""
-        if self.current_session:
-            self.save_session(self.current_session)
+        """自动保存当前会话（不结束）
+
+        序列化与写盘在后台线程执行；内容无变化或上一次写入未完成时跳过。
+        """
+        session = self.current_session
+        if not session:
+            return
+        if self._pending_save is not None and not self._pending_save.done():
+            return
+        sig = self._session_signature(session)
+        if sig == self._last_saved_sig:
+            return
+        # 快照必须在调用线程完成：to_dict 会读取 entries，
+        # 后台线程只拿纯 dict/str，不再触碰会话对象
+        data = session.to_dict()
+        self._last_saved_sig = sig
+        self._pending_save = self._save_executor.submit(
+            self._save_in_background, data, session.session_id, sig)
+
+    def _save_in_background(self, data: dict, session_id: str, sig: tuple):
+        try:
+            self._write_session_data(data, session_id)
+        except Exception as e:
+            logger.warning(f"session auto_save failed: {e}")
+            # 写失败则撤销签名，让下一轮 auto_save 重试
+            if self._last_saved_sig == sig:
+                self._last_saved_sig = None
