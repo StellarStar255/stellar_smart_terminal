@@ -240,6 +240,23 @@ def _extract_marker_based_response(lines: List[str], last_marker_line: int) -> O
     return None
 
 
+# C0 控制字符（除 \t \n \r）+ DEL + C1；ESC 也在内 → 阻断 ANSI/OSC 转义序列。
+# 请求正文会被粘贴进能执行命令的终端，恶意本地进程可借控制序列做键盘注入 /
+# 终端标题改写 / 伪造粘贴括号等。合法聊天正文不含这些字节，直接剥离。
+_PTY_CONTROL_RE = re.compile(r'[\x00-\x08\x0b\x0c\x0e-\x1f\x7f-\x9f]')
+
+
+def _sanitize_pty_input(text: str) -> str:
+    """剥离注入到终端的用户正文里的控制字符，保留 \\t 与换行。
+
+    仅用于外部 HTTP 请求正文；内部生成的控制序列（ESC 中断 / \\r / /clear）
+    不经此函数，走 bridge.send_input 原样发送。
+    """
+    if not text:
+        return text
+    return _PTY_CONTROL_RE.sub('', text)
+
+
 def extract_response_from_screen(screen_content: str, input_text: str = "") -> str:
     """从屏幕内容中提取 AI 响应 - 只提取最后一次用户输入之后的 AI 回答（调度函数）"""
     if not screen_content:
@@ -1006,7 +1023,7 @@ class OpenAIRequestHandler(BaseHTTPRequestHandler):
                         if image_path:
                             parts.append(image_path)
 
-        return '\n'.join(parts)
+        return _sanitize_pty_input('\n'.join(parts))
 
     def _save_image(self, image_url: dict) -> Optional[str]:
         url = image_url.get('url', '')
@@ -1847,7 +1864,11 @@ class OpenAIServerManager(QObject):
             raise RuntimeError(f"服务器已在 tab {tab_index} 上运行")
 
         actual_port = self.port_allocator.allocate(tab_index, port)
-        config = ServerConfig(port=actual_port)
+        # 可选鉴权：设了 STELLAR_OPENAI_API_KEY 就要求 Bearer 校验。默认空=沿用
+        # 旧行为（无鉴权，仅 localhost 绑定 + CSRF 头防护），避免切断已有外部工具；
+        # 安全意识强的用户可用它把本地任意进程注入终端的入口关掉。
+        api_key = (os.environ.get('STELLAR_OPENAI_API_KEY') or '').strip()
+        config = ServerConfig(port=actual_port, api_key=api_key)
         server = OpenAICompatServer(terminal_widget, config)
         # tab 索引是位置性的，关闭/分离其他 tab 后会变化；把当前索引存在 server 上，
         # 信号回调动态读取 server.tab_index，配合 remap_indices() 重新映射，避免指向错误 tab。

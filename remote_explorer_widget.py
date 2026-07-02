@@ -1481,6 +1481,7 @@ class RemoteExplorerPanel(QWidget):
         sess = SSHSession(host, parent=self)
         sess.connected.connect(lambda: self._on_session_connected(sess))
         sess.connect_failed.connect(lambda msg: self._on_session_connect_failed(sess, msg))
+        sess.host_key_check_degraded.connect(self._on_host_key_degraded)
         sess.connect_async(
             password_provider=self._prompt_password,
             passphrase_provider=self._prompt_password,
@@ -1530,6 +1531,10 @@ class RemoteExplorerPanel(QWidget):
         已缓存的密码带给新窗口的 Remote 面板，避免自动连接 SFTP 时再次弹框。"""
         if alias and password:
             self._cached_passwords[alias] = password
+
+    def _on_host_key_degraded(self, reason: str):
+        """known_hosts 加载失败 → MITM 拦截降级，非模态警告横幅提示用户。"""
+        self.error_occurred.emit(reason)
 
     def _on_session_connected(self, sess: SSHSession):
         if sess is not self._session:

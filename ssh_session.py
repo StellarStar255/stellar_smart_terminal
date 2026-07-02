@@ -33,6 +33,10 @@ paramiko.sftp_file.SFTPFile.MAX_REQUEST_SIZE = 1024 * 256
 
 from PyQt6.QtCore import QObject, pyqtSignal
 
+from app_logging import get_logger
+
+logger = get_logger(__name__)
+
 from i18n import t
 
 # --- 连接稳定性参数 ---
@@ -459,6 +463,8 @@ class SSHSession(QObject):
     connected = pyqtSignal()
     connect_failed = pyqtSignal(str)        # error message
     disconnected = pyqtSignal()
+    # known_hosts 加载失败：MITM 防护（主机密钥变更拦截）已降级，UI 应提示用户
+    host_key_check_degraded = pyqtSignal(str)  # 降级原因描述
 
     def __init__(self, host_config: HostConfig, parent: Optional[QObject] = None):
         super().__init__(parent)
@@ -476,6 +482,7 @@ class SSHSession(QObject):
         self._passphrase_provider: Optional[Callable[[str], Optional[str]]] = None
         self._auth_secrets: dict[str, dict[str, str]] = {}
         self._home: Optional[str] = None
+        self._host_key_degraded = False  # known_hosts 加载失败 → MITM 拦截降级
         # 路径 → (timestamp, entries) 的 listdir 缓存，节省重复网络往返
         self._listdir_cache: dict[str, tuple[float, list["RemoteEntry"]]] = {}
         self._cache_ttl = 30.0  # seconds
@@ -556,8 +563,20 @@ class SSHSession(QObject):
         try:
             if os.path.isfile(known_hosts):
                 client.load_host_keys(known_hosts)
-        except Exception:
-            pass
+        except Exception as e:
+            # known_hosts 损坏/不可读 → paramiko 拿不到历史指纹，主机密钥变更
+            # （典型 MITM 特征）不再被拦截。绝不能静默：记日志 + 标记降级，
+            # 由 UI 提示用户，让"防护已失效"变得可见而非无声通过。
+            self._host_key_degraded = True
+            logger.warning(
+                "known_hosts 加载失败，主机密钥变更拦截已降级 (%s): %s",
+                known_hosts, e,
+            )
+            try:
+                self.host_key_check_degraded.emit(
+                    t("ssh.host_key_degraded", path=known_hosts))
+            except Exception:
+                pass
         host_key_policy = _PersistOnFirstUsePolicy()
         client.set_missing_host_key_policy(host_key_policy)
 
@@ -744,8 +763,10 @@ class SSHSession(QObject):
         """关闭连接（在 UI 线程调用安全）"""
         try:
             self._executor.submit(self._do_disconnect).result(timeout=5)
-        except Exception:
-            pass
+        except Exception as e:
+            # 关闭失败（如超时）不阻断流程，但记一行便于排查连接泄漏
+            logger.debug("disconnect cleanup failed for %s: %s",
+                         self.host_config.alias, e)
         self._executor.shutdown(wait=False)
         self.disconnected.emit()
 

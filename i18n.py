@@ -745,6 +745,7 @@ TRANSLATIONS = {
     # ===== SSH 会话 =====
     "ssh.reconnect_failed": {"zh": "SSH 自动重连失败", "en": "SSH automatic reconnect failed"},
     "ssh.jump_channel_failed": {"zh": "无法通过跳板机建立转发通道", "en": "Failed to open forwarding channel via jump host"},
+    "ssh.host_key_degraded": {"zh": "⚠ 无法加载 known_hosts（{path}），主机密钥变更拦截已降级，本次连接无法防御中间人攻击。请检查该文件。", "en": "⚠ Could not load known_hosts ({path}); host-key change detection is degraded and this connection cannot defend against MITM. Please check that file."},
 
     # ===== 历史对话框 =====
     "history.title": {"zh": "历史会话", "en": "Session History"},
