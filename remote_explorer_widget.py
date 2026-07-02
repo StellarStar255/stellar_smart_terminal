@@ -248,8 +248,40 @@ class _AddHostDialog(QDialog):
         return self._alias_edit.text().strip() if self._alias_edit else ""
 
 
+class _HostAliasDelegate(QStyledItemDelegate):
+    """主机列表原地重命名：编辑框只显示/编辑「别名」而非整条 "🖥 alias  target"。
+
+    提交时不写回 item 文本（显示是带图标和地址的组合），而是交给 panel 改写
+    ~/.ssh/config（或内存主机）并刷新列表。
+    """
+
+    def __init__(self, panel):
+        super().__init__(panel)
+        self._panel = panel
+
+    def setEditorData(self, editor, index):
+        host = index.data(_ROLE_ENTRY)
+        if isinstance(editor, QLineEdit) and host is not None:
+            editor.setText(host.alias)
+            # 全选，方便直接输入覆盖（延后一拍，绕开 view 打开编辑器后的内部 selectAll）
+            QTimer.singleShot(0, editor.selectAll)
+        else:
+            super().setEditorData(editor, index)
+
+    def setModelData(self, editor, model, index):
+        host = index.data(_ROLE_ENTRY)
+        if not isinstance(editor, QLineEdit) or host is None:
+            super().setModelData(editor, model, index)
+            return
+        new_alias = editor.text().strip()
+        if new_alias and new_alias != host.alias:
+            panel = self._panel
+            # 延后执行：重建列表会删掉正在关闭的编辑器/条目，放到下一轮事件循环更安全
+            QTimer.singleShot(0, lambda: panel._apply_host_rename(host, new_alias))
+
+
 class _HostListWidget(QListWidget):
-    """主机列表：手动排序模式下支持内部拖拽改顺序。
+    """主机列表：手动排序模式下支持内部拖拽改顺序；Enter / F2 原地重命名别名。
 
     用 dropEvent 覆写在拖放完成后发 rows_reordered，比连 model().rowsMoved
     可靠——QListWidget 的 InternalMove 在不少 Qt 版本里是「删除+插入」实现，
@@ -260,6 +292,29 @@ class _HostListWidget(QListWidget):
     def dropEvent(self, event):
         super().dropEvent(event)
         self.rows_reordered.emit()
+
+    def keyPressEvent(self, event):
+        # 选中单台主机时，Enter / F2 → 原地编辑别名（配合 _HostAliasDelegate 只改 alias）。
+        if event.key() in (Qt.Key.Key_Return, Qt.Key.Key_Enter, Qt.Key.Key_F2):
+            items = self.selectedItems()
+            if len(items) == 1 and items[0].data(_ROLE_ENTRY) is not None:
+                item = items[0]
+                # 延迟到下一个事件循环再开编辑器：在 Linux 上，keyPressEvent 内同步开的
+                # 编辑器会被同一次回车事件继续派发/键释放立刻关掉（表现为回车没反应）。
+                QTimer.singleShot(0, lambda it=item: self._safe_edit(it))
+                event.accept()
+                return
+        super().keyPressEvent(event)
+
+    def _safe_edit(self, item):
+        try:
+            if sip.isdeleted(self) or sip.isdeleted(item):
+                return
+        except Exception:
+            pass
+        # 条目仍存在且仍是当前选中项才编辑
+        if self.row(item) >= 0:
+            self.editItem(item)
 
 
 class _RemoteTreeWidget(QTreeWidget):
@@ -791,6 +846,8 @@ class RemoteExplorerPanel(QWidget):
         hp_layout.addWidget(self._empty_hint)
 
         self._hosts_list = _HostListWidget()
+        # 原地重命名别名（Enter/F2）：编辑框只改 alias，提交后走 _apply_host_rename
+        self._hosts_list.setItemDelegate(_HostAliasDelegate(self))
         self._hosts_list.itemDoubleClicked.connect(self._on_host_activated)
         self._hosts_list.setContextMenuPolicy(Qt.ContextMenuPolicy.CustomContextMenu)
         self._hosts_list.customContextMenuRequested.connect(self._on_hosts_context_menu)
@@ -1051,6 +1108,8 @@ class RemoteExplorerPanel(QWidget):
                 target = f"{h.user + '@' if h.user else ''}{h.hostname}:{h.port}"
                 item = QListWidgetItem(f"🖥  {h.alias}    {target}")
                 item.setData(_ROLE_ENTRY, h)
+                # 允许 Enter/F2 原地重命名（编辑框由 _HostAliasDelegate 只显示 alias）
+                item.setFlags(item.flags() | Qt.ItemFlag.ItemIsEditable)
                 self._hosts_list.addItem(item)
 
     def _on_add_host_clicked(self):
@@ -1192,10 +1251,18 @@ class RemoteExplorerPanel(QWidget):
         )
         if dlg.exec() != QDialog.DialogCode.Accepted:
             return
-        new_alias = dlg.value()
+        self._apply_host_rename(host, dlg.value())
+
+    def _apply_host_rename(self, host: HostConfig, new_alias: str):
+        """把某主机别名改为 new_alias 并落盘/刷新。供弹窗重命名与 Enter/F2 原地
+        重命名共用。别名为空或未变则忽略；重名/写盘失败弹一次提示。"""
+        new_alias = (new_alias or "").strip()
         if not new_alias or new_alias == host.alias:
             return
-
+        if self._is_memory_host(host):
+            host.alias = new_alias          # 仅内存中的主机（未落 config）→ 直接改
+            self._populate_hosts_list()
+            return
         try:
             renamed = rename_ssh_config_host(host.alias, new_alias)
         except ValueError:
@@ -1210,11 +1277,10 @@ class RemoteExplorerPanel(QWidget):
                 t("remote.rename_host_failed").format(error=e),
             )
             return
-
         if renamed:
             self._reload_hosts()            # config 改了 → 重新读取
         else:
-            host.alias = new_alias          # 仅内存中的主机（未落 config）→ 直接改
+            host.alias = new_alias          # config 里没匹配到（内存态）→ 直接改
             self._populate_hosts_list()
 
     def _is_memory_host(self, host: HostConfig) -> bool:
