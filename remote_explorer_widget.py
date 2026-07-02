@@ -259,6 +259,22 @@ class _HostAliasDelegate(QStyledItemDelegate):
         super().__init__(panel)
         self._panel = panel
 
+    def createEditor(self, parent, option, index):
+        editor = QLineEdit(parent)
+        # 深色主题下必须显式给编辑框配色，否则默认是深底深字，回车后完全看不清。
+        editor.setStyleSheet("""
+            QLineEdit {
+                background-color: #2d2d44;
+                color: #ffffff;
+                border: 1px solid #667eea;
+                border-radius: 3px;
+                padding: 1px 4px;
+                selection-background-color: #667eea;
+                selection-color: #ffffff;
+            }
+        """)
+        return editor
+
     def setEditorData(self, editor, index):
         host = index.data(_ROLE_ENTRY)
         if isinstance(editor, QLineEdit) and host is not None:
