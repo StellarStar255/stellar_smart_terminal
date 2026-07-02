@@ -687,6 +687,7 @@ TRANSLATIONS = {
     "remote.rename_host_ok": {"zh": "重命名", "en": "Rename"},
     "remote.rename_host_exists": {"zh": "别名 “{alias}” 已存在，请换一个。", "en": "Alias “{alias}” already exists, pick another."},
     "remote.rename_host_failed": {"zh": "重命名失败：\n{error}", "en": "Rename failed:\n{error}"},
+    "remote.add_host_menu": {"zh": "添加主机…", "en": "Add Host…"},
     "remote.edit_host": {"zh": "编辑…", "en": "Edit…"},
     "remote.edit_host_title": {"zh": "编辑主机", "en": "Edit Host"},
     "remote.edit_host_hint": {"zh": "修改连接地址 [用户@]主机[:端口] 与别名；会就地改写 ~/.ssh/config，保留密钥/跳板等其它设置。", "en": "Edit the address [user@]host[:port] and alias; updates ~/.ssh/config in place, keeping IdentityFile/ProxyJump and other settings."},

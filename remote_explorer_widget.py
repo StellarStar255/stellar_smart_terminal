@@ -1151,6 +1151,10 @@ class RemoteExplorerPanel(QWidget):
         """
         menu = QMenu(self)
         menu.setStyleSheet(menu_css)
+        # 「添加主机」始终可用（点空白处或点主机都在，方便随时新增）
+        add_act = menu.addAction(t("remote.add_host_menu"))
+        add_act.triggered.connect(lambda checked=False: self._on_add_host_clicked())
+        menu.addSeparator()
         if host is not None:
             connect_act = menu.addAction(t("remote.connect"))
             connect_act.triggered.connect(lambda checked=False, h=host: self._connect_to(h))
