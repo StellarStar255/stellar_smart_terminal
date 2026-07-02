@@ -853,6 +853,7 @@ class GitCommitWidget(QFrame):
         self._behind = 0
         self._push_busy = False
         self._pull_busy = False
+        self._commit_busy = False
         self._setup_ui()
 
     def _setup_ui(self):
@@ -1004,13 +1005,17 @@ class GitCommitWidget(QFrame):
         self.message_input.setPlainText(text)
 
     def set_busy(self, kind: str, busy: bool):
-        """push/pull 进行中：禁用相关按钮并显示忙碌文案，避免重复点击。"""
+        """push/pull/commit 进行中：禁用相关按钮并显示忙碌文案，避免重复点击。"""
         if kind == 'push':
             self._push_busy = busy
             self.push_btn.setEnabled(not busy)
         elif kind == 'pull':
             self._pull_busy = busy
             self.pull_btn.setEnabled(not busy)
+        elif kind == 'commit':
+            self._commit_busy = busy
+            self.commit_btn.setEnabled(not busy)
+            self.commit_btn.setText("Committing…" if busy else "Commit")
         self._update_sync_button_text()
 
     def set_ahead_behind(self, ahead: int, behind: int):
@@ -2267,6 +2272,8 @@ class GitPanel(QWidget):
         self._last_fetch_ts = 0.0  # 上次后台 fetch 的时间（节流用）
         self._active_workers = set()  # 在跑的后台线程，关闭时统一等待，避免被销毁时 abort
         self._fetch_running = False
+        self._commit_running = False
+        self._checkout_running = False
         self._refresh_running = False   # 后台全量刷新是否进行中
         self._refresh_pending = False   # 进行中又被请求 → 跑完后补一次（合并）
         self._status_refresh_running = False  # 后台轻量状态刷新是否进行中
@@ -3281,7 +3288,11 @@ class GitPanel(QWidget):
         self._active_workers.clear()
 
     def _on_ref_changed(self, kind: str, name: str):
-        """引用切换处理（本地/远程分支或 tag）"""
+        """引用切换处理（本地/远程分支或 tag）。
+
+        checkout 在后台线程执行：大仓库/慢磁盘时同步跑会冻结整个窗口
+        （_run_git 超时上限 30s）。
+        """
         # detached 占位项仅用于显示，不触发任何操作
         if kind == 'detached':
             return
@@ -3289,8 +3300,20 @@ class GitPanel(QWidget):
         # 已经在目标引用上，无需切换
         if (kind, name) == (head_kind, head_name):
             return
+        if self._checkout_running:
+            # 上一个 checkout 还没完成：忽略本次，刷新让选中态回到实际 HEAD
+            self._refresh_all_async()
+            return
+        self._checkout_running = True
+        worker = _GitOpWorker(
+            lambda: self._git_manager.checkout_ref(kind, name), 'checkout', self)
+        worker.done.connect(self._on_checkout_done)
+        self._register_worker(worker)
+        worker.start()
+
+    def _on_checkout_done(self, _ok: bool, _kind: str):
+        self._checkout_running = False
         # 不论 checkout 成功失败都刷新一次（含状态），以同步 UI 选中态
-        self._git_manager.checkout_ref(kind, name)
         self._refresh_all_async()
 
     def _on_discard_file(self, path: str):
@@ -3306,8 +3329,25 @@ class GitPanel(QWidget):
             self._git_manager.discard_changes(path)
 
     def _on_commit(self, message: str):
-        """提交处理：仅在提交成功后才清空输入框，失败时保留用户已写的信息。"""
-        if self._git_manager.commit(message):
+        """提交处理：仅在提交成功后才清空输入框，失败时保留用户已写的信息。
+
+        commit 在后台线程执行：pre-commit hook / 大索引可能耗时数秒到
+        数十秒，同步跑会冻结整个窗口（_run_git 超时上限 30s）。
+        """
+        if self._commit_running:
+            return
+        self._commit_running = True
+        self.commit_widget.set_busy('commit', True)
+        worker = _GitOpWorker(
+            lambda: self._git_manager.commit(message), 'commit', self)
+        worker.done.connect(self._on_commit_done)
+        self._register_worker(worker)
+        worker.start()
+
+    def _on_commit_done(self, ok: bool, _kind: str):
+        self._commit_running = False
+        self.commit_widget.set_busy('commit', False)
+        if ok:
             self.commit_widget.clear_message()
             self._refresh_all_async()
 
