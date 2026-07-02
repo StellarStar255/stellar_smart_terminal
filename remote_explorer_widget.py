@@ -1038,6 +1038,19 @@ class RemoteExplorerPanel(QWidget):
 
         root.addWidget(self._stack, 1)
 
+        # Cmd+R（macOS）/ Ctrl+R（其它平台）刷新当前视图：
+        # 文件树页 → 刷新目录；主机列表页 → 重新读取主机。
+        refresh_sc = QShortcut(QKeySequence("Ctrl+R"), self)
+        refresh_sc.setContext(Qt.ShortcutContext.WidgetWithChildrenShortcut)
+        refresh_sc.activated.connect(self._on_refresh_shortcut)
+
+    def _on_refresh_shortcut(self):
+        """Cmd+R：按当前所在页刷新——文件树刷新目录，主机列表重新读取主机。"""
+        if self._stack.currentWidget() is self._tree_page and self._session is not None:
+            self._on_refresh()
+        else:
+            self._reload_hosts()
+
     def _apply_theme(self):
         bg_dark = self.theme.get('bg_dark', '#1a1a2e')
         bg_medium = self.theme.get('bg_medium', '#16213e')
