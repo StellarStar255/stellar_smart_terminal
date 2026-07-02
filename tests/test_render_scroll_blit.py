@@ -149,13 +149,40 @@ class TestScrollBlit(_RenderTestBase):
 
 
 class TestAsciiBatch(_RenderTestBase):
+    def _monospace_font(self):
+        """返回真实解析的等宽字体；环境无字体时注册系统字体文件兜底。
+
+        Windows 的 offscreen 平台插件用不了系统 GDI 字体库（Qt6 也不再自带
+        字体），QFontDatabase 为空，任何 QFont 都解析成无效字体——度量值与
+        实际字形排布对不上，像素比较无意义（合批探测会被骗过然后比较失败）。
+        此时把系统等宽字体文件注册进 Qt 再用；找不到可注册的字体则返回 None。
+        """
+        from PyQt6.QtGui import QFont, QFontInfo, QFontDatabase
+        f = QFont('Monaco', 11)  # macOS: cell_w 恰为 9.0 的整像素等宽字体
+        if QFontInfo(f).family():
+            return f
+        candidates = [
+            r'C:\Windows\Fonts\consola.ttf',
+            '/usr/share/fonts/truetype/dejavu/DejaVuSansMono.ttf',
+        ]
+        for path in candidates:
+            if not os.path.exists(path):
+                continue
+            fid = QFontDatabase.addApplicationFont(path)
+            if fid >= 0:
+                fams = QFontDatabase.applicationFontFamilies(fid)
+                if fams:
+                    return QFont(fams[0], 11)
+        return None
+
     def _integral_width_widget(self, lines=50):
-        """构造列宽为整数像素的 widget（Monaco 11 的 cell_w 恰为 9.0），
-        使合批与逐格可做逐像素比较"""
+        """构造列宽为整数像素的 widget，使合批与逐格可做逐像素比较"""
         from terminal_widget import TerminalWidget
-        from PyQt6.QtGui import QFont
+        font = self._monospace_font()
+        if font is None:
+            self.skipTest("环境无可用字体且找不到可注册的系统等宽字体")
         w = TerminalWidget()
-        w.term_font = QFont('Monaco', 11)
+        w.term_font = font
         w._calculate_char_size()
         w.resize(640, 400)
         w._update_terminal_size()
