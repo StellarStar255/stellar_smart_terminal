@@ -1013,25 +1013,12 @@ class MainWindow(QMainWindow):
 
     def _get_effective_group_order(self) -> list:
         """获取有效的分组顺序（含兼容性处理）"""
-        from toolbar_manager import ToolbarManagerDialog
+        from toolbar_manager import ToolbarManagerDialog, merge_group_order
         default_groups = ToolbarManagerDialog.DEFAULT_GROUPS
 
-        if not self.toolbar_config:
-            return default_groups.copy()
-
-        saved_order = self.toolbar_config.get("group_order", None)
-        if not saved_order:
-            return default_groups.copy()
-
-        # 兼容性处理：确保所有默认分组都存在
-        effective = saved_order.copy()
-        for group in default_groups:
-            if group not in effective:
-                effective.append(group)
-        # 移除已不存在的分组
-        effective = [g for g in effective if g in default_groups]
-
-        return effective
+        saved_order = self.toolbar_config.get("group_order", None) if self.toolbar_config else None
+        # 版本升级新增的默认分组按默认相对位置插入（而不是堆到末尾）
+        return merge_group_order(saved_order, default_groups)
 
     def _setup_toolbar(self):
         """设置工具栏"""
@@ -1685,10 +1672,12 @@ class MainWindow(QMainWindow):
                 "close_split_btn": self.close_split_btn,
                 "close_tab_btn": self.close_tab_btn,
             },
-            "面板与编辑器": {
+            "面板": {
                 "explorer_toggle_btn": self.explorer_toggle_btn,
                 "git_toggle_btn": self.git_toggle_btn,
                 "remote_toggle_btn": self.remote_toggle_btn,
+            },
+            "面板与编辑器": {
                 "vscode_open_btn": self.vscode_open_btn,
                 "cursor_open_btn": self.cursor_open_btn,
                 "log_toggle_btn": self.log_toggle_btn,
@@ -1709,7 +1698,8 @@ class MainWindow(QMainWindow):
             "选项": ["image_prefix_checkbox", "image_local_checkbox", "window_nav_checkbox"],
             "操作": ["export_btn", "history_btn", "images_btn", "clear_btn"],
             "分屏管理": ["split_btn", "split_v_btn", "close_split_btn", "close_tab_btn"],
-            "面板与编辑器": ["explorer_toggle_btn", "git_toggle_btn", "remote_toggle_btn", "vscode_open_btn", "cursor_open_btn", "log_toggle_btn"],
+            "面板": ["explorer_toggle_btn", "git_toggle_btn", "remote_toggle_btn"],
+            "面板与编辑器": ["vscode_open_btn", "cursor_open_btn", "log_toggle_btn"],
             "主题": ["theme_combo", "icon_tint_checkbox"],
             "设置": ["llm_config_btn", "gui_font_spin", "opacity_spin", "lang_combo"],
         }

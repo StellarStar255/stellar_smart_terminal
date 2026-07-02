@@ -13,6 +13,29 @@ from PyQt6.QtGui import QPainter, QColor, QPainterPath, QDrag
 from i18n import t
 
 
+def merge_group_order(saved_order, default_groups):
+    """合并保存的分组顺序与默认分组列表。
+
+    - 保留用户存的顺序，剔除已不存在的分组；
+    - 版本升级新增的默认分组按它在默认顺序里的相对位置插入
+      （紧跟默认顺序中它前面最近的、用户列表里也有的分组），
+      而不是堆到末尾——否则新分组会出现在工具栏最右边。
+    """
+    if not saved_order:
+        return list(default_groups)
+    effective = [g for g in saved_order if g in default_groups]
+    for i, group in enumerate(default_groups):
+        if group in effective:
+            continue
+        pos = 0
+        for prev in reversed(default_groups[:i]):
+            if prev in effective:
+                pos = effective.index(prev) + 1
+                break
+        effective.insert(pos, group)
+    return effective
+
+
 class ToggleSwitch(QWidget):
     """现代风格的开关切换控件"""
     toggled = pyqtSignal(bool)
@@ -359,15 +382,18 @@ class ToolbarManagerDialog(QDialog):
         ("images_btn", "图片", True, "操作"),
         ("clear_btn", "清屏", True, "操作"),
 
-        # 第四组：分屏
+        # 第四组：面板开关（高频入口，默认排在分屏之前）
+        ("explorer_toggle_btn", "资源管理器", True, "面板"),
+        ("git_toggle_btn", "Git", True, "面板"),
+        ("remote_toggle_btn", "Remote", True, "面板"),
+
+        # 第五组：分屏
         ("split_btn", "分屏", True, "分屏管理"),
         ("split_v_btn", "垂直分屏", True, "分屏管理"),
         ("close_split_btn", "关分屏", True, "分屏管理"),
         ("close_tab_btn", "关标签", True, "分屏管理"),
 
-        # 第五组：面板
-        ("explorer_toggle_btn", "资源管理器", True, "面板与编辑器"),
-        ("git_toggle_btn", "Git", True, "面板与编辑器"),
+        # 第六组：编辑器与日志
         ("vscode_open_btn", "VS Code", True, "面板与编辑器"),
         ("cursor_open_btn", "Cursor", True, "面板与编辑器"),
         ("log_toggle_btn", "日志", True, "面板与编辑器"),
@@ -383,7 +409,7 @@ class ToolbarManagerDialog(QDialog):
     ]
 
     # 分组定义（用于默认顺序）
-    DEFAULT_GROUPS = ["预设与控制", "选项", "分屏管理", "面板与编辑器", "操作", "主题", "设置"]
+    DEFAULT_GROUPS = ["预设与控制", "选项", "面板", "分屏管理", "面板与编辑器", "操作", "主题", "设置"]
 
     # 固定位置的分组（不可移动）
     PINNED_FIRST_GROUP = "预设与控制"
@@ -528,8 +554,10 @@ class ToolbarManagerDialog(QDialog):
         self.scroll_layout.setSpacing(2)
         self.scroll_layout.setContentsMargins(0, 0, 0, 0)
 
-        # 分组名称列表
-        self.group_order = self.current_config.get("group_order", self.DEFAULT_GROUPS.copy())
+        # 分组名称列表（老配置里没有的新增默认分组按默认相对位置插入，
+        # 而不是漏掉或堆到末尾）
+        self.group_order = merge_group_order(
+            self.current_config.get("group_order", None), self.DEFAULT_GROUPS)
 
         visible_buttons = self.current_config.get("visible_buttons", {})
 

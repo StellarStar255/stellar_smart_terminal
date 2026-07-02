@@ -315,6 +315,7 @@ TRANSLATIONS = {
     "toolbar_mgr.btn.close_tab_btn": {"zh": "关标签", "en": "Close Tab"},
     "toolbar_mgr.btn.explorer_toggle_btn": {"zh": "资源管理器", "en": "Explorer"},
     "toolbar_mgr.btn.git_toggle_btn": {"zh": "Git", "en": "Git"},
+    "toolbar_mgr.btn.remote_toggle_btn": {"zh": "Remote", "en": "Remote"},
     "toolbar_mgr.btn.vscode_open_btn": {"zh": "VS Code", "en": "VS Code"},
     "toolbar_mgr.btn.cursor_open_btn": {"zh": "Cursor", "en": "Cursor"},
     "toolbar_mgr.btn.log_toggle_btn": {"zh": "日志", "en": "Log"},
@@ -328,6 +329,7 @@ TRANSLATIONS = {
     # ===== 工具栏管理器 - 分组名称翻译(display only, internal key仍为中文) =====
     "toolbar_mgr.group.预设与控制": {"zh": "预设与控制", "en": "Presets & Control"},
     "toolbar_mgr.group.选项": {"zh": "选项", "en": "Options"},
+    "toolbar_mgr.group.面板": {"zh": "面板", "en": "Panels"},
     "toolbar_mgr.group.操作": {"zh": "操作", "en": "Actions"},
     "toolbar_mgr.group.分屏管理": {"zh": "分屏管理", "en": "Split Management"},
     "toolbar_mgr.group.面板与编辑器": {"zh": "面板与编辑器", "en": "Panels & Editors"},
