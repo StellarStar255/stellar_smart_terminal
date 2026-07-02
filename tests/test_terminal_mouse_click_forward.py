@@ -29,6 +29,8 @@ class TestMouseClickForward(unittest.TestCase):
         w._backend = object()
         w._writes = []
         w._write_to_backend = lambda data, _ws=w._writes: _ws.append(data)
+        # 点击转发是 opt-in 设置（默认关闭），测试聚焦鼠标模式本身的行为
+        w.set_mouse_click_forward_enabled(True)
         return w
 
     def _click(self, w, abs_cell=(12, 5), rel_cell=(2, 5)):

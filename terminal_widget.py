@@ -133,7 +133,9 @@ def merge_extracted_lines(rows, columns: int) -> str:
             # 断点两侧各自的连续非空白串（拼起来即被截断的 token 候选）
             tail = text[text.rfind(' ') + 1:] if text else ''      # 本行末尾连续非空白
             head = next_core.split(None, 1)[0] if next_core else ''  # 下一行开头连续非空白
-            combined = len(tail) + len(head)
+            # 用显示列宽（CJK 全角占 2 列）与 wrap_edge/threshold_low 比较，
+            # 否则 20 个全角字符顶满 40 列的行会因 len==20 够不着门槛而漏判。
+            combined = sum(max(wcwidth(ch), 0) for ch in tail + head)
             has_sep = bool(_TOKEN_SEP_RE.search(tail) or _TOKEN_SEP_RE.search(head))
             # 续行是否带前导缩进：Claude Code 等把列表项 "- <url>" 折行时，续行会缩进
             # 对齐到列表内容起点（悬挂缩进），此时 nxt[0] 是空格。
