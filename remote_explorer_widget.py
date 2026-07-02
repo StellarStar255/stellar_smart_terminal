@@ -33,7 +33,7 @@ import explorer_clipboard
 import remote_bookmarks
 from ssh_session import (
     HostConfig, RemoteEntry, SSHSession, parse_ssh_config, append_ssh_config_host,
-    rename_ssh_config_host,
+    rename_ssh_config_host, remove_ssh_config_host, update_ssh_config_host,
 )
 from git_widget import _make_git_tool_icon  # 复用统一风格的矢量线条图标
 from utils import (
@@ -115,7 +115,7 @@ class _AddHostDialog(QDialog):
 
     def __init__(self, parent=None, *, title=None, hint=None,
                  placeholder="deploy@10.0.0.5:22", initial="", ok_label=None,
-                 with_alias=False):
+                 with_alias=False, initial_alias=""):
         super().__init__(parent)
         self._with_alias = with_alias
         title = title or t("remote.add_host_title")
@@ -209,6 +209,8 @@ class _AddHostDialog(QDialog):
             self._alias_edit.setPlaceholderText(
                 t("remote.add_host_alias_placeholder"))
             self._alias_edit.setClearButtonEnabled(True)
+            if initial_alias:
+                self._alias_edit.setText(initial_alias)
             self._alias_edit.returnPressed.connect(
                 lambda: self.accept() if self._edit.text().strip() else None)
             layout.addWidget(self._alias_edit)
@@ -1155,8 +1157,12 @@ class RemoteExplorerPanel(QWidget):
             new_win_act = menu.addAction(t("remote.connect_in_new_window"))
             new_win_act.triggered.connect(lambda checked=False, h=host: self.open_in_new_window.emit(h))
             menu.addSeparator()
+            edit_act = menu.addAction(t("remote.edit_host"))
+            edit_act.triggered.connect(lambda checked=False, h=host: self._edit_host(h))
             rename_act = menu.addAction(t("remote.rename_host"))
             rename_act.triggered.connect(lambda checked=False, h=host: self._rename_host(h))
+            delete_act = menu.addAction(t("remote.delete_host"))
+            delete_act.triggered.connect(lambda checked=False, h=host: self._delete_host(h))
             menu.addSeparator()
 
         sort_menu = menu.addMenu(t("remote.sort_by"))
@@ -1205,6 +1211,100 @@ class RemoteExplorerPanel(QWidget):
             self._reload_hosts()            # config 改了 → 重新读取
         else:
             host.alias = new_alias          # 仅内存中的主机（未落 config）→ 直接改
+            self._populate_hosts_list()
+
+    def _is_memory_host(self, host: HostConfig) -> bool:
+        """该主机是否只存在于本会话内存（写盘失败退回的 _extra_hosts）而非 ~/.ssh/config。"""
+        return any(h is host for h in self._extra_hosts)
+
+    def _edit_host(self, host: HostConfig):
+        """编辑主机：可改 [user@]host[:port] 与别名。config 里的主机就地改写
+        （保留 IdentityFile / ProxyJump 等其它设置），内存主机直接改字段。"""
+        target = f"{host.user + '@' if host.user else ''}{host.hostname}:{host.port}"
+        dlg = _AddHostDialog(
+            self,
+            title=t("remote.edit_host_title"),
+            hint=t("remote.edit_host_hint"),
+            initial=target,
+            initial_alias=host.alias,
+            ok_label=t("remote.edit_host_ok"),
+            with_alias=True,
+        )
+        if dlg.exec() != QDialog.DialogCode.Accepted:
+            return
+        text = dlg.value()
+        if not text:
+            return
+
+        # 解析 [user@]host[:port]
+        user, port, rest = "", 22, text
+        if "@" in rest:
+            user, rest = rest.split("@", 1)
+        if ":" in rest:
+            host_s, port_s = rest.rsplit(":", 1)
+            try:
+                port = int(port_s)
+            except ValueError:
+                QMessageBox.warning(self, t("remote.edit_host_title"), "Invalid port")
+                return
+        else:
+            host_s = rest
+        host_s = host_s.strip()
+        if not host_s:
+            return
+        user = user.strip()
+        new_alias = dlg.alias() or host.alias
+
+        if self._is_memory_host(host):
+            host.alias, host.hostname, host.user, host.port = new_alias, host_s, user, port
+            self._populate_hosts_list()
+            return
+
+        try:
+            # 先改别名（若变了），再就地更新 HostName/User/Port
+            if new_alias != host.alias:
+                try:
+                    rename_ssh_config_host(host.alias, new_alias)
+                except ValueError:
+                    QMessageBox.warning(
+                        self, t("remote.edit_host_title"),
+                        t("remote.rename_host_exists").format(alias=new_alias))
+                    return
+            update_ssh_config_host(new_alias, hostname=host_s, user=user, port=port)
+            self._reload_hosts()
+        except Exception as e:
+            QMessageBox.warning(
+                self, t("remote.edit_host_title"),
+                t("remote.edit_host_failed").format(error=e))
+
+    def _delete_host(self, host: HostConfig):
+        """从列表删除主机：config 主机从 ~/.ssh/config 移除，内存主机直接摘掉。"""
+        resp = QMessageBox.question(
+            self, t("remote.delete_host_title"),
+            t("remote.delete_host_confirm").format(alias=host.alias),
+            QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No,
+            QMessageBox.StandardButton.No,
+        )
+        if resp != QMessageBox.StandardButton.Yes:
+            return
+
+        if self._is_memory_host(host):
+            self._extra_hosts = [h for h in self._extra_hosts if h is not host]
+            self._populate_hosts_list()
+            return
+
+        try:
+            removed = remove_ssh_config_host(host.alias)
+        except Exception as e:
+            QMessageBox.warning(
+                self, t("remote.delete_host_title"),
+                t("remote.delete_host_failed").format(error=e))
+            return
+        if removed:
+            self._reload_hosts()
+        else:
+            # config 里没找到（可能是内存态）→ 兜底也从内存列表摘掉
+            self._extra_hosts = [h for h in self._extra_hosts if h is not host]
             self._populate_hosts_list()
 
     # ---------- 连接 ----------

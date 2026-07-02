@@ -265,6 +265,142 @@ def rename_ssh_config_host(old_alias: str, new_alias: str,
     return changed
 
 
+def _host_line_aliases(line: str):
+    """若该行是 `Host a b c` 形式，返回别名列表 [a, b, c]，否则 None。"""
+    body = line.rstrip("\n").strip()
+    toks = body.split()
+    if len(toks) >= 2 and toks[0].lower() == "host":
+        return toks[1:]
+    return None
+
+
+def _find_host_block(lines: list, alias: str):
+    """定位包含 alias 的 Host 块，返回 (host_idx, end)（半开区间 [host_idx, end)），
+    end 为下一个 Host/Match 行或 EOF。找不到返回 None。"""
+    host_idx = None
+    for i, line in enumerate(lines):
+        aliases = _host_line_aliases(line)
+        if aliases and alias in aliases:
+            host_idx = i
+            break
+    if host_idx is None:
+        return None
+    end = len(lines)
+    for j in range(host_idx + 1, len(lines)):
+        toks = lines[j].strip().split()
+        if toks and toks[0].lower() in ("host", "match"):
+            end = j
+            break
+    return host_idx, end
+
+
+def remove_ssh_config_host(alias: str, path: Optional[str] = None) -> bool:
+    """从 ~/.ssh/config 删除某个 Host。
+
+    - Host 行只有这一个别名 → 删除整块（Host 行 + 其后配置行，直到下一个 Host/Match/EOF），
+      连带块前的一个分隔空行一起收掉，避免留下多余空行。
+    - Host 行有多个别名 → 只从 Host 行摘掉该别名 token，块保留给其它别名。
+    成功改写返回 True；config 不存在 / 没匹配到返回 False。
+    """
+    config_path = Path(path or os.path.expanduser("~/.ssh/config"))
+    if not config_path.is_file():
+        return False
+    try:
+        with config_path.open("r", encoding="utf-8", errors="replace") as fh:
+            lines = fh.readlines()
+    except OSError:
+        return False
+
+    found = _find_host_block(lines, alias)
+    if found is None:
+        return False
+    host_idx, end = found
+
+    aliases = _host_line_aliases(lines[host_idx]) or []
+    if len(aliases) > 1:
+        body = lines[host_idx].rstrip("\n")
+        newline = lines[host_idx][len(body):]
+        indent = body[:len(body) - len(body.lstrip())]
+        toks = body.split()
+        kept = [toks[0]] + [a for a in toks[1:] if a != alias]
+        lines[host_idx] = indent + " ".join(kept) + newline
+    else:
+        start = host_idx
+        # 连带吃掉块前紧邻的一个空行（append 时会写入的分隔空行）
+        if start > 0 and lines[start - 1].strip() == "":
+            start -= 1
+        del lines[start:end]
+        # 收敛：把连续多空行压成一个、去掉文件开头的空行
+        cleaned = []
+        for ln in lines:
+            if ln.strip() == "" and cleaned and cleaned[-1].strip() == "":
+                continue
+            cleaned.append(ln)
+        while cleaned and cleaned[0].strip() == "":
+            cleaned.pop(0)
+        lines = cleaned
+
+    with config_path.open("w", encoding="utf-8") as fh:
+        fh.writelines(lines)
+    try:
+        os.chmod(config_path, 0o600)
+    except OSError:
+        pass
+    return True
+
+
+def update_ssh_config_host(alias: str, hostname: str, user: str = "",
+                           port: int = 22, path: Optional[str] = None) -> bool:
+    """就地更新某 Host 块的 HostName/User/Port，其它指令（IdentityFile/ProxyJump 等）
+    原样保留。约定与 append_ssh_config_host 一致：User 为空则不写、Port 为 22 则不写
+    （已存在的对应行会被移除）。成功返回 True；config 不存在 / 没匹配到返回 False。"""
+    config_path = Path(path or os.path.expanduser("~/.ssh/config"))
+    if not config_path.is_file():
+        return False
+    try:
+        with config_path.open("r", encoding="utf-8", errors="replace") as fh:
+            lines = fh.readlines()
+    except OSError:
+        return False
+
+    found = _find_host_block(lines, alias)
+    if found is None:
+        return False
+    host_idx, end = found
+
+    # 沿用块内已有的缩进；没有正文行则默认 4 空格
+    body_indent = "    "
+    for j in range(host_idx + 1, end):
+        if lines[j].strip():
+            lead = lines[j][:len(lines[j]) - len(lines[j].lstrip())]
+            body_indent = lead or "    "
+            break
+
+    # 保留除 HostName/User/Port 之外的所有正文行
+    kept_body = []
+    for j in range(host_idx + 1, end):
+        toks = lines[j].strip().split()
+        key = toks[0].lower() if toks else ""
+        if key in ("hostname", "user", "port"):
+            continue
+        kept_body.append(lines[j])
+
+    fresh = [f"{body_indent}HostName {hostname}\n"]
+    if user and user.strip():
+        fresh.append(f"{body_indent}User {user.strip()}\n")
+    if port and int(port) != 22:
+        fresh.append(f"{body_indent}Port {int(port)}\n")
+
+    lines[host_idx:end] = [lines[host_idx]] + fresh + kept_body
+    with config_path.open("w", encoding="utf-8") as fh:
+        fh.writelines(lines)
+    try:
+        os.chmod(config_path, 0o600)
+    except OSError:
+        pass
+    return True
+
+
 # ---------- SFTP entry ----------
 
 @dataclass
