@@ -30,6 +30,7 @@ from PyQt6 import sip  # 用于检查 C++ 对象是否已被删除
 
 from i18n import t
 import explorer_clipboard
+import explorer_common
 import remote_bookmarks
 from ssh_session import (
     HostConfig, RemoteEntry, SSHSession, parse_ssh_config, append_ssh_config_host,
@@ -3031,26 +3032,8 @@ class RemoteExplorerPanel(QWidget):
             return set()
 
     def _resolve_paste_conflict(self, name: str, sticky: Optional[str]):
-        """跨目录/跨主机冲突时的三选一对话框。返回与本地 Explorer 同语义。"""
-        if sticky in ("overwrite", "keep"):
-            return (sticky, True)
-        box = QMessageBox(self)
-        box.setWindowTitle(t("paste.conflict_title"))
-        box.setText(t("paste.conflict_msg", name=name))
-        box.setIcon(QMessageBox.Icon.Question)
-        keep_btn = box.addButton(t("paste.btn_keep_both"), QMessageBox.ButtonRole.AcceptRole)
-        overwrite_btn = box.addButton(t("paste.btn_overwrite"), QMessageBox.ButtonRole.DestructiveRole)
-        cancel_btn = box.addButton(t("paste.btn_cancel"), QMessageBox.ButtonRole.RejectRole)
-        box.setDefaultButton(keep_btn)
-        from PyQt6.QtWidgets import QCheckBox
-        apply_all = QCheckBox(t("paste.apply_to_all"))
-        box.setCheckBox(apply_all)
-        box.exec()
-        clicked = box.clickedButton()
-        if clicked is cancel_btn or clicked is None:
-            return None
-        action = "overwrite" if clicked is overwrite_btn else "keep"
-        return (action, apply_all.isChecked())
+        """跨目录/跨主机冲突时的三选一对话框（收敛到 explorer_common 单点维护）。"""
+        return explorer_common.resolve_paste_conflict(self, name, sticky)
 
     def _refresh_subtree_by_path(self, path: str):
         """如果 tree 顶层有 path 对应的目录项，把它重刷一下；否则刷整棵树"""

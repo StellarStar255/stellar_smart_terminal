@@ -15,6 +15,7 @@ from typing import Optional
 
 from i18n import t
 import explorer_clipboard
+import explorer_common
 import explorer_favorites
 from utils import parse_search_tokens, name_matches_tokens
 from app_logging import get_logger
@@ -1926,33 +1927,8 @@ class ExplorerPanel(QWidget):
         self.refresh()
 
     def _resolve_paste_conflict(self, name: str, sticky: Optional[str]):
-        """跨文件夹冲突时的三选一对话框。
-
-        Returns:
-            ('overwrite', sticky_bool) — 覆盖
-            ('keep',      sticky_bool) — 保留二者（加 (N) 尾缀）
-            None                        — 取消，中止剩余粘贴
-        sticky 已有值时直接复用，不再弹窗。
-        """
-        if sticky in ("overwrite", "keep"):
-            return (sticky, True)
-        box = QMessageBox(self)
-        box.setWindowTitle(t("paste.conflict_title"))
-        box.setText(t("paste.conflict_msg", name=name))
-        box.setIcon(QMessageBox.Icon.Question)
-        keep_btn = box.addButton(t("paste.btn_keep_both"), QMessageBox.ButtonRole.AcceptRole)
-        overwrite_btn = box.addButton(t("paste.btn_overwrite"), QMessageBox.ButtonRole.DestructiveRole)
-        cancel_btn = box.addButton(t("paste.btn_cancel"), QMessageBox.ButtonRole.RejectRole)
-        box.setDefaultButton(keep_btn)
-        from PyQt6.QtWidgets import QCheckBox
-        apply_all = QCheckBox(t("paste.apply_to_all"))
-        box.setCheckBox(apply_all)
-        box.exec()
-        clicked = box.clickedButton()
-        if clicked is cancel_btn or clicked is None:
-            return None
-        action = "overwrite" if clicked is overwrite_btn else "keep"
-        return (action, apply_all.isChecked())
+        """跨文件夹冲突时的三选一对话框（收敛到 explorer_common 单点维护）。"""
+        return explorer_common.resolve_paste_conflict(self, name, sticky)
 
     def _await_remote(self, session, fn, *args, label: str):
         """提交单个远端操作，在事件循环等待中返回结果。
