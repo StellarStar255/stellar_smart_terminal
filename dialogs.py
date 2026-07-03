@@ -10,9 +10,9 @@ from pathlib import Path
 
 from PyQt6.QtWidgets import (
     QApplication, QAbstractItemView, QDialog, QDialogButtonBox, QFileDialog,
-    QFormLayout, QHBoxLayout, QLabel, QLineEdit, QListWidget, QListWidgetItem,
-    QMessageBox, QPlainTextEdit, QPushButton, QTreeWidget, QTreeWidgetItem,
-    QVBoxLayout, QWidget
+    QFormLayout, QGridLayout, QHBoxLayout, QLabel, QLineEdit, QListWidget,
+    QListWidgetItem, QMessageBox, QPlainTextEdit, QPushButton, QTreeWidget,
+    QTreeWidgetItem, QVBoxLayout, QWidget
 )
 from PyQt6.QtCore import Qt, QTimer, pyqtSignal
 from PyQt6.QtGui import QFont, QKeySequence, QTextCursor
@@ -439,7 +439,8 @@ class LLMConfigDialog(QDialog):
         self.configs = [c.copy() for c in configs]  # 深拷贝
         self.default_index = default_index
         self.setWindowTitle(t("llm.config_title"))
-        self.setMinimumSize(800, 550)
+        self.setMinimumSize(680, 460)
+        self.resize(760, 500)
 
         # 使用唯一 ID 来稳定关联 item 和 config
         self._config_id_counter = 0
@@ -469,13 +470,33 @@ class LLMConfigDialog(QDialog):
     def _setup_ui(self):
         # 主布局
         main_layout = QVBoxLayout(self)
+        main_layout.setContentsMargins(16, 14, 16, 12)
+        main_layout.setSpacing(10)
 
         # 内容区域（水平布局）
         content_layout = QHBoxLayout()
+        content_layout.setSpacing(16)
 
-        # 左侧：配置列表
+        # 左侧：配置列表，标题行内嵌「＋/－」按钮
         left_layout = QVBoxLayout()
-        left_layout.addWidget(QLabel(t("llm.config_list_label")))
+        left_layout.setSpacing(6)
+
+        list_header = QHBoxLayout()
+        list_label = QLabel(t("llm.config_list_label"))
+        list_label.setObjectName("sectionLabel")
+        list_header.addWidget(list_label)
+        list_header.addStretch()
+        self.add_btn = QPushButton("＋")
+        self.add_btn.setObjectName("iconBtn")
+        self.add_btn.setToolTip(t("llm.new_tooltip"))
+        self.add_btn.clicked.connect(self._add_config)
+        self.delete_btn = QPushButton("－")
+        self.delete_btn.setObjectName("iconBtn")
+        self.delete_btn.setToolTip(t("llm.delete_tooltip"))
+        self.delete_btn.clicked.connect(self._delete_config)
+        list_header.addWidget(self.add_btn)
+        list_header.addWidget(self.delete_btn)
+        left_layout.addLayout(list_header)
 
         self.config_list = QListWidget()
         self.config_list.currentRowChanged.connect(self._on_selection_changed)
@@ -485,88 +506,88 @@ class LLMConfigDialog(QDialog):
         self.config_list.model().rowsMoved.connect(self._on_rows_moved)
         left_layout.addWidget(self.config_list)
 
-        # 按钮组
-        btn_layout = QHBoxLayout()
-        self.add_btn = QPushButton(t("llm.new"))
-        self.add_btn.clicked.connect(self._add_config)
-        self.save_btn = QPushButton(t("llm.save"))
-        self.save_btn.clicked.connect(self._save_current_config)
-        self.save_btn.setToolTip(t("llm.save_tooltip"))
-        self.delete_btn = QPushButton(t("llm.delete"))
-        self.delete_btn.clicked.connect(self._delete_config)
-        btn_layout.addWidget(self.add_btn)
-        btn_layout.addWidget(self.save_btn)
-        btn_layout.addWidget(self.delete_btn)
-        left_layout.addLayout(btn_layout)
-
-        # 设为默认按钮
-        self.set_default_btn = QPushButton(t("llm.set_default"))
-        self.set_default_btn.setToolTip(t("llm.set_default_tooltip"))
-        self.set_default_btn.clicked.connect(self._set_as_default)
-        left_layout.addWidget(self.set_default_btn)
-
-        # 角色指派：分别指定「补全」和「Git」用哪个配置（再次点击取消）
-        role_btn_layout = QHBoxLayout()
-        self.set_completion_btn = QPushButton(t("llm.set_completion"))
-        self.set_completion_btn.setToolTip(t("llm.set_completion_tooltip"))
-        self.set_completion_btn.clicked.connect(self._set_as_completion)
-        self.set_git_btn = QPushButton(t("llm.set_git"))
-        self.set_git_btn.setToolTip(t("llm.set_git_tooltip"))
-        self.set_git_btn.clicked.connect(self._set_as_git)
-        role_btn_layout.addWidget(self.set_completion_btn)
-        role_btn_layout.addWidget(self.set_git_btn)
-        left_layout.addLayout(role_btn_layout)
-
-        # JSON 导入/导出按钮组
+        # JSON 导入/导出
         json_btn_layout = QHBoxLayout()
-        self.copy_json_btn = QPushButton(t("llm.copy_json"))
+        json_btn_layout.setSpacing(6)
+        self.copy_json_btn = QPushButton(t("llm.export_json"))
+        self.copy_json_btn.setObjectName("linkBtn")
         self.copy_json_btn.setToolTip(t("llm.copy_json_tooltip"))
         self.copy_json_btn.clicked.connect(self._copy_as_json)
-        self.paste_json_btn = QPushButton(t("llm.paste_json"))
+        self.paste_json_btn = QPushButton(t("llm.import_json"))
+        self.paste_json_btn.setObjectName("linkBtn")
         self.paste_json_btn.setToolTip(t("llm.paste_json_tooltip"))
         self.paste_json_btn.clicked.connect(self._paste_as_json)
         json_btn_layout.addWidget(self.copy_json_btn)
         json_btn_layout.addWidget(self.paste_json_btn)
+        json_btn_layout.addStretch()
         left_layout.addLayout(json_btn_layout)
 
         content_layout.addLayout(left_layout, 1)
 
-        # 右侧：编辑区
-        right_layout = QVBoxLayout()
-        right_layout.addWidget(QLabel(t("llm.edit_label")))
+        # 右侧：编辑区（无选中配置时整体禁用）
+        self.editor_panel = QWidget()
+        right_layout = QVBoxLayout(self.editor_panel)
+        right_layout.setContentsMargins(0, 0, 0, 0)
+        right_layout.setSpacing(8)
 
-        # 使用表单布局
-        form_widget = QWidget()
-        form_layout = QFormLayout(form_widget)
+        edit_label = QLabel(t("llm.edit_label"))
+        edit_label.setObjectName("sectionLabel")
+        right_layout.addWidget(edit_label)
+
+        form_layout = QFormLayout()
         form_layout.setSpacing(10)
         form_layout.setFieldGrowthPolicy(QFormLayout.FieldGrowthPolicy.ExpandingFieldsGrow)
 
         # 名称
         self.name_edit = QLineEdit()
         self.name_edit.setPlaceholderText(t("llm.name_placeholder"))
-        self.name_edit.setMinimumWidth(280)
         self.name_edit.textChanged.connect(self._on_name_changed)
         form_layout.addRow(t("llm.name_label"), self.name_edit)
+
+        # 用途：默认 / 补全 / Git（可勾选胶囊，替代原先左侧的三个按钮）
+        role_layout = QHBoxLayout()
+        role_layout.setContentsMargins(0, 0, 0, 0)
+        role_layout.setSpacing(8)
+        self.default_chip = QPushButton(t("llm.chip_default"))
+        self.default_chip.setToolTip(t("llm.set_default_tooltip"))
+        self.default_chip.clicked.connect(self._on_default_chip)
+        self.completion_chip = QPushButton(t("llm.chip_completion"))
+        self.completion_chip.setToolTip(t("llm.set_completion_tooltip"))
+        self.completion_chip.clicked.connect(
+            lambda checked: self._on_role_chip('for_completion', checked))
+        self.git_chip = QPushButton(t("llm.chip_git"))
+        self.git_chip.setToolTip(t("llm.set_git_tooltip"))
+        self.git_chip.clicked.connect(
+            lambda checked: self._on_role_chip('for_git', checked))
+        for chip in (self.default_chip, self.completion_chip, self.git_chip):
+            chip.setCheckable(True)
+            chip.setProperty('roleChip', True)
+            chip.setCursor(Qt.CursorShape.PointingHandCursor)
+            role_layout.addWidget(chip)
+        role_layout.addStretch()
+        role_widget = QWidget()
+        role_widget.setLayout(role_layout)
+        form_layout.addRow(t("llm.role_label"), role_widget)
 
         # API Base URL
         self.api_base_edit = QLineEdit()
         self.api_base_edit.setPlaceholderText("https://api.openai.com/v1")
-        self.api_base_edit.setMinimumWidth(280)
         self.api_base_edit.textChanged.connect(self._on_field_changed)
         form_layout.addRow("API URL:", self.api_base_edit)
 
         # API Key (带显示/隐藏切换)
         api_key_layout = QHBoxLayout()
         api_key_layout.setContentsMargins(0, 0, 0, 0)
+        api_key_layout.setSpacing(6)
         self.api_key_edit = QLineEdit()
         self.api_key_edit.setEchoMode(QLineEdit.EchoMode.Password)
         self.api_key_edit.setPlaceholderText("sk-...")
-        self.api_key_edit.setMinimumWidth(220)
         self.api_key_edit.textChanged.connect(self._on_field_changed)
         api_key_layout.addWidget(self.api_key_edit)
 
         self.toggle_key_btn = QPushButton(t("llm.show_key"))
-        self.toggle_key_btn.setMinimumWidth(72)
+        self.toggle_key_btn.setObjectName("linkBtn")
+        self.toggle_key_btn.setMinimumWidth(56)
         self.toggle_key_btn.clicked.connect(self._toggle_api_key_visibility)
         api_key_layout.addWidget(self.toggle_key_btn)
 
@@ -577,49 +598,57 @@ class LLMConfigDialog(QDialog):
         # 模型名称
         self.model_edit = QLineEdit()
         self.model_edit.setPlaceholderText("gpt-4")
-        self.model_edit.setMinimumWidth(280)
         self.model_edit.textChanged.connect(self._on_field_changed)
         form_layout.addRow(t("llm.model_label"), self.model_edit)
 
-        # 超时时间
+        right_layout.addLayout(form_layout)
+
+        # 高级参数（默认折叠：超时/最大 Tokens/温度/Top P/代理）
+        self.adv_toggle = QPushButton("▸ " + t("llm.advanced"))
+        self.adv_toggle.setObjectName("advToggle")
+        self.adv_toggle.setCheckable(True)
+        self.adv_toggle.setCursor(Qt.CursorShape.PointingHandCursor)
+        self.adv_toggle.toggled.connect(self._toggle_advanced)
+        right_layout.addWidget(self.adv_toggle)
+
         self.timeout_edit = QLineEdit()
         self.timeout_edit.setPlaceholderText("30")
-        self.timeout_edit.setMaximumWidth(100)
         self.timeout_edit.textChanged.connect(self._on_field_changed)
-        form_layout.addRow(t("llm.timeout_label"), self.timeout_edit)
-
-        # 最大 tokens
         self.max_tokens_edit = QLineEdit()
         self.max_tokens_edit.setPlaceholderText("4096")
-        self.max_tokens_edit.setMaximumWidth(100)
         self.max_tokens_edit.textChanged.connect(self._on_field_changed)
-        form_layout.addRow(t("llm.max_tokens_label"), self.max_tokens_edit)
-
-        # 温度
         self.temperature_edit = QLineEdit()
         self.temperature_edit.setPlaceholderText(t("llm.temperature_placeholder"))
-        self.temperature_edit.setMaximumWidth(150)
         self.temperature_edit.textChanged.connect(self._on_field_changed)
-        form_layout.addRow(t("llm.temperature_label"), self.temperature_edit)
-
-        # Top P
         self.top_p_edit = QLineEdit()
         self.top_p_edit.setPlaceholderText(t("llm.top_p_placeholder"))
-        self.top_p_edit.setMaximumWidth(150)
         self.top_p_edit.textChanged.connect(self._on_field_changed)
-        form_layout.addRow("Top P:", self.top_p_edit)
-
-        # 代理设置
         self.proxy_edit = QLineEdit()
         self.proxy_edit.setPlaceholderText(t("llm.proxy_placeholder"))
-        self.proxy_edit.setMinimumWidth(280)
         self.proxy_edit.textChanged.connect(self._on_field_changed)
-        form_layout.addRow(t("llm.proxy_label"), self.proxy_edit)
 
-        right_layout.addWidget(form_widget)
+        self.adv_widget = QWidget()
+        adv_grid = QGridLayout(self.adv_widget)
+        adv_grid.setContentsMargins(0, 2, 0, 0)
+        adv_grid.setHorizontalSpacing(10)
+        adv_grid.setVerticalSpacing(10)
+        adv_grid.addWidget(QLabel(t("llm.timeout_label")), 0, 0)
+        adv_grid.addWidget(self.timeout_edit, 0, 1)
+        adv_grid.addWidget(QLabel(t("llm.max_tokens_label")), 0, 2)
+        adv_grid.addWidget(self.max_tokens_edit, 0, 3)
+        adv_grid.addWidget(QLabel(t("llm.temperature_label")), 1, 0)
+        adv_grid.addWidget(self.temperature_edit, 1, 1)
+        adv_grid.addWidget(QLabel("Top P:"), 1, 2)
+        adv_grid.addWidget(self.top_p_edit, 1, 3)
+        adv_grid.addWidget(QLabel(t("llm.proxy_label")), 2, 0)
+        adv_grid.addWidget(self.proxy_edit, 2, 1, 1, 3)
+        adv_grid.setColumnStretch(1, 1)
+        adv_grid.setColumnStretch(3, 1)
+        self.adv_widget.setVisible(False)
+        right_layout.addWidget(self.adv_widget)
+
         right_layout.addStretch()
-
-        content_layout.addLayout(right_layout, 2)
+        content_layout.addWidget(self.editor_panel, 2)
 
         main_layout.addLayout(content_layout)
 
@@ -634,6 +663,13 @@ class LLMConfigDialog(QDialog):
 
         # 填充列表
         self._populate_list()
+        if not self.configs:
+            self.editor_panel.setEnabled(False)
+
+    def _toggle_advanced(self, checked):
+        """展开/折叠高级参数区"""
+        self.adv_toggle.setText(("▾ " if checked else "▸ ") + t("llm.advanced"))
+        self.adv_widget.setVisible(checked)
 
     def _apply_style(self):
         self.setStyleSheet("""
@@ -642,14 +678,19 @@ class LLMConfigDialog(QDialog):
                 color: #eaeaea;
             }
             QLabel {
-                color: #aaa;
+                color: #9aa0b5;
+            }
+            QLabel#sectionLabel {
+                color: #7f88a8;
+                font-weight: 600;
             }
             QLineEdit {
                 background-color: #16213e;
                 border: 1px solid #3d3d5c;
-                border-radius: 4px;
-                padding: 6px;
+                border-radius: 6px;
+                padding: 7px 10px;
                 color: #eaeaea;
+                selection-background-color: #667eea;
             }
             QLineEdit:focus {
                 border-color: #667eea;
@@ -657,24 +698,101 @@ class LLMConfigDialog(QDialog):
             QListWidget {
                 background-color: #16213e;
                 border: 1px solid #3d3d5c;
-                border-radius: 4px;
+                border-radius: 6px;
+                padding: 4px;
                 color: #eaeaea;
+                outline: none;
+            }
+            QListWidget::item {
+                padding: 7px 8px;
+                border-radius: 4px;
+            }
+            QListWidget::item:hover {
+                background-color: #222a4d;
             }
             QListWidget::item:selected {
                 background-color: #667eea;
-            }
-            QListWidget::item {
-                padding: 4px;
+                color: #ffffff;
             }
             QPushButton {
                 background-color: #3d3d5c;
                 border: none;
-                border-radius: 4px;
-                padding: 8px 16px;
+                border-radius: 6px;
+                padding: 7px 16px;
                 color: #eaeaea;
             }
             QPushButton:hover {
                 background-color: #4d4d6c;
+            }
+            QPushButton:pressed {
+                background-color: #35354f;
+            }
+            QPushButton:disabled {
+                color: #777;
+            }
+            QPushButton#iconBtn {
+                background: transparent;
+                padding: 0;
+                min-width: 26px;
+                max-width: 26px;
+                min-height: 26px;
+                max-height: 26px;
+                font-size: 15px;
+                color: #9aa0b5;
+            }
+            QPushButton#iconBtn:hover {
+                background-color: #3d3d5c;
+                color: #ffffff;
+            }
+            QPushButton#linkBtn {
+                background: transparent;
+                border: 1px solid #3d3d5c;
+                padding: 5px 10px;
+                color: #9aa0b5;
+            }
+            QPushButton#linkBtn:hover {
+                background: transparent;
+                border-color: #667eea;
+                color: #eaeaea;
+            }
+            QPushButton[roleChip="true"] {
+                background: transparent;
+                border: 1px solid #3d3d5c;
+                border-radius: 13px;
+                padding: 4px 14px;
+                color: #9aa0b5;
+            }
+            QPushButton[roleChip="true"]:hover {
+                background: transparent;
+                border-color: #667eea;
+                color: #eaeaea;
+            }
+            QPushButton[roleChip="true"]:checked {
+                background-color: #667eea;
+                border-color: #667eea;
+                color: #ffffff;
+            }
+            QPushButton#advToggle {
+                background: transparent;
+                border: none;
+                padding: 2px 0;
+                color: #7f88a8;
+                text-align: left;
+                font-weight: 600;
+            }
+            QPushButton#advToggle:hover {
+                background: transparent;
+                color: #eaeaea;
+            }
+            QDialogButtonBox QPushButton {
+                min-width: 72px;
+            }
+            QDialogButtonBox QPushButton:default {
+                background-color: #667eea;
+                color: #ffffff;
+            }
+            QDialogButtonBox QPushButton:default:hover {
+                background-color: #7b8ef0;
             }
         """)
 
@@ -703,29 +821,43 @@ class LLMConfigDialog(QDialog):
         if self.configs:
             self.config_list.setCurrentRow(0)
 
-    def _set_role(self, role_key: str):
-        """把当前选中配置指派为某角色（for_completion / for_git），独占；
-        再次点击已是该角色的配置则取消该角色（回退到默认配置）。"""
+    def _current_config(self):
+        """获取当前选中的配置（无选中返回 None）"""
         row = self.config_list.currentRow()
         item = self.config_list.item(row) if row >= 0 else None
         cid = item.data(Qt.ItemDataRole.UserRole) if item else None
-        target = self._get_config_by_id(cid) if cid else None
-        if not target:
+        return self._get_config_by_id(cid) if cid else None
+
+    def _refresh_list_labels(self):
+        """就地刷新列表项文字（不重建列表，避免选中态跳动）"""
+        for i in range(self.config_list.count()):
+            item = self.config_list.item(i)
+            config = self._get_config_by_id(item.data(Qt.ItemDataRole.UserRole))
+            if config:
+                item.setText(self._item_label(config))
+
+    def _on_default_chip(self, checked):
+        """默认角色唯一且必须存在：点选其他配置可转移，不可直接取消"""
+        config = self._current_config()
+        if not config:
+            self.default_chip.setChecked(False)
             return
-        already = bool(target.get(role_key))
+        idx = self.configs.index(config)
+        if idx != self.default_index:
+            self.default_index = idx
+        self.default_chip.setChecked(True)
+        self._refresh_list_labels()
+
+    def _on_role_chip(self, role_key, checked):
+        """补全/Git 角色独占指派；取消勾选则回退到默认配置"""
+        config = self._current_config()
+        if not config:
+            return
         for c in self.configs:
             c.pop(role_key, None)
-        if not already:
-            target[role_key] = True
-        self._populate_list()
-        if 0 <= row < self.config_list.count():
-            self.config_list.setCurrentRow(row)
-
-    def _set_as_completion(self):
-        self._set_role('for_completion')
-
-    def _set_as_git(self):
-        self._set_role('for_git')
+        if checked:
+            config[role_key] = True
+        self._refresh_list_labels()
 
     def _on_selection_changed(self, row):
         if self._closing:
@@ -746,12 +878,19 @@ class LLMConfigDialog(QDialog):
                 self.temperature_edit.setText(str(config.get('temperature', 1.0)))
                 self.top_p_edit.setText(str(config.get('top_p', 1.0)))
                 self.proxy_edit.setText(config.get('proxy', ''))
+                # 同步角色胶囊状态（chips 只连 clicked，setChecked 不会触发回调）
+                idx = self.configs.index(config)
+                self.default_chip.setChecked(idx == self.default_index)
+                self.completion_chip.setChecked(bool(config.get('for_completion')))
+                self.git_chip.setChecked(bool(config.get('for_git')))
                 self._block_signals(False)
+                self.editor_panel.setEnabled(True)
                 return
         # 清空编辑区
         self._block_signals(True)
         self._clear_edit_fields()
         self._block_signals(False)
+        self.editor_panel.setEnabled(False)
 
     def _block_signals(self, block):
         """阻止或恢复编辑控件的信号"""
@@ -776,6 +915,9 @@ class LLMConfigDialog(QDialog):
         self.temperature_edit.clear()
         self.top_p_edit.clear()
         self.proxy_edit.clear()
+        self.default_chip.setChecked(False)
+        self.completion_chip.setChecked(False)
+        self.git_chip.setChecked(False)
 
     def _on_name_changed(self, text):
         if self._closing:
@@ -850,6 +992,12 @@ class LLMConfigDialog(QDialog):
         cid = item.data(Qt.ItemDataRole.UserRole) if item else None
         config = self._get_config_by_id(cid) if cid else None
         if config and config in self.configs:
+            name = config.get('name') or t("llm.unnamed")
+            ret = QMessageBox.question(
+                self, t("llm.delete_confirm_title"),
+                t("llm.delete_confirm", name=name))
+            if ret != QMessageBox.StandardButton.Yes:
+                return
             config_index = self.configs.index(config)
             self.configs.remove(config)
             if cid in self._config_map:
@@ -862,31 +1010,6 @@ class LLMConfigDialog(QDialog):
                 self.default_index -= 1
             # 重新填充列表以更新默认标记
             self._populate_list()
-
-    def _save_current_config(self):
-        """保存当前编辑的配置"""
-        row = self.config_list.currentRow()
-        if row < 0:
-            QMessageBox.warning(self, t("llm.cannot_save"), t("llm.select_first"))
-            return
-        # 验证必要字段
-        if not self.name_edit.text().strip():
-            QMessageBox.warning(self, t("llm.validation_failed"), t("llm.name_required"))
-            return
-        if not self.api_base_edit.text().strip():
-            QMessageBox.warning(self, t("llm.validation_failed"), t("llm.url_required"))
-            return
-        # 触发一次字段同步
-        self._on_field_changed()
-        QMessageBox.information(self, t("llm.save_success"), t("llm.config_saved"))
-
-    def _set_as_default(self):
-        """设为默认配置"""
-        row = self.config_list.currentRow()
-        if row >= 0:
-            self.default_index = row
-            self._populate_list()
-            self.config_list.setCurrentRow(row)
 
     def _copy_as_json(self):
         """将当前选中的配置复制为 JSON 到剪贴板"""
