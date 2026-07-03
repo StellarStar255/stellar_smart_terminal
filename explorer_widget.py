@@ -384,7 +384,7 @@ class ExplorerPanel(QWidget):
     # 内容搜索（纯 Python 回退路径用）：跳过的二进制扩展名、单文件大小上限、
     # 单文件最多取的命中行数、命中行预览长度、最多扫描的文件数（防失控）。
     _CONTENT_SKIP_EXT = frozenset({
-        '.png', '.jpg', '.jpeg', '.gif', '.bmp', '.ico', '.webp', '.tiff',
+        '.png', '.jpg', '.jpeg', '.gif', '.bmp', '.ico', '.icns', '.webp', '.tiff',
         '.pdf', '.zip', '.gz', '.tar', '.bz2', '.xz', '.7z', '.rar',
         '.dmg', '.pkg', '.iso', '.exe', '.dll', '.so', '.dylib', '.bin',
         '.o', '.a', '.lib', '.class', '.pyc', '.pyo', '.jar',

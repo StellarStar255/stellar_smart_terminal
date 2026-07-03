@@ -27,7 +27,7 @@ from PyQt6.QtGui import (
 # 支持在编辑器面板里内联预览的图片扩展名
 _IMAGE_EXTENSIONS = {
     '.png', '.jpg', '.jpeg', '.gif', '.bmp', '.webp', '.tif', '.tiff',
-    '.ico', '.svg', '.heic', '.heif',
+    '.ico', '.icns', '.svg', '.heic', '.heif',
 }
 
 # 自动保存（崩溃恢复）：备份目录与写入周期
