@@ -8361,8 +8361,8 @@ class MainWindow(QMainWindow):
         # 记忆资源管理器/编辑器拖拽过的尺寸，避免每次重新打开都重置
         self._saved_explorer_main_sizes = None  # main_splitter 4 项尺寸（左右分屏）
         self._saved_explorer_internal_sizes = None  # explorer_splitter 2 项尺寸（上下分屏）
-        # 弹簧模式：编辑器与终端左右并排时，点哪边哪边自动变宽，另一边收窄但不收起
-        self._spring_mode_enabled = False
+        # 弹簧模式：编辑器与终端左右并排时，点哪边哪边自动变宽，另一边收窄但不收起（默认开启）
+        self._spring_mode_enabled = True
         self._spring_current_side = None   # 'editor' / 'terminal'，当前已展开的一侧
         self._spring_width_gate = True     # 窗口宽度是否允许 spring 生效（resize 时按滞回更新）
         self._applying_spring = False      # setSizes 期间置位，避免污染记忆尺寸
@@ -8418,8 +8418,8 @@ class MainWindow(QMainWindow):
                 # 加载左右分屏偏好（Explorer / Remote 各自记忆）
                 self._explorer_split_horizontal = config.get('explorer_split_horizontal', False)
                 self._remote_split_horizontal = config.get('remote_split_horizontal', False)
-                # 加载弹簧模式偏好
-                self._spring_mode_enabled = config.get('spring_mode_enabled', False)
+                # 加载弹簧模式偏好（默认开启；老配置里显式存过 false 则尊重用户选择）
+                self._spring_mode_enabled = config.get('spring_mode_enabled', True)
                 # 加载 AI 行内补全开关
                 self._ai_completion_enabled = config.get('ai_completion_enabled', False)
                 self._editor_word_wrap = config.get('editor_word_wrap', False)
