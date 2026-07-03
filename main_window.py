@@ -139,8 +139,8 @@ class MainWindow(QMainWindow):
 
     # 全局共享的窗口导航面板
     _global_window_navigator = None
-    # 导航面板停靠方式：'float'=独立浮动窗口（默认）；'embed'=嵌入每个窗口左侧栏
-    _navigator_dock_mode = 'float'
+    # 导航面板停靠方式：'embed'=嵌入每个窗口左侧栏（默认）；'float'=独立浮动窗口
+    _navigator_dock_mode = 'embed'
 
     # 左侧栏宽度（进程级共享）：只要打开侧边栏，所有窗口共用同一宽度，
     # 在一个窗口里拖动调宽，其它已打开窗口下次展开侧边栏时也用这个宽度，
@@ -200,7 +200,7 @@ class MainWindow(QMainWindow):
         self._global_zoom_delta = 0  # 全局缩放偏移量（相对于默认字体大小）
         self._gui_font_size = 0  # GUI 字体大小（0 表示跟随全局缩放）
         self._original_widget_styles = {}  # {id(widget): (weakref, original_stylesheet)}
-        self._pin_toolbar_row2 = False  # 是否固定显示第二排工具栏
+        self._pin_toolbar_row2 = True  # 是否固定显示第二排工具栏（默认开启）
         self._window_opacity = 100  # 窗口透明度百分比（10-100）
 
         # 多标签页支持
@@ -8357,7 +8357,7 @@ class MainWindow(QMainWindow):
         self._saved_explorer_panel_visible = False  # Explorer 面板可见性
         self._saved_git_panel_visible = False  # Git 面板可见性
         self._saved_log_panel_visible = False  # 日志面板可见性
-        self._saved_navigator_enabled = False  # Window Navigator 开关状态
+        self._saved_navigator_enabled = True  # Window Navigator 开关状态（默认开启）
         # 记忆资源管理器/编辑器拖拽过的尺寸，避免每次重新打开都重置
         self._saved_explorer_main_sizes = None  # main_splitter 4 项尺寸（左右分屏）
         self._saved_explorer_internal_sizes = None  # explorer_splitter 2 项尺寸（上下分屏）
@@ -8412,7 +8412,7 @@ class MainWindow(QMainWindow):
                 # 加载 GUI 字体大小
                 self._gui_font_size = config.get('gui_font_size', 0)
                 # 加载固定第二排工具栏设置
-                self._pin_toolbar_row2 = config.get('pin_toolbar_row2', False)
+                self._pin_toolbar_row2 = config.get('pin_toolbar_row2', True)
                 # 加载窗口透明度
                 self._window_opacity = config.get('window_opacity', 100)
                 # 加载左右分屏偏好（Explorer / Remote 各自记忆）
@@ -8438,7 +8438,7 @@ class MainWindow(QMainWindow):
                     TerminalWidget.PARSE_ON_READER_THREAD = bool(
                         config.get('parse_on_reader_thread', True))
                 # 加载导航面板停靠方式（'float' / 'embed'，全局记忆）
-                _dock_mode = config.get('navigator_dock_mode', 'float')
+                _dock_mode = config.get('navigator_dock_mode', 'embed')
                 if _dock_mode in ('float', 'embed'):
                     MainWindow._navigator_dock_mode = _dock_mode
                 # 加载用户自定义快捷键覆盖
@@ -8457,7 +8457,7 @@ class MainWindow(QMainWindow):
                 self._saved_explorer_panel_visible = config.get('explorer_panel_visible', False)
                 self._saved_git_panel_visible = config.get('git_panel_visible', False)
                 self._saved_log_panel_visible = config.get('log_panel_visible', False)
-                self._saved_navigator_enabled = config.get('navigator_enabled', False)
+                self._saved_navigator_enabled = config.get('navigator_enabled', True)
                 # 加载记忆的资源管理器/编辑器尺寸
                 main_sizes = config.get('explorer_main_splitter_sizes', None)
                 if isinstance(main_sizes, list) and len(main_sizes) == 4 and all(isinstance(s, int) and s >= 0 for s in main_sizes):
