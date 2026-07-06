@@ -13,14 +13,17 @@ from pathlib import Path
 from PyQt6.QtWidgets import (
     QWidget, QVBoxLayout, QHBoxLayout, QPlainTextEdit,
     QPushButton, QLabel, QFrame, QMessageBox,
-    QSplitter, QLineEdit, QTextEdit, QStackedWidget, QScrollArea,
+    QSplitter, QLineEdit, QTextEdit, QTextBrowser, QStackedWidget, QScrollArea,
     QSizePolicy, QMenu, QFileDialog, QApplication,
 )
-from PyQt6.QtCore import Qt, pyqtSignal, QRect, QSize, QFileSystemWatcher, QTimer, QEvent
+from PyQt6.QtCore import (
+    Qt, pyqtSignal, QRect, QSize, QFileSystemWatcher, QTimer, QEvent, QUrl,
+)
 from PyQt6.QtGui import (
     QFont, QFontMetrics, QColor, QTextCharFormat, QSyntaxHighlighter,
-    QKeySequence, QPalette, QShortcut, QPainter, QTextCursor,
+    QKeySequence, QPalette, QShortcut, QPainter, QTextCursor, QTextDocument,
     QPixmap, QImageReader, QCursor, QGuiApplication, QIcon, QWheelEvent,
+    QDesktopServices,
 )
 
 
@@ -1768,6 +1771,9 @@ class FileEditorWidget(QWidget):
         self._highlighter = None
         self._in_image_mode = False  # 当前显示的是否是图片预览
         self._image_pixmap: QPixmap | None = None  # 原始未缩放的 QPixmap
+        # Markdown 预览：只读渲染页（源文本 → 预览单向转换，绝不写回缓冲区/文件）
+        self._md_preview_supported = False  # 当前文件是否为 Markdown
+        self._in_md_preview = False         # 当前是否显示渲染预览页
         # 多窗格分屏：是否高亮当前活动窗格（仅在 >1 窗格时由 EditorArea 打开）
         self._is_active = False
         self._show_active_indicator = False
@@ -1836,6 +1842,15 @@ class FileEditorWidget(QWidget):
         header_layout.addWidget(self.modified_label)
 
         # 不再 addStretch：file_label 已用 stretch=1 占满中间空间，按钮自然靠右。
+
+        # Markdown 预览开关（仅 .md 文件显示）：勾选 = 渲染预览，取消 = 源码编辑
+        self.md_btn = QPushButton("◎")
+        self.md_btn.setFixedSize(26, 26)
+        self.md_btn.setCheckable(True)
+        self.md_btn.setToolTip(t("editor.md_preview_tooltip"))
+        self.md_btn.clicked.connect(self._set_md_preview)
+        self.md_btn.setVisible(False)
+        header_layout.addWidget(self.md_btn)
 
         # AI 行内补全开关（灰字建议，Tab 接受 / Esc 取消）
         # 用文字字形 ✦ 而非 emoji：emoji 是彩色位图，不随 QSS 配色，和相邻按钮不协调
@@ -1935,6 +1950,21 @@ class FileEditorWidget(QWidget):
         )
         self._stack.addWidget(self._image_scroll)  # index 1
 
+        # Markdown 渲染预览页：只读 QTextBrowser + Qt 原生 setMarkdown（GitHub 方言）。
+        # 安全性：预览有自己独立的 QTextDocument，与编辑器缓冲区完全隔离，
+        # 只做「源文本 → 预览」单向渲染，保存路径仍只序列化编辑器缓冲区原文，
+        # 因此预览不可能改动文件内容。无 HTML 引擎、无 JS、不发网络请求。
+        self._md_browser = QTextBrowser()
+        self._md_browser.setFrameShape(QFrame.Shape.NoFrame)
+        # 不让浏览器自己跳转（防止预览页被导航到别的文档）；
+        # 链接点击统一走 _on_md_link_clicked，只放行 http/https 到系统浏览器
+        self._md_browser.setOpenLinks(False)
+        self._md_browser.setOpenExternalLinks(False)
+        self._md_browser.anchorClicked.connect(self._on_md_link_clicked)
+        # 点击预览区也把本窗格设为活动窗格
+        self._md_browser.viewport().installEventFilter(self)
+        self._stack.addWidget(self._md_browser)  # index 2
+
         layout.addWidget(self._stack)
 
     def _setup_shortcuts(self):
@@ -1989,14 +2019,21 @@ class FileEditorWidget(QWidget):
 
     def _open_search(self):
         if hasattr(self, 'search_bar'):
+            # 查找作用于源码编辑器，预览模式下先切回源码
+            if self._in_md_preview:
+                self._set_md_preview(False)
             self.search_bar.open_search()
 
     def _open_search_with_replace(self):
         if hasattr(self, 'search_bar'):
+            if self._in_md_preview:
+                self._set_md_preview(False)
             self.search_bar.open_search(with_replace=True)
 
     def _find_next_or_open(self):
         if hasattr(self, 'search_bar'):
+            if self._in_md_preview:
+                self._set_md_preview(False)
             if self.search_bar.isHidden() or not self.search_bar.input.text():
                 self.search_bar.open_search()
             else:
@@ -2004,6 +2041,8 @@ class FileEditorWidget(QWidget):
 
     def _find_prev_or_open(self):
         if hasattr(self, 'search_bar'):
+            if self._in_md_preview:
+                self._set_md_preview(False)
             if self.search_bar.isHidden() or not self.search_bar.input.text():
                 self.search_bar.open_search()
             else:
@@ -2180,6 +2219,9 @@ class FileEditorWidget(QWidget):
         self._apply_theme()
         fm = QFontMetrics(font)
         self.editor.setTabStopDistance(4 * fm.horizontalAdvance(' '))
+        # 预览页字号随缩放变化后重渲染，确保标题等相对字号按新基准换算
+        if self._in_md_preview:
+            self._render_md_preview()
 
     def _zoom_in(self):
         """放大字体"""
@@ -2252,7 +2294,7 @@ class FileEditorWidget(QWidget):
         self.split_v_btn.setStyleSheet(split_btn_style)
 
         # AI 补全开关：透明底；hover/选中（开启）时显示 accent
-        self.ai_btn.setStyleSheet(f"""
+        toggle_btn_style = f"""
             QPushButton {{
                 background-color: transparent;
                 color: {text_dim};
@@ -2267,7 +2309,10 @@ class FileEditorWidget(QWidget):
                 background-color: {accent};
                 color: white;
             }}
-        """)
+        """
+        self.ai_btn.setStyleSheet(toggle_btn_style)
+        # Markdown 预览开关与 AI 开关同款样式
+        self.md_btn.setStyleSheet(toggle_btn_style)
 
         # 关闭按钮特殊样式
         self.close_btn.setStyleSheet(f"""
@@ -2300,6 +2345,23 @@ class FileEditorWidget(QWidget):
                 selection-color: white;
             }}
         """)
+
+        # Markdown 预览页：与编辑器同底色，用系统比例字体（阅读视图），
+        # 字号跟随编辑器字号联动（标题等的相对缩放由 Qt 渲染时按默认字号换算）
+        self._md_browser.setStyleSheet(f"""
+            QTextBrowser {{
+                background-color: {editor_bg};
+                color: {editor_fg};
+                border: none;
+                padding: 10px 18px;
+                font-size: {self._editor_point_size + 1}pt;
+                selection-background-color: {accent};
+                selection-color: white;
+            }}
+        """)
+        md_palette = self._md_browser.palette()
+        md_palette.setColor(QPalette.ColorRole.Link, QColor(accent))
+        self._md_browser.setPalette(md_palette)
 
         # AI 灰字建议用暗色文字 + 编辑器背景作底色（盖住下方真实文字），跟随主题
         self.editor.set_ai_ghost_color(QColor(self.theme.get('text_dim', '#6a737d')))
@@ -2334,6 +2396,8 @@ class FileEditorWidget(QWidget):
         self.split_v_btn.setToolTip(t("editor.split_v_tooltip"))
         if hasattr(self, 'ai_btn'):
             self.ai_btn.setToolTip(t("editor.ai_toggle_tooltip"))
+        if hasattr(self, 'md_btn'):
+            self.md_btn.setToolTip(t("editor.md_preview_tooltip"))
         if not self._current_file:
             self.file_label.setText(t("editor.no_file"))
         if hasattr(self, 'search_bar'):
@@ -2463,6 +2527,12 @@ class FileEditorWidget(QWidget):
         # 根据文件类型设置语法高亮
         self._setup_highlighter(file_path)
 
+        # Markdown 文件默认进渲染预览（Typora 式阅读视图），点 ◎ 切回源码编辑
+        is_md = Path(file_path).suffix.lower() in ('.md', '.markdown')
+        self._set_md_support(is_md)
+        if is_md:
+            self._set_md_preview(True)
+
         # 更新标题
         self._update_title()
 
@@ -2471,11 +2541,73 @@ class FileEditorWidget(QWidget):
 
         return True
 
+    def _set_md_support(self, supported: bool):
+        """标记当前文件是否支持 Markdown 预览，并同步按钮可见性。"""
+        supported = bool(supported)
+        self._md_preview_supported = supported
+        self.md_btn.setVisible(supported)
+        if not supported:
+            self._in_md_preview = False
+            if self.md_btn.isChecked():
+                self.md_btn.blockSignals(True)
+                self.md_btn.setChecked(False)
+                self.md_btn.blockSignals(False)
+            self._md_browser.clear()
+
+    def _set_md_preview(self, on: bool):
+        """切换 源码编辑 / 渲染预览。预览为只读，不触碰编辑器缓冲区。"""
+        on = bool(on) and self._md_preview_supported
+        if self.md_btn.isChecked() != on:
+            self.md_btn.blockSignals(True)
+            self.md_btn.setChecked(on)
+            self.md_btn.blockSignals(False)
+        self._in_md_preview = on
+        if on:
+            # 查找栏作用于源码编辑器，预览下先收起
+            if hasattr(self, 'search_bar') and not self.search_bar.isHidden():
+                self.search_bar.close_search()
+            self._render_md_preview()
+            self._stack.setCurrentIndex(2)
+        elif not self._in_image_mode:
+            self._stack.setCurrentIndex(0)
+            self.editor.setFocus()
+
+    def _render_md_preview(self):
+        """把编辑器缓冲区的 Markdown 源文本渲染到预览页（单向，只读）。
+
+        baseUrl 指向文件所在目录，使相对路径的本地图片能显示（只读加载）。
+        重渲染尽量保留预览页滚动位置（外部变更重载时不跳回顶部）。
+        """
+        doc = self._md_browser.document()
+        if self._current_file:
+            doc.setBaseUrl(QUrl.fromLocalFile(
+                os.path.dirname(os.path.abspath(self._current_file)) + os.sep))
+        scroll_pos = self._md_browser.verticalScrollBar().value()
+        # MarkdownNoHTML：禁用原始 HTML 解析。否则正文里出现 <tag> 这类未闭合
+        # HTML 时，Qt 会把其后的所有内容当 HTML 吞掉（文档从那里被截断）；
+        # 禁用后 HTML 按字面文本显示，同时也杜绝了 HTML 注入的渲染面。
+        doc.setMarkdown(
+            self.editor.toPlainText(),
+            QTextDocument.MarkdownFeature.MarkdownDialectGitHub
+            | QTextDocument.MarkdownFeature.MarkdownNoHTML,
+        )
+        self._md_browser.verticalScrollBar().setValue(scroll_pos)
+
+    def _on_md_link_clicked(self, url: QUrl):
+        """预览页链接点击：只放行 http/https 到系统浏览器。
+        本地文件/相对链接/其他 scheme 一律忽略，防止预览页意外导航
+        或触碰本地文件。"""
+        if url.scheme() in ('http', 'https'):
+            QDesktopServices.openUrl(url)
+
     def goto_line(self, line_no: int):
         """把光标移动到第 line_no 行（1 基）并滚动到可见处。
         用于从内容搜索结果跳转。图片模式或无效行号时静默忽略。"""
         if self._in_image_mode or line_no is None or line_no < 1:
             return
+        # 预览模式下先切回源码，行号跳转才可见
+        if self._in_md_preview:
+            self._set_md_preview(False)
         doc = self.editor.document()
         block = doc.findBlockByLineNumber(line_no - 1)
         if not block.isValid():
@@ -2535,6 +2667,7 @@ class FileEditorWidget(QWidget):
         self._current_file = file_path
         self._file_encoding = "utf-8"
         self._original_content = ""  # 图片不参与文本 modified 判定
+        self._set_md_support(False)
         self._image_pixmap = QPixmap.fromImage(image)
         self._in_image_mode = True
         self._stack.setCurrentIndex(1)
@@ -2780,6 +2913,9 @@ class FileEditorWidget(QWidget):
     def _on_text_changed(self):
         """文本变化时更新标题"""
         self._update_title()
+        # 预览可见时缓冲区只可能被程序改动（外部变更重载/恢复备份）→ 同步重渲染
+        if self._in_md_preview:
+            self._render_md_preview()
 
     def _update_title(self):
         """更新标题"""
@@ -3147,10 +3283,11 @@ class FileEditorWidget(QWidget):
         self._file_encoding = "utf-8"
         self._original_content = ""
         self.editor.clear()
-        # 复位图片预览
+        # 复位图片预览与 Markdown 预览
         self._in_image_mode = False
         self._image_pixmap = None
         self._image_label.clear()
+        self._set_md_support(False)
         self._stack.setCurrentIndex(0)
         self._update_title()
         self.editor_closed.emit()

@@ -13,6 +13,55 @@ from PyQt6.QtGui import QPainter, QColor, QPainterPath, QDrag
 from i18n import t
 
 
+# 工具栏顺序迁移版本：老配置升级后，新增按钮（remote/images）可能被
+# 合并逻辑放到离它的功能邻居很远的位置。首次加载时按锚点重定位一次
+# （remote → git 紧后，images → clear 紧后），随后写入版本号不再重复，
+# 用户之后的手动摆放不会被覆盖。
+TOOLBAR_ORDER_VERSION = 2
+
+
+def _reposition_after(config, btn, anchor, default_group):
+    """把 btn 挪到 anchor 紧后，并跟随 anchor 所在分组。就地修改 config。"""
+    button_order = config.get("button_order") or {}
+    button_groups = config.get("button_groups") or {}
+    # anchor 的实际分组：跨组覆盖优先，其次扫已存的组内顺序，最后默认组
+    anchor_group = button_groups.get(anchor)
+    if not anchor_group:
+        anchor_group = next(
+            (g for g, names in button_order.items() if anchor in names), None)
+    if not anchor_group:
+        anchor_group = default_group
+    # 从所有组内顺序里摘掉 btn（可能残留在旧版本的其它组里）
+    for names in button_order.values():
+        if btn in names:
+            names.remove(btn)
+    # anchor 所在组存了顺序表 → 插到 anchor 紧后；没存则交给默认顺序
+    names = button_order.get(anchor_group)
+    if names is not None and anchor in names:
+        names.insert(names.index(anchor) + 1, btn)
+    # 分组归属：与默认组一致就清掉跨组覆盖，否则显式跟随 anchor 的分组
+    if anchor_group == default_group:
+        button_groups.pop(btn, None)
+    else:
+        button_groups[btn] = anchor_group
+    config["button_groups"] = button_groups
+
+
+def migrate_toolbar_order(config) -> bool:
+    """一次性重整既有配置：remote 紧跟 git、images 紧跟 clear。
+
+    返回是否做了迁移。已是当前版本（含用户在管理对话框里重新保存过）
+    则不动，保护用户显式摆放。"""
+    if not isinstance(config, dict):
+        return False
+    if config.get("order_version", 0) >= TOOLBAR_ORDER_VERSION:
+        return False
+    _reposition_after(config, "remote_toggle_btn", "git_toggle_btn", "面板")
+    _reposition_after(config, "images_btn", "clear_btn", "操作")
+    config["order_version"] = TOOLBAR_ORDER_VERSION
+    return True
+
+
 def merge_group_order(saved_order, default_groups):
     """合并保存的分组顺序与默认分组列表。
 
@@ -376,11 +425,11 @@ class ToolbarManagerDialog(QDialog):
         ("image_local_checkbox", "图片存工作目录", True, "选项"),
         ("window_nav_checkbox", "窗口快速导航", True, "选项"),
 
-        # 第三组：操作
+        # 第三组：操作（图片默认紧跟清屏之后）
         ("export_btn", "导出", True, "操作"),
         ("history_btn", "历史", True, "操作"),
-        ("images_btn", "图片", True, "操作"),
         ("clear_btn", "清屏", True, "操作"),
+        ("images_btn", "图片", True, "操作"),
 
         # 第四组：面板开关（高频入口，默认排在分屏之前）
         ("explorer_toggle_btn", "资源管理器", True, "面板"),

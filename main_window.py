@@ -1663,8 +1663,8 @@ class MainWindow(QMainWindow):
             "操作": {
                 "export_btn": self.export_btn,
                 "history_btn": self.history_btn,
-                "images_btn": self.images_btn,
                 "clear_btn": self.clear_btn,
+                "images_btn": self.images_btn,
             },
             "分屏管理": {
                 "split_btn": self.split_btn,
@@ -1696,7 +1696,7 @@ class MainWindow(QMainWindow):
 
         self._group_default_orders = {
             "选项": ["image_prefix_checkbox", "image_local_checkbox", "window_nav_checkbox"],
-            "操作": ["export_btn", "history_btn", "images_btn", "clear_btn"],
+            "操作": ["export_btn", "history_btn", "clear_btn", "images_btn"],
             "分屏管理": ["split_btn", "split_v_btn", "close_split_btn", "close_tab_btn"],
             "面板": ["explorer_toggle_btn", "git_toggle_btn", "remote_toggle_btn"],
             "面板与编辑器": ["vscode_open_btn", "cursor_open_btn", "log_toggle_btn"],
@@ -7299,6 +7299,10 @@ class MainWindow(QMainWindow):
 
     def _on_toolbar_config_changed(self, config: dict):
         """工具栏配置变更回调"""
+        # 对话框重新保存的配置视为用户显式摆放：盖上当前顺序版本号，
+        # 避免下次启动时一次性迁移又把 remote/images 挪回锚点位置
+        from toolbar_manager import TOOLBAR_ORDER_VERSION
+        config["order_version"] = TOOLBAR_ORDER_VERSION
         old_layout = self.toolbar_config.get("layout", "single") if self.toolbar_config else "single"
         new_layout = config.get("layout", "single")
 
@@ -8402,8 +8406,11 @@ class MainWindow(QMainWindow):
                     self.current_theme = saved_theme
                 # 加载图标蒙版设置
                 self._use_icon_tint = config.get('icon_tint', False)
-                # 加载工具栏配置
+                # 加载工具栏配置（并做一次性顺序重整：remote 紧跟 git、images 紧跟 clear）
                 self.toolbar_config = config.get('toolbar_config', None)
+                if self.toolbar_config:
+                    from toolbar_manager import migrate_toolbar_order
+                    migrate_toolbar_order(self.toolbar_config)
                 # 加载 LLM 配置
                 self.llm_configs = config.get('llm_configs', [])
                 self.default_llm_config = config.get('default_llm_config', 0)
