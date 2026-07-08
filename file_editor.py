@@ -793,6 +793,16 @@ class CodeEditor(QPlainTextEdit):
     def contextMenuEvent(self, event):
         """在默认编辑菜单（撤销/剪切/复制/粘贴…）末尾追加分屏项。"""
         menu = self.createStandardContextMenu()
+        self.append_pane_actions(menu)
+        menu.exec(event.globalPos())
+
+    def append_pane_actions(self, menu):
+        """向 menu 末尾追加窗格级动作（保存/自动换行/分屏/移动）。
+
+        源码页与 Markdown 预览页共用：预览页的 QTextBrowser 没有这些项，
+        由 FileEditorWidget 把预览页的标准菜单传进来复用，信号仍从本编辑器
+        冒泡到所属窗格，行为与源码页完全一致。
+        """
         # 编辑器自身的 `QWidget {background-color}` 样式表会级联到这个子菜单的每个
         # item，盖住 Qt 默认的 hover 高亮。这里补回 :selected 高亮并把常态底色置透明。
         area = self._find_editor_area()
@@ -844,8 +854,6 @@ class CodeEditor(QPlainTextEdit):
             act_up = menu.addAction(self._split_menu_icon('up', icon_color), t("editor.move_up_menu"))
             act_up.setEnabled(area.can_move_up(pane))
             act_up.triggered.connect(self.move_up_requested.emit)
-
-        menu.exec(event.globalPos())
 
     @staticmethod
     def _split_menu_icon(kind: str, color: QColor) -> QIcon:
@@ -1963,6 +1971,10 @@ class FileEditorWidget(QWidget):
         self._md_browser.anchorClicked.connect(self._on_md_link_clicked)
         # 点击预览区也把本窗格设为活动窗格
         self._md_browser.viewport().installEventFilter(self)
+        # 预览页右键菜单：Qt 默认只有复制/全选，这里在其后追加与源码页
+        # 一致的分屏/移动等窗格级动作（否则预览状态下无法从右键菜单分屏）
+        self._md_browser.setContextMenuPolicy(Qt.ContextMenuPolicy.CustomContextMenu)
+        self._md_browser.customContextMenuRequested.connect(self._show_md_context_menu)
         self._stack.addWidget(self._md_browser)  # index 2
 
         layout.addWidget(self._stack)
@@ -2599,6 +2611,16 @@ class FileEditorWidget(QWidget):
         或触碰本地文件。"""
         if url.scheme() in ('http', 'https'):
             QDesktopServices.openUrl(url)
+
+    def _show_md_context_menu(self, pos):
+        """预览页右键菜单：Qt 标准项（复制/全选）+ 源码页同款窗格级动作。
+
+        动作追加复用 CodeEditor.append_pane_actions——分屏/移动信号仍从
+        源码编辑器冒泡到本窗格，与源码页路径一致。
+        """
+        menu = self._md_browser.createStandardContextMenu(pos)
+        self.editor.append_pane_actions(menu)
+        menu.exec(self._md_browser.mapToGlobal(pos))
 
     def goto_line(self, line_no: int):
         """把光标移动到第 line_no 行（1 基）并滚动到可见处。
