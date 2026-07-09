@@ -37,6 +37,11 @@ _IMAGE_EXTENSIONS = {
 _AUTOSAVE_DIR = os.path.expanduser("~/.smart_terminal_autosave")
 _AUTOSAVE_INTERVAL_MS = 30 * 1000
 
+# 切换文件后再切回来时恢复离开时的视图位置（光标 + 滚动）。
+# 模块级共享：同一文件在不同窗格间切换也能延续位置；仅内存态，不落盘。
+_VIEW_STATE_REGISTRY: dict = {}
+_VIEW_STATE_MAX = 200  # 防无限增长；超限时淘汰最早记录的文件
+
 
 def _looks_binary(raw: bytes) -> bool:
     """含 NUL 字节即视为二进制（与 git 同款启发式）。
@@ -2462,11 +2467,60 @@ class FileEditorWidget(QWidget):
         self._show_active_indicator = show_indicator
         self._apply_theme()
 
+    def _save_view_state(self):
+        """记录当前文件的视图位置（光标 + 滚动），切回时由 _restore_view_state 恢复。"""
+        if not self._current_file or self._in_image_mode:
+            return
+        key = os.path.abspath(self._current_file)
+        # 重插到末尾实现近似 LRU；超限时淘汰最早的记录
+        _VIEW_STATE_REGISTRY.pop(key, None)
+        while len(_VIEW_STATE_REGISTRY) >= _VIEW_STATE_MAX:
+            _VIEW_STATE_REGISTRY.pop(next(iter(_VIEW_STATE_REGISTRY)))
+        _VIEW_STATE_REGISTRY[key] = {
+            'cursor': self.editor.textCursor().position(),
+            'scroll': self.editor.verticalScrollBar().value(),
+            'md_scroll': (self._md_browser.verticalScrollBar().value()
+                          if self._md_preview_supported else 0),
+        }
+
+    def _restore_view_state(self, file_path: str):
+        """切回文件时恢复离开时的位置；无记录则停留在文件开头。
+
+        光标位置对文档长度取 min 钳制（文件可能已被外部改短）；
+        滚动条超范围时由 Qt 自行钳制。"""
+        state = _VIEW_STATE_REGISTRY.get(os.path.abspath(file_path))
+        if not state:
+            # 无记录的新文件：预览页滚动清零，避免残留上一个文件的位置
+            if self._in_md_preview:
+                self._md_browser.verticalScrollBar().setValue(0)
+            return
+        doc = self.editor.document()
+        cur = self.editor.textCursor()
+        cur.setPosition(min(state['cursor'], max(0, doc.characterCount() - 1)))
+        self.editor.setTextCursor(cur)
+        vsb = self.editor.verticalScrollBar()
+        vsb.setValue(state['scroll'])
+        if vsb.value() != state['scroll']:
+            # 自动换行等场景下布局未完成、范围还不够：下一轮事件循环补一次
+            QTimer.singleShot(0, lambda v=state['scroll']: self._apply_scroll_later(v))
+        if self._in_md_preview:
+            self._md_browser.verticalScrollBar().setValue(state.get('md_scroll', 0))
+
+    def _apply_scroll_later(self, value: int):
+        """布局完成后的延迟滚动恢复；窗格可能已销毁，静默忽略。"""
+        try:
+            self.editor.verticalScrollBar().setValue(value)
+        except RuntimeError:
+            pass
+
     def open_file(self, file_path: str) -> bool:
         """打开文件"""
         if not os.path.isfile(file_path):
             QMessageBox.warning(self, t("editor.error"), t("editor.file_not_found", path=file_path))
             return False
+
+        # 切走前记住当前文件的视图位置（若后续校验失败留在原文件，也只是白记一笔）
+        self._save_view_state()
 
         # 图片：走内联预览（QPixmap），跳过 "5MB 文本限制 / UTF-8 解码" 那条路径
         if Path(file_path).suffix.lower() in _IMAGE_EXTENSIONS:
@@ -2544,6 +2598,9 @@ class FileEditorWidget(QWidget):
         self._set_md_support(is_md)
         if is_md:
             self._set_md_preview(True)
+
+        # 恢复上次离开该文件时的视图位置（光标 + 滚动）
+        self._restore_view_state(file_path)
 
         # 更新标题
         self._update_title()
@@ -3294,6 +3351,9 @@ class FileEditorWidget(QWidget):
             elif reply == QMessageBox.StandardButton.Cancel:
                 return
 
+        # 关闭前记住视图位置，之后重新打开该文件仍能回到原位
+        self._save_view_state()
+
         # 正常关闭（已保存 / 无修改 / 明确丢弃）：停自动保存定时器并清理备份。
         # 删除是幂等的；Save 分支在 save_file 里已删，这里再调无副作用。
         self._autosave_timer.stop()
@@ -3562,6 +3622,8 @@ class EditorArea(QWidget):
     def close_pane(self, pane: FileEditorWidget):
         if pane not in self._panes or len(self._panes) <= 1:
             return
+        # 窗格销毁前记住其文件的视图位置（经 _close_editor 来的路径里文件已清空，此调用为无害空操作）
+        pane._save_view_state()
         parent = pane.parent()
         parent_sizes = parent.sizes() if isinstance(parent, QSplitter) else None
         close_index = parent.indexOf(pane) if isinstance(parent, QSplitter) else -1
