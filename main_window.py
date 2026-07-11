@@ -588,7 +588,7 @@ class MainWindow(QMainWindow):
             QToolBar {
                 background-color: #1a1a2e;
                 border: none;
-                padding: 8px;
+                padding: 8px 12px;
                 spacing: 8px;
             }
             QToolBar::separator {
@@ -1828,9 +1828,10 @@ class MainWindow(QMainWindow):
         self._pinned_flow_widget.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Preferred)
         self._pinned_flow_widget.setContentsMargins(0, 0, 0, 0)
         # h_spacing 匹配 unpin QToolBar 的 CSS spacing: 5px
-        # contentsMargins 需减去 QToolBar/QWidgetAction 内部约 3px 的隐式边距
+        # 左右对齐 unpin QToolBar 的 12px padding（需减去 QToolBar/QWidgetAction
+        # 内部约 3px 的隐式边距）
         self._flow_layout = FlowLayout(self._pinned_flow_widget, h_spacing=5, v_spacing=5)
-        self._flow_layout.setContentsMargins(2, 2, 2, 2)
+        self._flow_layout.setContentsMargins(9, 2, 9, 2)
         self._pinned_flow_toolbar.addWidget(self._pinned_flow_widget)
 
         pinned = is_double_row or self._pin_toolbar_row2
@@ -1863,7 +1864,7 @@ class MainWindow(QMainWindow):
             QToolBar {
                 background-color: #16213e;
                 border: none;
-                padding: 4px 8px;
+                padding: 4px 12px;
                 spacing: 6px;
             }
         """)
@@ -7619,7 +7620,7 @@ class MainWindow(QMainWindow):
                 background-color: {t['bg_dark']};
                 border: none;
                 spacing: 5px;
-                padding: 5px;
+                padding: 5px 12px;
             }}
             QToolBar::separator {{
                 background-color: {t['border']};
@@ -7765,7 +7766,7 @@ class MainWindow(QMainWindow):
             QToolBar {{
                 background-color: {t['bg_medium']};
                 border: none;
-                padding: 4px 8px;
+                padding: 4px 12px;
                 spacing: 6px;
             }}
             QToolBar::separator {{
