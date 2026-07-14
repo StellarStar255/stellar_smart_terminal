@@ -195,7 +195,7 @@ class MainWindow(QMainWindow):
         self._llm_configs_modified = False  # 标记 LLM API 配置是否在本窗口中被修改（防止多窗口覆盖）
         self.local_presets = []  # 本地快速命令列表（目录级别）
         self.pending_commands = []  # 待执行的命令队列
-        self.current_theme = "深蓝"  # 当前主题名称
+        self.current_theme = "午夜黑"  # 当前主题名称（初装默认：Midnight Black）
         self._use_icon_tint = False  # 是否给图标添加主题色蒙版
         self._global_zoom_delta = 0  # 全局缩放偏移量（相对于默认字体大小）
         self._gui_font_size = 0  # GUI 字体大小（0 表示跟随全局缩放）
@@ -2935,7 +2935,7 @@ class MainWindow(QMainWindow):
 
     def _create_flow_separator(self):
         """创建流式布局中的垂直分隔符，颜色取当前主题，外观与 QToolBar::separator 一致"""
-        t = self.THEMES.get(self.current_theme, self.THEMES["深蓝"])
+        t = self.THEMES.get(self.current_theme, self.THEMES["午夜黑"])
         sep = _FlowSeparator(self._pinned_flow_widget, color=t['border'])
         sep.show()
         return sep
@@ -3697,7 +3697,7 @@ class MainWindow(QMainWindow):
         terminal.local_quick_commands_provider = lambda: self.local_presets
 
         # 应用当前主题颜色
-        t = self.THEMES.get(self.current_theme, self.THEMES["深蓝"])
+        t = self.THEMES.get(self.current_theme, self.THEMES["午夜黑"])
         terminal.bg_color = QColor(t['terminal_bg'])
         terminal.fg_color = QColor(t['terminal_fg'])
         if t.get('is_light_theme'):
@@ -5377,7 +5377,7 @@ class MainWindow(QMainWindow):
         layout.addWidget(self._explorer_header)
 
         # 获取当前主题
-        current_theme = self.THEMES.get(self.current_theme, self.THEMES["深蓝"])
+        current_theme = self.THEMES.get(self.current_theme, self.THEMES["午夜黑"])
 
         # 使用 QSplitter 分隔资源管理器和编辑器
         self.explorer_splitter = QSplitter(Qt.Orientation.Vertical)
@@ -6533,7 +6533,7 @@ class MainWindow(QMainWindow):
         layout.addWidget(self._git_header)
 
         # 获取当前主题
-        current_theme = self.THEMES.get(self.current_theme, self.THEMES["深蓝"])
+        current_theme = self.THEMES.get(self.current_theme, self.THEMES["午夜黑"])
 
         # Git 面板内容
         self.git_panel = GitPanel(theme=current_theme)
@@ -6704,7 +6704,7 @@ class MainWindow(QMainWindow):
 
         layout.addWidget(self._remote_header)
 
-        current_theme = self.THEMES.get(self.current_theme, self.THEMES["深蓝"])
+        current_theme = self.THEMES.get(self.current_theme, self.THEMES["午夜黑"])
         self.remote_panel = RemoteExplorerPanel(theme=current_theme)
         # 远程文件打开 → 注入到本地编辑器（透明处理远程保存）
         self.remote_panel.file_open_requested.connect(self._open_remote_file_in_editor)
@@ -7296,7 +7296,7 @@ class MainWindow(QMainWindow):
 
     def _show_toolbar_manager(self):
         """显示工具栏管理对话框"""
-        current_theme = self.THEMES.get(self.current_theme, self.THEMES["深蓝"])
+        current_theme = self.THEMES.get(self.current_theme, self.THEMES["午夜黑"])
         dialog = ToolbarManagerDialog(self.toolbar_config, current_theme, self)
         dialog.config_changed.connect(self._on_toolbar_config_changed)
         dialog.exec()
@@ -7602,7 +7602,7 @@ class MainWindow(QMainWindow):
     def _update_app_icon_by_theme(self):
         """根据当前主题和蒙版设置更新图标"""
         if self._use_icon_tint:
-            t = self.THEMES.get(self.current_theme, self.THEMES["深蓝"])
+            t = self.THEMES.get(self.current_theme, self.THEMES["午夜黑"])
             self._update_app_icon(t['accent'])
         else:
             # 恢复原始图标
@@ -8658,7 +8658,7 @@ class MainWindow(QMainWindow):
                 self.working_dir_history.sort(key=lambda p: self._working_dir_freq.get(p, 0), reverse=True)
                 self.last_working_dir = config.get('last_working_dir', None)
                 # 加载主题设置
-                saved_theme = config.get('theme', '深蓝')
+                saved_theme = config.get('theme', '午夜黑')
                 if saved_theme in self.THEMES:
                     self.current_theme = saved_theme
                 # 加载图标蒙版设置
