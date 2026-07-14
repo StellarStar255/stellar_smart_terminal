@@ -694,6 +694,10 @@ class MainWindow(QMainWindow):
         # 使用自定义可分离的标签栏
         self.detachable_tab_bar = DetachableTabBar(self.tab_widget)
         self.tab_widget.setTabBar(self.detachable_tab_bar)
+        # 关掉 documentMode 标签栏的原生"基座"绘制：macOS 深色系统外观下它会
+        # 无视 QSS、按 NSAppearance 横贯整行画一条深灰底（浅色主题下极其突兀），
+        # 而且 widget.grab() 复现不出来（只有真实屏幕合成才可见）。
+        self.detachable_tab_bar.setDrawBase(False)
         self.detachable_tab_bar.tab_detach_requested.connect(self._detach_tab)
         self.detachable_tab_bar.tab_rename_requested.connect(self._begin_inline_tab_rename)
 
@@ -7756,6 +7760,27 @@ class MainWindow(QMainWindow):
                 color: {t['text']};
             }}
         """)
+        # 应用级 QPalette 跟随主题：documentMode 标签栏空白区等"原生绘制"
+        # 区域用的是 QPalette 而非 QSS（app.py 启动时设的是硬编码深色调色板，
+        # 浅色主题下这些区域会留下一条深色，且给 QTabBar 设 QSS 会禁用
+        # autoFillBackground，局部填充救不回来）。多窗口共享同一主题，改
+        # 应用级调色板是安全的。
+        _pal = QPalette()
+        _pal.setColor(QPalette.ColorRole.Window, QColor(t['bg_dark']))
+        _pal.setColor(QPalette.ColorRole.WindowText, QColor(t['text']))
+        _pal.setColor(QPalette.ColorRole.Base, QColor(t['bg_medium']))
+        _pal.setColor(QPalette.ColorRole.AlternateBase, QColor(t['bg_dark']))
+        _pal.setColor(QPalette.ColorRole.ToolTipBase, QColor(t['bg_light']))
+        _pal.setColor(QPalette.ColorRole.ToolTipText, QColor(t['text']))
+        _pal.setColor(QPalette.ColorRole.Text, QColor(t['text']))
+        _pal.setColor(QPalette.ColorRole.Button, QColor(t['bg_light']))
+        _pal.setColor(QPalette.ColorRole.ButtonText, QColor(t['text']))
+        _pal.setColor(QPalette.ColorRole.Link, QColor(t['accent']))
+        _pal.setColor(QPalette.ColorRole.Highlight, QColor(t['accent']))
+        _pal.setColor(QPalette.ColorRole.HighlightedText, QColor('#ffffff'))
+        _app = QApplication.instance()
+        if _app is not None:
+            _app.setPalette(_pal)
 
         # 信息栏样式
         self.info_frame.setStyleSheet(f"""
