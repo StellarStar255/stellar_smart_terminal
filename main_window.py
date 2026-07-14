@@ -706,6 +706,10 @@ class MainWindow(QMainWindow):
                 border: none;
                 background-color: #1a1a2e;
             }
+            QTabBar {
+                background-color: #0f0f1a;
+                border: none;
+            }
             QTabBar::tab {
                 background-color: #0f1626;
                 color: #888;
@@ -7724,6 +7728,10 @@ class MainWindow(QMainWindow):
             QTabWidget::pane {{
                 border: none;
                 background-color: {t['bg_dark']};
+            }}
+            QTabBar {{
+                background-color: {t['bg_darkest']};
+                border: none;
             }}
             QTabBar::tab {{
                 background-color: {t['bg_medium']};
