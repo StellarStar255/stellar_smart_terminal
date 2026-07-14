@@ -703,12 +703,19 @@ class MainWindow(QMainWindow):
 
         self.tab_widget.setTabsClosable(False)  # 禁用内置关闭按钮，使用自定义
         self.tab_widget.setMovable(True)
-        self.tab_widget.setDocumentMode(True)
+        # 不用 documentMode：它让标签栏走 macOS 原生外观绘制（NSAppearance），
+        # 空白区颜色无视 QSS/QPalette（conda 版 Qt 连 colorScheme 都只能改成
+        # 原生浅灰而非主题色）。关掉后标签栏完全由下面的 QSS 控制；
+        # 需配合 QTabWidget::tab-bar { alignment: left } 保持标签靠左。
+        self.tab_widget.setDocumentMode(False)
         self.tab_widget.currentChanged.connect(self._on_tab_changed)
         self.tab_widget.setStyleSheet("""
             QTabWidget::pane {
                 border: none;
                 background-color: #1a1a2e;
+            }
+            QTabWidget::tab-bar {
+                alignment: left;
             }
             QTabBar {
                 background-color: #0f0f1a;
@@ -7733,6 +7740,9 @@ class MainWindow(QMainWindow):
                 border: none;
                 background-color: {t['bg_dark']};
             }}
+            QTabWidget::tab-bar {{
+                alignment: left;
+            }}
             QTabBar {{
                 background-color: {t['bg_darkest']};
                 border: none;
@@ -7781,6 +7791,15 @@ class MainWindow(QMainWindow):
         _app = QApplication.instance()
         if _app is not None:
             _app.setPalette(_pal)
+            # 强制原生外观（NSAppearance）跟随主题（Qt 6.8+）：conda 版 Qt 在
+            # macOS 深色系统外观下会按原生外观画 documentMode 标签栏空白区等
+            # 区域，连 QPalette 都绕过；colorScheme 是唯一对所有构建都生效的开关
+            try:
+                _app.styleHints().setColorScheme(
+                    Qt.ColorScheme.Light if t.get('is_light_theme')
+                    else Qt.ColorScheme.Dark)
+            except AttributeError:
+                pass  # Qt < 6.8 没有 setColorScheme，保持系统外观
 
         # 信息栏样式
         self.info_frame.setStyleSheet(f"""
