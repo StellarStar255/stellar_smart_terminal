@@ -61,11 +61,17 @@ class NoHighlightDelegate(QStyledItemDelegate):
         # 绘制文本和其他内容
         super().paint(painter, opt, index)
 
-        # 「执行完毕」提醒：在条目右侧画一个绿色小圆点
+        # 「执行完毕」提醒：在条目右侧画一个绿色小圆点。
+        # 右端取「条目右端」与「可视区右缘」的较小者：窄侧栏出横向滚动条时
+        # 条目右端在可视区外，不钳制的话绿点会画到屏幕外看不见。
         if index.data(NAV_ATTENTION_ROLE):
             r = option.rect
             d = 8
-            cx = r.right() - d - 6
+            right = r.right()
+            view = option.widget
+            if view is not None:
+                right = min(right, view.viewport().rect().right())
+            cx = right - d - 6
             cy = r.center().y()
             painter.save()
             painter.setRenderHint(QPainter.RenderHint.Antialiasing, True)

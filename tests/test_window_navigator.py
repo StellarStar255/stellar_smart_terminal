@@ -75,5 +75,66 @@ class TestWindowNavigatorExtraction(unittest.TestCase):
         main_window.MainWindow._broadcast_navigator_refresh()
 
 
+class TestAttentionDotVisibility(unittest.TestCase):
+    """「执行完毕」绿点必须始终画在可视区内。
+
+    回归守卫：绿点原本画在条目矩形右端；窄侧栏下长窗口名会撑出横向滚动条，
+    条目右端跑到可视区外，绿点整个不可见。修复后绿点右端被钳制到可视区右缘。
+    """
+
+    LONG_TITLE = "9. zhiyuan_linux_pinyin_input_methods_long_name"
+
+    @classmethod
+    def setUpClass(cls):
+        os.environ.setdefault('QT_QPA_PLATFORM', 'offscreen')
+        from PyQt6.QtWidgets import QApplication
+        cls.app = QApplication.instance() or QApplication([])
+
+    def _green_pixels(self, list_width: int):
+        """构造指定宽度的列表并返回可视区内绿点像素数。"""
+        import main_window  # noqa: F401  先加载，破 window_navigator 的循环 import
+        from window_navigator import NoHighlightDelegate, NAV_ATTENTION_ROLE
+        from PyQt6.QtWidgets import QListWidget, QListWidgetItem
+        from PyQt6.QtGui import QColor
+
+        lw = QListWidget()
+        lw.setItemDelegate(NoHighlightDelegate(lw))
+        lw.setStyleSheet(
+            "QListWidget{background:#16213e;} QListWidget::item{padding:8px;}")
+        it = QListWidgetItem(self.LONG_TITLE)
+        it.setData(NAV_ATTENTION_ROLE, True)
+        it.setForeground(QColor('#a855f7'))
+        lw.addItem(it)
+        lw.resize(list_width, 120)
+        lw.show()
+        self.app.processEvents()
+        try:
+            img = lw.viewport().grab().toImage()
+            count = 0
+            for y in range(img.height()):
+                for x in range(img.width()):
+                    c = img.pixelColor(x, y)
+                    if (abs(c.red() - 0x2e) < 25 and abs(c.green() - 0xcc) < 25
+                            and abs(c.blue() - 0x71) < 25):
+                        count += 1
+            hbar_out = lw.horizontalScrollBar().maximum() > 0
+            return count, hbar_out
+        finally:
+            lw.deleteLater()
+            self.app.processEvents()
+
+    def test_dot_visible_in_narrow_list(self):
+        # 220px 窄列表：文字被截断、出横向滚动条，绿点仍须可见
+        count, hbar_out = self._green_pixels(220)
+        self.assertTrue(hbar_out, "前置条件不成立：窄列表未出横向滚动条")
+        self.assertGreater(count, 0, "窄侧栏下「执行完毕」绿点画到了可视区外")
+
+    def test_dot_visible_in_wide_list(self):
+        # 宽列表：原有行为（画在条目右端附近）不受钳制影响
+        count, hbar_out = self._green_pixels(500)
+        self.assertFalse(hbar_out)
+        self.assertGreater(count, 0)
+
+
 if __name__ == '__main__':
     unittest.main()
