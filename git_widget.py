@@ -427,13 +427,6 @@ class CollapsibleSection(QWidget):
             QSizePolicy.Policy.Ignored, QSizePolicy.Policy.Preferred
         )
         self.title_label.setMinimumWidth(0)
-        self.title_label.setStyleSheet(f"""
-            QLabel {{
-                color: {self.theme.get('text', '#eaeaea')};
-                font-weight: bold;
-                font-size: 12px;
-            }}
-        """)
         header_layout.addWidget(self.title_label, 1)
         # 标题宽度随侧栏变化时，用省略号重算可见文字（…），避免单纯裁剪把字截成半个
         self.title_label.resizeEvent = self._elide_title
@@ -468,7 +461,7 @@ class CollapsibleSection(QWidget):
         self.toggle_icon.setText("▼" if self._is_expanded else "▶")
 
     def _update_style(self):
-        """更新样式"""
+        """更新样式（标题与操作按钮也在此重设，保证切主题后不残留旧配色）"""
         self.header.setStyleSheet(f"""
             QFrame {{
                 background-color: {self.theme.get('bg_medium', '#16213e')};
@@ -480,6 +473,17 @@ class CollapsibleSection(QWidget):
                 color: {self.theme.get('text_dim', '#888')};
             }}
         """)
+        self.title_label.setStyleSheet(f"""
+            QLabel {{
+                color: {self.theme.get('text', '#eaeaea')};
+                font-weight: bold;
+                font-size: 12px;
+            }}
+        """)
+        for i in range(self.action_layout.count()):
+            w = self.action_layout.itemAt(i).widget()
+            if isinstance(w, QPushButton):
+                w.setStyleSheet(self._action_btn_qss())
 
     def _elide_title(self, event=None):
         """按当前标签宽度对标题做省略号处理（窄到放不下时显示 'Staged Cha…'）"""
@@ -495,12 +499,9 @@ class CollapsibleSection(QWidget):
         self._title_text = title
         self._elide_title()
 
-    def add_action_button(self, text: str, tooltip: str = "") -> QPushButton:
-        """添加操作按钮"""
-        btn = QPushButton(text)
-        btn.setToolTip(tooltip)
-        btn.setFixedSize(24, 20)
-        btn.setStyleSheet(f"""
+    def _action_btn_qss(self) -> str:
+        """操作按钮的主题样式（新增按钮与切主题重刷共用）"""
+        return f"""
             QPushButton {{
                 background-color: {self.theme.get('bg_lighter', '#3d3d5c')};
                 color: {self.theme.get('text', '#eaeaea')};
@@ -511,7 +512,14 @@ class CollapsibleSection(QWidget):
             QPushButton:hover {{
                 background-color: {self.theme.get('bg_hover', '#4d4d6c')};
             }}
-        """)
+        """
+
+    def add_action_button(self, text: str, tooltip: str = "") -> QPushButton:
+        """添加操作按钮"""
+        btn = QPushButton(text)
+        btn.setToolTip(tooltip)
+        btn.setFixedSize(24, 20)
+        btn.setStyleSheet(self._action_btn_qss())
         self.action_layout.addWidget(btn)
         return btn
 
@@ -641,6 +649,9 @@ class GitChangesWidget(QScrollArea):
         """)
         self.staged_section.apply_theme(theme)
         self.unstaged_section.apply_theme(theme)
+        # 文件条目在 update_files 时按当时的主题创建；作废指纹，
+        # 让下一次状态刷新用新主题重建条目（否则旧配色一直残留）
+        self._files_fingerprint = None
 
     def apply_language(self):
         """更新语言相关的 UI 文本"""
@@ -2266,6 +2277,14 @@ class GitHeaderWidget(QFrame):
         """应用主题"""
         self.theme = theme
         self._update_style()
+
+        self.title_label.setStyleSheet(f"""
+            QLabel {{
+                color: {theme.get('text', '#eaeaea')};
+                font-weight: bold;
+                font-size: 13px;
+            }}
+        """)
 
         self.branch_combo.setStyleSheet(f"""
             QComboBox {{

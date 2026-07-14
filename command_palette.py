@@ -248,6 +248,49 @@ class CommandPalette(QWidget):
     def set_empty_text(self, text: str):
         self.empty_label.setText(text)
 
+    def apply_theme(self, t: dict):
+        """应用主题配色。t 为主题颜色字典，需要的键：
+        bg_medium / bg_dark / border / accent / text / text_dim。
+        保持组件独立性：只消费传入的颜色，不 import 业务模块。
+        """
+        self.line_edit.setStyleSheet(f"""
+            QLineEdit {{
+                background-color: {t['bg_medium']};
+                color: {t['text']};
+                border: 1px solid {t['border']};
+                border-radius: 4px;
+                padding: 2px 8px;
+                selection-background-color: {t['accent']};
+            }}
+            QLineEdit:focus {{
+                border-color: {t['accent']};
+            }}
+        """)
+        self.popup.setStyleSheet(f"""
+            QFrame {{
+                background-color: {t['bg_dark']};
+                border: 1px solid {t['border']};
+                border-radius: 4px;
+            }}
+        """)
+        self.list_widget.setStyleSheet(f"""
+            QListWidget {{
+                background-color: transparent;
+                color: {t['text']};
+                border: none;
+                outline: none;
+            }}
+            QListWidget::item {{
+                padding: 5px 10px;
+            }}
+            QListWidget::item:selected {{
+                background-color: {t['accent']};
+                color: white;
+                border-radius: 3px;
+            }}
+        """)
+        self.empty_label.setStyleSheet(f"color: {t['text_dim']}; padding: 10px;")
+
     # ---------- internals ----------
 
     def _refresh_popup(self, force_show: bool = False):

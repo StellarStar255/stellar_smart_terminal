@@ -7737,7 +7737,7 @@ class MainWindow(QMainWindow):
             }}
             QTabBar::tab:selected {{
                 background-color: {t['bg_dark']};
-                color: #ffffff;
+                color: {t['text']};
                 font-weight: bold;
                 margin-top: 0px;
                 padding-top: 10px;
@@ -8155,6 +8155,210 @@ class MainWindow(QMainWindow):
                     background-color: {t['bg_hover']};
                 }}
             """)
+
+        # ===== 以下控件构造时写死了深色（默认主题），必须按主题重设，
+        # 否则浅色主题下会残留一块块深色补丁 =====
+
+        # 工具栏灰色小标签（Preset:/Theme:/Language:/GUI Font:/Opacity:）
+        for _name in ('preset_label', 'theme_label', 'lang_label',
+                      'gui_font_label', 'opacity_label'):
+            _lbl = getattr(self, _name, None)
+            if _lbl is not None:
+                _lbl.setStyleSheet(f"color: {t['text_dim']};")
+
+        # 预设下拉框（构造样式见 _setup_toolbar，这里仅替换颜色）
+        if hasattr(self, 'preset_combo'):
+            self.preset_combo.setStyleSheet(f"""
+                QComboBox {{
+                    background-color: {t['bg_medium']};
+                    border: 2px solid {t['border']};
+                    border-radius: 6px;
+                    padding: 8px 12px;
+                    padding-right: 36px;
+                    color: {t['text']};
+                    font-size: 12px;
+                    combobox-popup: 0;
+                }}
+                QComboBox:focus {{
+                    border-color: {t['accent']};
+                }}
+                QComboBox::drop-down {{
+                    subcontrol-origin: padding;
+                    subcontrol-position: center right;
+                    width: 32px;
+                    border: none;
+                    background: transparent;
+                }}
+                QComboBox::down-arrow {{
+                    image: none;
+                    width: 18px;
+                    height: 18px;
+                    background: transparent;
+                }}
+                QComboBox QAbstractItemView {{
+                    background-color: {t['bg_medium']};
+                    color: {t['text']};
+                    selection-background-color: {t['accent']};
+                    selection-color: #ffffff;
+                    border: 1px solid {t['border']};
+                    border-radius: 4px;
+                    outline: none;
+                    padding: 4px;
+                }}
+                QComboBox QAbstractItemView::item {{
+                    min-height: 28px;
+                    padding: 0px 6px;
+                    border-radius: 4px;
+                }}
+            """)
+
+        # 主题下拉框
+        if hasattr(self, 'theme_combo'):
+            self.theme_combo.setStyleSheet(f"""
+                QComboBox {{
+                    background-color: {t['bg_medium']};
+                    border: 1px solid {t['border']};
+                    border-radius: 4px;
+                    padding: 4px 8px;
+                    color: {t['text']};
+                    min-width: 70px;
+                    margin-right: 6px;
+                    combobox-popup: 0;
+                }}
+                QComboBox:hover {{
+                    border-color: {t['accent']};
+                }}
+                QComboBox::drop-down {{
+                    border: none;
+                    width: 20px;
+                }}
+                QComboBox QAbstractItemView {{
+                    background-color: {t['bg_medium']};
+                    color: {t['text']};
+                    selection-background-color: {t['accent']};
+                    selection-color: #ffffff;
+                    border: 1px solid {t['border']};
+                    border-radius: 4px;
+                    outline: none;
+                    padding: 4px;
+                }}
+                QComboBox QAbstractItemView::item {{
+                    min-height: 28px;
+                    padding: 0px 6px;
+                    border-radius: 4px;
+                }}
+            """)
+
+        # 语言 / GUI 字号 / 透明度下拉框（构造时共用 _COMBO_STYLE）
+        _combo_qss = f"""
+            QComboBox {{
+                background-color: {t['bg_medium']};
+                border: 1px solid {t['border']};
+                border-radius: 4px;
+                padding: 4px 8px;
+                color: {t['text']};
+                combobox-popup: 0;
+            }}
+            QComboBox:hover {{
+                border-color: {t['accent']};
+            }}
+            QComboBox::drop-down {{
+                border: none;
+                width: 20px;
+            }}
+            QComboBox QAbstractItemView {{
+                background-color: {t['bg_medium']};
+                color: {t['text']};
+                selection-background-color: {t['accent']};
+                selection-color: #ffffff;
+                border: 1px solid {t['border']};
+                border-radius: 4px;
+                outline: none;
+                padding: 4px;
+            }}
+            QComboBox QAbstractItemView::item {{
+                min-height: 28px;
+                padding: 0px 6px;
+                border-radius: 4px;
+            }}
+        """
+        for _name in ('lang_combo', 'gui_font_spin', 'opacity_spin'):
+            _combo = getattr(self, _name, None)
+            if _combo is not None:
+                _combo.setStyleSheet(_combo_qss)
+
+        # 管理预设按钮（bg_lighter 深浅主题下都是中性的按钮底色）
+        if hasattr(self, 'manage_preset_btn'):
+            self.manage_preset_btn.setStyleSheet(f"""
+                QPushButton {{
+                    background-color: {t['bg_lighter']};
+                    padding: 8px 12px;
+                    font-size: 12px;
+                }}
+            """)
+
+        # 工具栏勾选框（Image @prefix / Image to CWD / Window Navigator / Tint）：
+        # 指示器的 unchecked/checked 伪类必须整套重设，通用 QCheckBox 规则穿不透
+        _checkbox_qss = f"""
+            QCheckBox {{
+                color: {t['text_dim']};
+                font-size: 11px;
+                spacing: 8px;
+            }}
+            QCheckBox::indicator {{
+                width: 16px;
+                height: 16px;
+            }}
+            QCheckBox::indicator:unchecked {{
+                border: 2px solid {t['border']};
+                border-radius: 3px;
+                background-color: {t['bg_medium']};
+            }}
+            QCheckBox::indicator:checked {{
+                border: 2px solid {t['accent']};
+                border-radius: 3px;
+                background-color: {t['accent']};
+            }}
+        """
+        for _name in ('image_prefix_checkbox', 'image_local_checkbox',
+                      'window_nav_checkbox', 'icon_tint_checkbox'):
+            _cb = getattr(self, _name, None)
+            if _cb is not None:
+                _cb.setStyleSheet(_checkbox_qss)
+
+        # Remote 切换按钮（品牌色固定，但文字需要固定白色 ——
+        # 否则浅色主题下会继承 QToolBar QPushButton 的深色文字）
+        if hasattr(self, 'remote_toggle_btn'):
+            self.remote_toggle_btn.setStyleSheet("""
+                QPushButton {
+                    background-color: #38bdf8;
+                    color: white;
+                    border: none;
+                    border-radius: 4px;
+                    padding: 8px 15px;
+                }
+                QPushButton:hover {
+                    background-color: #7dd3fc;
+                }
+                QPushButton:checked {
+                    background-color: #0284c7;
+                }
+            """)
+
+        # 命令搜索框（Cmd+K）
+        if hasattr(self, 'command_palette'):
+            self.command_palette.apply_theme(t)
+
+        # 窗口导航面板：内嵌面板 + 全局浮动面板
+        if getattr(self, 'nav_panel', None) is not None:
+            self.nav_panel.apply_theme(t)
+        _global_nav = MainWindow._global_window_navigator
+        if _global_nav is not None:
+            try:
+                if not sip.isdeleted(_global_nav):
+                    _global_nav.apply_theme(t)
+            except Exception:
+                pass
 
         # 更新所有终端的颜色
         for terminals in self.tab_terminals.values():
@@ -8804,6 +9008,10 @@ class MainWindow(QMainWindow):
             if MainWindow._global_window_navigator is None:
                 MainWindow._global_window_navigator = WindowNavigatorPanel()
                 MainWindow._global_window_navigator.panel_closed.connect(MainWindow._on_navigator_closed_global)
+                # 面板是延迟创建的，补上当前主题（否则保持默认深色样式）
+                _t = self.THEMES.get(self.current_theme)
+                if _t:
+                    MainWindow._global_window_navigator.apply_theme(_t)
             MainWindow._global_window_navigator.show()
             MainWindow._global_window_navigator.raise_()
             MainWindow._sync_nav_checkbox_state(True)
@@ -8919,6 +9127,11 @@ class MainWindow(QMainWindow):
                 if MainWindow._global_window_navigator is None:
                     MainWindow._global_window_navigator = WindowNavigatorPanel()
                     MainWindow._global_window_navigator.panel_closed.connect(MainWindow._on_navigator_closed_global)
+                    # 面板是延迟创建的，补上当前主题（否则保持默认深色样式）
+                    if wins:
+                        _t = wins[0].THEMES.get(wins[0].current_theme)
+                        if _t:
+                            MainWindow._global_window_navigator.apply_theme(_t)
                 MainWindow._global_window_navigator.show()
                 MainWindow._global_window_navigator.raise_()
                 MainWindow._sync_nav_checkbox_state(True)

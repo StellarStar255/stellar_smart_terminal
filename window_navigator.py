@@ -28,6 +28,21 @@ logger = get_logger(__name__)
 # 导航条目的「执行完毕」提醒标记角色（绿点）
 NAV_ATTENTION_ROLE = Qt.ItemDataRole.UserRole + 1
 
+# 未收到主题前的兜底配色（与 themes.THEMES['深蓝'] 一致）。
+# 面板样式一律从 self._theme 取色，MainWindow._apply_theme 会调 apply_theme()
+# 把当前主题字典（themes.py 的一项）灌进来，浅色主题下不再是一块深色补丁。
+_FALLBACK_THEME = {
+    'bg_dark': '#1a1a2e',
+    'bg_medium': '#16213e',
+    'bg_light': '#2d2d44',
+    'bg_lighter': '#3d3d5c',
+    'bg_hover': '#4d4d6c',
+    'border': '#3d3d5c',
+    'accent': '#667eea',
+    'text': '#eaeaea',
+    'text_dim': '#888888',
+}
+
 
 class NoHighlightDelegate(QStyledItemDelegate):
     """自定义 delegate，禁用默认的选中高亮，使用 item 的背景色"""
@@ -94,6 +109,7 @@ class WindowNavigatorPanel(QWidget):
         import weakref as _weakref
         self._window_refs: "dict[int, _weakref.ReferenceType]" = {}
 
+        self._theme = dict(_FALLBACK_THEME)
         self._setup_ui()
         self._apply_style()
         self._load_navigator_config()
@@ -126,27 +142,13 @@ class WindowNavigatorPanel(QWidget):
         layout.setSpacing(6)
 
         # 标题
-        title_label = QLabel(t("window.navigator_list_title"))
-        title_label.setStyleSheet("color: #667eea; font-weight: bold; font-size: 13px;")
-        layout.addWidget(title_label)
+        self.title_label = QLabel(t("window.navigator_list_title"))
+        layout.addWidget(self.title_label)
 
         # 搜索框
         self.search_input = QLineEdit()
         self.search_input.setPlaceholderText(t("window.search_placeholder"))
         self.search_input.setClearButtonEnabled(True)
-        self.search_input.setStyleSheet("""
-            QLineEdit {
-                background-color: #16213e;
-                border: 1px solid #3d3d5c;
-                border-radius: 4px;
-                padding: 4px 8px;
-                color: #eaeaea;
-                font-size: 12px;
-            }
-            QLineEdit:focus {
-                border-color: #667eea;
-            }
-        """)
         self.search_input.textChanged.connect(self._filter_window_list)
         layout.addWidget(self.search_input)
 
@@ -160,24 +162,8 @@ class WindowNavigatorPanel(QWidget):
         self.window_list.setDropIndicatorShown(True)
         self.window_list.setDragDropMode(QListWidget.DragDropMode.InternalMove)
         self.window_list.setDefaultDropAction(Qt.DropAction.MoveAction)
-        # 直接在 window_list 上设置样式（不设置悬停样式，由代码动态控制）
-        self.window_list.setStyleSheet("""
-            QListWidget {
-                background-color: #16213e;
-                border: 1px solid #3d3d5c;
-                border-radius: 4px;
-                font-size: 12px;
-                outline: none;
-            }
-            QListWidget::item {
-                padding: 8px;
-                border-bottom: 1px solid #2d2d44;
-                border-radius: 4px;
-            }
-            QListWidget::item:selected {
-                background-color: #2d2d44;
-            }
-        """)
+        # 列表样式由 _apply_list_font_size() 按当前主题 + 字号统一设置
+        # （不设置悬停样式，由代码动态控制）
         # 内嵌模式下让列表保持紧凑（顶部一小条），把纵向空间留给下方的文件面板；
         # 窗口很多时列表内部滚动。高度可由底部手柄拖拽调整（见 set_embedded_list_height）。
         self.EMBED_LIST_MIN_H = 60
@@ -204,35 +190,9 @@ class WindowNavigatorPanel(QWidget):
         compact_row = QHBoxLayout()
         compact_row.setSpacing(8)
 
-        # 三个勾选框共用的深色样式：必须把 ::indicator 的外观（边框/背景/选中态）
-        # 全部定义掉，否则 Qt 会退回 Windows 原生风格画指示器，浅色高亮叠在
-        # 深色主题上非常突兀（hover 时尤其明显）。
-        nav_checkbox_style = """
-            QCheckBox {
-                color: #aaaaaa;
-                font-size: 11px;
-                border: none;
-            }
-            QCheckBox::indicator {
-                width: 14px;
-                height: 14px;
-                border: 2px solid #3d3d5c;
-                border-radius: 3px;
-                background-color: #16213e;
-            }
-            QCheckBox::indicator:hover {
-                border-color: #667eea;
-            }
-            QCheckBox::indicator:checked {
-                border-color: #667eea;
-                background-color: #667eea;
-            }
-        """
-
         self.compact_checkbox = QCheckBox(t("window.compact_display"))
         self.compact_checkbox.setChecked(True)  # 默认开启简洁显示
         self.compact_checkbox.setToolTip(t("window.compact_tooltip"))
-        self.compact_checkbox.setStyleSheet(nav_checkbox_style)
         self.compact_checkbox.stateChanged.connect(self._toggle_compact_mode)
         compact_row.addWidget(self.compact_checkbox)
 
@@ -240,14 +200,12 @@ class WindowNavigatorPanel(QWidget):
         self.quick_close_checkbox = QCheckBox(t("window.quick_close"))
         self.quick_close_checkbox.setChecked(self._quick_close)
         self.quick_close_checkbox.setToolTip(t("window.quick_close_tooltip"))
-        self.quick_close_checkbox.setStyleSheet(nav_checkbox_style)
         self.quick_close_checkbox.stateChanged.connect(self._on_quick_close_changed)
         compact_row.addWidget(self.quick_close_checkbox)
 
         # 「嵌入到侧栏」勾选框：勾选=内嵌到各窗口左侧栏；取消=独立浮动窗口。自动记住。
         self.embed_checkbox = QCheckBox(t("window.embed_checkbox"))
         self.embed_checkbox.setToolTip(t("window.embed_checkbox_tooltip"))
-        self.embed_checkbox.setStyleSheet(nav_checkbox_style)
         self.embed_checkbox.blockSignals(True)
         self.embed_checkbox.setChecked(self._embedded)
         self.embed_checkbox.blockSignals(False)
@@ -264,20 +222,9 @@ class WindowNavigatorPanel(QWidget):
         # 用矢量绘制的齿轮图标（_make_git_tool_icon），避免 macOS 上 ⚙ 字形被渲染成
         # 彩色 emoji / 小点，保证清晰统一。
         self.settings_btn = QPushButton()
-        self.settings_btn.setIcon(_make_git_tool_icon('gear', '#c8c8d8', 16))
         self.settings_btn.setIconSize(QSize(16, 16))
         self.settings_btn.setToolTip(t("window.settings_tooltip"))
         self.settings_btn.setFixedSize(28, 24)
-        self.settings_btn.setStyleSheet("""
-            QPushButton {
-                background-color: #3d3d5c;
-                border: none;
-                border-radius: 4px;
-            }
-            QPushButton:hover {
-                background-color: #4d4d6c;
-            }
-        """)
         self.settings_btn.clicked.connect(self._show_settings_menu)
         compact_row.addWidget(self.settings_btn)
 
@@ -285,7 +232,6 @@ class WindowNavigatorPanel(QWidget):
 
         # 拖拽提示标签（默认隐藏）
         self.drag_hint_label = QLabel(t("window.drag_hint"))
-        self.drag_hint_label.setStyleSheet("color: #667eea; font-size: 10px; border: none;")
         self.drag_hint_label.setAlignment(Qt.AlignmentFlag.AlignCenter)
         self.drag_hint_label.setVisible(False)
         layout.addWidget(self.drag_hint_label)
@@ -412,22 +358,23 @@ class WindowNavigatorPanel(QWidget):
         self._force_refresh()
 
     def _apply_list_font_size(self):
-        """应用字体大小到列表"""
+        """按当前主题 + 字号设置列表样式"""
+        th = self._theme
         self.window_list.setStyleSheet(f"""
             QListWidget {{
-                background-color: #16213e;
-                border: 1px solid #3d3d5c;
+                background-color: {th['bg_medium']};
+                border: 1px solid {th['border']};
                 border-radius: 4px;
                 font-size: {self._font_size}px;
                 outline: none;
             }}
             QListWidget::item {{
                 padding: 8px;
-                border-bottom: 1px solid #2d2d44;
+                border-bottom: 1px solid {th['bg_light']};
                 border-radius: 4px;
             }}
             QListWidget::item:selected {{
-                background-color: #2d2d44;
+                background-color: {th['bg_light']};
             }}
         """)
 
@@ -540,28 +487,102 @@ class WindowNavigatorPanel(QWidget):
                 # 所有关键词都必须匹配
                 item.setHidden(not all(kw in item_text for kw in keywords))
 
+    def apply_theme(self, theme: dict):
+        """应用主题配色（themes.THEMES 的一项）并重刷所有子控件样式。"""
+        if not theme:
+            return
+        self._theme = theme
+        self._apply_style()
+
     def _apply_style(self):
-        self.setStyleSheet("""
-            QWidget {
-                background-color: #1a1a2e;
-                border: 1px solid #3d3d5c;
+        """按 self._theme 重设面板及所有子控件的样式。"""
+        th = self._theme
+        # hover 落在 accent 背景上时文字固定用白色，深浅主题下都有足够对比度
+        self.setStyleSheet(f"""
+            QWidget {{
+                background-color: {th['bg_dark']};
+                border: 1px solid {th['border']};
                 border-radius: 8px;
-            }
-            QLabel {
+            }}
+            QLabel {{
                 border: none;
-            }
-            QPushButton {
-                background-color: #3d3d5c;
+            }}
+            QPushButton {{
+                background-color: {th['bg_lighter']};
                 border: none;
                 border-radius: 4px;
                 padding: 6px 12px;
-                color: #eaeaea;
+                color: {th['text']};
                 font-size: 12px;
-            }
-            QPushButton:hover {
-                background-color: #667eea;
-            }
+            }}
+            QPushButton:hover {{
+                background-color: {th['accent']};
+                color: #ffffff;
+            }}
         """)
+
+        self.title_label.setStyleSheet(
+            f"color: {th['accent']}; font-weight: bold; font-size: 13px;")
+
+        self.search_input.setStyleSheet(f"""
+            QLineEdit {{
+                background-color: {th['bg_medium']};
+                border: 1px solid {th['border']};
+                border-radius: 4px;
+                padding: 4px 8px;
+                color: {th['text']};
+                font-size: 12px;
+            }}
+            QLineEdit:focus {{
+                border-color: {th['accent']};
+            }}
+        """)
+
+        # 勾选框：必须把 ::indicator 的外观（边框/背景/选中态）全部定义掉，
+        # 否则 Qt 会退回原生风格画指示器，与主题背景叠在一起非常突兀。
+        nav_checkbox_style = f"""
+            QCheckBox {{
+                color: {th['text_dim']};
+                font-size: 11px;
+                border: none;
+            }}
+            QCheckBox::indicator {{
+                width: 14px;
+                height: 14px;
+                border: 2px solid {th['border']};
+                border-radius: 3px;
+                background-color: {th['bg_medium']};
+            }}
+            QCheckBox::indicator:hover {{
+                border-color: {th['accent']};
+            }}
+            QCheckBox::indicator:checked {{
+                border-color: {th['accent']};
+                background-color: {th['accent']};
+            }}
+        """
+        for cb in (self.compact_checkbox, self.quick_close_checkbox, self.embed_checkbox):
+            cb.setStyleSheet(nav_checkbox_style)
+
+        # 齿轮图标颜色：深色主题用固定浅灰，浅色主题跟随次要文字色
+        icon_color = th['text_dim'] if th.get('is_light_theme') else '#c8c8d8'
+        self.settings_btn.setIcon(_make_git_tool_icon('gear', icon_color, 16))
+        self.settings_btn.setStyleSheet(f"""
+            QPushButton {{
+                background-color: {th['bg_lighter']};
+                border: none;
+                border-radius: 4px;
+            }}
+            QPushButton:hover {{
+                background-color: {th['bg_hover']};
+            }}
+        """)
+
+        self.drag_hint_label.setStyleSheet(
+            f"color: {th['accent']}; font-size: 10px; border: none;")
+
+        # 列表样式依赖主题 + 字号，统一走 _apply_list_font_size
+        self._apply_list_font_size()
 
     def _refresh_window_list(self):
         """刷新窗口列表（优化：只在变化时更新）"""
@@ -677,7 +698,7 @@ class WindowNavigatorPanel(QWidget):
     _faded_bg_cache = {}
 
     def _get_faded_bg_color(self, color_hex: str) -> QColor:
-        """生成淡化的背景色（与深色背景混合）- 带缓存
+        """生成淡化的背景色（与列表背景混合）- 带缓存
 
         Args:
             color_hex: 颜色的十六进制字符串，如 '#667eea'
@@ -685,12 +706,13 @@ class WindowNavigatorPanel(QWidget):
         Returns:
             淡化后的 QColor 对象
         """
-        # 检查缓存
-        if color_hex in self._faded_bg_cache:
-            return self._faded_bg_cache[color_hex]
+        list_bg = self._theme['bg_medium']  # 列表背景色（跟随主题）
+        cache_key = (color_hex, list_bg)
+        if cache_key in self._faded_bg_cache:
+            return self._faded_bg_cache[cache_key]
 
         theme_color = QColor(color_hex)
-        bg_color = QColor("#16213e")  # 列表背景色
+        bg_color = QColor(list_bg)
 
         # 混合主题色和背景色，比例约 40:60（更明显的效果）
         r = int(theme_color.red() * 0.4 + bg_color.red() * 0.6)
@@ -700,7 +722,7 @@ class WindowNavigatorPanel(QWidget):
         result = QColor(r, g, b)
         # 缓存结果（限制缓存大小）
         if len(self._faded_bg_cache) < 50:
-            self._faded_bg_cache[color_hex] = result
+            self._faded_bg_cache[cache_key] = result
         return result
 
     def _on_current_item_changed(self, current, previous):
@@ -794,25 +816,27 @@ class WindowNavigatorPanel(QWidget):
         if not hasattr(window, 'force_close_with_save'):
             return  # 非 MainWindow 类型，不支持
 
+        th = self._theme
         menu = QMenu(self)
-        menu.setStyleSheet("""
-            QMenu {
-                background-color: #2d2d44;
-                color: #eaeaea;
-                border: 1px solid #3d3d5c;
+        menu.setStyleSheet(f"""
+            QMenu {{
+                background-color: {th['bg_light']};
+                color: {th['text']};
+                border: 1px solid {th['border']};
                 border-radius: 4px;
                 padding: 4px;
-            }
-            QMenu::item {
+            }}
+            QMenu::item {{
                 padding: 6px 20px;
                 border-radius: 3px;
-            }
-            QMenu::item:selected {
-                background-color: #667eea;
-            }
-            QMenu::item:disabled {
-                color: #666;
-            }
+            }}
+            QMenu::item:selected {{
+                background-color: {th['accent']};
+                color: #ffffff;
+            }}
+            QMenu::item:disabled {{
+                color: {th['text_dim']};
+            }}
         """)
 
         force_close_action = menu.addAction(t("window.force_close"))
@@ -868,10 +892,11 @@ class WindowNavigatorPanel(QWidget):
             return
 
         if not self._quick_close:
-            # 父窗口（导航面板）有深色 QWidget 全局 QSS，会级联进 QMessageBox 把
-            # 文字染暗、看不清。这里：
+            # 父窗口（导航面板）有 QWidget 全局 QSS，会级联进 QMessageBox 把
+            # 文字染得看不清。这里：
             # 1. 不传 parent，避免 QSS 级联
-            # 2. 自己组合一套深色主题的 QSS，与导航面板风格一致
+            # 2. 自己组合一套跟随当前主题的 QSS，与导航面板风格一致
+            th = self._theme
             msg_box = QMessageBox()
             msg_box.setWindowTitle(t("window.force_close_confirm_title"))
             msg_box.setText(t("window.force_close_confirm_msg", title=title))
@@ -880,33 +905,34 @@ class WindowNavigatorPanel(QWidget):
                 QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No
             )
             msg_box.setDefaultButton(QMessageBox.StandardButton.No)
-            msg_box.setStyleSheet("""
-                QMessageBox {
-                    background-color: #1a1a2e;
-                }
-                QMessageBox QLabel {
-                    color: #eaeaea;
+            msg_box.setStyleSheet(f"""
+                QMessageBox {{
+                    background-color: {th['bg_dark']};
+                }}
+                QMessageBox QLabel {{
+                    color: {th['text']};
                     background-color: transparent;
                     font-size: 13px;
                     border: none;
-                }
-                QMessageBox QPushButton {
-                    background-color: #3d3d5c;
-                    color: #eaeaea;
-                    border: 1px solid #3d3d5c;
+                }}
+                QMessageBox QPushButton {{
+                    background-color: {th['bg_lighter']};
+                    color: {th['text']};
+                    border: 1px solid {th['border']};
                     border-radius: 4px;
                     padding: 6px 18px;
                     min-width: 72px;
                     font-size: 12px;
-                }
-                QMessageBox QPushButton:hover {
-                    background-color: #667eea;
-                    border-color: #667eea;
-                }
-                QMessageBox QPushButton:default {
-                    background-color: #2d2d44;
-                    border-color: #667eea;
-                }
+                }}
+                QMessageBox QPushButton:hover {{
+                    background-color: {th['accent']};
+                    border-color: {th['accent']};
+                    color: #ffffff;
+                }}
+                QMessageBox QPushButton:default {{
+                    background-color: {th['bg_light']};
+                    border-color: {th['accent']};
+                }}
             """)
             # 让弹窗显示在导航面板附近
             geo = self.geometry()
