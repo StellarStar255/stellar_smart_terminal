@@ -3402,16 +3402,28 @@ class MainWindow(QMainWindow):
             lst.setCurrentRow(0)
         lst.setUpdatesEnabled(True)
 
+    @staticmethod
+    def _ql_detach_modifier_held() -> bool:
+        """快速启动激活瞬间是否按着 Shift/Cmd（Qt 在 macOS 上把 Cmd 映射为 Control）。
+
+        按住即表示「启动后直接扩展为新窗口」。
+        """
+        mods = QApplication.keyboardModifiers()
+        return bool(mods & (Qt.KeyboardModifier.ShiftModifier
+                            | Qt.KeyboardModifier.ControlModifier
+                            | Qt.KeyboardModifier.MetaModifier))
+
     def _ql_on_item_activated(self, item):
         """列表项被点击/回车选中。"""
         item_type, dir_path = item.data(Qt.ItemDataRole.UserRole)
+        detach = self._ql_detach_modifier_held()
         self._ql_hide()
         if item_type == "browse":
             self._quick_launch_browse()
         elif item_type == "manage":
             self._manage_quick_launch_dirs()
         else:
-            self._quick_launch_with_dir(dir_path)
+            self._quick_launch_with_dir(dir_path, detach=detach)
 
     def _ql_do_launch(self):
         """回车：输入是路径则直接启动，否则激活当前选中项。"""
@@ -3423,8 +3435,9 @@ class MainWindow(QMainWindow):
             elif '\\' in text or (len(text) >= 2 and text[1] == ':' and text[0].isalpha()):
                 is_path = True
         if is_path:
+            detach = self._ql_detach_modifier_held()
             self._ql_hide()
-            self._quick_launch_with_dir(text)
+            self._quick_launch_with_dir(text, detach=detach)
             return
         cur = self._ql_list.currentItem()
         if cur:
@@ -3475,10 +3488,14 @@ class MainWindow(QMainWindow):
         self._ql_search.setFocus(Qt.FocusReason.PopupFocusReason)
         QTimer.singleShot(100, lambda: setattr(self, '_ql_ready', True))
 
-    def _quick_launch_with_dir(self, dir_path: str):
+    def _quick_launch_with_dir(self, dir_path: str, detach: bool = False):
         """以指定目录快速启动新终端标签页并自动启动预设
 
         注意：不改变当前窗口的工作目录，新tab使用指定目录
+
+        detach=True（Shift/Cmd + 点击）：会话启动后立即执行「扩展为新窗口」。
+        在本窗口先建 tab 再启动再分离，而不是直接开新窗口里启动，是为了沿用
+        本窗口当前选中的预设（新窗口的预设选择是各自独立的）。
         """
         dir_path = os.path.expanduser(dir_path)
 
@@ -3494,13 +3511,22 @@ class MainWindow(QMainWindow):
             dir_name = os.path.basename(dir_path) or dir_path
 
             # 创建新标签页，并存储独立的工作目录
-            self._add_new_tab(tab_name=dir_name, tab_cwd=dir_path)
+            idx = self._add_new_tab(tab_name=dir_name, tab_cwd=dir_path)
+            # 用 page 引用而非索引定位待分离的 tab：分离前索引可能因增删 tab 变化
+            detach_page = self.tab_widget.widget(idx) if detach else None
 
             # 自动启动当前预设，传递目标工作目录
             # 使用闭包捕获 dir_path，避免时序问题
             def start_session_delayed(cwd=dir_path):
-                if not sip.isdeleted(self):
-                    self._start_session(cwd=cwd)
+                if sip.isdeleted(self):
+                    return
+                self._start_session(cwd=cwd)
+                if detach_page is not None:
+                    # 会话已启动（后续预设命令经闭包绑定终端对象发送，
+                    # 跟着 tab 一起搬走不受影响），直接扩展为新窗口
+                    i = self.tab_widget.indexOf(detach_page)
+                    if i >= 0:
+                        self._detach_tab(i, None, follow_drag=False)
             QTimer.singleShot(100, start_session_delayed)
 
         except Exception as e:
