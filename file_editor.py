@@ -23,7 +23,8 @@ from PyQt6.QtGui import (
     QFont, QFontMetrics, QColor, QTextCharFormat, QSyntaxHighlighter,
     QKeySequence, QPalette, QShortcut, QPainter, QTextCursor, QTextDocument,
     QPixmap, QImageReader, QCursor, QGuiApplication, QIcon, QWheelEvent,
-    QDesktopServices,
+    QDesktopServices, QTextBlockFormat, QTextFormat, QTextFrameFormat,
+    QTextTable, QFontDatabase,
 )
 
 
@@ -2370,7 +2371,7 @@ class FileEditorWidget(QWidget):
                 background-color: {editor_bg};
                 color: {editor_fg};
                 border: none;
-                padding: 10px 18px;
+                padding: 14px 22px;
                 font-size: {self._editor_point_size + 1}pt;
                 selection-background-color: {accent};
                 selection-color: white;
@@ -2660,7 +2661,198 @@ class FileEditorWidget(QWidget):
             QTextDocument.MarkdownFeature.MarkdownDialectGitHub
             | QTextDocument.MarkdownFeature.MarkdownNoHTML,
         )
+        self._polish_md_document(doc)
         self._md_browser.verticalScrollBar().setValue(scroll_pos)
+
+    # 标题排版表：级别 → (字号倍率, 上留白, 下留白)，留白以正文字号为单位。
+    # 仿 GitHub 阅读视图的比例：H1 约 1.7 倍正文而非 Qt 默认的 2 倍。
+    _MD_HEADING_STYLE = {
+        1: (1.70, 1.5, 0.65),
+        2: (1.40, 1.3, 0.55),
+        3: (1.20, 1.1, 0.45),
+        4: (1.05, 1.0, 0.40),
+        5: (0.95, 1.0, 0.40),
+        6: (0.85, 1.0, 0.40),
+    }
+
+    def _polish_md_document(self, doc):
+        """setMarkdown 之后的排版精修（只改预览文档的显示格式，不碰编辑器缓冲区）。
+
+        Qt 原生 markdown 排版直接看很粗糙：H1 是正文 2 倍大且上下零留白、
+        全文无行距、代码块无底色、引用块左右各硬缩进 40px、表格是零内边距
+        的默认灰线。这里逐 block 重排：标题按倍率表收敛并加留白、正文/列表
+        加行距与段距、代码块加底色和等宽字号、行内代码加底色小片、引用块
+        改浅色窄缩进、表格加内边距。字号全部相对正文字号计算，缩放时
+        set_editor_point_size 会重渲染，各级字号随之重算。
+        """
+        base = float(self._editor_point_size + 1)   # 与 QSS 里预览正文字号一致
+        heading_fg = QColor(self.theme.get('text', '#eaeaea'))
+        dim_fg = QColor(self.theme.get('text_dim', '#888888'))
+        editor_bg = QColor(self.theme.get('terminal_bg', '#282c34'))
+        # 代码底色：深色主题上提亮、浅色主题上压暗，保证与正文底色可感知区分
+        code_bg = (editor_bg.lighter(135) if editor_bg.lightness() < 128
+                   else editor_bg.darker(107))
+        mono_family = QFontDatabase.systemFont(
+            QFontDatabase.SystemFont.FixedFont).family()
+        prop_h = QTextBlockFormat.LineHeightTypes.ProportionalHeight.value
+
+        def _is_code_block(blk):
+            if not blk.isValid():
+                return False
+            f = blk.blockFormat()
+            return (f.hasProperty(QTextFormat.Property.BlockCodeFence)
+                    or f.hasProperty(QTextFormat.Property.BlockCodeLanguage)
+                    or f.nonBreakableLines())
+
+        edit_cursor = QTextCursor(doc)
+        edit_cursor.beginEditBlock()
+        block = doc.begin()
+        while block.isValid():
+            bf = block.blockFormat()
+            lvl = bf.headingLevel()
+            sel = QTextCursor(block)
+            sel.movePosition(QTextCursor.MoveOperation.EndOfBlock,
+                             QTextCursor.MoveMode.KeepAnchor)
+            nbf = QTextBlockFormat()
+
+            if lvl:
+                scale, top, bottom = self._MD_HEADING_STYLE.get(
+                    lvl, (1.0, 1.0, 0.4))
+                # FontSizeAdjustment（h1 高达 2 倍）只要存在就会盖过显式字号，
+                # 而 mergeCharFormat 删不掉属性 → 逐 fragment 复制原格式、
+                # clearProperty 后整体替换（保留链接/行内代码等其余属性）。
+                # 先收集再应用：改格式会分裂/合并 fragment，边遍历边改会使
+                # 迭代器失效
+                frags = []
+                it = block.begin()
+                while not it.atEnd():
+                    frag = it.fragment()
+                    frags.append((frag.position(), frag.length(),
+                                  QTextCharFormat(frag.charFormat())))
+                    it += 1
+                for fpos, flen, hcf in frags:
+                    hcf.clearProperty(
+                        QTextFormat.Property.FontSizeAdjustment)
+                    hcf.setFontPointSize(base * scale)
+                    hcf.setFontWeight(QFont.Weight.Bold if lvl <= 2
+                                      else QFont.Weight.DemiBold)
+                    hcf.setForeground(heading_fg)
+                    fsel = QTextCursor(doc)
+                    fsel.setPosition(fpos)
+                    fsel.setPosition(fpos + flen,
+                                     QTextCursor.MoveMode.KeepAnchor)
+                    fsel.setCharFormat(hcf)
+                nbf.setTopMargin(base * top)
+                nbf.setBottomMargin(base * bottom)
+                nbf.setLineHeight(125, prop_h)
+            elif _is_code_block(block):
+                # 代码块每行一个 block：整片底色相连，行首缩进当左内边距用；
+                # 只有片区首/尾行需要外边距。不能加比例行距——多出的行间
+                # 空隙不带底色，会把底色片切成一条条断缝
+                nbf.setBackground(code_bg)
+                nbf.setTextIndent(base * 0.8)
+                nbf.setTopMargin(
+                    0.0 if _is_code_block(block.previous()) else base * 0.7)
+                nbf.setBottomMargin(
+                    0.0 if _is_code_block(block.next()) else base * 0.7)
+                ccf = QTextCharFormat()
+                ccf.setFontFamilies([mono_family])
+                ccf.setFontPointSize(base * 0.9)
+                sel.mergeCharFormat(ccf)
+            elif bf.hasProperty(QTextFormat.Property.BlockQuoteLevel):
+                qlvl = max(1, bf.intProperty(QTextFormat.Property.BlockQuoteLevel))
+                nbf.setLeftMargin(base * 1.5 * qlvl)
+                nbf.setRightMargin(0.0)
+                nbf.setTopMargin(base * 0.4)
+                nbf.setBottomMargin(base * 0.4)
+                nbf.setLineHeight(150, prop_h)
+                qcf = QTextCharFormat()
+                qcf.setForeground(dim_fg)
+                sel.mergeCharFormat(qcf)
+            elif bf.hasProperty(
+                    QTextFormat.Property.BlockTrailingHorizontalRulerWidth):
+                nbf.setTopMargin(base * 0.9)
+                nbf.setBottomMargin(base * 0.9)
+            elif QTextCursor(block).currentTable() is not None:
+                if not block.text():
+                    # Qt 导入怪癖：表格前若紧跟引用块等结构，帧分隔的空 block
+                    # 会留在第一个单元格里，把表头文字顶下去一行 → 压成 1px
+                    nbf.setLineHeight(
+                        1.0,
+                        QTextBlockFormat.LineHeightTypes.FixedHeight.value)
+                    nbf.setTopMargin(0.0)
+                    nbf.setBottomMargin(0.0)
+                else:
+                    # 单元格正文：行距略收紧，别带上段落的大段距
+                    nbf.setLineHeight(135, prop_h)
+                    nbf.setTopMargin(2.0)
+                    nbf.setBottomMargin(2.0)
+            elif block.textList() is not None:
+                nbf.setLineHeight(150, prop_h)
+                nbf.setTopMargin(base * 0.15)
+                nbf.setBottomMargin(base * 0.15)
+            elif not block.text().strip():
+                # 结构分隔用的空 block（引用/表格后 Qt 会插一个）：不占空间
+                nbf.setTopMargin(0.0)
+                nbf.setBottomMargin(0.0)
+            else:
+                nbf.setLineHeight(152, prop_h)
+                nbf.setTopMargin(0.0)
+                nbf.setBottomMargin(base * 0.6)
+            sel.mergeBlockFormat(nbf)
+
+            # 行内元素精修（整块代码已在上面处理，标题的 fragment 已整体替换）：
+            # 行内代码 → 等宽小片 + 底色 + 提亮；链接 → 主题 accent 色
+            # （QSS 样式表下 palette 的 Link 色不生效，锚点会渲染成默认纯蓝）
+            if not _is_code_block(block) and not lvl:
+                patches = []   # 先收集再应用，理由同标题分支
+                it = block.begin()
+                while not it.atEnd():
+                    frag = it.fragment()
+                    fcf = frag.charFormat()
+                    patch = None
+                    if fcf.fontFixedPitch():
+                        patch = QTextCharFormat()
+                        patch.setBackground(code_bg)
+                        patch.setForeground(heading_fg)
+                        patch.setFontFamilies([mono_family])
+                        patch.setFontPointSize(base * 0.9)
+                    elif fcf.isAnchor():
+                        patch = QTextCharFormat()
+                        patch.setForeground(
+                            QColor(self.theme.get('accent', '#667eea')))
+                    if patch is not None:
+                        patches.append(
+                            (frag.position(), frag.length(), patch))
+                    it += 1
+                for fpos, flen, patch in patches:
+                    fsel = QTextCursor(doc)
+                    fsel.setPosition(fpos)
+                    fsel.setPosition(fpos + flen,
+                                     QTextCursor.MoveMode.KeepAnchor)
+                    fsel.mergeCharFormat(patch)
+            block = block.next()
+
+        # 表格：默认零内边距 + 2px 缝隙灰线 → 实线边框 + 内边距 + 上下留白
+        border_col = QColor(self.theme.get('border', '#3d3d5c'))
+
+        def _fix_tables(frame):
+            for child in frame.childFrames():
+                _fix_tables(child)
+                if isinstance(child, QTextTable):
+                    tf = child.format()
+                    tf.setCellPadding(base * 0.5)
+                    tf.setCellSpacing(0.0)
+                    tf.setBorder(1.0)
+                    tf.setBorderBrush(border_col)
+                    tf.setBorderStyle(
+                        QTextFrameFormat.BorderStyle.BorderStyle_Solid)
+                    tf.setTopMargin(base * 0.6)
+                    tf.setBottomMargin(base * 0.6)
+                    child.setFormat(tf)
+
+        _fix_tables(doc.rootFrame())
+        edit_cursor.endEditBlock()
 
     def _on_md_link_clicked(self, url: QUrl):
         """预览页链接点击：只放行 http/https 到系统浏览器。
