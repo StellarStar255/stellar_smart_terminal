@@ -3013,6 +3013,13 @@ class FileEditorWidget(QWidget):
                 nbf.setLineHeight(152, prop_h)
                 nbf.setTopMargin(0.0)
                 nbf.setBottomMargin(base * 0.6)
+            # 含内嵌图片（U+FFFC）的行禁用比例行距：Qt 按“行内最高元素×比例”
+            # 算行高，多出的百分比全是空白——大图下方会凭空出现整屏空隙
+            if '\ufffc' in block.text():  # ObjectReplacementCharacter 即内嵌图
+                nbf.clearProperty(QTextFormat.Property.LineHeight)
+                # LineHeightType 必须一起清：只清高度会留下
+                # “Proportional + 0%”，整行塌成零高、图片压到后续内容上
+                nbf.clearProperty(QTextFormat.Property.LineHeightType)
             sel.mergeBlockFormat(nbf)
 
             # 行内元素精修（整块代码已在上面处理，标题的 fragment 已整体替换）：
