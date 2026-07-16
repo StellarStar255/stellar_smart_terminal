@@ -24,7 +24,7 @@ from PyQt6.QtGui import (
     QKeySequence, QPalette, QShortcut, QPainter, QTextCursor, QTextDocument,
     QPixmap, QImageReader, QCursor, QGuiApplication, QIcon, QWheelEvent,
     QDesktopServices, QTextBlockFormat, QTextFormat, QTextFrameFormat,
-    QTextTable, QFontDatabase,
+    QTextTable, QFontDatabase, QTextImageFormat,
 )
 
 
@@ -2661,8 +2661,72 @@ class FileEditorWidget(QWidget):
             QTextDocument.MarkdownFeature.MarkdownDialectGitHub
             | QTextDocument.MarkdownFeature.MarkdownNoHTML,
         )
+        self._inline_md_html_images(doc)
         self._polish_md_document(doc)
         self._md_browser.verticalScrollBar().setValue(scroll_pos)
+
+    # 匹配按字面显示的 <img ...> 标签（NoHTML 模式的产物）及其属性
+    _MD_IMG_TAG_RE = re.compile(r'<img\b[^<>]*?>', re.IGNORECASE)
+    _MD_IMG_ATTR_RE = re.compile(
+        r'''(\w+)\s*=\s*(?:"([^"]*)"|'([^']*)')''')
+
+    def _inline_md_html_images(self, doc):
+        """把 NoHTML 模式下按字面显示的 <img> 标签替换成真正的内嵌图片。
+
+        MarkdownNoHTML 是防截断/防注入的刚需（见 _render_md_preview），但
+        README 常用 <img width=...> 控制图片尺寸。这里不引入 HTML 引擎，
+        只把 <img> 文本换成 QTextImageFormat 内嵌图——加载走 baseUrl 相对
+        路径的只读通道，与 markdown ![]() 图片完全同一条路，width/height
+        属性映射到图片格式。代码块/行内代码里的 <img> 是示例代码，不动。
+        """
+        def _overlaps_mono(blk, start, end):
+            it = blk.begin()
+            while not it.atEnd():
+                frag = it.fragment()
+                fs = frag.position() - blk.position()
+                if (frag.charFormat().fontFixedPitch()
+                        and fs < end and start < fs + frag.length()):
+                    return True
+                it += 1
+            return False
+
+        replacements = []
+        block = doc.begin()
+        while block.isValid():
+            bf = block.blockFormat()
+            is_code = (bf.hasProperty(QTextFormat.Property.BlockCodeFence)
+                       or bf.hasProperty(
+                           QTextFormat.Property.BlockCodeLanguage)
+                       or bf.nonBreakableLines())
+            if not is_code:
+                text = block.text()
+                for m in self._MD_IMG_TAG_RE.finditer(text):
+                    if _overlaps_mono(block, m.start(), m.end()):
+                        continue
+                    attrs = {k.lower(): (v1 if v1 is not None else v2)
+                             for k, v1, v2 in
+                             self._MD_IMG_ATTR_RE.findall(m.group(0))}
+                    src = attrs.get('src')
+                    if not src:
+                        continue
+                    fmt = QTextImageFormat()
+                    fmt.setName(src)
+                    for attr, setter in (('width', fmt.setWidth),
+                                         ('height', fmt.setHeight)):
+                        val = (attrs.get(attr) or '').rstrip('px')
+                        if val.isdigit():
+                            setter(float(val))
+                    replacements.append((block.position() + m.start(),
+                                         block.position() + m.end(), fmt))
+            block = block.next()
+
+        # 从后往前替换，避免前面的替换使后面记录的位置失效
+        for start, end, fmt in reversed(replacements):
+            c = QTextCursor(doc)
+            c.setPosition(start)
+            c.setPosition(end, QTextCursor.MoveMode.KeepAnchor)
+            c.removeSelectedText()
+            c.insertImage(fmt)
 
     # 标题排版表：级别 → (字号倍率, 上留白, 下留白)，留白以正文字号为单位。
     # 仿 GitHub 阅读视图的比例：H1 约 1.7 倍正文而非 Qt 默认的 2 倍。
