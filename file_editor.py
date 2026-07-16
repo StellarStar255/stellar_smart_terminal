@@ -2662,6 +2662,7 @@ class FileEditorWidget(QWidget):
             | QTextDocument.MarkdownFeature.MarkdownNoHTML,
         )
         self._inline_md_html_images(doc)
+        self._apply_md_html_layout(doc)
         self._polish_md_document(doc)
         self._md_browser.verticalScrollBar().setValue(scroll_pos)
 
@@ -2727,6 +2728,155 @@ class FileEditorWidget(QWidget):
             c.setPosition(end, QTextCursor.MoveMode.KeepAnchor)
             c.removeSelectedText()
             c.insertImage(fmt)
+
+    # <br> 换行标签；块首的容器开标签 / 块尾的闭标签；同块内成对的“<p>内容</p>”。
+    # 注意 markdown 会把相邻行合并进同一段落：
+    #   <div align="center">\n<img ...> → 一个 block「<div ...> ￼」
+    #   **text**\n</div>              → 一个 block「text </div>」
+    # 所以容器标签按“块首前缀/块尾后缀”识别，而不是按独占一行识别。
+    _MD_BR_RE = re.compile(r'<br\s*/?>', re.IGNORECASE)
+    _MD_TAG_OPEN_RE = re.compile(
+        r'^\s*<(div|p|center|section)\b([^<>]*)>\s*', re.IGNORECASE)
+    _MD_TAG_CLOSE_RE = re.compile(
+        r'\s*</(div|p|center|section)\s*>\s*$', re.IGNORECASE)
+    _MD_TAG_WRAP_RE = re.compile(
+        r'^\s*(<(div|p|center|section)\b[^<>]*>)\s*(\S.*?)\s*(</\2\s*>)\s*$',
+        re.IGNORECASE)
+    _MD_ALIGN_ATTR_RE = re.compile(
+        r'''align\s*=\s*["']?(center|left|right|justify)''', re.IGNORECASE)
+
+    def _apply_md_html_layout(self, doc):
+        """把字面显示的 <br> 与对齐容器标签还原成对应排版（NoHTML 白名单第二批）。
+
+        - <br> → 行分隔符 U+2028（同段内换行）
+        - <div/p/center/section ...> ... </...> 容器：剥掉标签文本，按 align
+          属性（<center> 视为居中）给 开块..闭块 范围内的 block 设对齐；
+          没有 align 的容器只剥标签。剥完为空的 block 整行删除。
+          开闭配不上对的标签保持字面显示不动。
+        同样只做文本→格式的等价替换；代码块/行内代码里的标签是示例，不动。
+        """
+        aligns = {'center': Qt.AlignmentFlag.AlignHCenter,
+                  'left': Qt.AlignmentFlag.AlignLeft,
+                  'right': Qt.AlignmentFlag.AlignRight,
+                  'justify': Qt.AlignmentFlag.AlignJustify}
+
+        def _overlaps_mono(blk, start, end):
+            it = blk.begin()
+            while not it.atEnd():
+                frag = it.fragment()
+                fs = frag.position() - blk.position()
+                if (frag.charFormat().fontFixedPitch()
+                        and fs < end and start < fs + frag.length()):
+                    return True
+                it += 1
+            return False
+
+        def _container_align(open_tag_text, tag_name):
+            am = self._MD_ALIGN_ATTR_RE.search(open_tag_text)
+            if am:
+                return aligns.get(am.group(1).lower())
+            return aligns['center'] if tag_name.lower() == 'center' else None
+
+        # 第一遍只收集，不动文档：blocks 快照、文本删改、对齐 op、容器开闭配对。
+        # 开标签的剥除挂在 opens 栈上，配对成功才生效——不配对保持字面。
+        blocks = []       # (pos, length, is_code, in_table)
+        edits = []        # (start, end, replacement)
+        align_ops = []    # (block_pos, AlignmentFlag)
+        opens = []        # 栈: (tag, align_or_None, block_idx, strip_edit)
+        pairs = []        # (open_idx, close_idx, align, [strip_edits])
+        last_pos = 0
+
+        block = doc.begin()
+        while block.isValid():
+            bf = block.blockFormat()
+            is_code = (bf.hasProperty(QTextFormat.Property.BlockCodeFence)
+                       or bf.hasProperty(
+                           QTextFormat.Property.BlockCodeLanguage)
+                       or bf.nonBreakableLines())
+            in_table = QTextCursor(block).currentTable() is not None
+            idx = len(blocks)
+            blocks.append((block.position(), block.length(),
+                           is_code, in_table))
+            last_pos = block.position() + block.length()
+            if is_code:
+                block = block.next()
+                continue
+            text = block.text()
+            p = block.position()
+
+            wm = self._MD_TAG_WRAP_RE.match(text)
+            om = self._MD_TAG_OPEN_RE.match(text)
+            cm = self._MD_TAG_CLOSE_RE.search(text)
+            if wm and not _overlaps_mono(block, 0, len(text)):
+                # 同块成对：剥首尾标签（连同内侧空白），本块按 align 对齐
+                flag = _container_align(wm.group(1), wm.group(2))
+                if flag is not None:
+                    align_ops.append((p, flag))
+                edits.append((p + wm.start(1), p + wm.start(3), ''))
+                edits.append((p + wm.end(3), p + wm.end(4), ''))
+            elif om and not _overlaps_mono(block, om.start(), om.end()):
+                flag = _container_align(om.group(0), om.group(1))
+                if text[om.end():].strip():
+                    strip = ('range', idx, p + om.start(), p + om.end())
+                else:
+                    strip = ('block', idx)   # 剥完为空 → 整行删
+                opens.append((om.group(1).lower(), flag, idx, strip))
+            elif cm and not _overlaps_mono(block, cm.start(), cm.end()):
+                tag = cm.group(1).lower()
+                # 就近配对同名开标签；配不上则保持字面
+                for k in range(len(opens) - 1, -1, -1):
+                    if opens[k][0] == tag:
+                        if text[:cm.start()].strip():
+                            strip = ('range', idx, p + cm.start(),
+                                     p + cm.end())
+                        else:
+                            strip = ('block', idx)
+                        pairs.append((opens[k][2], idx, opens[k][1],
+                                      [opens[k][3], strip]))
+                        del opens[k:]   # 更晚的未闭合标签一并放弃
+                        break
+            for m in self._MD_BR_RE.finditer(text):
+                if not _overlaps_mono(block, m.start(), m.end()):
+                    edits.append((p + m.start(), p + m.end(),
+                                  '\u2028'))  # 行分隔符：段内换行
+            block = block.next()
+
+        doc_end = last_pos - 1   # 最后一个 block 的 length 含文档终结符
+        deleted = set()
+        for open_idx, close_idx, flag, strips in pairs:
+            for strip in strips:
+                if strip[0] == 'block':
+                    # 整行删（含分隔符；末 block 改吃前导分隔符）
+                    bidx = strip[1]
+                    deleted.add(bidx)
+                    pos, length, _, _ = blocks[bidx]
+                    if pos + length > doc_end:
+                        edits.append((max(0, pos - 1), doc_end, ''))
+                    else:
+                        edits.append((pos, pos + length, ''))
+                else:
+                    edits.append((strip[2], strip[3], ''))
+            if flag is not None:
+                # 开/闭标签与内容可能共享 block，范围取两端闭区间
+                for bidx in range(open_idx, close_idx + 1):
+                    pos, _, is_code, in_table = blocks[bidx]
+                    if not is_code and not in_table and bidx not in deleted:
+                        align_ops.append((pos, flag))
+
+        # 先设对齐（不移动文本），再从后往前做文本删改
+        for pos, flag in align_ops:
+            abf = QTextBlockFormat()
+            abf.setAlignment(flag)
+            c = QTextCursor(doc)
+            c.setPosition(pos)
+            c.mergeBlockFormat(abf)
+        for start, end, repl in sorted(edits, reverse=True):
+            c = QTextCursor(doc)
+            c.setPosition(start)
+            c.setPosition(end, QTextCursor.MoveMode.KeepAnchor)
+            c.removeSelectedText()
+            if repl:
+                c.insertText(repl)
 
     # 标题排版表：级别 → (字号倍率, 上留白, 下留白)，留白以正文字号为单位。
     # 仿 GitHub 阅读视图的比例：H1 约 1.7 倍正文而非 Qt 默认的 2 倍。
