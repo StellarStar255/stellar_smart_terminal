@@ -42,6 +42,13 @@ class TestAutoUpdateCheck(unittest.TestCase):
         import app_updater
         import main_window
 
+    # 整个测试类共用一个 MainWindow：每个测试各建一个完整主窗口的
+    # 延迟销毁残留会在 CI（不同 Python/Qt 版本）上污染后续用例、
+    # 段错误崩掉整个测试进程——曾把 v1.14.1 的三平台构建全崩红。
+    @classmethod
+    def _make_window(cls):
+        cls.w_shared = main_window.MainWindow()
+
     def setUp(self):
         self._tmp = tempfile.TemporaryDirectory(prefix='auto_update_test_')
         self._cfg_path = Path(self._tmp.name) / 'config.json'
@@ -52,16 +59,34 @@ class TestAutoUpdateCheck(unittest.TestCase):
         app_updater.UpdateChecker = _StubChecker
         _StubChecker.started_count = 0
         main_window.MainWindow._auto_update_check_done = False
-        self.w = main_window.MainWindow()
+        if not hasattr(type(self), 'w_shared'):
+            self._make_window()
+        self.w = type(self).w_shared
+        # 清掉上个用例可能留下的角标
+        badge = getattr(self.w, '_update_badge', None)
+        if badge is not None:
+            self.w.statusbar.removeWidget(badge)
+            badge.deleteLater()
+            self.w._update_badge = None
+        self.app.processEvents()
 
     def tearDown(self):
-        self.w.close()
-        self.w.deleteLater()
-        self.app.processEvents()
         app_config.get_config_path = self._orig_get_path
         app_updater.UpdateChecker = self._orig_checker
         main_window.MainWindow._auto_update_check_done = False
         self._tmp.cleanup()
+
+    @classmethod
+    def tearDownClass(cls):
+        from PyQt6.QtCore import QEvent
+        if hasattr(cls, 'w_shared'):
+            cls.w_shared.close()
+            cls.w_shared.deleteLater()
+            del cls.w_shared
+        # 把延迟删除当场冲干净，不留给后续测试文件的事件循环
+        for _ in range(5):
+            cls.app.sendPostedEvents(None, QEvent.Type.DeferredDelete)
+            cls.app.processEvents()
 
     def _write_cfg(self, d: dict):
         self._cfg_path.write_text(json.dumps(d))

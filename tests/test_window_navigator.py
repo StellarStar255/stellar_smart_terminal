@@ -52,10 +52,15 @@ class TestWindowNavigatorExtraction(unittest.TestCase):
                             f"导航未列出可见主窗口: {titles}")
             nav.deleteLater()
         finally:
+            from PyQt6.QtCore import QEvent
             for w in windows:
                 w.close()
                 w.deleteLater()
-            self.app.processEvents()
+            # 当场冲干净延迟删除：半销毁的 MainWindow 残留会在后续
+            # processEvents 里段错误（CI 上曾崩掉整个测试进程）
+            for _ in range(5):
+                self.app.sendPostedEvents(None, QEvent.Type.DeferredDelete)
+                self.app.processEvents()
 
     def test_dock_mode_static_roundtrip(self):
         import main_window
