@@ -2096,6 +2096,12 @@ class FileEditorWidget(QWidget):
         split_v_sc.setContext(Qt.ShortcutContext.WidgetWithChildrenShortcut)
         split_v_sc.activated.connect(self.split_v_requested.emit)
 
+        # Cmd+Shift+M 切换 Markdown 源码/预览（VS Code 的 Cmd+Shift+V
+        # 在本应用已被「上下分屏」占用，取 M=Markdown）
+        md_toggle_sc = QShortcut(QKeySequence("Ctrl+Shift+M"), self)
+        md_toggle_sc.setContext(Qt.ShortcutContext.WidgetWithChildrenShortcut)
+        md_toggle_sc.activated.connect(self._toggle_md_preview)
+
         # Cmd+F / Ctrl+F 唤出查找栏
         find_shortcut = QShortcut(QKeySequence.StandardKey.Find, self)
         find_shortcut.setContext(Qt.ShortcutContext.WidgetWithChildrenShortcut)
@@ -2716,6 +2722,11 @@ class FileEditorWidget(QWidget):
                 self.md_btn.setChecked(False)
                 self.md_btn.blockSignals(False)
             self._md_browser.clear()
+
+    def _toggle_md_preview(self):
+        """快捷键入口：markdown 文件上切换 源码/预览，其他文件无操作。"""
+        if self._md_preview_supported and not self._in_image_mode:
+            self._set_md_preview(not self._in_md_preview)
 
     def _set_md_preview(self, on: bool, sync_scroll: bool = True):
         """切换 源码编辑 / 渲染预览。预览为只读，不触碰编辑器缓冲区。

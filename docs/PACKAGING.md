@@ -176,7 +176,14 @@ gh release create v1.6.0 \
     --title "v1.6.0" --notes-file /tmp/release_notes.md
 ```
 
-Release notes 可参考 [v1.5.0](https://github.com/StellarStar255/stellar_smart_terminal/releases/tag/v1.5.0) 的结构:按模块(Terminal / Git panel / Remote / Editor)分组列变更,最后附下载安装说明。变更列表可从 `git log --oneline v1.5.0..HEAD` 整理。
+Release notes 可参考 [v1.5.0](https://github.com/StellarStar255/stellar_smart_terminal/releases/tag/v1.5.0) 的结构:按模块(Terminal / Git panel / Remote / Editor)分组列变更,最后附下载安装说明。
+
+起草可用脚本自动分组(产出的是草稿,发布前必须手工润色成面向用户的说明):
+
+```bash
+python3 scripts/draft_release_notes.py --version v1.14.0 -o /tmp/release_notes.md
+# 默认取「最近一个 tag..HEAD」;跨版本用 --since v1.12.0 指定起点
+```
 
 补传/更新已有 release:
 

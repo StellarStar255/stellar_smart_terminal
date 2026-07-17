@@ -2614,6 +2614,7 @@ class MainWindow(QMainWindow):
             (nat("Ctrl+H"), t("shortcuts.sc.edit_replace")),
             (nat("Ctrl+G") + " / " + nat("Ctrl+Shift+G"), t("shortcuts.sc.edit_find_next")),
             (nat("Ctrl+\\") + " / " + nat("Ctrl+Shift+\\"), t("shortcuts.sc.edit_split")),
+            (nat("Ctrl+Shift+M"), t("shortcuts.sc.edit_md_preview")),
             ("Tab", t("shortcuts.sc.edit_ai_accept")),
             (nat("Esc"), t("shortcuts.sc.edit_ai_dismiss")),
             (nat("Alt+\\"), t("shortcuts.sc.edit_ai_trigger")),

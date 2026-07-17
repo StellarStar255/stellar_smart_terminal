@@ -86,6 +86,7 @@ TRANSLATIONS = {
     "shortcuts.sc.edit_replace": {"zh": "查找并替换", "en": "Find and replace"},
     "shortcuts.sc.edit_find_next": {"zh": "下一个/上一个匹配", "en": "Next/previous match"},
     "shortcuts.sc.edit_split": {"zh": "编辑器左右/上下分屏", "en": "Split editor right/down"},
+    "shortcuts.sc.edit_md_preview": {"zh": "切换 Markdown 源码/预览", "en": "Toggle Markdown source/preview"},
     "shortcuts.sc.edit_ai_accept": {"zh": "接受 AI 行内补全建议", "en": "Accept the AI inline suggestion"},
     "shortcuts.sc.edit_ai_dismiss": {"zh": "取消 AI 行内补全建议", "en": "Dismiss the AI inline suggestion"},
     "shortcuts.sc.edit_ai_trigger": {"zh": "手动触发 AI 补全", "en": "Trigger AI completion manually"},
