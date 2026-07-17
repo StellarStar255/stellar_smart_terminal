@@ -657,6 +657,84 @@ def _ini_rules():
     return rules, []
 
 
+def _python_rules():
+    """Python 的规则表版本（供 markdown 预览代码块用；编辑器仍用
+    PythonHighlighter——其命令式字符串/注释处理更精细，行为保持不变）。"""
+    kw = _make_format(_COLOR_KEYWORD, bold=True)
+    st = _make_format(_COLOR_STRING)
+    cm = _make_format(_COLOR_COMMENT, italic=True)
+    nm = _make_format(_COLOR_NUMBER)
+    fn = _make_format(_COLOR_FUNC)
+    cls_f = _make_format(_COLOR_CLASS)
+    dec = _make_format(_COLOR_VAR)
+    keywords = (
+        r'\b(and|as|assert|async|await|break|class|continue|def|del|elif|'
+        r'else|except|finally|for|from|global|if|import|in|is|lambda|'
+        r'nonlocal|not|or|pass|raise|return|try|while|with|yield|'
+        r'True|False|None|self)\b'
+    )
+    rules = [
+        (re.compile(r'"(?:[^"\\]|\\.)*"'), st, 0, True),
+        (re.compile(r"'(?:[^'\\]|\\.)*'"), st, 0, True),
+        (re.compile(r'#.*$'), cm, 0, True),
+        (re.compile(r'\bdef\s+(\w+)'), fn, 1, False),
+        (re.compile(r'\bclass\s+(\w+)'), cls_f, 1, False),
+        (re.compile(r'^\s*@[\w.]+'), dec, 0, False),
+        (re.compile(keywords), kw, 0, False),
+        (re.compile(r'\b\d+\.?\d*\b'), nm, 0, False),
+    ]
+    blocks = [
+        (re.compile(r'"""'), re.compile(r'"""'), st),
+        (re.compile(r"'''"), re.compile(r"'''"), st),
+    ]
+    return rules, blocks
+
+
+class _MdCodeHighlighter(GenericHighlighter):
+    """markdown 预览专用：只给代码块（带 BlockCodeLanguage 属性）按语言上色。
+
+    复用 GenericHighlighter 的规则引擎，逐 block 按 codelang 换规则表。
+    用 QSyntaxHighlighter 层而不是在精修 pass 里直接改 charFormat：
+    高亮作为叠加层不与精修的等宽字体/字号 merge 互相覆盖，且 setMarkdown
+    重渲染后自动重跑，无需手动触发。
+    """
+
+    # codelang（含常见别名）→ 规则表工厂
+    _LANG_FACTORY = {
+        'python': _python_rules, 'py': _python_rules, 'python3': _python_rules,
+        'sh': _shell_rules, 'bash': _shell_rules, 'shell': _shell_rules,
+        'zsh': _shell_rules, 'console': _shell_rules,
+        'json': _json_rules, 'jsonc': _json_rules,
+        'yaml': _yaml_rules, 'yml': _yaml_rules,
+        'js': lambda: _js_ts_rules(False), 'javascript': lambda: _js_ts_rules(False),
+        'jsx': lambda: _js_ts_rules(False), 'mjs': lambda: _js_ts_rules(False),
+        'ts': lambda: _js_ts_rules(True), 'typescript': lambda: _js_ts_rules(True),
+        'tsx': lambda: _js_ts_rules(True),
+        'dockerfile': _dockerfile_rules, 'docker': _dockerfile_rules,
+        'makefile': _makefile_rules, 'make': _makefile_rules,
+        'toml': _ini_rules, 'ini': _ini_rules, 'conf': _ini_rules,
+        'properties': _ini_rules,
+    }
+
+    def __init__(self, document):
+        super().__init__(document, rules=[], block_rules=[])
+        self._cache = {}   # lang → (rules, block_rules)
+
+    def highlightBlock(self, text):
+        bf = self.currentBlock().blockFormat()
+        lang = (bf.stringProperty(QTextFormat.Property.BlockCodeLanguage)
+                or '').strip().lower()
+        factory = self._LANG_FACTORY.get(lang)
+        if factory is None:
+            # 非代码块 / 未知语言：清状态，防止跨行块状态漏到下一个代码片
+            self.setCurrentBlockState(0)
+            return
+        if lang not in self._cache:
+            self._cache[lang] = factory()
+        self.rules, self.block_rules = self._cache[lang]
+        super().highlightBlock(text)
+
+
 class _LineNumberArea(QWidget):
     """左侧行号条 — 由 CodeEditor 管理绘制"""
 
@@ -1988,6 +2066,8 @@ class FileEditorWidget(QWidget):
         # 一致的分屏/移动等窗格级动作（否则预览状态下无法从右键菜单分屏）
         self._md_browser.setContextMenuPolicy(Qt.ContextMenuPolicy.CustomContextMenu)
         self._md_browser.customContextMenuRequested.connect(self._show_md_context_menu)
+        # 代码块语法高亮：常驻挂在预览文档上，随每次 setMarkdown 自动重跑
+        self._md_code_highlighter = _MdCodeHighlighter(self._md_browser.document())
         self._stack.addWidget(self._md_browser)  # index 2
 
         layout.addWidget(self._stack)
@@ -2611,7 +2691,7 @@ class FileEditorWidget(QWidget):
         is_md = Path(file_path).suffix.lower() in ('.md', '.markdown')
         self._set_md_support(is_md)
         if is_md:
-            self._set_md_preview(True)
+            self._set_md_preview(True, sync_scroll=False)
 
         # 恢复上次离开该文件时的视图位置（光标 + 滚动）
         self._restore_view_state(file_path)
@@ -2637,8 +2717,13 @@ class FileEditorWidget(QWidget):
                 self.md_btn.blockSignals(False)
             self._md_browser.clear()
 
-    def _set_md_preview(self, on: bool):
-        """切换 源码编辑 / 渲染预览。预览为只读，不触碰编辑器缓冲区。"""
+    def _set_md_preview(self, on: bool, sync_scroll: bool = True):
+        """切换 源码编辑 / 渲染预览。预览为只读，不触碰编辑器缓冲区。
+
+        sync_scroll: 是否按滚动比例同步阅读位置。用户手动切换时要同步；
+        open_file 的程序性切换传 False——那时源码还在顶部，同步的延迟校正
+        会把 _restore_view_state 刚恢复的预览位置踩回去。
+        """
         on = bool(on) and self._md_preview_supported
         if self.md_btn.isChecked() != on:
             self.md_btn.blockSignals(True)
@@ -2652,11 +2737,11 @@ class FileEditorWidget(QWidget):
                 self.search_bar.close_search()
             self._render_md_preview()
             self._stack.setCurrentIndex(2)
-            if not was:
+            if not was and sync_scroll:
                 self._sync_md_scroll(to_preview=True)
         elif not self._in_image_mode:
             self._stack.setCurrentIndex(0)
-            if was:
+            if was and sync_scroll:
                 self._sync_md_scroll(to_preview=False)
             self.editor.setFocus()
 
@@ -2840,6 +2925,9 @@ class FileEditorWidget(QWidget):
         re.IGNORECASE)
     _MD_ALIGN_ATTR_RE = re.compile(
         r'''align\s*=\s*["']?(center|left|right|justify)''', re.IGNORECASE)
+    # HTML 注释（README 模板里常见）。跨空行的注释开闭会落在不同 block，
+    # 配不上就保持字面——与容器标签同策略
+    _MD_COMMENT_RE = re.compile(r'<!--.*?-->', re.DOTALL)
 
     def _apply_md_html_layout(self, doc):
         """把字面显示的 <br> 与对齐容器标签还原成对应排版（NoHTML 白名单第二批）。
@@ -2880,6 +2968,7 @@ class FileEditorWidget(QWidget):
         align_ops = []    # (block_pos, AlignmentFlag)
         opens = []        # 栈: (tag, align_or_None, block_idx, strip_edit)
         pairs = []        # (open_idx, close_idx, align, [strip_edits])
+        comment_blocks = []   # 剥掉注释后整块为空 → 整行删
         last_pos = 0
 
         block = doc.begin()
@@ -2900,9 +2989,34 @@ class FileEditorWidget(QWidget):
             text = block.text()
             p = block.position()
 
-            wm = self._MD_TAG_WRAP_RE.match(text)
-            om = self._MD_TAG_OPEN_RE.match(text)
-            cm = self._MD_TAG_CLOSE_RE.search(text)
+            # HTML 注释剥离。后续容器/br 匹配全部基于 masked（注释区替换成
+            # 等长空格）：注释内的标签/<br> 是被注释掉的内容，不该生效，
+            # 且等长屏蔽保证 masked 上的匹配位置与原文一一对应
+            comment_spans = [
+                (m.start(), m.end())
+                for m in self._MD_COMMENT_RE.finditer(text)
+                if not _overlaps_mono(block, m.start(), m.end())
+            ]
+            masked = text
+            for cs, ce in comment_spans:
+                masked = masked[:cs] + ' ' * (ce - cs) + masked[ce:]
+            if comment_spans:
+                if not masked.strip():
+                    # 整块只有注释 → 整行删，不留空段落
+                    comment_blocks.append(idx)
+                    block = block.next()
+                    continue
+                for cs, ce in comment_spans:
+                    edits.append((p + cs, p + ce, ''))
+
+            # 同块既有注释又有容器标签的组合极罕见；两者的删除区间可能
+            # 交叠（先删注释会使外层区间失效）→ 该块只剥注释、容器保持字面
+            if comment_spans:
+                wm = om = cm = None
+            else:
+                wm = self._MD_TAG_WRAP_RE.match(masked)
+                om = self._MD_TAG_OPEN_RE.match(masked)
+                cm = self._MD_TAG_CLOSE_RE.search(masked)
             if wm and not _overlaps_mono(block, 0, len(text)):
                 # 同块成对：剥首尾标签（连同内侧空白），本块按 align 对齐
                 flag = _container_align(wm.group(1), wm.group(2))
@@ -2931,7 +3045,7 @@ class FileEditorWidget(QWidget):
                                       [opens[k][3], strip]))
                         del opens[k:]   # 更晚的未闭合标签一并放弃
                         break
-            for m in self._MD_BR_RE.finditer(text):
+            for m in self._MD_BR_RE.finditer(masked):
                 if not _overlaps_mono(block, m.start(), m.end()):
                     edits.append((p + m.start(), p + m.end(),
                                   '\u2028'))  # 行分隔符：段内换行
@@ -2939,17 +3053,24 @@ class FileEditorWidget(QWidget):
 
         doc_end = last_pos - 1   # 最后一个 block 的 length 含文档终结符
         deleted = set()
+
+        def _delete_block(bidx):
+            """整行删（含分隔符；末 block 改吃前导分隔符）"""
+            if bidx in deleted:
+                return
+            deleted.add(bidx)
+            pos, length, _, _ = blocks[bidx]
+            if pos + length > doc_end:
+                edits.append((max(0, pos - 1), doc_end, ''))
+            else:
+                edits.append((pos, pos + length, ''))
+
+        for bidx in comment_blocks:
+            _delete_block(bidx)
         for open_idx, close_idx, flag, strips in pairs:
             for strip in strips:
                 if strip[0] == 'block':
-                    # 整行删（含分隔符；末 block 改吃前导分隔符）
-                    bidx = strip[1]
-                    deleted.add(bidx)
-                    pos, length, _, _ = blocks[bidx]
-                    if pos + length > doc_end:
-                        edits.append((max(0, pos - 1), doc_end, ''))
-                    else:
-                        edits.append((pos, pos + length, ''))
+                    _delete_block(strip[1])
                 else:
                     edits.append((strip[2], strip[3], ''))
             if flag is not None:
@@ -3058,13 +3179,21 @@ class FileEditorWidget(QWidget):
             elif _is_code_block(block):
                 # 代码块每行一个 block：整片底色相连，行首缩进当左内边距用；
                 # 只有片区首/尾行需要外边距。不能加比例行距——多出的行间
-                # 空隙不带底色，会把底色片切成一条条断缝
+                # 空隙不带底色，会把底色片切成一条条断缝。
+                # 相邻但语言不同的两个围栏是两片：按 codelang 变化切分
+                def _same_fence(other):
+                    if not _is_code_block(other):
+                        return False
+                    return (other.blockFormat().stringProperty(
+                                QTextFormat.Property.BlockCodeLanguage)
+                            == bf.stringProperty(
+                                QTextFormat.Property.BlockCodeLanguage))
                 nbf.setBackground(code_bg)
                 nbf.setTextIndent(base * 0.8)
                 nbf.setTopMargin(
-                    0.0 if _is_code_block(block.previous()) else base * 0.7)
+                    0.0 if _same_fence(block.previous()) else base * 0.7)
                 nbf.setBottomMargin(
-                    0.0 if _is_code_block(block.next()) else base * 0.7)
+                    0.0 if _same_fence(block.next()) else base * 0.7)
                 ccf = QTextCharFormat()
                 ccf.setFontFamilies([mono_family])
                 ccf.setFontPointSize(base * 0.9)
@@ -3172,11 +3301,43 @@ class FileEditorWidget(QWidget):
         edit_cursor.endEditBlock()
 
     def _on_md_link_clicked(self, url: QUrl):
-        """预览页链接点击：只放行 http/https 到系统浏览器。
-        本地文件/相对链接/其他 scheme 一律忽略，防止预览页意外导航
+        """预览页链接点击：http/https 放行到系统浏览器；#锚点 跳到对应标题。
+        其余（本地文件/相对链接/其他 scheme）一律忽略，防止预览页意外导航
         或触碰本地文件。"""
         if url.scheme() in ('http', 'https'):
             QDesktopServices.openUrl(url)
+            return
+        # 文档内锚点（GitHub 目录写法 [..](#features--功能)）
+        if url.hasFragment() and not url.path() and not url.scheme():
+            self._md_scroll_to_heading(url.fragment())
+
+    @staticmethod
+    def _md_github_slug(text: str) -> str:
+        """GitHub 风格的标题锚点 slug：小写、去标点（保留字母数字/CJK/
+        连字符/下划线）、每个空格换成一个连字符。"""
+        t = text.strip().lower()
+        t = re.sub(r'[^\w\- ]', '', t)
+        return t.replace(' ', '-')
+
+    def _md_scroll_to_heading(self, fragment: str):
+        """滚动预览到 slug 匹配的标题；找不到则原地不动。"""
+        want = fragment.strip().lower()
+        if not want:
+            return
+        doc = self._md_browser.document()
+        doc.size()   # 惰性布局：先完成整篇布局，blockBoundingRect 才可靠
+        collapse = lambda s: re.sub(r'-{2,}', '-', s)
+        block = doc.begin()
+        while block.isValid():
+            if block.blockFormat().headingLevel():
+                slug = self._md_github_slug(block.text())
+                # 宽松一档：连续连字符折叠后也算命中（slug 方言差异）
+                if slug == want or collapse(slug) == collapse(want):
+                    r = doc.documentLayout().blockBoundingRect(block)
+                    self._md_browser.verticalScrollBar().setValue(
+                        max(0, int(r.y()) - 8))
+                    return
+            block = block.next()
 
     def _show_md_context_menu(self, pos):
         """预览页右键菜单：Qt 标准项（复制/全选）+ 源码页同款窗格级动作。
