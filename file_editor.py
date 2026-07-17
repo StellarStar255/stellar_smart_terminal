@@ -1817,6 +1817,13 @@ class FileEditorWidget(QWidget):
         self._autosave_timer = QTimer(self)
         self._autosave_timer.setInterval(_AUTOSAVE_INTERVAL_MS)
         self._autosave_timer.timeout.connect(self._autosave_tick)
+
+        # markdown 预览视口 resize 防抖：停止变宽 200ms 后重渲染重算大图缩放
+        self._md_refit_timer = QTimer(self)
+        self._md_refit_timer.setSingleShot(True)
+        self._md_refit_timer.setInterval(200)
+        self._md_refit_timer.timeout.connect(
+            lambda: self._render_md_preview() if self._in_md_preview else None)
         # 上次写入备份的内容指纹：内容没变就不重复写盘
         self._last_autosave_hash: str | None = None
 
@@ -2447,6 +2454,12 @@ class FileEditorWidget(QWidget):
             QEvent.Type.MouseButtonPress,
         ):
             self.pane_focused.emit()
+        elif (event.type() == QEvent.Type.Resize
+                and getattr(self, '_md_browser', None) is not None
+                and obj is self._md_browser.viewport()):
+            # 预览视口变宽/变窄 → 防抖重渲染，让大图缩放跟上新视口宽
+            if self._in_md_preview:
+                self._md_refit_timer.start()
         elif obj is self.editor and event.type() in (
             QEvent.Type.ShortcutOverride,
             QEvent.Type.KeyPress,
@@ -2631,6 +2644,7 @@ class FileEditorWidget(QWidget):
             self.md_btn.blockSignals(True)
             self.md_btn.setChecked(on)
             self.md_btn.blockSignals(False)
+        was = self._in_md_preview
         self._in_md_preview = on
         if on:
             # 查找栏作用于源码编辑器，预览下先收起
@@ -2638,9 +2652,38 @@ class FileEditorWidget(QWidget):
                 self.search_bar.close_search()
             self._render_md_preview()
             self._stack.setCurrentIndex(2)
+            if not was:
+                self._sync_md_scroll(to_preview=True)
         elif not self._in_image_mode:
             self._stack.setCurrentIndex(0)
+            if was:
+                self._sync_md_scroll(to_preview=False)
             self.editor.setFocus()
+
+    def _sync_md_scroll(self, to_preview: bool):
+        """源码↔预览互切时按滚动比例近似同步阅读位置。
+
+        两边文档结构不同（预览里图片占高、代码围栏行数不同），做不到
+        精确的行级映射；按 scrollbar 比例映射对 README 类文档已足够贴近，
+        且行为可预期。预览内部的重渲染（外部变更、缩放）不走这里，
+        仍由 _render_md_preview 原样保留预览滚动位置。
+        """
+        # 预览文档布局是惰性的：先强制完成整篇布局，scrollbar 范围才有效
+        self._md_browser.document().size()
+        esb = self.editor.verticalScrollBar()
+        psb = self._md_browser.verticalScrollBar()
+        src, dst = (esb, psb) if to_preview else (psb, esb)
+        frac = src.value() / src.maximum() if src.maximum() > 0 else 0.0
+
+        def apply():
+            try:
+                dst.setValue(round(frac * dst.maximum()))
+            except RuntimeError:
+                pass   # 窗格已销毁
+        # 立即设一次，再延迟一拍校正：刚从 QStackedWidget 隐藏页切出来时
+        # 目标视口几何还没稳定，scrollbar 范围会在下一轮事件循环重算
+        apply()
+        QTimer.singleShot(0, apply)
 
     def _render_md_preview(self):
         """把编辑器缓冲区的 Markdown 源文本渲染到预览页（单向，只读）。
@@ -2663,8 +2706,61 @@ class FileEditorWidget(QWidget):
         )
         self._inline_md_html_images(doc)
         self._apply_md_html_layout(doc)
+        self._fit_md_images(doc)
         self._polish_md_document(doc)
         self._md_browser.verticalScrollBar().setValue(scroll_pos)
+
+    def _fit_md_images(self, doc):
+        """把宽于视口的内嵌图片等比缩到视口宽（GitHub 风格），消除横向滚动。
+
+        只缩不放：窄图保持原尺寸/显式尺寸。natural 尺寸用 QImageReader
+        只读文件头，不解码整图。视口 resize 时由防抖重渲染重新计算。
+        """
+        avail = float(self._md_browser.viewport().width()
+                      - 2 * doc.documentMargin() - 8)
+        if avail < 100:   # 视口还没布局好（宽度无意义）时不缩放
+            return
+        base_dir = (os.path.dirname(os.path.abspath(self._current_file))
+                    if self._current_file else '')
+
+        fits = []   # (pos, len, new_fmt)
+        block = doc.begin()
+        while block.isValid():
+            it = block.begin()
+            while not it.atEnd():
+                frag = it.fragment()
+                cf = frag.charFormat()
+                if cf.isImageFormat():
+                    fmt = cf.toImageFormat()
+                    w, h = fmt.width(), fmt.height()
+                    if w <= 0:
+                        # 无显式宽度 → 读自然尺寸（本地文件才读得到）
+                        name = fmt.name()
+                        path = (name if os.path.isabs(name)
+                                else os.path.join(base_dir, name))
+                        size = QImageReader(path).size()
+                        if not size.isValid():
+                            it += 1
+                            continue
+                        w = float(size.width())
+                        if h <= 0:
+                            h = float(size.height())
+                        else:
+                            h = 0.0  # 显式高度 + 自然宽度的组合极罕见，交给 Qt
+                    if w > avail:
+                        nf = QTextImageFormat(fmt)
+                        nf.setWidth(avail)
+                        if h > 0:
+                            nf.setHeight(h * avail / w)
+                        fits.append((frag.position(), frag.length(), nf))
+                it += 1
+            block = block.next()
+
+        for pos, ln, nf in fits:
+            c = QTextCursor(doc)
+            c.setPosition(pos)
+            c.setPosition(pos + ln, QTextCursor.MoveMode.KeepAnchor)
+            c.setCharFormat(nf)
 
     # 匹配按字面显示的 <img ...> 标签（NoHTML 模式的产物）及其属性
     _MD_IMG_TAG_RE = re.compile(r'<img\b[^<>]*?>', re.IGNORECASE)

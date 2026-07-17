@@ -41,15 +41,23 @@ class TestGitAsyncOps(unittest.TestCase):
             f.write('hello\n')
         _git(self.repo, 'add', '.')
         _git(self.repo, 'commit', '-m', 'init')
+        # 面板的 commit 走 GitManager 自己 spawn 的 git，不带 _git() 那套身份
+        # 环境变量。CI runner（Linux/Windows）没有全局 git 身份、gecos 又是
+        # 空的，git 自动探测邮箱失败会以 "Author identity unknown" 拒绝提交
+        # （macOS runner 因 gecos 有全名而侥幸通过）→ 仓库级配置身份自洽
+        _git(self.repo, 'config', 'user.name', 't')
+        _git(self.repo, 'config', 'user.email', 't@t')
 
         from git_widget import GitPanel
         self.panel = GitPanel()
         # 失败路径会经 error_occurred 弹模态 QMessageBox，offscreen 下会永久阻塞；
-        # 测试只关心异步行为与仓库结果，断开错误弹窗
+        # 换成记到列表——断言失败时能看到底层 git 报错，而不是只有结果不符
         try:
             self.panel._git_manager.error_occurred.disconnect()
         except TypeError:
             pass
+        self.git_errors = []
+        self.panel._git_manager.error_occurred.connect(self.git_errors.append)
         self.panel.set_repository(self.repo)
         self._wait_workers()  # set_repository 触发的初始刷新先跑完
 
@@ -86,7 +94,8 @@ class TestGitAsyncOps(unittest.TestCase):
 
         self._wait_workers()
         self.assertEqual(_git(self.repo, 'log', '-1', '--format=%s'),
-                         'feat: async commit')
+                         'feat: async commit',
+                         msg=f"git errors: {self.git_errors}")
         # 成功后：清空输入框、按钮恢复
         self.assertEqual(self.panel.commit_widget.message_input.toPlainText(), '')
         self.assertTrue(self.panel.commit_widget.commit_btn.isEnabled())
@@ -109,7 +118,8 @@ class TestGitAsyncOps(unittest.TestCase):
         self.panel._on_commit('first')
         self.panel._on_commit('second')  # 忙碌中重复触发应被忽略
         self._wait_workers()
-        self.assertEqual(_git(self.repo, 'log', '-1', '--format=%s'), 'first')
+        self.assertEqual(_git(self.repo, 'log', '-1', '--format=%s'), 'first',
+                         msg=f"git errors: {self.git_errors}")
         # 只产生了一个新提交（init + first）
         self.assertEqual(_git(self.repo, 'rev-list', '--count', 'HEAD'), '2')
 

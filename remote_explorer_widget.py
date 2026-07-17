@@ -25,7 +25,8 @@ from PyQt6.QtWidgets import (
     QAbstractItemView, QDialog,
 )
 from PyQt6.QtCore import Qt, pyqtSignal, QTimer, QMimeData, QUrl, QSize
-from PyQt6.QtGui import QAction, QActionGroup, QCursor, QDrag, QShortcut, QKeySequence
+from PyQt6.QtGui import (QAction, QActionGroup, QCursor, QDrag, QShortcut,
+                         QKeySequence, QDesktopServices)
 from PyQt6 import sip  # 用于检查 C++ 对象是否已被删除
 
 from i18n import t
@@ -3430,6 +3431,11 @@ class RemoteExplorerPanel(QWidget):
         self._open_temp_map[local_path] = (host_alias, remote_path)
         # 用发起下载时的 session，而不是当前 self._session（期间可能已切换/断开）
         sess_for_open = self._open_session_map.pop(local_path, self._session)
+        if not explorer_common.editor_can_display(local_path):
+            # 编辑器展示不了的格式（xlsx 等二进制）→ 系统默认应用打开临时
+            # 文件。只读查看语义：系统程序里的改动不会回传远端。
+            QDesktopServices.openUrl(QUrl.fromLocalFile(local_path))
+            return
         self.file_open_requested.emit(host_alias, remote_path, local_path, sess_for_open)
 
     def _on_file_downloaded(self, host_alias: str, remote_path: str,
@@ -3443,6 +3449,9 @@ class RemoteExplorerPanel(QWidget):
         self._open_temp_map[local_path] = (host_alias, remote_path)
         # 用发起下载时的 session，而不是当前 self._session（期间可能已切换/断开）
         sess_for_open = self._open_session_map.pop(local_path, self._session)
+        if not explorer_common.editor_can_display(local_path):
+            QDesktopServices.openUrl(QUrl.fromLocalFile(local_path))
+            return
         self.file_open_requested.emit(host_alias, remote_path, local_path, sess_for_open)
 
     def remote_mapping_for(self, local_path: str) -> Optional[tuple[str, str]]:

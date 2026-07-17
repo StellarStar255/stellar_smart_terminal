@@ -18,7 +18,6 @@ import explorer_clipboard
 import explorer_common
 import explorer_favorites
 from utils import parse_search_tokens, name_matches_tokens
-from file_editor import _IMAGE_EXTENSIONS  # 编辑器可内联预览的图片格式
 from app_logging import get_logger
 
 logger = get_logger(__name__)
@@ -1283,40 +1282,9 @@ class ExplorerPanel(QWidget):
         """清除当前正在编辑的文件路径"""
         self._editing_file = None
 
-    # 编辑器无法有效展示、打开时应交给系统默认应用的扩展名。
-    # 名单之外的未知格式再按文件头是否含 NUL 字节嗅探二进制兜底。
-    _SYSTEM_OPEN_EXTS = {
-        # 办公文档
-        '.xlsx', '.xls', '.docx', '.doc', '.pptx', '.ppt', '.pdf',
-        '.key', '.numbers', '.pages', '.odt', '.ods', '.odp',
-        # 压缩包/镜像
-        '.zip', '.rar', '.7z', '.tar', '.gz', '.bz2', '.xz',
-        '.dmg', '.iso', '.jar',
-        # 音视频
-        '.mp3', '.wav', '.flac', '.m4a', '.aac', '.ogg',
-        '.mp4', '.mov', '.avi', '.mkv', '.webm',
-        # 可执行/库/字体/数据库/设计稿
-        '.exe', '.dll', '.dylib', '.so', '.bin', '.apk', '.ipa',
-        '.ttf', '.otf', '.woff', '.woff2',
-        '.sqlite', '.sqlite3', '.db', '.psd', '.ai', '.sketch',
-    }
-
     def _editor_can_display(self, file_path: str) -> bool:
-        """内置编辑器能否有效展示该文件（文本/代码/图片可以）。
-
-        展示不了的（office 文档、压缩包、音视频等二进制）双击时交给
-        系统默认应用。未知扩展名按前 8KB 是否含 NUL 字节嗅探二进制。
-        """
-        ext = os.path.splitext(file_path)[1].lower()
-        if ext in _IMAGE_EXTENSIONS:
-            return True   # 编辑器有内联图片预览
-        if ext in self._SYSTEM_OPEN_EXTS:
-            return False
-        try:
-            with open(file_path, 'rb') as f:
-                return b'\x00' not in f.read(8192)
-        except OSError:
-            return True   # 读不了仍走编辑器，沿用其现有报错提示
+        """内置编辑器能否有效展示该文件——委托共享判定（与远程 explorer 同源）。"""
+        return explorer_common.editor_can_display(file_path)
 
     def _on_double_click(self, index: QModelIndex):
         """双击事件处理"""
