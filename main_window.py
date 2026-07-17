@@ -405,8 +405,16 @@ class MainWindow(QMainWindow):
                 self.explorer_panel.prewarm(getattr(self, '_window_cwd', None))
             QTimer.singleShot(1200, _prewarm_explorer)
 
-        # 启动 5s 后静默检查更新（每日最多一次、设置里可关；不打扰启动性能）
-        QTimer.singleShot(5000, self._maybe_auto_check_updates)
+        # 启动 5s 后静默检查更新（每日最多一次、设置里可关；不打扰启动性能）。
+        # 必须用挂在 self 下的 QTimer 而不是裸 singleShot：窗口销毁后裸
+        # singleShot 仍会触发、回调打在已删对象上段错误（CI 上曾以此崩掉
+        # 整个测试进程）。测试进程里不调度——避免单测创建窗口时发起真实网络。
+        if 'pytest' not in sys.modules:
+            self._auto_update_timer = QTimer(self)
+            self._auto_update_timer.setSingleShot(True)
+            self._auto_update_timer.timeout.connect(
+                self._maybe_auto_check_updates)
+            self._auto_update_timer.start(5000)
 
     def showEvent(self, event):
         """窗口显示事件 - 设置 macOS 原生窗口属性"""
