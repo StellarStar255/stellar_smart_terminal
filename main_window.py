@@ -36,11 +36,11 @@ from PyQt6.QtWidgets import (
     QFormLayout, QGroupBox, QCheckBox, QTabWidget, QTabBar,
     QApplication, QInputDialog, QMenu, QStyledItemDelegate, QStyle,
     QStyleOptionViewItem, QStyleOptionButton, QSpinBox, QSizePolicy,
-    QStackedWidget
+    QStackedWidget, QProgressDialog
 )
 from PyQt6 import sip  # 用于检查 C++ 对象是否已被删除
-from PyQt6.QtCore import Qt, QTimer, QEvent, QPoint, QMimeData, pyqtSignal, QObject, QSize, QRectF, QVariantAnimation, QEasingCurve
-from PyQt6.QtGui import QAction, QActionGroup, QIcon, QFont, QColor, QPixmap, QPainter, QPainterPath, QPen, QDrag, QCursor, QBrush, QPalette, QShortcut, QKeySequence
+from PyQt6.QtCore import Qt, QTimer, QEvent, QPoint, QMimeData, pyqtSignal, QObject, QSize, QRectF, QVariantAnimation, QEasingCurve, QUrl
+from PyQt6.QtGui import QAction, QActionGroup, QIcon, QFont, QColor, QPixmap, QPainter, QPainterPath, QPen, QDrag, QCursor, QBrush, QPalette, QShortcut, QKeySequence, QDesktopServices
 from PyQt6.QtWidgets import QWidgetAction, QStylePainter, QStyleOptionComboBox
 
 from terminal_widget import TerminalWidget
@@ -7226,8 +7226,111 @@ class MainWindow(QMainWindow):
         click_fwd_act.setChecked(getattr(self, '_mouse_click_forward_enabled', False))
         click_fwd_act.setToolTip(t("settings.mouse_click_forward_tooltip"))
         click_fwd_act.toggled.connect(self._set_mouse_click_forward)
+        menu.addSeparator()
+        update_act = menu.addAction(t("update.menu_item"))
+        update_act.triggered.connect(self._check_for_updates)
         btn = self.toolbar_settings_btn
         menu.exec(btn.mapToGlobal(QPoint(0, btn.height())))
+
+    def _check_for_updates(self):
+        """设置菜单「检查更新」：后台查 GitHub 最新 release，不阻塞 GUI。"""
+        import app_updater
+        if getattr(self, '_update_checker', None) is not None \
+                and self._update_checker.isRunning():
+            return   # 已在查了
+        self.statusbar.showMessage(t("update.checking"), 0)
+        checker = app_updater.UpdateChecker(self)
+        self._update_checker = checker
+        checker.result.connect(self._on_update_check_result)
+        checker.error.connect(self._on_update_check_error)
+        checker.start()
+
+    def _on_update_check_error(self, err: str):
+        self.statusbar.clearMessage()
+        self._styled_message_box(
+            QMessageBox.Icon.Warning, t("update.title"),
+            t("update.check_failed", error=err))
+
+    def _on_update_check_result(self, info: dict):
+        import app_updater
+        self.statusbar.clearMessage()
+        cur = app_updater.get_current_version()
+        cur_v = app_updater.parse_version(cur)
+        latest_tag = info.get('tag', '')
+        latest_v = app_updater.parse_version(latest_tag)
+        if cur_v and latest_v and latest_v <= cur_v:
+            self._styled_message_box(
+                QMessageBox.Icon.Information, t("update.title"),
+                t("update.up_to_date", version=cur))
+            return
+
+        notes = (info.get('notes') or '').strip()
+        if len(notes) > 1200:
+            notes = notes[:1200] + '…'
+        box = QMessageBox(self)
+        box.setWindowTitle(t("update.title"))
+        box.setIcon(QMessageBox.Icon.Information)
+        box.setText(t("update.available", latest=latest_tag,
+                      current=cur or '?'))
+        if notes:
+            box.setDetailedText(notes)
+        # 只有打包的 mac app 且该 release 带 mac zip 产物才提供一键安装
+        can_install = (app_updater.is_frozen_mac_app()
+                       and info.get('asset') is not None)
+        install_btn = None
+        if can_install:
+            install_btn = box.addButton(
+                t("update.download_install"), QMessageBox.ButtonRole.AcceptRole)
+        page_btn = box.addButton(
+            t("update.open_page"), QMessageBox.ButtonRole.ActionRole)
+        box.addButton(QMessageBox.StandardButton.Cancel)
+        box.exec()
+        clicked = box.clickedButton()
+        if clicked is page_btn:
+            QDesktopServices.openUrl(QUrl(app_updater.RELEASES_PAGE))
+        elif install_btn is not None and clicked is install_btn:
+            self._start_update_download(info['asset'])
+
+    def _start_update_download(self, asset: dict):
+        """下载更新 zip（带进度），完成后确认重启安装。"""
+        import app_updater
+        url = asset.get('browser_download_url')
+        if not url:
+            return
+        progress = QProgressDialog(t("update.downloading"), None, 0, 100, self)
+        progress.setWindowModality(Qt.WindowModality.WindowModal)
+        progress.setMinimumDuration(0)
+        progress.setCancelButton(None)   # 换包链路不做中途取消，避免半成品状态
+        progress.setValue(0)
+
+        dl = app_updater.UpdateDownloader(url, self)
+        self._update_downloader = dl
+
+        def on_progress(done, total):
+            if total > 0:
+                progress.setMaximum(100)
+                progress.setValue(min(99, int(done * 100 / total)))
+
+        def on_done(app_path):
+            progress.close()
+            ret = self._styled_message_box(
+                QMessageBox.Icon.Question, t("update.title"),
+                t("update.restart_confirm"),
+                QMessageBox.StandardButton.Ok | QMessageBox.StandardButton.Cancel)
+            if ret == QMessageBox.StandardButton.Ok:
+                if app_updater.install_and_restart(app_path):
+                    QApplication.instance().closeAllWindows()
+
+        def on_error(err):
+            progress.close()
+            self._styled_message_box(
+                QMessageBox.Icon.Warning, t("update.title"),
+                t("update.download_failed", error=err))
+
+        dl.progress.connect(on_progress)
+        dl.finished_ok.connect(on_done)
+        dl.error.connect(on_error)
+        dl.start()
 
     def _set_parse_off_gui(self, enabled: bool):
         """切换"终端解析放到后台线程"。立即对所有终端生效（on_output 每次按此分流），

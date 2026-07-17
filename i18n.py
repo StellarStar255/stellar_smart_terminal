@@ -22,6 +22,17 @@ TRANSLATIONS = {
     "settings.mouse_click_forward_tooltip": {"zh": "关闭时终端单击不会触发 Claude Code 选项等可点击界面，避免误触；滚轮与文本选择不受影响", "en": "When off, a click in the terminal won't trigger Claude Code options or other clickable UIs (avoids misclicks); wheel and text selection are unaffected"},
     "settings.mouse_click_forward_on": {"zh": "已开启：终端点击会转发给 TUI 程序", "en": "On: terminal clicks are forwarded to TUI apps"},
     "settings.mouse_click_forward_off": {"zh": "已关闭：终端点击不再触发 TUI 选项（防误触）", "en": "Off: terminal clicks no longer trigger TUI options (misclick-safe)"},
+    "update.menu_item": {"zh": "检查更新…", "en": "Check for Updates…"},
+    "update.title": {"zh": "检查更新", "en": "Software Update"},
+    "update.checking": {"zh": "正在检查更新…", "en": "Checking for updates…"},
+    "update.check_failed": {"zh": "检查更新失败：{error}", "en": "Update check failed: {error}"},
+    "update.up_to_date": {"zh": "已是最新版本（v{version}）", "en": "You're up to date (v{version})"},
+    "update.available": {"zh": "发现新版本 {latest}（当前 v{current}）。\n点击「显示详细信息」可查看更新说明。", "en": "New version {latest} available (current v{current}).\nClick \"Show Details\" for release notes."},
+    "update.download_install": {"zh": "下载并安装", "en": "Download && Install"},
+    "update.open_page": {"zh": "打开发布页", "en": "Open Releases Page"},
+    "update.downloading": {"zh": "正在下载更新…", "en": "Downloading update…"},
+    "update.restart_confirm": {"zh": "下载完成。重启并安装新版本？\n（未保存的编辑会照常提示保存）", "en": "Download complete. Restart and install the new version?\n(You'll be prompted to save any unsaved edits.)"},
+    "update.download_failed": {"zh": "下载更新失败：{error}", "en": "Update download failed: {error}"},
     "scrollback.applied": {"zh": "已更新历史行数上限，对之后新建的终端生效", "en": "Scrollback limit updated; applies to newly created terminals"},
 
     # ===== 键盘快捷键设置 =====

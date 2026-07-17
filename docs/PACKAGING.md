@@ -192,6 +192,16 @@ gh release upload v1.6.0 dist/xxx.dmg          # 追加产物
 gh release edit v1.6.0 --notes-file notes.md   # 更新说明
 ```
 
+## 应用内更新 / In-app updates
+
+设置 ⚙ 菜单 →「检查更新…」（app_updater.py）:查 GitHub Releases 最新 tag,
+mac 打包版可一键「下载并安装」——下载 release 的 `*-macOS-arm64.zip`、ditto
+解压、等应用退出后分阶段换包(失败自动回滚)并重启;其余平台/源码运行退化为
+打开发布页。运行时版本读自身 Info.plist(源码运行读 pyproject.toml),发版
+无需额外维护版本号。**依赖每个 release 都带 macOS zip 产物**(CI 已自动上传)。
+注:应用自身进程下载的文件不带 quarantine 标记,未签名状态下换包重启不会再
+触发 Gatekeeper;换包脚本仍带 `xattr -dr` 兜底。
+
 ## 已知限制 / Known limitations
 
 - **未签名/未公证**:用户首次打开会被 Gatekeeper 拦截(macOS 15 Sequoia 起右键 → 打开已失效),需到 系统设置 → 隐私与安全性 → 仍要打开(Open Anyway),或执行 `xattr -cr "/Applications/Stellar Smart Terminal.app"`。彻底解决需要 Apple Developer 账号($99/年)做 codesign + notarytool 公证。
