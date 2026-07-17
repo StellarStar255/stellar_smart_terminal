@@ -11,6 +11,45 @@ from typing import Optional, List, Callable
 
 from app_logging import get_logger
 
+
+def scrub_packaging_env(env: dict) -> dict:
+    """清洗 PyInstaller 运行时注入/泄漏的打包环境变量，原地改并返回 env。
+
+    打包的 app 里，PyInstaller 的 PyQt6 hook 会把 QT_PLUGIN_PATH 等指向
+    bundle 内部；若原样传给内置终端的 shell，子进程里任何 Qt/Python 程序
+    都会被迫加载本 app 内置的 Qt、与自身版本混载而崩溃（实测崩在
+    QApplication 构造，objc 报重复类）。源码运行时这些变量若指向某个
+    .app 包内或 PyInstaller 临时目录（从打包 app 的终端里启动的开发实例
+    继承而来），同样是毒药，一并清掉。
+    """
+    frozen = bool(getattr(sys, 'frozen', False))
+
+    def _poisoned(val: str) -> bool:
+        return '.app/Contents/' in val or '_MEI' in val
+
+    for var in ('QT_PLUGIN_PATH', 'QT_QPA_PLATFORM_PLUGIN_PATH',
+                'QML_IMPORT_PATH', 'QML2_IMPORT_PATH'):
+        val = env.get(var)
+        if val is not None and (frozen or _poisoned(val)):
+            env.pop(var, None)
+    # PyInstaller bootloader 自身的记账变量，对子进程只有害处
+    for var in ('_MEIPASS2', '_PYI_APPLICATION_HOME_DIR', '_PYI_ARCHIVE_FILE',
+                '_PYI_PARENT_PROCESS_LEVEL', 'PYINSTALLER_RESET_ENVIRONMENT'):
+        env.pop(var, None)
+    if frozen:
+        for var in ('TCL_LIBRARY', 'TK_LIBRARY'):
+            env.pop(var, None)
+    # 动态库搜索路径：bootloader 把用户原值存进 *_ORIG——有原值就恢复，
+    # 冻结态下没有原值说明是 bootloader 自己设的 → 清掉
+    for var in ('LD_LIBRARY_PATH', 'DYLD_LIBRARY_PATH',
+                'DYLD_FRAMEWORK_PATH'):
+        orig = env.pop(var + '_ORIG', None)
+        if orig:
+            env[var] = orig
+        elif frozen:
+            env.pop(var, None)
+    return env
+
 logger = get_logger(__name__)
 
 # 平台检测
@@ -363,7 +402,7 @@ if IS_WINDOWS:
                     cwd = os.getcwd()
 
                 # 6. 构建环境变量块（Unicode）
-                env = os.environ.copy()
+                env = scrub_packaging_env(os.environ.copy())
                 # 显式设置终端类型和能力标识。
                 # 在 Windows 上，Node.js CLI 工具（如 Claude Code/Ink）会检查多个
                 # 环境变量来判断终端是否支持 Unicode、颜色、交互式渲染等。
@@ -666,7 +705,7 @@ else:
                         os.chdir(cwd)
 
                     # 设置环境变量
-                    env = os.environ.copy()
+                    env = scrub_packaging_env(os.environ.copy())
                     env['TERM'] = 'xterm-256color'
                     env['COLORTERM'] = 'truecolor'
                     env['COLUMNS'] = str(cols)

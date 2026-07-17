@@ -405,6 +405,9 @@ class MainWindow(QMainWindow):
                 self.explorer_panel.prewarm(getattr(self, '_window_cwd', None))
             QTimer.singleShot(1200, _prewarm_explorer)
 
+        # 启动 5s 后静默检查更新（每日最多一次、设置里可关；不打扰启动性能）
+        QTimer.singleShot(5000, self._maybe_auto_check_updates)
+
     def showEvent(self, event):
         """窗口显示事件 - 设置 macOS 原生窗口属性"""
         super().showEvent(event)
@@ -7229,8 +7232,83 @@ class MainWindow(QMainWindow):
         menu.addSeparator()
         update_act = menu.addAction(t("update.menu_item"))
         update_act.triggered.connect(self._check_for_updates)
+        auto_update_act = menu.addAction(t("update.auto_check"))
+        auto_update_act.setCheckable(True)
+        auto_update_act.setChecked(
+            app_config.read_config().get('auto_update_check', True))
+        auto_update_act.toggled.connect(
+            lambda on: app_config.update_config(
+                {'auto_update_check': bool(on)},
+                description='auto update toggle'))
         btn = self.toolbar_settings_btn
         menu.exec(btn.mapToGlobal(QPoint(0, btn.height())))
+
+    # 进程内只自动检查一次（多窗口时由最先到点的窗口执行）
+    _auto_update_check_done = False
+
+    def _maybe_auto_check_updates(self):
+        """启动后的静默更新检查：每日最多一次、可在设置 ⚙ 里关闭。
+
+        发现新版只在状态栏挂一个可点击的角标，不弹窗打扰；用户对某个
+        版本点过「取消」就不再自动提醒该版本（手动检查不受影响）。
+        检查失败完全静默——启动期不该为此打扰用户。
+        """
+        import time
+        import app_updater
+        if MainWindow._auto_update_check_done or sip.isdeleted(self):
+            return
+        cfg = app_config.read_config()
+        if not cfg.get('auto_update_check', True):
+            return
+        if time.time() - float(cfg.get('update_last_check_ts', 0)) < 24 * 3600:
+            return
+        MainWindow._auto_update_check_done = True
+        app_config.update_config({'update_last_check_ts': time.time()},
+                                 description='auto update check throttle')
+        checker = app_updater.UpdateChecker(self)
+        self._auto_update_checker = checker
+        checker.result.connect(self._on_auto_update_result)
+        checker.error.connect(lambda _e: None)
+        checker.start()
+
+    def _on_auto_update_result(self, info: dict):
+        import app_updater
+        cur_v = app_updater.parse_version(app_updater.get_current_version())
+        tag = info.get('tag', '')
+        latest_v = app_updater.parse_version(tag)
+        if not latest_v or (cur_v and latest_v <= cur_v):
+            return
+        if tag == app_config.read_config().get('update_skipped_tag'):
+            return
+        self._show_update_badge(info)
+
+    def _show_update_badge(self, info: dict):
+        """状态栏右侧挂「⬆ 新版本可用」角标，点击进入现有更新弹窗流程。"""
+        old = getattr(self, '_update_badge', None)
+        if old is not None and not sip.isdeleted(old):
+            self.statusbar.removeWidget(old)
+            old.deleteLater()
+        badge = QPushButton(t("update.badge", version=info.get('tag', '')))
+        badge.setCursor(Qt.CursorShape.PointingHandCursor)
+        badge.setStyleSheet("""
+            QPushButton {
+                background: transparent; border: none;
+                color: #667eea; padding: 0 8px;
+                text-decoration: underline;
+            }
+            QPushButton:hover { color: #7a8efa; }
+        """)
+        badge.clicked.connect(lambda: self._on_update_badge_clicked(info))
+        self.statusbar.addPermanentWidget(badge)
+        self._update_badge = badge
+
+    def _on_update_badge_clicked(self, info: dict):
+        badge = getattr(self, '_update_badge', None)
+        if badge is not None and not sip.isdeleted(badge):
+            self.statusbar.removeWidget(badge)
+            badge.deleteLater()
+        self._update_badge = None
+        self._on_update_check_result(info, auto=True)
 
     def _check_for_updates(self):
         """设置菜单「检查更新」：后台查 GitHub 最新 release，不阻塞 GUI。"""
@@ -7251,7 +7329,9 @@ class MainWindow(QMainWindow):
             QMessageBox.Icon.Warning, t("update.title"),
             t("update.check_failed", error=err))
 
-    def _on_update_check_result(self, info: dict):
+    def _on_update_check_result(self, info: dict, auto: bool = False):
+        """展示更新弹窗。auto=True 表示来自启动角标：用户取消时记住该版本，
+        自动提醒不再骚扰（手动检查仍会正常弹出）。"""
         import app_updater
         self.statusbar.clearMessage()
         cur = app_updater.get_current_version()
@@ -7290,6 +7370,10 @@ class MainWindow(QMainWindow):
             QDesktopServices.openUrl(QUrl(app_updater.RELEASES_PAGE))
         elif install_btn is not None and clicked is install_btn:
             self._start_update_download(info['asset'])
+        elif auto:
+            # 自动提醒被取消：这个版本别再弹角标（出更新的版本会重新提醒）
+            app_config.update_config({'update_skipped_tag': latest_tag},
+                                     description='skip update tag')
 
     def _start_update_download(self, asset: dict):
         """下载更新 zip（带进度），完成后确认重启安装。"""
