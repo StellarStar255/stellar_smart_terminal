@@ -18,6 +18,7 @@
 import os
 import plistlib
 import re
+import ssl
 import subprocess
 import sys
 import tempfile
@@ -34,6 +35,35 @@ REPO = "StellarStar255/stellar_smart_terminal"
 LATEST_API = f"https://api.github.com/repos/{REPO}/releases/latest"
 RELEASES_PAGE = f"https://github.com/{REPO}/releases/latest"
 _TIMEOUT = 15
+
+
+def _ssl_context() -> ssl.SSLContext:
+    """带可用 CA 的 SSL 上下文。
+
+    macOS 上 python.org/conda 构建的 Python 不读系统钥匙串，默认上下文常因
+    找不到 CA 而 CERTIFICATE_VERIFY_FAILED（打包后同样如此）。按序尝试：
+    certifi（requests 的传递依赖，打包时一并带上）→ 系统 /etc/ssl/cert.pem
+    → 默认。绝不关闭验证——这里下载的是可执行代码。
+    """
+    try:
+        import certifi
+        return ssl.create_default_context(cafile=certifi.where())
+    except Exception:
+        pass
+    for cafile in ('/etc/ssl/cert.pem', '/etc/ssl/certs/ca-certificates.crt'):
+        if os.path.exists(cafile):
+            try:
+                return ssl.create_default_context(cafile=cafile)
+            except Exception:
+                continue
+    return ssl.create_default_context()
+
+
+def _urlopen(url: str, timeout: int = _TIMEOUT):
+    req = urllib.request.Request(
+        url, headers={'Accept': 'application/vnd.github+json',
+                      'User-Agent': 'stellar-smart-terminal'})
+    return urllib.request.urlopen(req, timeout=timeout, context=_ssl_context())
 
 
 def parse_version(text: str):
@@ -92,10 +122,7 @@ class UpdateChecker(QThread):
 
     def run(self):
         try:
-            req = urllib.request.Request(
-                LATEST_API, headers={'Accept': 'application/vnd.github+json',
-                                     'User-Agent': 'stellar-smart-terminal'})
-            with urllib.request.urlopen(req, timeout=_TIMEOUT) as resp:
+            with _urlopen(LATEST_API) as resp:
                 import json
                 data = json.load(resp)
             self.result.emit({
@@ -122,9 +149,7 @@ class UpdateDownloader(QThread):
         try:
             workdir = tempfile.mkdtemp(prefix='stellar_update_')
             zip_path = os.path.join(workdir, 'update.zip')
-            req = urllib.request.Request(
-                self._url, headers={'User-Agent': 'stellar-smart-terminal'})
-            with urllib.request.urlopen(req, timeout=_TIMEOUT) as resp, \
+            with _urlopen(self._url) as resp, \
                     open(zip_path, 'wb') as out:
                 total = int(resp.headers.get('Content-Length') or 0)
                 done = 0
