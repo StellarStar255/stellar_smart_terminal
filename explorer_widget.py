@@ -18,6 +18,7 @@ import explorer_clipboard
 import explorer_common
 import explorer_favorites
 from utils import parse_search_tokens, name_matches_tokens
+from file_editor import _IMAGE_EXTENSIONS  # 编辑器可内联预览的图片格式
 from app_logging import get_logger
 
 logger = get_logger(__name__)
@@ -1218,6 +1219,11 @@ class ExplorerPanel(QWidget):
         elif os.path.isfile(abs_path):
             # 内容命中带行号 → 打开后跳到该行；文件名命中 line_no 为 None/0
             line_no = data[2] if len(data) > 2 and data[2] else 0
+            # 文件名命中的可能是编辑器展示不了的二进制（如 xlsx）→ 系统打开
+            # （内容命中必然是文本，嗅探自然放行）
+            if not self._editor_can_display(abs_path):
+                self._open_file(abs_path)
+                return
             self.file_double_clicked.emit(abs_path)
             self.file_edit_requested.emit(abs_path, line_no)
 
@@ -1277,6 +1283,41 @@ class ExplorerPanel(QWidget):
         """清除当前正在编辑的文件路径"""
         self._editing_file = None
 
+    # 编辑器无法有效展示、打开时应交给系统默认应用的扩展名。
+    # 名单之外的未知格式再按文件头是否含 NUL 字节嗅探二进制兜底。
+    _SYSTEM_OPEN_EXTS = {
+        # 办公文档
+        '.xlsx', '.xls', '.docx', '.doc', '.pptx', '.ppt', '.pdf',
+        '.key', '.numbers', '.pages', '.odt', '.ods', '.odp',
+        # 压缩包/镜像
+        '.zip', '.rar', '.7z', '.tar', '.gz', '.bz2', '.xz',
+        '.dmg', '.iso', '.jar',
+        # 音视频
+        '.mp3', '.wav', '.flac', '.m4a', '.aac', '.ogg',
+        '.mp4', '.mov', '.avi', '.mkv', '.webm',
+        # 可执行/库/字体/数据库/设计稿
+        '.exe', '.dll', '.dylib', '.so', '.bin', '.apk', '.ipa',
+        '.ttf', '.otf', '.woff', '.woff2',
+        '.sqlite', '.sqlite3', '.db', '.psd', '.ai', '.sketch',
+    }
+
+    def _editor_can_display(self, file_path: str) -> bool:
+        """内置编辑器能否有效展示该文件（文本/代码/图片可以）。
+
+        展示不了的（office 文档、压缩包、音视频等二进制）双击时交给
+        系统默认应用。未知扩展名按前 8KB 是否含 NUL 字节嗅探二进制。
+        """
+        ext = os.path.splitext(file_path)[1].lower()
+        if ext in _IMAGE_EXTENSIONS:
+            return True   # 编辑器有内联图片预览
+        if ext in self._SYSTEM_OPEN_EXTS:
+            return False
+        try:
+            with open(file_path, 'rb') as f:
+                return b'\x00' not in f.read(8192)
+        except OSError:
+            return True   # 读不了仍走编辑器，沿用其现有报错提示
+
     def _on_double_click(self, index: QModelIndex):
         """双击事件处理"""
         if not index.isValid():
@@ -1284,9 +1325,13 @@ class ExplorerPanel(QWidget):
 
         file_path = self._proxy.filePath(index)
         if os.path.isfile(file_path):
-            # 双击文件，发射信号请求在内置编辑器中打开（行号 0 = 不跳转）
-            self.file_double_clicked.emit(file_path)
-            self.file_edit_requested.emit(file_path, 0)
+            if self._editor_can_display(file_path):
+                # 发射信号请求在内置编辑器中打开（行号 0 = 不跳转）
+                self.file_double_clicked.emit(file_path)
+                self.file_edit_requested.emit(file_path, 0)
+            else:
+                # 编辑器展示不了的格式（Excel 等）→ 系统默认应用打开
+                self._open_file(file_path)
 
     def _open_file(self, file_path: str):
         """使用系统默认应用打开文件"""
