@@ -62,7 +62,8 @@ def _need_boundary_space(last_char: str, first_char: str) -> bool:
     return True
 
 
-def merge_extracted_lines(rows, columns: int) -> str:
+def merge_extracted_lines(rows, columns: int,
+                          strip_soft_trailing: bool = False) -> str:
     """把从终端缓冲区提取的逐行内容合并成复制用文本（纯函数，无 Qt 依赖）。
 
     rows: [(text, is_soft, last_content_col, spaceless, can_heuristic), ...]
@@ -72,6 +73,12 @@ def merge_extracted_lines(rows, columns: int) -> str:
         spaceless        —— 整行内容无内部空格（单一连续 token，如 URL/路径/哈希）
         can_heuristic    —— 是否允许应用层折行启发式（选区未覆盖整行宽度时为 False）
     columns: 终端实际列宽
+    strip_soft_trailing: 拼接前去掉软换行行的尾部空格。Windows ConPTY 重绘
+        时会把行尾清空区写成真实空格、且不发换行地连续绘制——pyte 在右缘
+        自动折行，把应用层折行的行误标成「终端软换行」，行尾填充空格随
+        无缝拼接混进结果（复制跨行 URL 平白多出几个空格）。ConPTY 之下
+        软换行行的尾部空格不可信，一律剥掉。Unix pty 不开启：真实软换行
+        行的尾部空格是内容（字符串内多个空格恰跨折行处），必须保留。
 
     换行类型（look-ahead 决定）：
         0=硬换行（保留换行）；1=终端软换行（无缝拼接）；
@@ -83,6 +90,10 @@ def merge_extracted_lines(rows, columns: int) -> str:
     n = len(rows)
     if n == 0:
         return ""
+
+    if strip_soft_trailing:
+        rows = [(t.rstrip(), s, lc, sp, ch) if s else (t, s, lc, sp, ch)
+                for (t, s, lc, sp, ch) in rows]
 
     # 估算每行所在「连续非软换行行块」的应用层折行宽度（块内最大内容列）。
     # 这样即使应用（如 Claude Code 的盒子边距）按比终端更窄的宽度折行，也能正确识别
@@ -4368,8 +4379,10 @@ class TerminalWidget(QWidget):
 
             rows.append((line_text, is_soft, last_content_col, spaceless, can_heuristic))
 
-        # 软换行/应用层折行启发式合并（与 _get_all_content 共用同一纯函数）
-        return merge_extracted_lines(rows, term_cols)
+        # 软换行/应用层折行启发式合并（与 _get_all_content 共用同一纯函数）。
+        # Windows(ConPTY) 下软换行行的尾部空格是重绘填充、不可信，拼接前剥掉
+        return merge_extracted_lines(rows, term_cols,
+                                     strip_soft_trailing=(sys.platform == 'win32'))
 
     def _copy_selection_to_clipboard(self):
         """复制选中内容到剪贴板"""
@@ -4489,8 +4502,10 @@ class TerminalWidget(QWidget):
         while line_data and not line_data[-1][0]:
             line_data.pop()
 
-        # 软换行/应用层折行启发式合并（与 _get_selected_text 共用同一纯函数）
-        return merge_extracted_lines(line_data, columns)
+        # 软换行/应用层折行启发式合并（与 _get_selected_text 共用同一纯函数）。
+        # Windows(ConPTY) 下软换行行的尾部空格是重绘填充、不可信，拼接前剥掉
+        return merge_extracted_lines(line_data, columns,
+                                     strip_soft_trailing=(sys.platform == 'win32'))
 
     def _clear_selection(self):
         """清除选择"""

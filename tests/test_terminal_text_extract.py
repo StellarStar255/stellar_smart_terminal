@@ -444,3 +444,55 @@ class TestPureHelpers(TerminalTextExtractBase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class TestConPTYFakeSoftWrap(TerminalTextExtractBase):
+    """Windows ConPTY 假软换行：重绘把行尾清空区写成真实空格且连续绘制，
+    pyte 在右缘自动折行，把应用层折行的行误标成终端软换行——行尾填充
+    空格随无缝拼接混进复制结果（跨行 URL 平白多出几个空格）。
+    修复：ConPTY（win32）下拼接前剥掉软换行行的尾部空格；Unix 不开启。
+    """
+
+    URL_A = "https://claude.com/oauth?scope=org%3Acreate_"
+    URL_B = "api_key+user%3Aprofile&state=Z0nFUg"
+
+    def _feed_conpty_style(self, w):
+        # 模拟 ConPTY：行内容 + 填充空格写满整行、不发换行连续画下一行
+        pad = w.term_cols - len(self.URL_A)
+        self.feed(w, self.URL_A + " " * pad + self.URL_B + "\r\n")
+
+    def test_pure_function_strips_soft_trailing_when_enabled(self):
+        rows = [
+            (self.URL_A + "    ", True, 47, True, True),
+            (self.URL_B, False, len(self.URL_B) - 1, True, True),
+        ]
+        # 开启（win32 路径）：填充空格剥掉，URL 无缝复原
+        self.assertEqual(
+            merge_extracted_lines(rows, 48, strip_soft_trailing=True),
+            self.URL_A + self.URL_B)
+        # 默认（mac 路径）：行为不变，尾部空格保留
+        self.assertEqual(
+            merge_extracted_lines(rows, 48),
+            self.URL_A + "    " + self.URL_B)
+
+    def test_widget_copy_on_win32_strips_padding(self):
+        w = self.make_widget(cols=60, rows=8)
+        self._feed_conpty_style(w)
+        # 填充写满整行 + 连续绘制 → pyte 确实把该行标成了软换行
+        self.assertTrue(w.screen.is_soft_wrapped(w.screen.buffer[0]))
+        old = sys.platform
+        try:
+            sys.platform = 'win32'
+            self.assertEqual(w._get_all_content(), self.URL_A + self.URL_B)
+        finally:
+            sys.platform = old
+
+    def test_widget_copy_on_mac_keeps_current_behavior(self):
+        # 同样的喂流在非 win32 平台维持既有语义（尾部空格视为真实内容保留）
+        if sys.platform == 'win32':
+            self.skipTest("non-windows only")
+        w = self.make_widget(cols=60, rows=8)
+        self._feed_conpty_style(w)
+        pad = 60 - len(self.URL_A)
+        self.assertEqual(w._get_all_content(),
+                         self.URL_A + " " * pad + self.URL_B)
