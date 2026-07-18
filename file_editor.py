@@ -3208,8 +3208,15 @@ class FileEditorWidget(QWidget):
         dim_fg = QColor(self.theme.get('text_dim', '#888888'))
         editor_bg = QColor(self.theme.get('terminal_bg', '#282c34'))
         # 代码底色：深色主题上提亮、浅色主题上压暗，保证与正文底色可感知区分
-        code_bg = (editor_bg.lighter(135) if editor_bg.lightness() < 128
-                   else editor_bg.darker(107))
+        # 深色主题用「加法」提亮而不是 lighter()（乘法）：Midnight Black 等
+        # 接近纯黑的底色乘完仍是黑，面板完全看不出来；固定增量保证任何
+        # 暗度下都有可感知的对比（略偏蓝灰，贴近 GitHub 代码面板的色感）
+        if editor_bg.lightness() < 128:
+            code_bg = QColor(min(255, editor_bg.red() + 18),
+                             min(255, editor_bg.green() + 21),
+                             min(255, editor_bg.blue() + 30))
+        else:
+            code_bg = editor_bg.darker(107)
         mono_family = QFontDatabase.systemFont(
             QFontDatabase.SystemFont.FixedFont).family()
         prop_h = QTextBlockFormat.LineHeightTypes.ProportionalHeight.value
