@@ -296,5 +296,36 @@ class TestDownloadCancel(unittest.TestCase):
         shutil.rmtree(os.path.dirname(events[0][1]), ignore_errors=True)
 
 
+class TestLocalProxyFallback(unittest.TestCase):
+    """环境没配代理时探测本机代理端口（回归：桌面启动的 GUI 继承不到
+    终端 http_proxy，直连 GitHub 下载中途被掐断 SSL UNEXPECTED_EOF）。"""
+
+    def _patch_ports(self, ports):
+        orig = app_updater._LOCAL_PROXY_PORTS
+        app_updater._LOCAL_PROXY_PORTS = ports
+        self.addCleanup(setattr, app_updater, '_LOCAL_PROXY_PORTS', orig)
+
+    def test_detects_listening_port(self):
+        import socket
+        srv = socket.socket()
+        srv.bind(('127.0.0.1', 0))
+        srv.listen(1)
+        self.addCleanup(srv.close)
+        port = srv.getsockname()[1]
+        self._patch_ports((port,))
+        self.assertEqual(app_updater._detect_local_proxy(),
+                         f'http://127.0.0.1:{port}')
+
+    def test_returns_none_when_nothing_listens(self):
+        import socket
+        # 先 bind 拿一个空闲端口再关掉，保证探测时它必然没人监听
+        s = socket.socket()
+        s.bind(('127.0.0.1', 0))
+        port = s.getsockname()[1]
+        s.close()
+        self._patch_ports((port,))
+        self.assertIsNone(app_updater._detect_local_proxy())
+
+
 if __name__ == "__main__":
     unittest.main()

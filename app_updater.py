@@ -63,11 +63,44 @@ def _ssl_context() -> ssl.SSLContext:
     return ssl.create_default_context()
 
 
+# Clash Verge Rev / Clash 系默认混合端口，按本机常见程度排序
+_LOCAL_PROXY_PORTS = (7897, 7890)
+
+
+def _detect_local_proxy() -> str | None:
+    """探测本机是否跑着常见端口的代理，命中返回 'http://127.0.0.1:端口'。
+
+    GUI 从桌面启动继承不到终端的 http_proxy；本机代理开着 TUN 又没生效时，
+    直连 GitHub 下载大文件常被中途掐断（SSL: UNEXPECTED_EOF_WHILE_READING）。
+    只做 TCP connect 探测（127.0.0.1 上失败即刻返回，不产生可感知延迟），
+    全部不通返回 None、维持直连。
+    """
+    import socket
+    for port in _LOCAL_PROXY_PORTS:
+        try:
+            with socket.create_connection(('127.0.0.1', port), timeout=0.3):
+                return f'http://127.0.0.1:{port}'
+        except OSError:
+            continue
+    return None
+
+
 def _urlopen(url: str, timeout: int = _TIMEOUT):
     req = urllib.request.Request(
         url, headers={'Accept': 'application/vnd.github+json',
                       'User-Agent': 'stellar-smart-terminal'})
-    return urllib.request.urlopen(req, timeout=timeout, context=_ssl_context())
+    ctx = _ssl_context()
+    # 环境变量/系统设置里已配代理（getproxies 都能读到）时 urlopen 自带
+    # ProxyHandler 会用上；两处都空才探测本机代理端口兜底
+    if not urllib.request.getproxies():
+        proxy = _detect_local_proxy()
+        if proxy:
+            logger.info("no proxy configured, falling back to %s", proxy)
+            opener = urllib.request.build_opener(
+                urllib.request.ProxyHandler({'http': proxy, 'https': proxy}),
+                urllib.request.HTTPSHandler(context=ctx))
+            return opener.open(req, timeout=timeout)
+    return urllib.request.urlopen(req, timeout=timeout, context=ctx)
 
 
 def parse_version(text: str):
