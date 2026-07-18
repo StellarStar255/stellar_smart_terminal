@@ -1,4 +1,4 @@
-"""应用内检查更新与自升级（macOS / Windows）。
+"""应用内检查更新与自升级（macOS / Windows / Linux）。
 
 流程：设置 ⚙ 菜单「检查更新」→ GitHub Releases API 查最新版 →
 有新版则弹窗（可看说明）→「下载并安装」下载 zip、ditto 解压 →
@@ -14,7 +14,8 @@
 - 解压用 /usr/bin/ditto 而不是 zipfile：后者会丢符号链接和可执行位，
   解出来的 .app 起不来。
 - macOS 打包版一键换包（zip 解包 + 分阶段换装）；Windows 打包版一键
-  静默升级（Inno 安装包 /SILENT）；Linux/源码运行退化为打开发布页。
+  静默升级（Inno 安装包 /SILENT）；Linux 打包版一键升级（pkexec 系统
+  授权 + apt 装 deb，需输一次密码）；源码运行退化为打开发布页。
 - 打包版的版本号来源：mac 读 Info.plist，Windows/Linux 读随包携带的
   pyproject.toml（spec datas 已包含），发版仍零额外维护。
 """
@@ -110,9 +111,10 @@ def get_current_version() -> str:
 
 
 def can_self_update() -> bool:
-    """当前形态是否支持一键自升级（mac/Windows 的打包版；Linux 走 deb 包
-    管理器、源码运行走 git，均不做换包）。"""
-    return bool(getattr(sys, 'frozen', False)) and sys.platform in ('darwin', 'win32')
+    """当前形态是否支持一键自升级（mac/Windows/Linux 的打包版；
+    源码运行走 git，不做换包）。"""
+    return (bool(getattr(sys, 'frozen', False))
+            and sys.platform in ('darwin', 'win32', 'linux'))
 
 
 def pick_update_asset(assets: list[dict]) -> dict | None:
@@ -120,13 +122,16 @@ def pick_update_asset(assets: list[dict]) -> dict | None:
 
     macOS 用 zip（直接解包换 .app；DMG 需挂载不适合自动化）；
     Windows 用 Inno 安装包（installer.iss 固定 AppId + PrivilegesRequired=
-    lowest，`/SILENT` 静默原地升级、默认无 UAC）。其余平台返回 None。
+    lowest，`/SILENT` 静默原地升级、默认无 UAC）；
+    Linux 用 .deb（pkexec 授权后 apt 原地升级）。其余平台返回 None。
     """
     for a in assets or []:
         name = (a.get('name') or '').lower()
         if sys.platform == 'darwin' and 'macos' in name and name.endswith('.zip'):
             return a
         if sys.platform == 'win32' and name.endswith('-setup.exe'):
+            return a
+        if sys.platform == 'linux' and name.endswith('.deb'):
             return a
     return None
 
@@ -164,9 +169,16 @@ class UpdateDownloader(QThread):
     def run(self):
         try:
             workdir = tempfile.mkdtemp(prefix='stellar_update_')
-            is_installer = self._url.lower().endswith('.exe')
-            dl_path = os.path.join(
-                workdir, 'update.exe' if is_installer else 'update.zip')
+            # Windows 安装包 / Linux deb 本身就是安装载体，落盘即用；
+            # 只有 macOS 的 zip 需要解包
+            lower = self._url.lower()
+            if lower.endswith('.exe'):
+                fname, is_installer = 'update.exe', True
+            elif lower.endswith('.deb'):
+                fname, is_installer = 'update.deb', True
+            else:
+                fname, is_installer = 'update.zip', False
+            dl_path = os.path.join(workdir, fname)
             with _urlopen(self._url) as resp, \
                     open(dl_path, 'wb') as out:
                 total = int(resp.headers.get('Content-Length') or 0)
@@ -271,16 +283,52 @@ def _install_and_restart_windows(setup_path: str) -> bool:
     return True
 
 
+# Linux：等应用退出 → pkexec 弹系统授权（deb 装进 /opt 与 /usr 需要
+# root，这是发行版安全模型的要求，GNOME Software 同样要密码）→ apt
+# 原地升级 → 重启。pkexec 找不到（无 polkit 的极简环境）则放弃，
+# 旧版本保持完好。
+_UPDATER_SH_LINUX = """#!/bin/bash
+PID={pid}
+DEB="{deb}"
+EXE="{exe}"
+for _ in $(seq 1 120); do
+  kill -0 "$PID" 2>/dev/null || break
+  sleep 0.5
+done
+kill -0 "$PID" 2>/dev/null && exit 1
+command -v pkexec >/dev/null 2>&1 || exit 1
+pkexec apt-get install -y "$DEB" || exit 1
+setsid "$EXE" >/dev/null 2>&1 &
+"""
+
+
+def build_updater_sh_linux(pid: int, deb: str, exe: str) -> str:
+    return _UPDATER_SH_LINUX.format(pid=pid, deb=deb, exe=exe)
+
+
+def _install_and_restart_linux(deb_path: str) -> bool:
+    script = build_updater_sh_linux(os.getpid(), deb_path, sys.executable)
+    fd, sh_path = tempfile.mkstemp(prefix='stellar_updater_', suffix='.sh')
+    with os.fdopen(fd, 'w') as f:
+        f.write(script)
+    os.chmod(sh_path, 0o755)
+    subprocess.Popen(['/bin/bash', sh_path], start_new_session=True,
+                     stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+    return True
+
+
 def install_and_restart(new_app_path: str) -> bool:
     """写换装脚本并以独立进程启动。返回 True 后调用方应立即退出应用。
 
-    macOS 传解包出的 .app 路径（分阶段换包）；Windows 传下载好的
-    Inno 安装包路径（静默原地升级）。
+    macOS 传解包出的 .app 路径（分阶段换包）；Windows 传 Inno 安装包
+    路径（静默原地升级）；Linux 传 .deb 路径（pkexec + apt 原地升级）。
     """
     if not can_self_update():
         return False   # 源码运行 / 不支持的平台：绝不触发换装
     if sys.platform == 'win32':
         return _install_and_restart_windows(new_app_path)
+    if sys.platform == 'linux':
+        return _install_and_restart_linux(new_app_path)
     bundle = bundle_path()
     if bundle is None:
         return False

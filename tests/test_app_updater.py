@@ -99,9 +99,10 @@ class TestAssetPick(unittest.TestCase):
             picked = app_updater.pick_update_asset(_ASSETS)
         self.assertTrue(picked["name"].endswith("windows-x64-setup.exe"))
 
-    def test_linux_has_no_one_click_asset(self):
+    def test_linux_picks_deb(self):
         with _PlatformPatch('linux'):
-            self.assertIsNone(app_updater.pick_update_asset(_ASSETS))
+            picked = app_updater.pick_update_asset(_ASSETS)
+        self.assertTrue(picked["name"].endswith("linux-amd64.deb"))
 
     def test_no_asset_edge_cases(self):
         with _PlatformPatch('darwin'):
@@ -152,6 +153,8 @@ class TestWindowsUpdaterScript(unittest.TestCase):
             sys.platform = "win32"
             self.assertTrue(app_updater.can_self_update())
             sys.platform = "linux"
+            self.assertTrue(app_updater.can_self_update())
+            sys.platform = "freebsd"
             self.assertFalse(app_updater.can_self_update())
         finally:
             sys.platform = old_platform
@@ -215,6 +218,21 @@ class TestWindowsUpdaterRegression(unittest.TestCase):
             else:
                 sys.frozen = old_frozen
 
+
+
+class TestLinuxUpdaterScript(unittest.TestCase):
+    def test_sh_waits_authorizes_installs_and_relaunches(self):
+        sh = app_updater.build_updater_sh_linux(
+            7777, "/tmp/update.deb", "/opt/StellarSmartTerminal/StellarSmartTerminal")
+        # 等待退出 + 超时守卫：没退就绝不动系统
+        self.assertIn('kill -0 "$PID" 2>/dev/null && exit 1', sh)
+        # pkexec 缺失（无 polkit 环境）时放弃，旧版保持完好
+        self.assertIn("command -v pkexec", sh)
+        # 系统授权 + apt 原地升级失败即停，不做半截安装
+        self.assertIn('pkexec apt-get install -y "$DEB" || exit 1', sh)
+        # 升级成功后以独立会话重启
+        self.assertIn('setsid "$EXE"', sh)
+        self.assertIn("7777", sh)
 
 
 if __name__ == "__main__":

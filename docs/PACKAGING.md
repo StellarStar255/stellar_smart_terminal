@@ -201,7 +201,10 @@ gh release edit v1.6.0 --notes-file notes.md   # 更新说明
 - Windows:下载 `*-windows-x64-setup.exe`,等应用退出后 `/SILENT /NORESTART`
   静默原地升级(installer.iss 固定 AppId + PrivilegesRequired=lowest,无 UAC)
   并重启;
-- Linux/源码运行退化为打开发布页。
+- Linux:下载 `*-linux-amd64.deb`,等应用退出后 `pkexec apt-get install`
+  原地升级(弹一次系统授权密码框——deb 装进系统目录需要 root,这是发行版
+  安全模型;无 polkit 的环境自动放弃、旧版保持完好)并重启;
+- 源码运行退化为打开发布页。
 运行时版本:mac 读自身 Info.plist,Windows/Linux 冻结版读随包的
 pyproject.toml(spec datas 已包含),源码运行读仓库 pyproject——发版无需
 额外维护版本号。**依赖每个 release 都带对应平台产物**(CI 已自动上传)。
