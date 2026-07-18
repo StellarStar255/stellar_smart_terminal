@@ -33,6 +33,8 @@ TRANSLATIONS = {
     "update.downloading": {"zh": "正在下载更新…", "en": "Downloading update…"},
     "update.restart_confirm": {"zh": "下载完成。重启并安装新版本？\n（未保存的编辑会照常提示保存）", "en": "Download complete. Restart and install the new version?\n(You'll be prompted to save any unsaved edits.)"},
     "update.download_failed": {"zh": "下载更新失败：{error}", "en": "Update download failed: {error}"},
+    "update.cancel": {"zh": "取消", "en": "Cancel"},
+    "update.cancelled": {"zh": "已取消更新下载", "en": "Update download cancelled"},
     "update.auto_check": {"zh": "启动时自动检查更新", "en": "Check for updates at launch"},
     "update.badge": {"zh": "⬆ 新版本 {version} 可用", "en": "⬆ {version} available"},
     "scrollback.applied": {"zh": "已更新历史行数上限，对之后新建的终端生效", "en": "Scrollback limit updated; applies to newly created terminals"},

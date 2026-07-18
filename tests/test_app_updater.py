@@ -235,5 +235,66 @@ class TestLinuxUpdaterScript(unittest.TestCase):
         self.assertIn("7777", sh)
 
 
+class _FakeResponse:
+    """替身 HTTP 响应：按块吐出预置数据，不碰网络。"""
+
+    def __init__(self, chunks):
+        self._chunks = list(chunks)
+        self.headers = {'Content-Length': str(sum(len(c) for c in chunks))}
+
+    def read(self, _size):
+        return self._chunks.pop(0) if self._chunks else b''
+
+    def __enter__(self):
+        return self
+
+    def __exit__(self, *a):
+        return False
+
+
+class TestDownloadCancel(unittest.TestCase):
+    """关掉进度窗必须真正中止下载（回归：曾经关窗后线程继续下载并弹重启确认）。"""
+
+    def _run_downloader(self, dl, chunks):
+        orig = app_updater._urlopen
+        app_updater._urlopen = lambda url, timeout=0: _FakeResponse(chunks)
+        try:
+            dl.run()   # 直接同步跑线程体，不依赖 Qt 事件循环
+        finally:
+            app_updater._urlopen = orig
+
+    def test_cancel_mid_download_emits_nothing_and_cleans_up(self):
+        dl = app_updater.UpdateDownloader("https://example.com/x.zip")
+        events = []
+        dl.finished_ok.connect(lambda p: events.append(('ok', p)))
+        dl.error.connect(lambda e: events.append(('err', e)))
+        # 第一块下载进度回调里取消（对应用户中途关窗）
+        dl.progress.connect(lambda done, total: dl.cancel())
+        self._run_downloader(dl, [b'a' * 1024, b'b' * 1024])
+        self.assertEqual(events, [])
+
+    def test_cancel_before_completion_removes_workdir(self):
+        import glob
+        import tempfile as _tf
+        before = set(glob.glob(os.path.join(_tf.gettempdir(), 'stellar_update_*')))
+        dl = app_updater.UpdateDownloader("https://example.com/x.zip")
+        dl.progress.connect(lambda done, total: dl.cancel())
+        self._run_downloader(dl, [b'a' * 1024, b'b' * 1024])
+        after = set(glob.glob(os.path.join(_tf.gettempdir(), 'stellar_update_*')))
+        self.assertEqual(after - before, set())
+
+    def test_uncancelled_download_still_completes(self):
+        dl = app_updater.UpdateDownloader("https://example.com/setup-Setup.exe")
+        events = []
+        dl.finished_ok.connect(lambda p: events.append(('ok', p)))
+        dl.error.connect(lambda e: events.append(('err', e)))
+        self._run_downloader(dl, [b'a' * 1024])
+        self.assertEqual(len(events), 1)
+        self.assertEqual(events[0][0], 'ok')
+        # 清理这次测试产生的临时目录
+        import shutil
+        shutil.rmtree(os.path.dirname(events[0][1]), ignore_errors=True)
+
+
 if __name__ == "__main__":
     unittest.main()

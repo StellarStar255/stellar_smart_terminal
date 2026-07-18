@@ -165,8 +165,15 @@ class UpdateDownloader(QThread):
     def __init__(self, url: str, parent=None):
         super().__init__(parent)
         self._url = url
+        self._cancelled = False
+
+    def cancel(self):
+        """请求中止下载。线程在下一个读块边界收工并清理临时目录，
+        之后不再发出任何信号（含已排队但未送达的除外，由调用方守卫）。"""
+        self._cancelled = True
 
     def run(self):
+        workdir = None
         try:
             workdir = tempfile.mkdtemp(prefix='stellar_update_')
             # Windows 安装包 / Linux deb 本身就是安装载体，落盘即用；
@@ -184,12 +191,16 @@ class UpdateDownloader(QThread):
                 total = int(resp.headers.get('Content-Length') or 0)
                 done = 0
                 while True:
+                    if self._cancelled:
+                        return
                     chunk = resp.read(256 * 1024)
                     if not chunk:
                         break
                     out.write(chunk)
                     done += len(chunk)
                     self.progress.emit(done, total)
+            if self._cancelled:
+                return
             if is_installer:
                 # Windows：Inno 安装包本身就是安装载体，无需解包
                 self.finished_ok.emit(dl_path)
@@ -205,10 +216,18 @@ class UpdateDownloader(QThread):
                 apps = list(Path(extract_dir).glob('*/*.app'))
             if not apps:
                 raise RuntimeError("no .app found in downloaded zip")
+            if self._cancelled:
+                return
             self.finished_ok.emit(str(apps[0]))
         except Exception as e:
+            if self._cancelled:
+                return   # 取消导致的中断不当作错误上报
             logger.exception("update download failed")
             self.error.emit(str(e))
+        finally:
+            if self._cancelled and workdir:
+                import shutil
+                shutil.rmtree(workdir, ignore_errors=True)
 
 
 # 分阶段换包：等待退出 → 去 quarantine → 暂存旧包 → 换入新包 → 删暂存；

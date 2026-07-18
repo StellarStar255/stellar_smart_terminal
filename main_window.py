@@ -7397,21 +7397,39 @@ class MainWindow(QMainWindow):
         url = asset.get('browser_download_url')
         if not url:
             return
-        progress = QProgressDialog(t("update.downloading"), None, 0, 100, self)
+        # 下载阶段只写临时目录，中途取消没有半成品风险（真正的换包发生在
+        # 下载完成、用户确认重启之后），所以取消按钮和关窗都允许中止
+        progress = QProgressDialog(t("update.downloading"),
+                                   t("update.cancel"), 0, 100, self)
+        progress.setWindowTitle(t("update.title"))
         progress.setWindowModality(Qt.WindowModality.WindowModal)
         progress.setMinimumDuration(0)
-        progress.setCancelButton(None)   # 换包链路不做中途取消，避免半成品状态
         progress.setValue(0)
 
         dl = app_updater.UpdateDownloader(url, self)
         self._update_downloader = dl
+        # finished: 正常收尾（on_done/on_error 关闭对话框也会触发 canceled，
+        # 用它区分）；cancelled: 用户点了取消或关掉了进度窗
+        state = {'finished': False, 'cancelled': False}
+
+        def on_cancelled():
+            if state['finished'] or state['cancelled']:
+                return
+            state['cancelled'] = True
+            dl.cancel()
+            self.statusbar.showMessage(t("update.cancelled"), 4000)
 
         def on_progress(done, total):
+            if state['cancelled']:
+                return
             if total > 0:
                 progress.setMaximum(100)
                 progress.setValue(min(99, int(done * 100 / total)))
 
         def on_done(app_path):
+            if state['cancelled']:
+                return   # 取消后才送达的完成信号：不再弹重启确认
+            state['finished'] = True
             progress.close()
             ret = self._styled_message_box(
                 QMessageBox.Icon.Question, t("update.title"),
@@ -7422,11 +7440,16 @@ class MainWindow(QMainWindow):
                     QApplication.instance().closeAllWindows()
 
         def on_error(err):
+            if state['cancelled']:
+                return
+            state['finished'] = True
             progress.close()
             self._styled_message_box(
                 QMessageBox.Icon.Warning, t("update.title"),
                 t("update.download_failed", error=err))
 
+        # 取消按钮和标题栏关闭都会发 canceled（Qt 在 closeEvent 里同样发射）
+        progress.canceled.connect(on_cancelled)
         dl.progress.connect(on_progress)
         dl.finished_ok.connect(on_done)
         dl.error.connect(on_error)
