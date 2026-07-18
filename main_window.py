@@ -7365,8 +7365,8 @@ class MainWindow(QMainWindow):
                       current=cur or '?'))
         if notes:
             box.setDetailedText(notes)
-        # 只有打包的 mac app 且该 release 带 mac zip 产物才提供一键安装
-        can_install = (app_updater.is_frozen_mac_app()
+        # 打包版（mac/Windows）且该 release 带对应平台产物才提供一键安装
+        can_install = (app_updater.can_self_update()
                        and info.get('asset') is not None)
         install_btn = None
         if can_install:

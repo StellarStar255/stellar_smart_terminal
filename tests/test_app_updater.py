@@ -64,22 +64,51 @@ class TestVersionParse(unittest.TestCase):
                 sys.frozen = old_frozen
 
 
+_ASSETS = [
+    {"name": "Stellar-Smart-Terminal-v1.14.0-windows-x64-setup.exe"},
+    {"name": "Stellar-Smart-Terminal-v1.14.0-windows-x64.zip"},
+    {"name": "Stellar-Smart-Terminal-v1.14.0-macOS-arm64.dmg"},
+    {"name": "Stellar-Smart-Terminal-v1.14.0-macOS-arm64.zip"},
+    {"name": "stellar-smart-terminal-v1.14.0-linux-amd64.deb"},
+]
+
+
+class _PlatformPatch:
+    """临时改 sys.platform（pick_update_asset 按它分流）。"""
+
+    def __init__(self, platform):
+        self.platform = platform
+
+    def __enter__(self):
+        self._old = sys.platform
+        sys.platform = self.platform
+
+    def __exit__(self, *a):
+        sys.platform = self._old
+
+
 class TestAssetPick(unittest.TestCase):
     def test_pick_mac_zip(self):
-        assets = [
-            {"name": "Stellar-Smart-Terminal-v1.14.0-windows-x64-setup.exe"},
-            {"name": "Stellar-Smart-Terminal-v1.14.0-macOS-arm64.dmg"},
-            {"name": "Stellar-Smart-Terminal-v1.14.0-macOS-arm64.zip"},
-            {"name": "stellar-smart-terminal-v1.14.0-linux-amd64.deb"},
-        ]
-        picked = app_updater.pick_mac_asset(assets)
+        with _PlatformPatch('darwin'):
+            picked = app_updater.pick_update_asset(_ASSETS)
         self.assertTrue(picked["name"].endswith("macOS-arm64.zip"))
 
-    def test_no_mac_asset(self):
-        self.assertIsNone(app_updater.pick_mac_asset(
-            [{"name": "only-windows.exe"}]))
-        self.assertIsNone(app_updater.pick_mac_asset([]))
-        self.assertIsNone(app_updater.pick_mac_asset(None))
+    def test_pick_windows_installer(self):
+        # Windows 必须选 Inno 安装包（-setup.exe），不能选 onedir zip
+        with _PlatformPatch('win32'):
+            picked = app_updater.pick_update_asset(_ASSETS)
+        self.assertTrue(picked["name"].endswith("windows-x64-setup.exe"))
+
+    def test_linux_has_no_one_click_asset(self):
+        with _PlatformPatch('linux'):
+            self.assertIsNone(app_updater.pick_update_asset(_ASSETS))
+
+    def test_no_asset_edge_cases(self):
+        with _PlatformPatch('darwin'):
+            self.assertIsNone(app_updater.pick_update_asset(
+                [{"name": "only-windows.exe"}]))
+            self.assertIsNone(app_updater.pick_update_asset([]))
+            self.assertIsNone(app_updater.pick_update_asset(None))
 
 
 class TestUpdaterScript(unittest.TestCase):
@@ -100,7 +129,36 @@ class TestUpdaterScript(unittest.TestCase):
     def test_install_refuses_outside_frozen_mac(self):
         # 源码运行（非打包 .app）：不允许触发换包
         self.assertFalse(app_updater.is_frozen_mac_app())
+        self.assertFalse(app_updater.can_self_update())
         self.assertFalse(app_updater.install_and_restart("/tmp/whatever.app"))
+
+
+class TestWindowsUpdaterScript(unittest.TestCase):
+    def test_bat_contains_wait_silent_install_and_relaunch(self):
+        bat = app_updater.build_updater_bat(
+            4242, r"C:\Temp\update.exe", r"C:\Apps\StellarSmartTerminal.exe")
+        # 等待退出 + 超时守卫
+        self.assertIn('tasklist /FI "PID eq 4242"', bat)
+        self.assertIn("GEQ 120 exit /b 1", bat)
+        # 静默原地升级 + 重启
+        self.assertIn('/SILENT /NORESTART', bat)
+        self.assertIn('start "" "C:\\Apps\\StellarSmartTerminal.exe"', bat)
+
+    def test_can_self_update_frozen_windows(self):
+        old_frozen = getattr(sys, "frozen", None)
+        old_platform = sys.platform
+        try:
+            sys.frozen = True
+            sys.platform = "win32"
+            self.assertTrue(app_updater.can_self_update())
+            sys.platform = "linux"
+            self.assertFalse(app_updater.can_self_update())
+        finally:
+            sys.platform = old_platform
+            if old_frozen is None:
+                del sys.frozen
+            else:
+                sys.frozen = old_frozen
 
 
 if __name__ == "__main__":

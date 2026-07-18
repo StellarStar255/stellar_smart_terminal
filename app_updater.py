@@ -1,4 +1,4 @@
-"""应用内检查更新与 macOS 自升级。
+"""应用内检查更新与自升级（macOS / Windows）。
 
 流程：设置 ⚙ 菜单「检查更新」→ GitHub Releases API 查最新版 →
 有新版则弹窗（可看说明）→「下载并安装」下载 zip、ditto 解压 →
@@ -13,7 +13,10 @@
   文件没有该标记；换包脚本再补一次 `xattr -dr` 兜底。
 - 解压用 /usr/bin/ditto 而不是 zipfile：后者会丢符号链接和可执行位，
   解出来的 .app 起不来。
-- 仅 macOS 打包版提供一键安装；其余平台/源码运行退化为打开发布页。
+- macOS 打包版一键换包（zip 解包 + 分阶段换装）；Windows 打包版一键
+  静默升级（Inno 安装包 /SILENT）；Linux/源码运行退化为打开发布页。
+- 打包版的版本号来源：mac 读 Info.plist，Windows/Linux 读随包携带的
+  pyproject.toml（spec datas 已包含），发版仍零额外维护。
 """
 import os
 import plistlib
@@ -106,11 +109,24 @@ def get_current_version() -> str:
         return ''
 
 
-def pick_mac_asset(assets: list[dict]) -> dict | None:
-    """从 release assets 里挑 macOS 的 zip 包（DMG 换包需挂载，zip 直接解）。"""
+def can_self_update() -> bool:
+    """当前形态是否支持一键自升级（mac/Windows 的打包版；Linux 走 deb 包
+    管理器、源码运行走 git，均不做换包）。"""
+    return bool(getattr(sys, 'frozen', False)) and sys.platform in ('darwin', 'win32')
+
+
+def pick_update_asset(assets: list[dict]) -> dict | None:
+    """挑当前平台可用于一键安装的 release 产物。
+
+    macOS 用 zip（直接解包换 .app；DMG 需挂载不适合自动化）；
+    Windows 用 Inno 安装包（installer.iss 固定 AppId + PrivilegesRequired=
+    lowest，`/SILENT` 静默原地升级、默认无 UAC）。其余平台返回 None。
+    """
     for a in assets or []:
         name = (a.get('name') or '').lower()
-        if 'macos' in name and name.endswith('.zip'):
+        if sys.platform == 'darwin' and 'macos' in name and name.endswith('.zip'):
+            return a
+        if sys.platform == 'win32' and name.endswith('-setup.exe'):
             return a
     return None
 
@@ -128,7 +144,7 @@ class UpdateChecker(QThread):
             self.result.emit({
                 'tag': data.get('tag_name') or '',
                 'notes': data.get('body') or '',
-                'asset': pick_mac_asset(data.get('assets')),
+                'asset': pick_update_asset(data.get('assets')),
             })
         except Exception as e:
             logger.warning("update check failed: %s", e)
@@ -148,9 +164,11 @@ class UpdateDownloader(QThread):
     def run(self):
         try:
             workdir = tempfile.mkdtemp(prefix='stellar_update_')
-            zip_path = os.path.join(workdir, 'update.zip')
+            is_installer = self._url.lower().endswith('.exe')
+            dl_path = os.path.join(
+                workdir, 'update.exe' if is_installer else 'update.zip')
             with _urlopen(self._url) as resp, \
-                    open(zip_path, 'wb') as out:
+                    open(dl_path, 'wb') as out:
                 total = int(resp.headers.get('Content-Length') or 0)
                 done = 0
                 while True:
@@ -160,9 +178,13 @@ class UpdateDownloader(QThread):
                     out.write(chunk)
                     done += len(chunk)
                     self.progress.emit(done, total)
-            # zipfile 会丢符号链接/可执行位，必须用 ditto
+            if is_installer:
+                # Windows：Inno 安装包本身就是安装载体，无需解包
+                self.finished_ok.emit(dl_path)
+                return
+            # macOS zip：zipfile 会丢符号链接/可执行位，必须用 ditto
             extract_dir = os.path.join(workdir, 'extracted')
-            subprocess.run(['/usr/bin/ditto', '-x', '-k', zip_path, extract_dir],
+            subprocess.run(['/usr/bin/ditto', '-x', '-k', dl_path, extract_dir],
                            check=True, capture_output=True)
             apps = [p for p in Path(extract_dir).iterdir()
                     if p.suffix == '.app']
@@ -205,8 +227,49 @@ def build_updater_script(pid: int, bundle: str, new_app: str) -> str:
     return _UPDATER_SCRIPT.format(pid=pid, bundle=bundle, new_app=new_app)
 
 
+# Windows：等应用退出 → 静默跑 Inno 安装包原地升级 → 重启应用。
+# /SILENT 只显示进度条；PrivilegesRequired=lowest 的用户级安装无 UAC。
+# `ping -n 2` 是无控制台 cmd 里的 sleep 1s 替代（timeout 需要可交互控制台）。
+_UPDATER_BAT = """@echo off
+set tries=0
+:wait
+tasklist /FI "PID eq {pid}" 2>NUL | find "{pid}" >NUL
+if not errorlevel 1 (
+  set /a tries+=1
+  if %tries% GEQ 120 exit /b 1
+  ping -n 2 127.0.0.1 >NUL
+  goto wait
+)
+"{setup}" /SILENT /NORESTART
+start "" "{exe}"
+"""
+
+
+def build_updater_bat(pid: int, setup: str, exe: str) -> str:
+    return _UPDATER_BAT.format(pid=pid, setup=setup, exe=exe)
+
+
+def _install_and_restart_windows(setup_path: str) -> bool:
+    bat = build_updater_bat(os.getpid(), setup_path, sys.executable)
+    fd, bat_path = tempfile.mkstemp(prefix='stellar_updater_', suffix='.bat')
+    with os.fdopen(fd, 'w') as f:
+        f.write(bat)
+    flags = (getattr(subprocess, 'DETACHED_PROCESS', 0)
+             | getattr(subprocess, 'CREATE_NO_WINDOW', 0)
+             | getattr(subprocess, 'CREATE_NEW_PROCESS_GROUP', 0))
+    subprocess.Popen(['cmd', '/c', bat_path], creationflags=flags,
+                     stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+    return True
+
+
 def install_and_restart(new_app_path: str) -> bool:
-    """写换包脚本并以独立会话启动。返回 True 后调用方应立即退出应用。"""
+    """写换装脚本并以独立进程启动。返回 True 后调用方应立即退出应用。
+
+    macOS 传解包出的 .app 路径（分阶段换包）；Windows 传下载好的
+    Inno 安装包路径（静默原地升级）。
+    """
+    if sys.platform == 'win32':
+        return _install_and_restart_windows(new_app_path)
     bundle = bundle_path()
     if bundle is None:
         return False

@@ -19,6 +19,9 @@ APP_NAME = "StellarSmartTerminal"
 # ---------------------------------------------------------------------------
 datas = [
     (str(PROJ / "assets"), "assets"),
+    # 版本号单一来源：app_updater.get_current_version 在 Windows/Linux
+    # 冻结版读随包的 pyproject.toml（mac 读 Info.plist）
+    (str(PROJ / "pyproject.toml"), "."),
 ]
 
 # ---------------------------------------------------------------------------
