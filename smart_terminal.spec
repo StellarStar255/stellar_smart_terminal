@@ -106,11 +106,17 @@ if sys.platform == "darwin":
         info_plist={
             "CFBundleName": APP_DISPLAY_NAME,
             "CFBundleDisplayName": APP_DISPLAY_NAME,
-            "CFBundleShortVersionString": "1.14.1",
-            "CFBundleVersion": "1.14.1",
+            "CFBundleShortVersionString": "1.14.2",
+            "CFBundleVersion": "1.14.2",
             "NSHighResolutionCapable": True,
             "NSRequiresAquaSystemAppearance": False,
-            # 终端应用需要的权限说明（访问用户文件等由系统按需弹窗）
+            # 终端应用需要的权限说明（访问用户文件等由系统按需弹窗）。
+            # NSAppleEventsUsageDescription 缺失时 Apple 事件会被静默拒绝
+            # （不弹窗）——「在 Terminal.app 中运行」「移到废纸篓」依赖它
             "NSAppleEventsUsageDescription": "Stellar Smart Terminal needs to control other apps for automation features.",
+            # 文件夹访问的弹窗说明文案（不配也会弹，配了显示应用自己的解释）
+            "NSDocumentsFolderUsageDescription": "Terminal sessions and the file explorer need access to your project folders in Documents.",
+            "NSDesktopFolderUsageDescription": "Terminal sessions and the file explorer need access to files on your Desktop.",
+            "NSDownloadsFolderUsageDescription": "Terminal sessions and the file explorer need access to your Downloads folder.",
         },
     )
