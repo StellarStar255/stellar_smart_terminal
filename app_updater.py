@@ -230,16 +230,22 @@ def build_updater_script(pid: int, bundle: str, new_app: str) -> str:
 # Windows：等应用退出 → 静默跑 Inno 安装包原地升级 → 重启应用。
 # /SILENT 只显示进度条；PrivilegesRequired=lowest 的用户级安装无 UAC。
 # `ping -n 2` 是无控制台 cmd 里的 sleep 1s 替代（timeout 需要可交互控制台）。
+# 注意两个实战踩过的坑：
+# 1) 不用括号块——cmd 的 %var% 在解析括号块时一次性展开，块内计数器
+#    永远读到旧值，超时护卫失效（须 goto 结构或 delayed expansion）。
+# 2) 必须由「带隐形控制台」的 cmd 运行（见 _install_and_restart_windows
+#    的 CREATE_NO_WINDOW）：无控制台的 cmd 会让 tasklist/find/ping 各自
+#    弹出可见控制台窗口，每秒一轮、关不完。
 _UPDATER_BAT = """@echo off
 set tries=0
 :wait
+set /a tries+=1
+if %tries% GEQ 120 exit /b 1
 tasklist /FI "PID eq {pid}" 2>NUL | find "{pid}" >NUL
-if not errorlevel 1 (
-  set /a tries+=1
-  if %tries% GEQ 120 exit /b 1
-  ping -n 2 127.0.0.1 >NUL
-  goto wait
-)
+if errorlevel 1 goto install
+ping -n 2 127.0.0.1 >NUL
+goto wait
+:install
 "{setup}" /SILENT /NORESTART
 start "" "{exe}"
 """
@@ -254,9 +260,12 @@ def _install_and_restart_windows(setup_path: str) -> bool:
     fd, bat_path = tempfile.mkstemp(prefix='stellar_updater_', suffix='.bat')
     with os.fdopen(fd, 'w') as f:
         f.write(bat)
-    flags = (getattr(subprocess, 'DETACHED_PROCESS', 0)
-             | getattr(subprocess, 'CREATE_NO_WINDOW', 0)
-             | getattr(subprocess, 'CREATE_NEW_PROCESS_GROUP', 0))
+    # 只用 CREATE_NO_WINDOW，绝不能加 DETACHED_PROCESS：detached 的 cmd
+    # 没有控制台，循环里的 tasklist/find/ping 会各自弹出可见控制台窗口
+    # （Windows 11 下表现为不断冒 Windows Terminal 窗口）。CREATE_NO_WINDOW
+    # 给 cmd 一个隐形控制台，子命令全部继承，全程无窗。cmd 是独立进程，
+    # 本进程退出后它继续运行，不需要 detach。
+    flags = getattr(subprocess, 'CREATE_NO_WINDOW', 0)
     subprocess.Popen(['cmd', '/c', bat_path], creationflags=flags,
                      stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
     return True

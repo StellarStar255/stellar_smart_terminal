@@ -161,5 +161,61 @@ class TestWindowsUpdaterScript(unittest.TestCase):
                 sys.frozen = old_frozen
 
 
+
+
+class TestWindowsUpdaterRegression(unittest.TestCase):
+    """v1.14.5 Windows 实战翻车的两个回归守卫。"""
+
+    def test_bat_has_no_parenthesized_blocks(self):
+        # cmd 的 %var% 在解析括号块时一次性展开——块内计数器读旧值，
+        # 超时护卫失效。脚本必须是 goto 结构，且超时判断先于 tasklist。
+        bat = app_updater.build_updater_bat(1, "s", "e")
+        self.assertNotIn("(\n", bat)
+        self.assertNotIn("if not errorlevel 1 (", bat)
+        self.assertIn(":install", bat)
+        self.assertLess(bat.index("GEQ 120"), bat.index("tasklist"))
+
+    def test_spawn_uses_hidden_console_not_detached(self):
+        # DETACHED_PROCESS 的 cmd 没有控制台，tasklist/find/ping 会各自
+        # 弹出可见控制台窗口（Windows Terminal 窗口刷屏）。必须只用
+        # CREATE_NO_WINDOW（隐形控制台，子命令继承）。
+        import subprocess as sp
+        recorded = {}
+
+        class _FakePopen:
+            def __init__(self, *a, **k):
+                recorded['args'] = a
+                recorded['flags'] = k.get('creationflags')
+
+        old_frozen = getattr(sys, "frozen", None)
+        old_platform = sys.platform
+        old_popen = sp.Popen
+        had_detached = hasattr(sp, 'DETACHED_PROCESS')
+        had_no_window = hasattr(sp, 'CREATE_NO_WINDOW')
+        try:
+            sys.frozen = True
+            sys.platform = "win32"
+            sp.Popen = _FakePopen
+            sp.DETACHED_PROCESS = 0x8
+            sp.CREATE_NO_WINDOW = 0x08000000
+            self.assertTrue(
+                app_updater.install_and_restart("C:/Temp/update.exe"))
+            self.assertEqual(recorded['flags'], 0x08000000,
+                             "must be CREATE_NO_WINDOW only")
+            self.assertEqual(list(recorded['args'][0][:2]), ['cmd', '/c'])
+        finally:
+            sp.Popen = old_popen
+            if not had_detached:
+                del sp.DETACHED_PROCESS
+            if not had_no_window:
+                del sp.CREATE_NO_WINDOW
+            sys.platform = old_platform
+            if old_frozen is None:
+                del sys.frozen
+            else:
+                sys.frozen = old_frozen
+
+
+
 if __name__ == "__main__":
     unittest.main()
