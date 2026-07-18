@@ -9,7 +9,7 @@
 ; 版本号由 CI 通过 /DMyAppVersion=x.y.z 注入（见 .github/workflows/release.yml）；
 ; 本地手动编译可加该参数，缺省时退化为 0.0.0 仅供调试。
 ;
-; 本地编译： "C:\Program Files (x86)\Inno Setup 6\ISCC.exe" /DMyAppVersion=1.14.10 installer.iss
+; 本地编译： "C:\Program Files (x86)\Inno Setup 6\ISCC.exe" /DMyAppVersion=1.14.11 installer.iss
 ; 产物：     dist\Stellar-Smart-Terminal-v<版本>-windows-x64-setup.exe
 
 #ifndef MyAppVersion
