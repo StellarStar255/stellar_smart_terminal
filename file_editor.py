@@ -3134,8 +3134,9 @@ class FileEditorWidget(QWidget):
                 QTextFormat.Property.BlockCodeLanguage)
 
         # 收集：代码围栏（连续同语言 code 块）与引用块，全部先收集后修改
-        runs = []      # (first_pos, last_block_end_pos)
+        runs = []      # (first_pos, last_block_end_pos, indent)
         quotes = []    # block_pos
+        code_line_starts = []   # 每个代码行行首位置（插入左内边距空格用）
         block = doc.begin()
         while block.isValid():
             bf = block.blockFormat()
@@ -3156,6 +3157,12 @@ class FileEditorWidget(QWidget):
                     runs.append((first.position(),
                                  last.position() + last.length() - 1,
                                  first.blockFormat().indent()))
+                    ln = first
+                    while True:
+                        code_line_starts.append(ln.position())
+                        if ln == last:
+                            break
+                        ln = ln.next()
             block = block.next()
 
         # 从后往前做插入，避免位置失效
@@ -3166,6 +3173,8 @@ class FileEditorWidget(QWidget):
                 edits.append((first_pos - 1, 'pad-top', indent))
         for qpos in quotes:
             edits.append((qpos, 'quote-bar', 0))
+        for cpos in code_line_starts:
+            edits.append((cpos, 'code-left-pad', 0))
         edits.sort(reverse=True)
 
         bar_fmt = QTextCharFormat()
@@ -3180,6 +3189,11 @@ class FileEditorWidget(QWidget):
             c.setPosition(pos)
             if kind == 'quote-bar':
                 c.insertText('▎ ', bar_fmt)
+            elif kind == 'code-left-pad':
+                # 面板左内边距：textIndent 会把含 CJK 行的块背景一并右移
+                # 造成左缘缺口，改插两个真实空格（仅预览文档；从预览复制
+                # 会带统一的两格前导空格，相对缩进不受影响）
+                c.insertText('  ')
             else:
                 nbf = QTextBlockFormat()
                 nbf.setProperty(self._MD_PAD_PROP,
@@ -3293,7 +3307,11 @@ class FileEditorWidget(QWidget):
                 # （它们同时充当面板的上下内边距），本体全部归零。
                 # 不能加比例行距——多出的行间空隙不带底色会切断底色片
                 nbf.setBackground(code_bg)
-                nbf.setTextIndent(base * 0.8)
+                # 不用 textIndent 做左内边距：含 CJK/破折号的行会把块背景
+                # 一并右移 textIndent 宽度（纯 ASCII 行不移），面板左缘出现
+                # 参差缺口。左内边距改由每行行首的真实空格观感承担（无）
+                # ——保持背景完全平齐优先
+                nbf.setTextIndent(0.0)
                 nbf.setTopMargin(0.0)
                 nbf.setBottomMargin(0.0)
                 ccf = QTextCharFormat()
