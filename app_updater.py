@@ -268,6 +268,8 @@ def install_and_restart(new_app_path: str) -> bool:
     macOS 传解包出的 .app 路径（分阶段换包）；Windows 传下载好的
     Inno 安装包路径（静默原地升级）。
     """
+    if not can_self_update():
+        return False   # 源码运行 / 不支持的平台：绝不触发换装
     if sys.platform == 'win32':
         return _install_and_restart_windows(new_app_path)
     bundle = bundle_path()
