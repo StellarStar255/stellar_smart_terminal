@@ -24,7 +24,7 @@ from PyQt6.QtGui import (
     QKeySequence, QPalette, QShortcut, QPainter, QTextCursor, QTextDocument,
     QPixmap, QImageReader, QCursor, QGuiApplication, QIcon, QWheelEvent,
     QDesktopServices, QTextBlockFormat, QTextFormat, QTextFrameFormat,
-    QTextTable, QFontDatabase, QTextImageFormat,
+    QTextTable, QFontDatabase, QTextImageFormat, QTextLength,
 )
 
 
@@ -2803,6 +2803,7 @@ class FileEditorWidget(QWidget):
         self._inline_md_html_images(doc)
         self._apply_md_html_layout(doc)
         self._fit_md_images(doc)
+        self._prepare_md_blocks(doc)
         self._polish_md_document(doc)
         self._md_browser.verticalScrollBar().setValue(scroll_pos)
 
@@ -3106,6 +3107,81 @@ class FileEditorWidget(QWidget):
             if repl:
                 c.insertText(repl)
 
+    # 代码块 padding 块的标记属性（UserProperty 起始位，值 'top'/'bottom'）
+    _MD_PAD_PROP = QTextFormat.Property.UserProperty
+
+    def _prepare_md_blocks(self, doc):
+        """排版结构准备（在精修之前做的文档手术，仅预览文档）。
+
+        1. 代码块面板内边距：Qt 的块背景不含 padding，在每个代码围栏
+           前后插入一个固定高度的空块（带同款底色）充当上下内边距，
+           视觉上等价 GitHub 的代码面板。空块用 UserProperty 标记，
+           精修 pass 据此设置高度/边距。
+        2. 引用块左侧竖条：Qt 块格式没有单边 border，在每个引用块行首
+           插入 U+258E（▎）字符染成边框色——GitHub 引用条的近似。
+        文本插入只发生在预览文档，不触碰编辑器缓冲区。
+        """
+        def _is_code(blk):
+            if not blk.isValid():
+                return False
+            f = blk.blockFormat()
+            return (f.hasProperty(QTextFormat.Property.BlockCodeFence)
+                    or f.hasProperty(QTextFormat.Property.BlockCodeLanguage)
+                    or f.nonBreakableLines())
+
+        def _lang(blk):
+            return blk.blockFormat().stringProperty(
+                QTextFormat.Property.BlockCodeLanguage)
+
+        # 收集：代码围栏（连续同语言 code 块）与引用块，全部先收集后修改
+        runs = []      # (first_pos, last_block_end_pos)
+        quotes = []    # block_pos
+        block = doc.begin()
+        while block.isValid():
+            bf = block.blockFormat()
+            if bf.hasProperty(QTextFormat.Property.BlockQuoteLevel):
+                quotes.append(block.position())
+            if _is_code(block):
+                prev = block.previous()
+                if not (_is_code(prev) and _lang(prev) == _lang(block)):
+                    first = block
+                    last = block
+                    nxt = block.next()
+                    while _is_code(nxt) and _lang(nxt) == _lang(block):
+                        last = nxt
+                        nxt = nxt.next()
+                    runs.append((first.position(),
+                                 last.position() + last.length() - 1))
+            block = block.next()
+
+        # 从后往前做插入，避免位置失效
+        edits = []   # (pos, kind)  kind: 'pad-top' / 'pad-bottom' / 'quote-bar'
+        for first_pos, last_end in runs:
+            edits.append((last_end, 'pad-bottom'))
+            if first_pos > 0:
+                edits.append((first_pos - 1, 'pad-top'))
+        for qpos in quotes:
+            edits.append((qpos, 'quote-bar'))
+        edits.sort(reverse=True)
+
+        bar_fmt = QTextCharFormat()
+        bar_fmt.setForeground(QColor(self.theme.get('border', '#3d3d5c')))
+        # pad 块用小字号控制高度（空块行高跟随块字符格式的字体）。
+        # 不能用 LineHeight FixedHeight：布局占整行高、绘制只画固定高度，
+        # 面板区域会整体错位出现「代码行被裁半」的假象（实测踩过）
+        pad_char = QTextCharFormat()
+        pad_char.setFontPointSize(max(4.0, (self._editor_point_size + 1) * 0.42))
+        for pos, kind in edits:
+            c = QTextCursor(doc)
+            c.setPosition(pos)
+            if kind == 'quote-bar':
+                c.insertText('▎ ', bar_fmt)
+            else:
+                nbf = QTextBlockFormat()
+                nbf.setProperty(self._MD_PAD_PROP,
+                                'top' if kind == 'pad-top' else 'bottom')
+                c.insertBlock(nbf, pad_char)
+
     # 标题排版表：级别 → (字号倍率, 上留白, 下留白)，留白以正文字号为单位。
     # 仿 GitHub 阅读视图的比例：H1 约 1.7 倍正文而非 Qt 默认的 2 倍。
     _MD_HEADING_STYLE = {
@@ -3187,31 +3263,36 @@ class FileEditorWidget(QWidget):
                 nbf.setTopMargin(base * top)
                 nbf.setBottomMargin(base * bottom)
                 nbf.setLineHeight(125, prop_h)
+                if lvl <= 2:
+                    # GitHub 风格：H1/H2 下方一条全宽分隔线
+                    nbf.setProperty(
+                        QTextFormat.Property.BlockTrailingHorizontalRulerWidth,
+                        QTextLength(QTextLength.Type.PercentageLength, 100))
+            elif block.blockFormat().hasProperty(self._MD_PAD_PROP):
+                # 代码面板的上/下内边距块（_prepare_md_blocks 插入）：
+                # 固定小高度 + 代码底色；外边距承接整个围栏的段间距
+                kind = block.blockFormat().stringProperty(self._MD_PAD_PROP)
+                nbf.setBackground(code_bg)
+                nbf.setTopMargin(base * 0.7 if kind == 'top' else 0.0)
+                nbf.setBottomMargin(base * 0.7 if kind == 'bottom' else 0.0)
             elif _is_code_block(block):
-                # 代码块每行一个 block：整片底色相连，行首缩进当左内边距用；
-                # 只有片区首/尾行需要外边距。不能加比例行距——多出的行间
-                # 空隙不带底色，会把底色片切成一条条断缝。
-                # 相邻但语言不同的两个围栏是两片：按 codelang 变化切分
-                def _same_fence(other):
-                    if not _is_code_block(other):
-                        return False
-                    return (other.blockFormat().stringProperty(
-                                QTextFormat.Property.BlockCodeLanguage)
-                            == bf.stringProperty(
-                                QTextFormat.Property.BlockCodeLanguage))
+                # 代码块每行一个 block：整片底色相连，行首缩进当左内边距用。
+                # 上下外边距由 _prepare_md_blocks 插入的 padding 块承接
+                # （它们同时充当面板的上下内边距），本体全部归零。
+                # 不能加比例行距——多出的行间空隙不带底色会切断底色片
                 nbf.setBackground(code_bg)
                 nbf.setTextIndent(base * 0.8)
-                nbf.setTopMargin(
-                    0.0 if _same_fence(block.previous()) else base * 0.7)
-                nbf.setBottomMargin(
-                    0.0 if _same_fence(block.next()) else base * 0.7)
+                nbf.setTopMargin(0.0)
+                nbf.setBottomMargin(0.0)
                 ccf = QTextCharFormat()
                 ccf.setFontFamilies([mono_family])
                 ccf.setFontPointSize(base * 0.9)
                 sel.mergeCharFormat(ccf)
             elif bf.hasProperty(QTextFormat.Property.BlockQuoteLevel):
+                # GitHub 式引用：行首 ▎竖条（_prepare_md_blocks 插入）+
+                # 暗色文字 + 小缩进
                 qlvl = max(1, bf.intProperty(QTextFormat.Property.BlockQuoteLevel))
-                nbf.setLeftMargin(base * 1.5 * qlvl)
+                nbf.setLeftMargin(base * 0.4 * qlvl)
                 nbf.setRightMargin(0.0)
                 nbf.setTopMargin(base * 0.4)
                 nbf.setBottomMargin(base * 0.4)
@@ -3241,6 +3322,7 @@ class FileEditorWidget(QWidget):
                 nbf.setLineHeight(150, prop_h)
                 nbf.setTopMargin(base * 0.15)
                 nbf.setBottomMargin(base * 0.15)
+                nbf.setLeftMargin(base * 0.5)   # 列表整体右移，靠近 GitHub 缩进
             elif not block.text().strip():
                 # 结构分隔用的空 block（引用/表格后 Qt 会插一个）：不占空间
                 nbf.setTopMargin(0.0)
