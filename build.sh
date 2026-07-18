@@ -22,17 +22,21 @@ echo "==> Installing dependencies + PyInstaller"
 "$VENV/bin/python" -m pip install -r requirements.txt pyinstaller --quiet
 
 # ---------------------------------------------------------------------------
-# 2. 生成 .icns 图标（仅 macOS 且缺失时；从 2048x2048 png 派生）
+# 2. 生成 .icns 图标（仅 macOS 且缺失时）。
+#    注意：必须用带透明留白的 mac 专用母版（图形占画布 ~80%、Apple 圆角），
+#    满幅的 smart_terminal.png 会让 Dock 图标比其他 app 大一圈。
+#    母版与 icns 由 scripts/make_mac_icon.py 生成并已提交，此处仅兜底。
 # ---------------------------------------------------------------------------
 ICNS="assets/smart_terminal.icns"
+ICON_MAC_SRC="assets/smart_terminal_icon_mac.png"
 if [ "$(uname)" = "Darwin" ] && [ ! -f "$ICNS" ]; then
-    echo "==> Generating $ICNS from assets/smart_terminal.png"
+    echo "==> Generating $ICNS from $ICON_MAC_SRC"
     ICONSET="$(mktemp -d)/smart_terminal.iconset"
     mkdir -p "$ICONSET"
     for sz in 16 32 128 256 512; do
-        sips -z "$sz" "$sz" assets/smart_terminal.png \
+        sips -z "$sz" "$sz" "$ICON_MAC_SRC" \
             --out "$ICONSET/icon_${sz}x${sz}.png" >/dev/null
-        sips -z "$((sz * 2))" "$((sz * 2))" assets/smart_terminal.png \
+        sips -z "$((sz * 2))" "$((sz * 2))" "$ICON_MAC_SRC" \
             --out "$ICONSET/icon_${sz}x${sz}@2x.png" >/dev/null
     done
     iconutil -c icns "$ICONSET" -o "$ICNS"
