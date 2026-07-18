@@ -1913,17 +1913,31 @@ class _GraphCanvas(QWidget):
             painter.setPen(QPen(dot, 1))
             painter.drawEllipse(QPoint(col_x(my), y_mid), r, r)
 
-            # 文本起点
+            # 文本起点。作者列先定位：徽标与标题都不得越过 author_x，
+            # 否则窄面板 + 多引用（main/tag/origin/…）时右对齐的作者名
+            # 会直接压在徽章/文字上
             tx = self._left_pad + self._max_cols * lane_w + 8
-            # 引用徽标（branch / HEAD / tag）
-            for ref in row['commit']['refs']:
+            author = row['commit']['author']
+            aw = fm.horizontalAdvance(author) + 12
+            author_x = w - aw - 8
+
+            # 引用徽标（branch / HEAD / tag）；放不下的用 "…" 指示
+            refs = row['commit']['refs']
+            for i, ref in enumerate(refs):
                 label = ref.replace('HEAD -> ', '')
                 is_head = ref.startswith('HEAD')
                 is_remote = label.startswith('origin/') or '/' in label
                 badge_bg = QColor(self.theme.get('accent', '#667eea')) if is_head \
                     else (QColor('#4b5263') if is_remote else QColor('#3a7a3a'))
                 bw = fm.horizontalAdvance(label) + 12
-                if tx + bw > w - 8:
+                if tx + bw > author_x - 6:
+                    ell = '…'
+                    ew = fm.horizontalAdvance(ell) + 4
+                    if tx + ew <= author_x - 6:
+                        painter.setPen(dim_color)
+                        painter.drawText(QRect(tx, y_top, ew, row_h),
+                                         Qt.AlignmentFlag.AlignVCenter, ell)
+                        tx += ew + 4
                     break
                 painter.setBrush(QBrush(badge_bg))
                 painter.setPen(Qt.PenStyle.NoPen)
@@ -1934,17 +1948,16 @@ class _GraphCanvas(QWidget):
                                  Qt.AlignmentFlag.AlignCenter, label)
                 tx += bw + 4
 
-            # 标题 + 作者（作者右对齐、暗色）
-            author = row['commit']['author']
-            aw = fm.horizontalAdvance(author) + 12
-            subj_w = max(20, w - tx - aw - 12)
-            painter.setPen(text_color)
-            subj = fm.elidedText(row['commit']['subject'],
-                                 Qt.TextElideMode.ElideRight, subj_w)
-            painter.drawText(QRect(tx, y_top, subj_w, row_h),
-                             Qt.AlignmentFlag.AlignVCenter, subj)
+            # 标题（放不下就不画，绝不与作者区重叠）+ 作者（右对齐、暗色）
+            subj_w = author_x - tx - 4
+            if subj_w > 20:
+                painter.setPen(text_color)
+                subj = fm.elidedText(row['commit']['subject'],
+                                     Qt.TextElideMode.ElideRight, subj_w)
+                painter.drawText(QRect(tx, y_top, subj_w, row_h),
+                                 Qt.AlignmentFlag.AlignVCenter, subj)
             painter.setPen(dim_color)
-            painter.drawText(QRect(w - aw - 8, y_top, aw, row_h),
+            painter.drawText(QRect(author_x, y_top, aw, row_h),
                              Qt.AlignmentFlag.AlignVCenter | Qt.AlignmentFlag.AlignRight,
                              author)
         painter.end()
