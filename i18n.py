@@ -313,6 +313,7 @@ TRANSLATIONS = {
     "toolbar_mgr.btn.manage_preset_btn": {"zh": "管理按钮", "en": "Manage Button"},
     "toolbar_mgr.btn.start_btn": {"zh": "启动按钮", "en": "Start Button"},
     "toolbar_mgr.btn.stop_btn": {"zh": "停止按钮", "en": "Stop Button"},
+    "toolbar_mgr.btn.command_palette": {"zh": "命令搜索框", "en": "Command Search"},
     "toolbar_mgr.btn.image_prefix_checkbox": {"zh": "图片加@前缀", "en": "Image @prefix"},
     "toolbar_mgr.btn.image_local_checkbox": {"zh": "图片存工作目录", "en": "Image to CWD"},
     "toolbar_mgr.btn.window_nav_checkbox": {"zh": "窗口快速导航", "en": "Window Navigator"},

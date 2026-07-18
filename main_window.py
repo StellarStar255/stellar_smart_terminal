@@ -1195,7 +1195,8 @@ class MainWindow(QMainWindow):
 
         toolbar.addSeparator()
 
-        # 命令搜索框（Cmd+K 聚焦）
+        # 命令搜索框（Cmd+K 聚焦）。只创建不入列：它注册在「预设与控制」组的
+        # 分组按钮里（默认排在 Stop 之后），位置可在工具栏布局管理器里调整
         self.command_palette = CommandPalette(t("palette.placeholder"))
         self.command_palette.set_empty_text(t("palette.no_results"))
         # 两倍宽，保证占位文字 "Search commands… (⌘K)" 完整可见、不被截断。
@@ -1209,9 +1210,6 @@ class MainWindow(QMainWindow):
         self.command_palette.setSizePolicy(
             QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Fixed
         )
-        toolbar.addWidget(self.command_palette)
-
-        toolbar.addSeparator()
 
         # 启动按钮
         self.start_btn = QPushButton(t("toolbar.start"))
@@ -1234,8 +1232,6 @@ class MainWindow(QMainWindow):
             self._preset_combo_container,
             self.preset_switch_btn,
             self.manage_preset_btn,
-            None,  # separator
-            self.command_palette,
             None,  # separator
             self.start_btn,
             self.stop_btn,
@@ -1684,6 +1680,11 @@ class MainWindow(QMainWindow):
 
         # ===== 定义每组的按钮和默认顺序 =====
         self._group_button_dicts = {
+            # 搜索框走分组按钮体系（而非核心控件）：默认紧跟 Stop 之后，
+            # 可在工具栏布局管理器里改顺序/移到其他组/隐藏
+            "预设与控制": {
+                "command_palette": self.command_palette,
+            },
             "选项": {
                 "image_prefix_checkbox": self.image_prefix_checkbox,
                 "image_local_checkbox": self.image_local_checkbox,
@@ -1724,6 +1725,7 @@ class MainWindow(QMainWindow):
         }
 
         self._group_default_orders = {
+            "预设与控制": ["command_palette"],
             "选项": ["image_prefix_checkbox", "image_local_checkbox", "window_nav_checkbox"],
             "操作": ["export_btn", "history_btn", "clear_btn", "images_btn"],
             "分屏管理": ["split_btn", "split_v_btn", "close_split_btn", "close_tab_btn"],
@@ -1810,6 +1812,7 @@ class MainWindow(QMainWindow):
             "manage_preset_btn": self.manage_preset_btn,
             "start_btn": self.start_btn,
             "stop_btn": self.stop_btn,
+            "command_palette": self.command_palette,
             "image_prefix_checkbox": self.image_prefix_checkbox,
             "image_local_checkbox": self.image_local_checkbox,
             "window_nav_checkbox": self.window_nav_checkbox,

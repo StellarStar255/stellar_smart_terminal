@@ -419,6 +419,7 @@ class ToolbarManagerDialog(QDialog):
         ("manage_preset_btn", "管理按钮", True, "预设与控制"),
         ("start_btn", "启动按钮", True, "预设与控制"),
         ("stop_btn", "停止按钮", True, "预设与控制"),
+        ("command_palette", "命令搜索框", True, "预设与控制"),
 
         # 第二组：选项
         ("image_prefix_checkbox", "图片加@前缀", True, "选项"),
