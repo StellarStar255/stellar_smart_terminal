@@ -4892,6 +4892,35 @@ class TerminalWidget(QWidget):
             if self._write_paste(data):
                 self.input_buffer += text
 
+    def _image_save_dir(self) -> Path:
+        """「Image to CWD」存图的目标目录（带兜底，绝不抛异常）。
+
+        必须用终端 shell 的真实 cwd（get_cwd，lsof 取子进程目录），取不到
+        再退启动时的工作目录、再退用户主目录。绝不能用 os.getcwd()——那是
+        主进程的目录：打包 app 从 Finder 启动时是 `/`，mkdir `/.images` 因
+        权限失败抛异常，曾把整个粘贴链路静默吞掉（v1.14 DMG 实测；源码
+        运行时恰好从项目目录启动，两个 cwd 重合掩盖了此 bug）。
+        目录创建失败逐级回退到临时目录——存图路径永远不该让粘贴失败。
+        """
+        import tempfile
+        candidates = []
+        if self.image_save_local:
+            cwd = None
+            try:
+                cwd = self.get_cwd()
+            except Exception:
+                pass
+            cwd = cwd or getattr(self, '_working_dir', None) or str(Path.home())
+            candidates.append(Path(cwd) / ".images")
+        candidates.append(Path(tempfile.gettempdir()) / "smart_terminal_images")
+        for d in candidates:
+            try:
+                d.mkdir(exist_ok=True)
+                return d
+            except OSError:
+                continue
+        return Path(tempfile.gettempdir())   # 理论兜底：临时目录本身必然存在
+
     def _paste_clipboard_data_macos_native(self) -> bool:
         """macOS: 使用 osascript + JXA 原生 API 安全处理剪贴板图片/文件
 
@@ -4900,22 +4929,10 @@ class TerminalWidget(QWidget):
         """
         import subprocess
         from datetime import datetime
-        import tempfile
 
         # 准备图片保存路径
         timestamp = datetime.now().strftime("%Y%m%d_%H%M%S_%f")
-        if self.image_save_local:
-            try:
-                cwd = os.getcwd()
-            except (FileNotFoundError, OSError):
-                cwd = str(Path.home())
-            images_dir = Path(cwd) / ".images"
-            images_dir.mkdir(exist_ok=True)
-            save_path = str(images_dir / f"paste_{timestamp}.png")
-        else:
-            temp_dir = Path(tempfile.gettempdir()) / "smart_terminal_images"
-            temp_dir.mkdir(exist_ok=True)
-            save_path = str(temp_dir / f"paste_{timestamp}.png")
+        save_path = str(self._image_save_dir() / f"paste_{timestamp}.png")
 
         escaped_path = save_path.replace('\\', '\\\\').replace('"', '\\"')
 
@@ -5040,19 +5057,8 @@ if (hasFileURL) {{
                 import tempfile
 
                 timestamp = datetime.now().strftime("%Y%m%d_%H%M%S_%f")
-
-                if self.image_save_local:
-                    try:
-                        cwd = os.getcwd()
-                    except (FileNotFoundError, OSError):
-                        cwd = str(Path.home())
-                    images_dir = Path(cwd) / ".images"
-                    images_dir.mkdir(exist_ok=True)
-                    image_path = images_dir / f"paste_{timestamp}.png"
-                else:
-                    temp_dir = Path(tempfile.gettempdir()) / "smart_terminal_images"
-                    temp_dir.mkdir(exist_ok=True)
-                    image_path = temp_dir / f"paste_{timestamp}.png"
+                # 目录解析统一走 _image_save_dir：终端真实 cwd + 失败兜底
+                image_path = self._image_save_dir() / f"paste_{timestamp}.png"
 
                 if image.save(str(image_path), "PNG"):
                     # 发送原始路径；若 Bracketed Paste 启用则由 _write_paste
@@ -5872,8 +5878,9 @@ if (hasFileURL) {{
 
     def _start_and_execute(self, commands: list):
         """启动终端并执行命令"""
-        # 获取当前工作目录
-        cwd = getattr(self, '_working_dir', None) or os.getcwd()
+        # 获取当前工作目录。不回退 os.getcwd()：打包 app 从 Finder 启动时
+        # 主进程 cwd 是 /，shell 会起在根目录，改退用户主目录
+        cwd = getattr(self, '_working_dir', None) or str(Path.home())
         # 启动默认 shell
         shell = self._get_default_shell()
         self.start_process([shell], cwd=cwd)
