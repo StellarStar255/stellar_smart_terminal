@@ -389,3 +389,19 @@ def checkbox_checkmark_url() -> str:
             return ''
         _checkmark_url_cache = str(p).replace('\\', '/')
     return _checkmark_url_cache
+
+
+def app_icon_path() -> Path:
+    """运行时 app 图标的源图路径（窗口图标 / Dock / 主题 Tint 上色共用）。
+
+    macOS 必须用带透明留白的 Dock 母版（scripts/make_mac_icon.py 生成）：
+    QApplication.setWindowIcon 会接管 Dock 图标——连打包版 Info.plist 的
+    icns 都会被运行时设置盖掉，满幅图会显得比其他 app 大一圈、圆角偏方。
+    Windows 任务栏 / Linux dock 的规范就是满幅，仍用原图。
+    """
+    base = Path(__file__).resolve().parent / 'assets'
+    if sys.platform == 'darwin':
+        padded = base / 'smart_terminal_icon_mac.png'
+        if padded.exists():
+            return padded
+    return base / 'smart_terminal.png'

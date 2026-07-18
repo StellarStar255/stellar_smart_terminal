@@ -282,8 +282,9 @@ def main():
     # macOS: 确保支持多窗口在 Mission Control 中正确显示
     app.setAttribute(Qt.ApplicationAttribute.AA_DontShowIconsInMenus, False)
 
-    # 设置应用程序图标路径
-    icon_path = Path(__file__).parent / "assets" / "smart_terminal.png"
+    # 设置应用程序图标路径（macOS 用带留白的 Dock 母版，见 utils.app_icon_path）
+    from utils import app_icon_path
+    icon_path = app_icon_path()
 
     # Linux: 自动创建 .desktop 文件，用于dock/任务栏图标匹配
     if sys.platform == "linux":

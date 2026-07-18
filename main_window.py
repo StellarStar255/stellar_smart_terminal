@@ -587,7 +587,10 @@ class MainWindow(QMainWindow):
         self.setMinimumSize(1000, 700)
 
         # 设置窗口图标
-        self._icon_path = Path(__file__).parent / "assets" / "smart_terminal.png"
+        # macOS 下是带留白的 Dock 母版（满幅图会让 Dock 图标偏大），
+        # Tint 主题上色也从这份源图出发，保持留白
+        from utils import app_icon_path
+        self._icon_path = app_icon_path()
         if self._icon_path.exists():
             self.setWindowIcon(QIcon(str(self._icon_path)))
 
