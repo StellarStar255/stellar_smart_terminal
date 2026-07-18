@@ -35,9 +35,30 @@ def setup_qt_plugin_path():
 
 setup_qt_plugin_path()
 
-from PyQt6.QtWidgets import QApplication
+from PyQt6.QtWidgets import QApplication, QDialog, QWidget
 from PyQt6.QtGui import QFont, QPalette, QColor, QIcon, QPixmap
-from PyQt6.QtCore import Qt, QSize
+from PyQt6.QtCore import Qt, QSize, QObject, QEvent
+
+
+class DialogCloseShortcutFilter(QObject):
+    """让所有 QDialog 弹窗都能用 Cmd+W（Windows/Linux 为 Ctrl+W）关闭。
+
+    装在 QApplication 上的全局过滤器：KeyPress 只派发给焦点控件一次，
+    从接收对象上溯到所在顶层窗口，是 QDialog 才拦截关闭——主窗口的
+    Ctrl+W 不受影响（继续走既有的「关标签页」快捷键）。一处规则覆盖
+    现有与未来所有对话框（Pasted Images / History / 预设管理 / 各设置
+    对话框等），无需逐个注册。
+    """
+
+    def eventFilter(self, obj, event):
+        if (event.type() == QEvent.Type.KeyPress
+                and event.key() == Qt.Key.Key_W
+                and event.modifiers() == Qt.KeyboardModifier.ControlModifier):
+            w = obj.window() if isinstance(obj, QWidget) else None
+            if isinstance(w, QDialog):
+                w.close()
+                return True
+        return super().eventFilter(obj, event)
 
 from app_logging import setup_logging, get_logger
 from main_window import MainWindow
@@ -333,6 +354,10 @@ def main():
 
     # 安装 Ctrl+C (SIGINT) 处理器：在终端里按两次 Ctrl+C 可保存并退出
     install_sigint_handler(app)
+
+    # 所有 QDialog 弹窗支持 Cmd+W / Ctrl+W 关闭（保持引用防 GC）
+    app._dialog_close_filter = DialogCloseShortcutFilter(app)
+    app.installEventFilter(app._dialog_close_filter)
 
     # 运行
     sys.exit(app.exec())
