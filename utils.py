@@ -358,3 +358,34 @@ def play_notify_sound(name: str) -> None:
         )
     except OSError:
         pass
+
+
+# ---------- 全局勾选框对勾图标 ----------
+
+# 白色对勾，viewBox 16：QSS 的 image: 不缩放位图，SVG 在任意 DPR 下都清晰
+_CHECKMARK_SVG = (
+    '<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 16 16">'
+    '<path d="M3.5 8.5l3 3 6-7" fill="none" stroke="#ffffff" '
+    'stroke-width="2.4" stroke-linecap="round" stroke-linejoin="round"/></svg>'
+)
+_checkmark_url_cache = None
+
+
+def checkbox_checkmark_url() -> str:
+    """勾选框白色对勾 SVG 的路径（供 QSS `image: url(...)` 引用）。
+
+    QSS 的 image 只认文件路径，故惰性写入临时目录一次并缓存。
+    返回正斜杠路径（Windows 的 QSS url 同样要求 /）；写盘失败返回 ''，
+    调用方应跳过 image 规则（回退为无对勾的实心块，不影响功能）。
+    """
+    global _checkmark_url_cache
+    if _checkmark_url_cache is None:
+        d = Path(tempfile.gettempdir()) / 'smart_terminal_assets'
+        p = d / 'checkmark.svg'
+        try:
+            d.mkdir(exist_ok=True)
+            p.write_text(_CHECKMARK_SVG, encoding='utf-8')
+        except OSError:
+            return ''
+        _checkmark_url_cache = str(p).replace('\\', '/')
+    return _checkmark_url_cache

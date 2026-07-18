@@ -208,6 +208,28 @@ def setup_app_style(app: QApplication):
 
     app.setPalette(palette)
 
+    # 全局勾选框样式：统一深色方块，勾选态 accent 底 + 白色对勾。
+    # 此前各处 QSS 只把底色涂成 accent、没有对勾图形，勾选后是一坨实心
+    # 色块。放在 app 级 stylesheet 的原因：各 widget 级 QSS 没设 image
+    # 属性，本条的对勾按 Qt 层叠透下去，一处规则覆盖全应用（含对话框）。
+    # 必须在任何 MainWindow 创建之前设置——GUI 字号缩放会以此刻的
+    # app stylesheet 为基准快照（_apply_application_font）。
+    from utils import checkbox_checkmark_url
+    check_url = checkbox_checkmark_url()
+    if check_url:
+        app.setStyleSheet(app.styleSheet() + f"""
+QCheckBox::indicator {{
+    width: 16px; height: 16px;
+    border: 2px solid #3d3d5c; border-radius: 3px;
+    background-color: #16213e;
+}}
+QCheckBox::indicator:hover {{ border-color: #667eea; }}
+QCheckBox::indicator:checked {{
+    border-color: #667eea; background-color: #667eea;
+    image: url({check_url});
+}}
+""")
+
 
 def _ensure_linux_desktop_file(icon_path: Path):
     """在 Linux 上自动创建/更新 .desktop 文件，使任务栏/dock 能显示应用图标"""
