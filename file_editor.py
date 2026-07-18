@@ -3150,18 +3150,22 @@ class FileEditorWidget(QWidget):
                     while _is_code(nxt) and _lang(nxt) == _lang(block):
                         last = nxt
                         nxt = nxt.next()
+                    # 记录围栏的缩进：列表内嵌代码块 indent=1，块背景从
+                    # 缩进位置才开始画——pad 块必须继承同样的缩进，否则
+                    # 面板左缘错位出现黑色缺口
                     runs.append((first.position(),
-                                 last.position() + last.length() - 1))
+                                 last.position() + last.length() - 1,
+                                 first.blockFormat().indent()))
             block = block.next()
 
         # 从后往前做插入，避免位置失效
-        edits = []   # (pos, kind)  kind: 'pad-top' / 'pad-bottom' / 'quote-bar'
-        for first_pos, last_end in runs:
-            edits.append((last_end, 'pad-bottom'))
+        edits = []   # (pos, kind, indent)
+        for first_pos, last_end, indent in runs:
+            edits.append((last_end, 'pad-bottom', indent))
             if first_pos > 0:
-                edits.append((first_pos - 1, 'pad-top'))
+                edits.append((first_pos - 1, 'pad-top', indent))
         for qpos in quotes:
-            edits.append((qpos, 'quote-bar'))
+            edits.append((qpos, 'quote-bar', 0))
         edits.sort(reverse=True)
 
         bar_fmt = QTextCharFormat()
@@ -3171,7 +3175,7 @@ class FileEditorWidget(QWidget):
         # 面板区域会整体错位出现「代码行被裁半」的假象（实测踩过）
         pad_char = QTextCharFormat()
         pad_char.setFontPointSize(max(4.0, (self._editor_point_size + 1) * 0.42))
-        for pos, kind in edits:
+        for pos, kind, indent in edits:
             c = QTextCursor(doc)
             c.setPosition(pos)
             if kind == 'quote-bar':
@@ -3180,6 +3184,7 @@ class FileEditorWidget(QWidget):
                 nbf = QTextBlockFormat()
                 nbf.setProperty(self._MD_PAD_PROP,
                                 'top' if kind == 'pad-top' else 'bottom')
+                nbf.setIndent(indent)   # 与围栏同缩进，面板左缘对齐
                 c.insertBlock(nbf, pad_char)
 
     # 标题排版表：级别 → (字号倍率, 上留白, 下留白)，留白以正文字号为单位。
