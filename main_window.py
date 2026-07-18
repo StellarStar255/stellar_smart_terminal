@@ -1660,17 +1660,19 @@ class MainWindow(QMainWindow):
         """)
         self.pin_row2_checkbox.stateChanged.connect(self._on_pin_row2_changed)
 
-        self.toolbar_settings_btn = QPushButton("⚙")
+        # 矢量绘制齿轮（复用 git 面板的图标工具）：⚙ 字形在 Windows 的
+        # Segoe 字体族里走回退、渲染成一截虚线，macOS 上则可能变彩色 emoji
+        from git_widget import _make_git_tool_icon
+        self.toolbar_settings_btn = QPushButton("")
+        self.toolbar_settings_btn.setIcon(_make_git_tool_icon('gear', '#eaeaea', 16))
         self.toolbar_settings_btn.setObjectName("toolbarSettingsBtn")
         self.toolbar_settings_btn.setToolTip(t("toolbar.settings_tooltip"))
         self.toolbar_settings_btn.setFixedSize(32, 32)
         self.toolbar_settings_btn.setStyleSheet("""
             QPushButton {
                 background-color: #3d3d5c;
-                color: #eaeaea;
                 border: none;
                 border-radius: 4px;
-                font-size: 16px;
             }
             QPushButton:hover {
                 background-color: #4d4d6c;
