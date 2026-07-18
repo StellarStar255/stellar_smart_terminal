@@ -1070,6 +1070,27 @@ class GitManager(QObject):
         """检查是否为有效的 Git 仓库"""
         return self._repo_path is not None
 
+    _GIT_HOST_RE = re.compile(r"https?://([^/'\s]+)")
+
+    def _humanize_git_error(self, output: str) -> str:
+        """把常见的原始 git 网络/认证报错翻译成用户能看懂、可操作的提示。
+
+        识别不了的报错原样返回，避免把真实信息吞掉。
+        """
+        low = output.lower()
+        m = self._GIT_HOST_RE.search(output)
+        host = m.group(1) if m else t("git_mgr.err_remote_host")
+        if ('could not read username' in low
+                or 'could not read password' in low
+                or 'terminal prompts disabled' in low):
+            return t("git_mgr.err_no_credentials", host=host)
+        if 'authentication failed' in low or 'invalid username or password' in low:
+            return t("git_mgr.err_auth_failed", host=host)
+        m = re.search(r"could not resolve host:?\s*(\S+)", low)
+        if m:
+            return t("git_mgr.err_host_unreachable", host=m.group(1).strip("'\""))
+        return output
+
     def push(self, remote: str = "origin", branch: str = None) -> bool:
         """推送到远程仓库
 
@@ -1089,7 +1110,7 @@ class GitManager(QObject):
 
         success, output = self._run_git('push', remote, branch, timeout=GIT_NETWORK_TIMEOUT)
         if not success:
-            self.error_occurred.emit(t("git_mgr.push_failed", error=output))
+            self.error_occurred.emit(t("git_mgr.push_failed", error=self._humanize_git_error(output)))
             return False
         return True
 
@@ -1152,7 +1173,7 @@ class GitManager(QObject):
 
         success, output = self._run_git_verbose('pull', remote, branch, timeout=GIT_NETWORK_TIMEOUT)
         if not success:
-            self.error_occurred.emit(t("git_mgr.pull_failed", error=output))
+            self.error_occurred.emit(t("git_mgr.pull_failed", error=self._humanize_git_error(output)))
             return False
         # 把 pull 的完整输出（进度 + fast-forward + 文件统计）抛给 UI 展示
         self.op_output.emit('pull', output)

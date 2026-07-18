@@ -571,6 +571,27 @@ TRANSLATIONS = {
     "git_mgr.resolve_failed": {"zh": "解决冲突失败：{error}", "en": "Failed to resolve conflict: {error}"},
     "git_mgr.commit_conflicts": {"zh": "存在 {n} 个未解决的合并冲突文件，请先解决冲突再提交。", "en": "{n} file(s) have unresolved merge conflicts. Resolve them before committing."},
     "git_mgr.apply_patch_failed": {"zh": "应用补丁失败: {error}", "en": "Failed to apply patch: {error}"},
+    "git_mgr.err_remote_host": {"zh": "远程仓库", "en": "the remote host"},
+    "git_mgr.err_no_credentials": {
+        "zh": "未保存 {host} 的登录凭据。\n\n解决方法：在系统终端进入本仓库执行一次 git push，"
+              "输入用户名和密码（GitHub 需填 Personal Access Token，在 github.com/settings/tokens 生成）。"
+              "成功一次后凭据会被记住，之后即可在本应用内正常推送/拉取。",
+        "en": "No saved credentials for {host}.\n\nFix: open a system terminal in this repository and run "
+              "'git push' once, entering your username and password (for GitHub, use a Personal Access Token "
+              "from github.com/settings/tokens). Credentials are remembered afterwards, and push/pull will "
+              "work inside this app.",
+    },
+    "git_mgr.err_auth_failed": {
+        "zh": "{host} 认证失败：保存的凭据可能已过期或没有权限。\n\n解决方法：删除 ~/.git-credentials 中"
+              "对应的行，然后在系统终端重新执行一次 git push 输入新凭据。",
+        "en": "Authentication to {host} failed — the saved credentials may be expired or lack permission.\n\n"
+              "Fix: remove the matching line from ~/.git-credentials, then run 'git push' in a system "
+              "terminal and enter new credentials.",
+    },
+    "git_mgr.err_host_unreachable": {
+        "zh": "无法连接到 {host}，请检查网络连接或代理设置。",
+        "en": "Cannot reach {host}. Check your network connection or proxy settings.",
+    },
 
     # ===== 文件编辑器 =====
     "editor.no_file": {"zh": "未打开文件", "en": "No file open"},
