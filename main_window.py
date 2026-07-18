@@ -5335,7 +5335,7 @@ class MainWindow(QMainWindow):
             }
         """)
         if not hasattr(self, '_explorer_split_horizontal'):
-            self._explorer_split_horizontal = False  # 默认上下分屏
+            self._explorer_split_horizontal = True  # 默认左右并排（side by side）
         self._explorer_split_checkbox.stateChanged.connect(self._on_explorer_split_orientation_changed)
         explorer_header_layout.addWidget(self._explorer_split_checkbox)
 
@@ -8909,11 +8909,22 @@ class MainWindow(QMainWindow):
                 self._pin_toolbar_row2 = config.get('pin_toolbar_row2', True)
                 # 加载窗口透明度
                 self._window_opacity = config.get('window_opacity', 100)
-                # 加载左右分屏偏好（Explorer / Remote 各自记忆）
-                self._explorer_split_horizontal = config.get('explorer_split_horizontal', False)
+                # 加载左右分屏偏好（Explorer / Remote 各自记忆；Explorer 默认左右并排）
+                self._explorer_split_horizontal = config.get('explorer_split_horizontal', True)
                 self._remote_split_horizontal = config.get('remote_split_horizontal', False)
                 # 加载弹簧模式偏好（默认开启；老配置里显式存过 false 则尊重用户选择）
                 self._spring_mode_enabled = config.get('spring_mode_enabled', True)
+                # 一次性迁移（2026-07）：左右分屏 + 弹簧改为默认开启，老配置里
+                # 保存过 False 的也翻一次到新默认；标记落盘后不再重复，之后
+                # 用户的手动开关照常记忆
+                if not config.get('split_spring_default_on_migrated'):
+                    self._explorer_split_horizontal = True
+                    self._spring_mode_enabled = True
+                    app_config.update_config(
+                        {'split_spring_default_on_migrated': True,
+                         'explorer_split_horizontal': True,
+                         'spring_mode_enabled': True},
+                        description='split/spring default-on migration')
                 # 加载 AI 行内补全开关
                 self._ai_completion_enabled = config.get('ai_completion_enabled', False)
                 self._editor_word_wrap = config.get('editor_word_wrap', False)
@@ -9157,7 +9168,7 @@ class MainWindow(QMainWindow):
                 'gui_font_size': self._gui_font_size,  # 保存 GUI 字体大小
                 'pin_toolbar_row2': self._pin_toolbar_row2,  # 保存固定第二排工具栏
                 'window_opacity': self._window_opacity,  # 保存窗口透明度
-                'explorer_split_horizontal': getattr(self, '_explorer_split_horizontal', False),  # 保存左右分屏偏好
+                'explorer_split_horizontal': getattr(self, '_explorer_split_horizontal', True),  # 保存左右分屏偏好
                 'remote_split_horizontal': getattr(self, '_remote_split_horizontal', False),  # Remote 左右分屏偏好
                 'spring_mode_enabled': getattr(self, '_spring_mode_enabled', False),  # 保存弹簧模式偏好
                 'ai_completion_enabled': getattr(self, '_ai_completion_enabled', False),  # 保存 AI 行内补全开关
