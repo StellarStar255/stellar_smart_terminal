@@ -207,6 +207,7 @@ class UpdateDownloader(QThread):
 
     def run(self):
         workdir = None
+        keep = False  # 只有成功发出 finished_ok 时保留（安装步骤要用里面的文件）
         try:
             workdir = tempfile.mkdtemp(prefix='stellar_update_')
             # Windows 安装包 / Linux deb 本身就是安装载体，落盘即用；
@@ -236,6 +237,7 @@ class UpdateDownloader(QThread):
                 return
             if is_installer:
                 # Windows：Inno 安装包本身就是安装载体，无需解包
+                keep = True
                 self.finished_ok.emit(dl_path)
                 return
             # macOS zip：zipfile 会丢符号链接/可执行位，必须用 ditto
@@ -251,6 +253,7 @@ class UpdateDownloader(QThread):
                 raise RuntimeError("no .app found in downloaded zip")
             if self._cancelled:
                 return
+            keep = True
             self.finished_ok.emit(str(apps[0]))
         except Exception as e:
             if self._cancelled:
@@ -258,7 +261,8 @@ class UpdateDownloader(QThread):
             logger.exception("update download failed")
             self.error.emit(str(e))
         finally:
-            if self._cancelled and workdir:
+            # 取消或失败都清掉临时目录，否则半截的下载包（可上百 MB）会留在 /tmp
+            if workdir and not keep:
                 import shutil
                 shutil.rmtree(workdir, ignore_errors=True)
 

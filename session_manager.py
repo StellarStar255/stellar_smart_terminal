@@ -150,6 +150,10 @@ class SessionManager:
             max_workers=1, thread_name_prefix='session-save')
         self._pending_save: Optional[Future] = None
         self._last_saved_sig: Optional[tuple] = None
+        # list_sessions 摘要缓存：文件名 -> ((mtime_ns, size), summary)。
+        # 会话文件单个可达 10MB，摘要只需 5 个字段；不缓存的话每次打开
+        # 历史对话框都要整文件 json.load 一遍所有会话。
+        self._summary_cache: Dict[str, tuple] = {}
 
     @staticmethod
     def _session_signature(session: Session) -> tuple:
@@ -290,22 +294,40 @@ class SessionManager:
             return None
 
     def list_sessions(self) -> List[Dict[str, Any]]:
-        """列出所有会话（摘要信息）"""
+        """列出所有会话（摘要信息）；按 (mtime, size) 缓存，未变的文件不重新解析"""
         sessions = []
+        seen = set()
         for file_path in sorted(self.sessions_dir.glob("*.json"), reverse=True):
+            name = file_path.name
+            try:
+                st = file_path.stat()
+            except OSError:
+                continue
+            seen.add(name)
+            stamp = (st.st_mtime_ns, st.st_size)
+            cached = self._summary_cache.get(name)
+            if cached is not None and cached[0] == stamp:
+                sessions.append(dict(cached[1]))
+                continue
             try:
                 with open(file_path, 'r', encoding='utf-8') as f:
                     data = json.load(f)
-                sessions.append({
+                summary = {
                     'session_id': data['session_id'],
                     'start_time': data['start_time'],
                     'end_time': data.get('end_time', 'N/A'),
                     'command': data['command'],
                     'working_directory': data.get('working_directory', ''),
                     'entry_count': len(data.get('entries', []))
-                })
+                }
             except (json.JSONDecodeError, KeyError):
                 continue
+            self._summary_cache[name] = (stamp, summary)
+            sessions.append(dict(summary))
+        # 文件已删除的缓存条目一并清掉
+        for name in list(self._summary_cache):
+            if name not in seen:
+                del self._summary_cache[name]
         return sessions
 
     def delete_session(self, session_id: str) -> bool:

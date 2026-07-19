@@ -436,20 +436,24 @@ class Exporter:
         return result
 
     def _merge_messages(self, messages: list) -> list:
-        """合并连续的相同角色消息"""
-        import copy
+        """合并连续的相同角色消息
+
+        messages 是 _export_json 每次导出临时新建的 dict/list，仅本方法
+        消费，直接原地合并即可，不需要 deepcopy（多模态含 base64 图片时
+        深拷贝一条就是整张图的内存复制）。
+        """
         if not messages:
             return messages
 
         merged = []
         for msg in messages:
             if not merged:
-                merged.append(copy.deepcopy(msg))
+                merged.append(msg)
                 continue
 
             last = merged[-1]
             if last["role"] != msg["role"]:
-                merged.append(copy.deepcopy(msg))
+                merged.append(msg)
                 continue
 
             # 相同角色，需要合并
@@ -462,13 +466,13 @@ class Exporter:
                 last["content"] = last_content + "\n" + curr_content
             elif isinstance(last_content, list) and isinstance(curr_content, list):
                 # 两个都是多模态
-                last["content"].extend(copy.deepcopy(curr_content))
+                last_content.extend(curr_content)
             elif isinstance(last_content, str) and isinstance(curr_content, list):
                 # 上一个是文本，当前是多模态
-                last["content"] = [{"type": "text", "text": last_content}] + copy.deepcopy(curr_content)
+                last["content"] = [{"type": "text", "text": last_content}] + curr_content
             elif isinstance(last_content, list) and isinstance(curr_content, str):
                 # 上一个是多模态，当前是文本
-                last["content"].append({"type": "text", "text": curr_content})
+                last_content.append({"type": "text", "text": curr_content})
 
         return merged
 

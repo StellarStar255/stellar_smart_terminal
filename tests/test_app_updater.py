@@ -327,5 +327,75 @@ class TestLocalProxyFallback(unittest.TestCase):
         self.assertIsNone(app_updater._detect_local_proxy())
 
 
+class TestDownloadWorkdirCleanup(unittest.TestCase):
+    """下载临时目录的生命周期：失败/取消清理，成功保留给安装步骤"""
+
+    @classmethod
+    def setUpClass(cls):
+        # 必须用 QApplication 而不是 QCoreApplication：Qt 应用单例全进程唯一，
+        # 同进程后续 GUI 测试会复用它，QCoreApplication 会让它们在
+        # QApplication 专属 API 上直接 abort
+        os.environ.setdefault('QT_QPA_PLATFORM', 'offscreen')
+        from PyQt6.QtWidgets import QApplication
+        cls.app = QApplication.instance() or QApplication([])
+
+    def _tracking_mkdtemp(self, created):
+        real_mkdtemp = app_updater.tempfile.mkdtemp
+
+        def wrapper(*a, **kw):
+            d = real_mkdtemp(*a, **kw)
+            created['dir'] = d
+            return d
+        return wrapper
+
+    def test_failed_download_cleans_workdir(self):
+        from unittest import mock
+        created = {}
+        errors = []
+        dl = app_updater.UpdateDownloader('https://example.invalid/pkg.zip')
+        dl.error.connect(errors.append)
+        with mock.patch.object(app_updater.tempfile, 'mkdtemp',
+                               self._tracking_mkdtemp(created)), \
+             mock.patch.object(app_updater, '_urlopen',
+                               side_effect=OSError('boom')):
+            dl.run()
+        self.assertTrue(errors)
+        self.assertIn('dir', created)
+        self.assertFalse(os.path.exists(created['dir']))
+
+    def test_success_keeps_workdir_for_install(self):
+        import shutil
+        from unittest import mock
+
+        class _FakeResp:
+            headers = {}
+            _chunks = [b'payload']
+
+            def __enter__(self):
+                return self
+
+            def __exit__(self, *a):
+                return False
+
+            def read(self, _n):
+                return self._chunks.pop() if self._chunks else b''
+
+        created = {}
+        results = []
+        # .exe 走安装包分支：不解包直接 finished_ok
+        dl = app_updater.UpdateDownloader('https://example.invalid/setup.exe')
+        dl.finished_ok.connect(results.append)
+        with mock.patch.object(app_updater.tempfile, 'mkdtemp',
+                               self._tracking_mkdtemp(created)), \
+             mock.patch.object(app_updater, '_urlopen',
+                               return_value=_FakeResp()):
+            dl.run()
+        try:
+            self.assertTrue(results)
+            self.assertTrue(os.path.exists(results[0]))
+        finally:
+            shutil.rmtree(created['dir'], ignore_errors=True)
+
+
 if __name__ == "__main__":
     unittest.main()

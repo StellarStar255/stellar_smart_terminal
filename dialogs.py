@@ -1116,8 +1116,8 @@ class LLMConfigDialog(QDialog):
                 if c.get('_id') == default_config_id:
                     self.default_index = i
                     break
-        # 更新列表显示
-        self._populate_list()
+        # 就地刷新标签即可；clear+重建会闪烁且把选中重置到第 0 行
+        self._refresh_list_labels()
 
     def accept(self):
         """重写 accept 方法，确保当前编辑在关闭前被保存"""
@@ -1254,17 +1254,30 @@ class DirectoryHistoryDialog(QDialog):
             }
         """)
 
+    @staticmethod
+    def _make_dir_item(dir_path):
+        # 显示目录名和完整路径
+        dir_name = os.path.basename(dir_path) or dir_path
+        item = QListWidgetItem(f"📁 {dir_name}")
+        item.setToolTip(dir_path)
+        item.setData(Qt.ItemDataRole.UserRole, dir_path)
+        return item
+
     def _populate_list(self):
         self.dir_list.clear()
         for dir_path in self.directories:
-            # 显示目录名和完整路径
-            dir_name = os.path.basename(dir_path) or dir_path
-            item = QListWidgetItem(f"📁 {dir_name}")
-            item.setToolTip(dir_path)
-            item.setData(Qt.ItemDataRole.UserRole, dir_path)
-            self.dir_list.addItem(item)
+            self.dir_list.addItem(self._make_dir_item(dir_path))
         if self.directories:
             self.dir_list.setCurrentRow(0)
+
+    def _sync_row(self, row):
+        """把第 row 行的显示同步为 self.directories[row]（就地，不重建列表）"""
+        dir_path = self.directories[row]
+        item = self.dir_list.item(row)
+        dir_name = os.path.basename(dir_path) or dir_path
+        item.setText(f"📁 {dir_name}")
+        item.setToolTip(dir_path)
+        item.setData(Qt.ItemDataRole.UserRole, dir_path)
 
     def _on_selection_changed(self, row):
         self._update_buttons()
@@ -1295,9 +1308,9 @@ class DirectoryHistoryDialog(QDialog):
                         break
                 return
 
-            # 添加到列表开头
+            # 添加到列表开头（就地插入，不重建）
             self.directories.insert(0, dir_path)
-            self._populate_list()
+            self.dir_list.insertItem(0, self._make_dir_item(dir_path))
             self.dir_list.setCurrentRow(0)
 
     def _delete_directory(self):
@@ -1321,19 +1334,21 @@ class DirectoryHistoryDialog(QDialog):
     def _move_up(self):
         row = self.dir_list.currentRow()
         if row > 0:
-            # 交换位置
+            # 交换位置（就地同步两行显示，不重建列表）
             self.directories[row], self.directories[row - 1] = \
                 self.directories[row - 1], self.directories[row]
-            self._populate_list()
+            self._sync_row(row)
+            self._sync_row(row - 1)
             self.dir_list.setCurrentRow(row - 1)
 
     def _move_down(self):
         row = self.dir_list.currentRow()
         if row < len(self.directories) - 1:
-            # 交换位置
+            # 交换位置（就地同步两行显示，不重建列表）
             self.directories[row], self.directories[row + 1] = \
                 self.directories[row + 1], self.directories[row]
-            self._populate_list()
+            self._sync_row(row)
+            self._sync_row(row + 1)
             self.dir_list.setCurrentRow(row + 1)
 
     def get_directories(self):

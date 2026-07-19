@@ -7,13 +7,38 @@ from PyQt6.QtWidgets import (
     QTableWidgetItem, QPushButton, QLabel, QMessageBox,
     QHeaderView, QTextEdit, QSplitter, QWidget, QComboBox, QSizePolicy
 )
-from PyQt6.QtCore import Qt
+from PyQt6.QtCore import Qt, QThread, pyqtSignal
 from PyQt6.QtGui import QFont, QColor
 
 from session_manager import SessionManager, Session
 from exporter import export_session
 from utils import strip_ansi
 from i18n import t
+
+
+# 正在运行的列表加载线程的强引用：对话框中途关闭时 worker 可能仍在跑，
+# 只靠对话框成员引用会被 GC 连带销毁运行中的 QThread（崩溃）
+_ACTIVE_LIST_WORKERS = set()
+
+
+class _SessionListWorker(QThread):
+    """后台加载会话摘要列表。
+
+    list_sessions 首次要整文件解析所有会话（单个可达 10MB），
+    放 GUI 线程会让历史对话框打开时明显卡顿。
+    """
+    loaded = pyqtSignal(list)
+
+    def __init__(self, manager: SessionManager):
+        super().__init__()
+        self._manager = manager
+
+    def run(self):
+        try:
+            sessions = self._manager.list_sessions()
+        except Exception:
+            sessions = []
+        self.loaded.emit(sessions)
 
 
 class HistoryDialog(QDialog):
@@ -23,6 +48,8 @@ class HistoryDialog(QDialog):
         super().__init__(parent)
         self.session_manager = session_manager
         self.current_session: Session = None
+        self._list_worker = None
+        self._reload_pending = False
 
         self._setup_ui()
         self._load_sessions()
@@ -189,22 +216,50 @@ class HistoryDialog(QDialog):
         layout.addLayout(close_layout)
 
     def _load_sessions(self):
-        """加载会话列表"""
-        self.table.setRowCount(0)
-        sessions = self.session_manager.list_sessions()
+        """加载会话列表（后台线程读盘，完成后回 GUI 线程填表）"""
+        if self._list_worker is not None:
+            self._reload_pending = True
+            return
+        worker = _SessionListWorker(self.session_manager)
+        self._list_worker = worker
+        _ACTIVE_LIST_WORKERS.add(worker)
+        worker.loaded.connect(self._on_sessions_loaded)
+        worker.finished.connect(
+            lambda w=worker: (_ACTIVE_LIST_WORKERS.discard(w), w.deleteLater()))
+        worker.start()
 
-        for session in sessions:
-            row = self.table.rowCount()
-            self.table.insertRow(row)
+    def _on_sessions_loaded(self, sessions):
+        self._list_worker = None
+        if self._reload_pending:
+            # 加载期间又有删除/刷新请求，用新数据再跑一轮
+            self._reload_pending = False
+            self._load_sessions()
+        # 记住当前选中的会话，重建后恢复
+        selected_id = None
+        row = self.table.currentRow()
+        if row >= 0 and self.table.item(row, 0):
+            selected_id = self.table.item(row, 0).text()
 
-            self.table.setItem(row, 0, QTableWidgetItem(session['session_id']))
-            self.table.setItem(row, 1, QTableWidgetItem(session['command']))
-            src = session.get('working_directory', '') or t("history.source_unknown")
-            src_item = QTableWidgetItem(src)
-            src_item.setToolTip(src)  # 路径较长时悬停看全
-            self.table.setItem(row, 2, src_item)
-            self.table.setItem(row, 3, QTableWidgetItem(session['start_time']))
-            self.table.setItem(row, 4, QTableWidgetItem(str(session['entry_count'])))
+        self.table.setUpdatesEnabled(False)
+        try:
+            self.table.setRowCount(0)
+            self.table.setRowCount(len(sessions))
+            restore_row = -1
+            for row, session in enumerate(sessions):
+                self.table.setItem(row, 0, QTableWidgetItem(session['session_id']))
+                self.table.setItem(row, 1, QTableWidgetItem(session['command']))
+                src = session.get('working_directory', '') or t("history.source_unknown")
+                src_item = QTableWidgetItem(src)
+                src_item.setToolTip(src)  # 路径较长时悬停看全
+                self.table.setItem(row, 2, src_item)
+                self.table.setItem(row, 3, QTableWidgetItem(session['start_time']))
+                self.table.setItem(row, 4, QTableWidgetItem(str(session['entry_count'])))
+                if session['session_id'] == selected_id:
+                    restore_row = row
+            if restore_row >= 0:
+                self.table.selectRow(restore_row)
+        finally:
+            self.table.setUpdatesEnabled(True)
 
     def _on_selection_changed(self):
         """选择变化"""

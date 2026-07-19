@@ -12,6 +12,7 @@ import pytest
 
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
+import session_manager as sm_mod
 from session_manager import SessionEntry, SessionManager
 
 
@@ -178,3 +179,53 @@ class TestAutoSave:
     def test_auto_save_without_session_is_noop(self, manager):
         manager.auto_save()
         assert manager._pending_save is None
+
+
+class TestListSessionsCache:
+    """list_sessions 摘要缓存：未变的会话文件不重新整份解析"""
+
+    @staticmethod
+    def _write_session(manager, sid, command='claude'):
+        data = {
+            'session_id': sid,
+            'start_time': 't0',
+            'command': command,
+            'entries': [{'type': 'input', 'content': 'x', 'timestamp': 't'}],
+        }
+        path = manager.sessions_dir / f"{sid}.json"
+        path.write_text(json.dumps(data), encoding='utf-8')
+        return path
+
+    def test_unchanged_files_not_reparsed(self, manager, monkeypatch):
+        self._write_session(manager, 's1')
+        self._write_session(manager, 's2')
+        first = manager.list_sessions()
+        assert {s['session_id'] for s in first} == {'s1', 's2'}
+
+        calls = []
+        real_load = json.load
+        monkeypatch.setattr(sm_mod.json, 'load',
+                            lambda f: (calls.append(1), real_load(f))[1])
+        second = manager.list_sessions()
+        assert second == first
+        assert calls == []  # 全部命中缓存，零次解析
+
+    def test_modified_file_reparsed(self, manager):
+        self._write_session(manager, 's1', command='old')
+        assert manager.list_sessions()[0]['command'] == 'old'
+        self._write_session(manager, 's1', command='newer-cmd')
+        assert manager.list_sessions()[0]['command'] == 'newer-cmd'
+
+    def test_deleted_file_pruned_from_cache(self, manager):
+        path = self._write_session(manager, 's1')
+        manager.list_sessions()
+        assert 's1.json' in manager._summary_cache
+        path.unlink()
+        assert manager.list_sessions() == []
+        assert 's1.json' not in manager._summary_cache
+
+    def test_returned_dict_mutation_does_not_pollute_cache(self, manager):
+        self._write_session(manager, 's1')
+        result = manager.list_sessions()
+        result[0]['command'] = 'hacked'
+        assert manager.list_sessions()[0]['command'] == 'claude'

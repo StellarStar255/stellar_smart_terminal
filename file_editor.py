@@ -1406,6 +1406,16 @@ class _SearchBar(QFrame):
         self.theme = theme or {}
         self._matches = []  # list[(start, end)]
         self._current = -1
+        # _matches 对应的全文快照；替换时从这里取命中文本，
+        # 避免每次替换再整份 toPlainText()
+        self._matched_text = ""
+        # 输入防抖：大文件下每敲一键就全文 finditer + 重建高亮太重。
+        # 必须连绑定方法而非 lambda：lambda 不随接收者销毁自动断开，
+        # 已排队的 timeout 会投递到删掉的对象上（崩溃）
+        self._debounce = QTimer(self)
+        self._debounce.setSingleShot(True)
+        self._debounce.setInterval(120)
+        self._debounce.timeout.connect(self._on_debounce_timeout)
 
         self.setFocusPolicy(Qt.FocusPolicy.NoFocus)
 
@@ -1651,12 +1661,22 @@ class _SearchBar(QFrame):
         self._update_matches(reset_current=False)
 
     def close_search(self):
+        self._debounce.stop()
         self.hide()
         self.editor.set_search_selections([])
         self.editor.setFocus()
 
     def _on_text_changed(self, _text):
+        self._debounce.start()
+
+    def _on_debounce_timeout(self):
         self._update_matches(reset_current=True)
+
+    def _flush_pending(self):
+        """有未生效的防抖更新时立即执行（Enter 跳转/替换前调用，保证结果不滞后）"""
+        if self._debounce.isActive():
+            self._debounce.stop()
+            self._update_matches(reset_current=True)
 
     def _build_pattern(self, query):
         if not query:
@@ -1676,8 +1696,10 @@ class _SearchBar(QFrame):
             return None
 
     def _update_matches(self, reset_current: bool):
+        self._debounce.stop()  # 显式更新后取消排队中的防抖触发
         query = self.input.text()
         text = self.editor.toPlainText()
+        self._matched_text = text
         pattern = self._build_pattern(query)
 
         self._matches = []
@@ -1709,19 +1731,33 @@ class _SearchBar(QFrame):
         self._update_count()
         self._update_input_validity(query, pattern)
 
+    # 高亮条数上限：每个高亮是一个 QTextCursor + ExtraSelection，
+    # 大文件搜 "e" 能命中上万，全建出来 GUI 直接冻住。超限时只高亮
+    # 当前命中前后一个窗口；计数标签仍显示全部命中数。
+    _MAX_HIGHLIGHTS = 500
+
     def _refresh_highlights(self):
         selections = []
         all_match_color = QColor(self.theme.get('search_match_bg', '#5a4a1a'))
         current_match_color = QColor(self.theme.get('search_current_bg', '#c89020'))
         text_color = QColor(self.theme.get('text', '#eaeaea'))
 
-        for i, (start, end) in enumerate(self._matches):
+        lo, hi = 0, len(self._matches)
+        if hi > self._MAX_HIGHLIGHTS:
+            center = self._current if self._current >= 0 else 0
+            lo = max(0, min(center - self._MAX_HIGHLIGHTS // 2,
+                            hi - self._MAX_HIGHLIGHTS))
+            hi = lo + self._MAX_HIGHLIGHTS
+
+        doc = self.editor.document()
+        for i in range(lo, hi):
+            start, end = self._matches[i]
             sel = QTextEdit.ExtraSelection()
             fmt = QTextCharFormat()
             fmt.setBackground(current_match_color if i == self._current else all_match_color)
             fmt.setForeground(text_color)
             sel.format = fmt
-            cur = QTextCursor(self.editor.document())
+            cur = QTextCursor(doc)
             cur.setPosition(start)
             cur.setPosition(end, QTextCursor.MoveMode.KeepAnchor)
             sel.cursor = cur
@@ -1742,6 +1778,7 @@ class _SearchBar(QFrame):
         self.input.setFocus()
 
     def _goto_next(self):
+        self._flush_pending()
         if not self._matches:
             return
         self._current = (self._current + 1) % len(self._matches)
@@ -1750,6 +1787,7 @@ class _SearchBar(QFrame):
         self._update_count()
 
     def _goto_prev(self):
+        self._flush_pending()
         if not self._matches:
             return
         self._current = (self._current - 1) % len(self._matches)
@@ -1772,12 +1810,13 @@ class _SearchBar(QFrame):
 
     def _replace_one(self):
         """替换当前命中，再跳到下一个；无命中时仅触发一次匹配"""
+        self._flush_pending()
         if not self._matches or self._current < 0:
             self._update_matches(reset_current=True)
             return
         start, end = self._matches[self._current]
         doc = self.editor.document()
-        match_text = self.editor.toPlainText()[start:end]
+        match_text = self._matched_text[start:end]
         new_text = self._expand_replacement(self.replace_input.text(), match_text)
 
         edit_cursor = QTextCursor(doc)
@@ -1799,10 +1838,11 @@ class _SearchBar(QFrame):
         self.replace_input.setFocus()
 
     def _replace_all(self):
+        self._flush_pending()
         if not self._matches:
             return
         doc = self.editor.document()
-        full_text = self.editor.toPlainText()
+        full_text = self._matched_text
         replacement = self.replace_input.text()
 
         edit_cursor = QTextCursor(doc)
