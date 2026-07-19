@@ -2137,6 +2137,10 @@ class MainWindow(QMainWindow):
 
     def _add_to_dir_history(self, dir_path: str):
         """添加目录到历史记录（按使用频率排序）"""
+        # 用户显式选用的路径 → 解除拉黑；readded 标记让保存时把磁盘黑名单
+        # 里的这条也一并清除（否则并集时会被磁盘版本重新拉黑）
+        self._dir_history_removed.discard(dir_path)
+        self._dir_history_readded.add(dir_path)
         # 增加使用次数
         self._working_dir_freq[dir_path] = self._working_dir_freq.get(dir_path, 0) + 1
         # 确保在列表中
@@ -3231,10 +3235,19 @@ class MainWindow(QMainWindow):
             if config:
                 saved_history = config.get('working_dir_history', [])
                 saved_freq = config.get('working_dir_freq', {})
+                # 同步其它窗口的显式删除：黑名单与磁盘取并集，剔除本窗口
+                # 显式选回的路径，合并结果里不得出现黑名单路径
+                disk_removed = set(config.get('working_dir_removed', []) or [])
+                self._dir_history_removed = (
+                    (self._dir_history_removed | disk_removed)
+                    - self._dir_history_readded)
                 # 合并：以文件中的数据为基础，同时保留本窗口新增但尚未保存的条目
-                merged_history = list(saved_history)
+                merged_history = [p for p in saved_history
+                                  if p not in self._dir_history_removed]
                 merged_freq = dict(saved_freq)
                 for p in self.working_dir_history:
+                    if p in self._dir_history_removed:
+                        continue
                     if p not in merged_freq:
                         merged_freq[p] = self._working_dir_freq.get(p, 1)
                     if p not in merged_history:
@@ -3568,12 +3581,12 @@ class MainWindow(QMainWindow):
         dialog = DirectoryHistoryDialog(self.working_dir_history, self)
         if dialog.exec() == QDialog.DialogCode.Accepted:
             new_dirs = dialog.get_directories()
-            # 记录被显式删除的路径：保存时会与磁盘做并集，必须把这些路径剔除，
-            # 否则它们会被磁盘上的旧版本（或其它窗口）复活
+            # 记录被显式删除的路径：进持久黑名单，保存时从磁盘并集中剔除，
+            # 启动时也不再被 cwd 自动加入复活（如 Linux 桌面启动 cwd=$HOME）
             removed = set(self.working_dir_history) - set(new_dirs)
             if removed:
-                pending = getattr(self, '_dir_history_pending_removals', None) or set()
-                self._dir_history_pending_removals = pending | removed
+                self._dir_history_removed |= removed
+                self._dir_history_readded -= removed
             # 更新目录历史
             self.working_dir_history = new_dirs
             # 同步更新下拉框
@@ -8859,7 +8872,8 @@ class MainWindow(QMainWindow):
         self._mouse_click_forward_enabled = False
         self.working_dir_history = []  # 工作目录历史
         self._working_dir_freq = {}  # 工作目录使用频率 {path: count}
-        self._dir_history_pending_removals = set()  # 用户显式删除、待从共享配置剔除的路径
+        self._dir_history_removed = set()  # 用户显式删除的路径黑名单（随配置持久化，防止启动 cwd 自动加入/多窗口合并把它复活）
+        self._dir_history_readded = set()  # 拉黑后又被用户显式选回的路径（保存时据此解除拉黑）
         self.last_working_dir = None  # 上次使用的工作目录
         self.toolbar_config = None  # 工具栏配置
         self.llm_configs = []  # LLM API 配置列表
@@ -8903,6 +8917,12 @@ class MainWindow(QMainWindow):
                 self.used_label_names = config.get('used_label_names', [])
                 self.working_dir_history = config.get('working_dir_history', [])
                 self._working_dir_freq = config.get('working_dir_freq', {})
+                # 用户显式删除的路径黑名单：过滤掉被其它窗口写回的黑名单路径
+                self._dir_history_removed = set(config.get('working_dir_removed', []) or [])
+                if self._dir_history_removed:
+                    self.working_dir_history = [
+                        p for p in self.working_dir_history
+                        if p not in self._dir_history_removed]
                 # 兼容旧配置：为没有频率记录的历史路径补默认值
                 for p in self.working_dir_history:
                     if p not in self._working_dir_freq:
@@ -9027,10 +9047,12 @@ class MainWindow(QMainWindow):
         if stale_roots:
             self.working_dir_history = [
                 p for p in self.working_dir_history if p not in stale_roots]
-            # 借用显式删除通道：下次保存与磁盘并集时把根目录从共享配置剔除
-            self._dir_history_pending_removals |= stale_roots
+            # 记入持久黑名单：下次保存与磁盘并集时把根目录从共享配置剔除
+            self._dir_history_removed |= stale_roots
+        # 用户显式删除过的路径同理不自动加回——Linux 从桌面/启动器启动时
+        # cwd 是 $HOME（如 /home/zy），不挡这一步删掉的家目录每次启动都会复活。
         current_dir = os.getcwd()
-        if not _is_fs_root(current_dir):
+        if not _is_fs_root(current_dir) and current_dir not in self._dir_history_removed:
             if current_dir not in self.working_dir_history:
                 self.working_dir_history.append(current_dir)
             if current_dir not in self._working_dir_freq:
@@ -9097,15 +9119,21 @@ class MainWindow(QMainWindow):
         其它窗口新增的路径就会被冲掉 —— 表现为"只有最后退出的窗口的路径被
         保存"。这里在写入前先与磁盘做并集，确保任意窗口新增的路径都不丢。
 
-        删除处理：用户在"管理路径"对话框里显式删除的路径会先记到
-        self._dir_history_pending_removals，并集时主动剔除，否则会被磁盘版本复活。
+        删除处理：用户显式删除的路径记在持久黑名单 self._dir_history_removed
+        （落盘为 working_dir_removed），并集时主动剔除，否则会被磁盘版本或
+        启动时的 cwd 自动加入复活。黑名单与磁盘版本取并集（让删除跨窗口
+        生效），再减去本窗口显式选回的路径（_dir_history_readded）。
         """
         try:
             cfg = app_config.read_config()
             saved_history = cfg.get('working_dir_history', []) or []
             saved_freq = cfg.get('working_dir_freq', {}) or {}
 
-            removals = getattr(self, '_dir_history_pending_removals', None) or set()
+            mem_removed = getattr(self, '_dir_history_removed', None) or set()
+            disk_removed = set(cfg.get('working_dir_removed', []) or [])
+            readded = getattr(self, '_dir_history_readded', None) or set()
+            removals = (mem_removed | disk_removed) - readded
+            self._dir_history_removed = removals
             mem_history = self.working_dir_history if hasattr(self, 'working_dir_history') else []
             mem_freq = self._working_dir_freq if hasattr(self, '_working_dir_freq') else {}
 
@@ -9125,8 +9153,6 @@ class MainWindow(QMainWindow):
             merged_history.sort(key=lambda p: merged_freq.get(p, 0), reverse=True)
             self.working_dir_history = merged_history
             self._working_dir_freq = merged_freq
-            # 删除意图已在本次写盘中落实，清空待删除集合
-            self._dir_history_pending_removals = set()
         except Exception:
             # 合并失败不应阻断保存：保持内存中的历史原样写出
             pass
@@ -9198,6 +9224,7 @@ class MainWindow(QMainWindow):
                 'working_dir_history': dir_history,
                 'used_label_names': self._merged_label_names(existing_config),
                 'working_dir_freq': self._working_dir_freq if hasattr(self, '_working_dir_freq') else {},
+                'working_dir_removed': sorted(getattr(self, '_dir_history_removed', None) or set()),
                 'last_working_dir': last_cwd,
                 'theme': self.current_theme,  # 保存主题设置
                 'icon_tint': self._use_icon_tint,  # 保存图标蒙版设置
