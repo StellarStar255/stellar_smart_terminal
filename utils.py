@@ -64,12 +64,20 @@ def is_frozen() -> bool:
 def get_data_dir() -> Path:
     """用户数据目录（配置 / 会话 / 导出等的统一根目录）。
 
+    - 环境变量 STELLAR_DATA_DIR 优先：显式指定数据目录（测试隔离用——
+      测试会实例化 MainWindow 并在关闭时保存配置，没有隔离就会写真实
+      配置文件；也可用于便携安装）。
     - 源码运行：返回项目目录（Path(__file__).parent），与历史行为完全一致，
       现有用户数据仍在原位被找到。
     - 打包运行（frozen）：返回并创建平台标准的用户数据目录，避免把数据写进
       .app bundle 内部（/Applications 下无写权限，且 App Translocation 会
       让 bundle 路径每次启动都变化）。
     """
+    override = os.environ.get('STELLAR_DATA_DIR')
+    if override:
+        data_dir = Path(override)
+        data_dir.mkdir(parents=True, exist_ok=True)
+        return data_dir
     if not is_frozen():
         return Path(__file__).parent
     if sys.platform == 'darwin':

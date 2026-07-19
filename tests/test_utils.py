@@ -238,10 +238,28 @@ class TestCopyFilesToExport(unittest.TestCase):
 class TestDataDir(unittest.TestCase):
     """get_data_dir / get_config_path：源码模式路径不变 + frozen 模式落到平台数据目录"""
 
+    def setUp(self):
+        # conftest 为隔离全局设置了 STELLAR_DATA_DIR；本组验证的是无覆盖时
+        # 的源码/frozen 路径决策，需在各用例期间临时摘掉覆盖
+        patcher = mock.patch.dict(utils.os.environ)
+        patcher.start()
+        self.addCleanup(patcher.stop)
+        utils.os.environ.pop('STELLAR_DATA_DIR', None)
+
     def _fake_home(self) -> Path:
         tmp = Path(tempfile.mkdtemp(prefix="stellar_test_home_"))
         self.addCleanup(shutil.rmtree, tmp, ignore_errors=True)
         return tmp
+
+    def test_env_override_wins(self):
+        # STELLAR_DATA_DIR 覆盖一切模式，且目录自动创建（测试隔离/便携安装）
+        target = self._fake_home() / "custom_data"
+        with mock.patch.dict(utils.os.environ, {"STELLAR_DATA_DIR": str(target)}):
+            self.assertEqual(utils.get_data_dir(), target)
+            self.assertTrue(target.is_dir())
+            self.assertEqual(
+                utils.get_config_path(), target / ".smart_terminal_config.json"
+            )
 
     def test_source_mode_is_project_dir(self):
         # 源码运行：行为必须与历史一致 —— 数据目录就是项目目录
