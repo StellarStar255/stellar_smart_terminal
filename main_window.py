@@ -13,10 +13,8 @@ from datetime import datetime
 # macOS 原生窗口支持
 if sys.platform == 'darwin':
     try:
-        import objc
-        from ctypes import c_void_p
         from AppKit import (
-            NSApp, NSWindow,
+            NSApp,
             NSWindowCollectionBehaviorFullScreenPrimary,
             NSWindowCollectionBehaviorManaged,
             NSWindowCollectionBehaviorParticipatesInCycle
@@ -32,16 +30,14 @@ from PyQt6.QtWidgets import (
     QPushButton, QLabel, QToolBar, QStatusBar,
     QMessageBox, QFileDialog, QComboBox, QSplitter,
     QTextEdit, QFrame, QDialog, QLineEdit, QListWidget,
-    QListWidgetItem, QPlainTextEdit, QDialogButtonBox,
-    QFormLayout, QGroupBox, QCheckBox, QTabWidget, QTabBar,
-    QApplication, QInputDialog, QMenu, QStyledItemDelegate, QStyle,
-    QStyleOptionViewItem, QStyleOptionButton, QSpinBox, QSizePolicy,
+    QListWidgetItem, QCheckBox, QTabWidget, QTabBar,
+    QApplication, QInputDialog, QMenu, QSizePolicy,
     QStackedWidget, QProgressDialog
 )
 from PyQt6 import sip  # 用于检查 C++ 对象是否已被删除
-from PyQt6.QtCore import Qt, QTimer, QEvent, QPoint, QMimeData, pyqtSignal, QObject, QSize, QRectF, QVariantAnimation, QEasingCurve, QUrl
-from PyQt6.QtGui import QAction, QActionGroup, QIcon, QFont, QColor, QPixmap, QPainter, QPainterPath, QPen, QDrag, QCursor, QBrush, QPalette, QShortcut, QKeySequence, QDesktopServices
-from PyQt6.QtWidgets import QWidgetAction, QStylePainter, QStyleOptionComboBox
+from PyQt6.QtCore import Qt, QTimer, QEvent, QPoint, QObject, QSize, QVariantAnimation, QEasingCurve, QUrl
+from PyQt6.QtGui import QAction, QActionGroup, QIcon, QColor, QPixmap, QPainter, QCursor, QPalette, QShortcut, QKeySequence, QDesktopServices
+from PyQt6.QtWidgets import QWidgetAction
 
 from terminal_widget import TerminalWidget
 from session_manager import SessionManager
@@ -56,7 +52,7 @@ from explorer_widget import ExplorerPanel
 import explorer_favorites
 from toolbar_manager import ToolbarManagerDialog
 from command_palette import CommandPalette
-from file_editor import FileEditorWidget, EditorArea
+from file_editor import EditorArea
 from i18n import t, set_language, get_language
 from flow_layout import FlowLayout
 from utils import atomic_write_json, get_config_path, list_notify_sounds, play_notify_sound
@@ -68,13 +64,13 @@ import shutil
 import subprocess
 from widgets import (
     SelectAllLineEdit, QuietPopupComboBox, CenteredComboBox,
-    InlineRenameEdit, DetachableTabBar, DetachedWindow,
+    InlineRenameEdit, DetachableTabBar,
     _ToolbarCheckBox, _FlowSeparator, _NavResizeHandle,
     MultiKeywordCompleter,
 )
 from dialogs import (
     get_default_shell, PresetDialog, LLMConfigDialog,
-    DirectoryHistoryDialog, _ShortcutCaptureButton, ShortcutSettingsDialog,
+    DirectoryHistoryDialog, ShortcutSettingsDialog,
     ShortcutCheatSheetDialog,
 )
 
@@ -474,9 +470,9 @@ class MainWindow(QMainWindow):
                         for terminal in terminals:
                             # 每个终端延迟 20ms 启动，避免同时触发
                             # 使用闭包捕获终端引用，确保安全访问
-                            def resume_terminal_timers(t=terminal):
-                                if not sip.isdeleted(t):
-                                    t.resume_timers()
+                            def resume_terminal_timers(term=terminal):
+                                if not sip.isdeleted(term):
+                                    term.resume_timers()
                             QTimer.singleShot(delay, resume_terminal_timers)
                             delay += 20
                 # 更新所有导航面板（浮动 + 内嵌）的选中项
@@ -4686,9 +4682,6 @@ class MainWindow(QMainWindow):
         （macOS 上 startSystemMove() 因鼠标按下事件不在新窗口上而导致窗口漂移，
         故用 timer 轮询鼠标位置实现跟随。）
         """
-        from PyQt6.QtWidgets import QApplication
-        from PyQt6.QtGui import QCursor
-
         start_cursor = QCursor.pos()
         drag_state = getattr(new_window, '_detach_drag_state', None) or {'moved': False}
         base_pos = [0, 0]  # 转入相对拖拽时的窗口位置基准（frame 坐标）
@@ -4891,14 +4884,14 @@ class MainWindow(QMainWindow):
                     continue
                 worst = None
                 level = 0
-                for t in terminals:
+                for term in terminals:
                     try:
-                        lv = t.scrollback_level()
+                        lv = term.scrollback_level()
                     except Exception:
                         lv = 0
                     if lv > level:
                         level = lv
-                        worst = t
+                        worst = term
                 self.tab_widget.setTabIcon(idx, self._scrollback_dot_icon(level))
                 self.tab_widget.setTabToolTip(
                     idx, worst.scrollback_tooltip() if worst is not None else "")
@@ -8483,20 +8476,20 @@ class MainWindow(QMainWindow):
 
         # Explorer 切换按钮样式
         if hasattr(self, 'explorer_toggle_btn'):
-            self.explorer_toggle_btn.setStyleSheet(f"""
-                QPushButton {{
+            self.explorer_toggle_btn.setStyleSheet("""
+                QPushButton {
                     background-color: #22c55e;
                     color: white;
                     border: none;
                     border-radius: 4px;
                     padding: 8px 15px;
-                }}
-                QPushButton:hover {{
+                }
+                QPushButton:hover {
                     background-color: #4ade80;
-                }}
-                QPushButton:checked {{
+                }
+                QPushButton:checked {
                     background-color: #16a34a;
-                }}
+                }
             """)
 
         # Git 面板样式
@@ -8520,50 +8513,50 @@ class MainWindow(QMainWindow):
 
         # Git 切换按钮样式
         if hasattr(self, 'git_toggle_btn'):
-            self.git_toggle_btn.setStyleSheet(f"""
-                QPushButton {{
+            self.git_toggle_btn.setStyleSheet("""
+                QPushButton {
                     background-color: #f97316;
                     color: white;
                     border: none;
                     border-radius: 4px;
                     padding: 8px 15px;
-                }}
-                QPushButton:hover {{
+                }
+                QPushButton:hover {
                     background-color: #fb923c;
-                }}
-                QPushButton:checked {{
+                }
+                QPushButton:checked {
                     background-color: #ea580c;
-                }}
+                }
             """)
 
         # VS Code 打开按钮样式
         if hasattr(self, 'vscode_open_btn'):
-            self.vscode_open_btn.setStyleSheet(f"""
-                QPushButton {{
+            self.vscode_open_btn.setStyleSheet("""
+                QPushButton {
                     background-color: #007ACC;
                     color: white;
                     border: none;
                     border-radius: 4px;
                     padding: 8px 15px;
-                }}
-                QPushButton:hover {{
+                }
+                QPushButton:hover {
                     background-color: #1a8ad4;
-                }}
+                }
             """)
 
         # Cursor 打开按钮样式
         if hasattr(self, 'cursor_open_btn'):
-            self.cursor_open_btn.setStyleSheet(f"""
-                QPushButton {{
+            self.cursor_open_btn.setStyleSheet("""
+                QPushButton {
                     background-color: #7c3aed;
                     color: white;
                     border: none;
                     border-radius: 4px;
                     padding: 8px 15px;
-                }}
-                QPushButton:hover {{
+                }
+                QPushButton:hover {
                     background-color: #8b5cf6;
-                }}
+                }
             """)
 
         # 工具栏设置按钮样式
