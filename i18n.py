@@ -824,6 +824,7 @@ TRANSLATIONS = {
     "history.delete_success_msg": {"zh": "会话已删除", "en": "Session deleted"},
     "history.delete_failed_title": {"zh": "失败", "en": "Failed"},
     "history.delete_failed_msg": {"zh": "删除失败", "en": "Delete failed"},
+    "history.preview_loading": {"zh": "加载中...", "en": "Loading..."},
 
     # ===== 会话详情对话框 =====
     "session_detail.title": {"zh": "会话详情 - {id}", "en": "Session Details - {id}"},
@@ -836,6 +837,12 @@ TRANSLATIONS = {
     "session_detail.detected_files": {"zh": "检测到的文件: {n}", "en": "Detected Files: {n}"},
     "session_detail.files_label": {"zh": "文件: {files}", "en": "Files: {files}"},
     "session_detail.close": {"zh": "关闭", "en": "Close"},
+    "session_detail.entry_truncated": {
+        "zh": "...（本条超长，已省略 {n} 字符，完整内容请导出查看）",
+        "en": "...(entry too long, {n} chars omitted; export to see full content)"},
+    "session_detail.entries_omitted": {
+        "zh": "\n===== 内容过长，其余 {n} 条未显示，完整内容请导出查看 =====",
+        "en": "\n===== Content too long, {n} more entries not shown; export to see all ====="},
 
     # ===== 终端右键菜单 =====
     "ctx.copy": {"zh": "复制 (⌘C)", "en": "Copy (⌘C)"},

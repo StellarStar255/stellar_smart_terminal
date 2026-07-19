@@ -5,10 +5,10 @@
 from PyQt6.QtWidgets import (
     QDialog, QVBoxLayout, QHBoxLayout, QTableWidget,
     QTableWidgetItem, QPushButton, QLabel, QMessageBox,
-    QHeaderView, QTextEdit, QSplitter, QWidget, QComboBox, QSizePolicy
+    QHeaderView, QTextEdit, QSplitter, QWidget, QSizePolicy
 )
 from PyQt6.QtCore import Qt, QThread, pyqtSignal
-from PyQt6.QtGui import QFont, QColor
+from PyQt6.QtGui import QFont
 
 from session_manager import SessionManager, Session
 from exporter import export_session
@@ -16,9 +16,80 @@ from utils import strip_ansi
 from i18n import t
 
 
-# 正在运行的列表加载线程的强引用：对话框中途关闭时 worker 可能仍在跑，
+# 正在运行的后台加载线程的强引用：对话框中途关闭时 worker 可能仍在跑，
 # 只靠对话框成员引用会被 GC 连带销毁运行中的 QThread（崩溃）
-_ACTIVE_LIST_WORKERS = set()
+_ACTIVE_WORKERS = set()
+
+# 预览区每条内容的展示长度，以及 strip_ansi 的处理片段上限
+# （单条合并 output 可达 10MB，全量去 ANSI 只为了看前 200 字不值）
+_PREVIEW_SNIPPET_CHARS = 200
+_PREVIEW_STRIP_SLICE = 4096
+_PREVIEW_MAX_ENTRIES = 20
+
+# 详情对话框的截断上限：QTextEdit 塞多兆文本本身就会卡死界面，
+# 详情用于快速目检，完整内容走导出
+_DETAIL_ENTRY_CAP = 20_000
+_DETAIL_TOTAL_CAP = 500_000
+
+
+def _build_preview_text(session: Session) -> str:
+    """生成左侧预览文本（纯逻辑，供后台线程调用）"""
+    lines = [
+        t("history.session_id_label", id=session.session_id),
+        t("history.command_label", cmd=session.command),
+        t("history.working_dir_label", dir=session.working_directory),
+        t("history.start_time_label", time=session.start_time),
+        t("history.end_time_label", time=session.end_time or 'N/A'),
+        t("history.entry_count_label", n=len(session.entries)),
+        "",
+        "=" * 50,
+        ""
+    ]
+
+    for entry in session.entries[:_PREVIEW_MAX_ENTRIES]:
+        entry_type = "[INPUT]" if entry.type == 'input' else "[OUTPUT]"
+        raw = entry.content
+        content = strip_ansi(raw[:_PREVIEW_STRIP_SLICE])
+        if len(content) > _PREVIEW_SNIPPET_CHARS or len(raw) > _PREVIEW_STRIP_SLICE:
+            content = content[:_PREVIEW_SNIPPET_CHARS] + "..."
+
+        lines.append(f"{entry_type} {entry.timestamp}")
+        lines.append(content)
+        lines.append("")
+
+    if len(session.entries) > _PREVIEW_MAX_ENTRIES:
+        lines.append(t("history.more_entries",
+                       n=len(session.entries) - _PREVIEW_MAX_ENTRIES))
+    return '\n'.join(lines)
+
+
+def _build_detail_text(session: Session) -> str:
+    """生成详情对话框正文，带单条/总量截断（纯逻辑，可单测）"""
+    lines = []
+    total = 0
+    for i, entry in enumerate(session.entries):
+        entry_type = "═══ INPUT ═══" if entry.type == 'input' else "─── OUTPUT ───"
+        raw = entry.content
+        omitted = len(raw) - _DETAIL_ENTRY_CAP
+        if omitted > 0:
+            content = (strip_ansi(raw[:_DETAIL_ENTRY_CAP]) + '\n'
+                       + t("session_detail.entry_truncated", n=omitted))
+        else:
+            content = strip_ansi(raw)
+
+        lines.append(f"\n{entry_type} [{i + 1}] {entry.timestamp}")
+        lines.append(content)
+
+        if entry.files:
+            lines.append("\n📎 " + t("session_detail.files_label",
+                                     files=', '.join(entry.files)))
+
+        total += len(content)
+        if total >= _DETAIL_TOTAL_CAP and i + 1 < len(session.entries):
+            lines.append(t("session_detail.entries_omitted",
+                           n=len(session.entries) - i - 1))
+            break
+    return '\n'.join(lines)
 
 
 class _SessionListWorker(QThread):
@@ -39,6 +110,24 @@ class _SessionListWorker(QThread):
         except Exception:
             sessions = []
         self.loaded.emit(sessions)
+
+
+class _SessionPreviewWorker(QThread):
+    """后台加载单个会话并生成预览文本（点选表格行触发，整文件解析可达 10MB）"""
+    loaded = pyqtSignal(str, object, str)  # (session_id, Session|None, preview_text)
+
+    def __init__(self, manager: SessionManager, session_id: str):
+        super().__init__()
+        self._manager = manager
+        self._session_id = session_id
+
+    def run(self):
+        try:
+            session = self._manager.load_session(self._session_id)
+            text = _build_preview_text(session) if session else ""
+        except Exception:
+            session, text = None, ""
+        self.loaded.emit(self._session_id, session, text)
 
 
 class HistoryDialog(QDialog):
@@ -222,10 +311,10 @@ class HistoryDialog(QDialog):
             return
         worker = _SessionListWorker(self.session_manager)
         self._list_worker = worker
-        _ACTIVE_LIST_WORKERS.add(worker)
+        _ACTIVE_WORKERS.add(worker)
         worker.loaded.connect(self._on_sessions_loaded)
         worker.finished.connect(
-            lambda w=worker: (_ACTIVE_LIST_WORKERS.discard(w), w.deleteLater()))
+            lambda w=worker: (_ACTIVE_WORKERS.discard(w), w.deleteLater()))
         worker.start()
 
     def _on_sessions_loaded(self, sessions):
@@ -266,9 +355,12 @@ class HistoryDialog(QDialog):
         selected = self.table.selectedItems()
         has_selection = len(selected) > 0
 
-        self.view_btn.setEnabled(has_selection)
-        self.export_btn.setEnabled(has_selection)
         self.delete_btn.setEnabled(has_selection)
+        # 会话对象在后台加载，加载完成前查看/导出不可用
+        # （否则点得快会拿到上一个会话的对象）
+        self.view_btn.setEnabled(False)
+        self.export_btn.setEnabled(False)
+        self.current_session = None
 
         if has_selection:
             row = self.table.currentRow()
@@ -276,41 +368,28 @@ class HistoryDialog(QDialog):
             self._preview_session(session_id)
 
     def _preview_session(self, session_id: str):
-        """预览会话"""
-        session = self.session_manager.load_session(session_id)
-        if not session:
+        """预览会话：后台线程整文件解析 + 生成文本，完成后回填"""
+        self.preview.setPlainText(t("history.preview_loading"))
+        worker = _SessionPreviewWorker(self.session_manager, session_id)
+        _ACTIVE_WORKERS.add(worker)
+        worker.loaded.connect(self._on_preview_loaded)
+        worker.finished.connect(
+            lambda w=worker: (_ACTIVE_WORKERS.discard(w), w.deleteLater()))
+        worker.start()
+
+    def _on_preview_loaded(self, session_id: str, session, text: str):
+        # 到达时选中已经变了 → 丢弃过期结果（快速换行选择时 latest-wins）
+        row = self.table.currentRow()
+        item = self.table.item(row, 0) if row >= 0 else None
+        if item is None or item.text() != session_id:
             return
-
+        if session is None:
+            self.preview.setPlainText("")
+            return
         self.current_session = session
-
-        # 生成预览文本
-        lines = [
-            t("history.session_id_label", id=session.session_id),
-            t("history.command_label", cmd=session.command),
-            t("history.working_dir_label", dir=session.working_directory),
-            t("history.start_time_label", time=session.start_time),
-            t("history.end_time_label", time=session.end_time or 'N/A'),
-            t("history.entry_count_label", n=len(session.entries)),
-            "",
-            "=" * 50,
-            ""
-        ]
-
-        # 显示前几个条目
-        for i, entry in enumerate(session.entries[:20]):
-            entry_type = "[INPUT]" if entry.type == 'input' else "[OUTPUT]"
-            content = strip_ansi(entry.content)
-            if len(content) > 200:
-                content = content[:200] + "..."
-
-            lines.append(f"{entry_type} {entry.timestamp}")
-            lines.append(content)
-            lines.append("")
-
-        if len(session.entries) > 20:
-            lines.append(t("history.more_entries", n=len(session.entries) - 20))
-
-        self.preview.setText('\n'.join(lines))
+        self.preview.setPlainText(text)
+        self.view_btn.setEnabled(True)
+        self.export_btn.setEnabled(True)
 
     def _view_session(self):
         """查看会话详情"""
@@ -432,23 +511,10 @@ class SessionDetailDialog(QDialog):
         info_label.setStyleSheet("background-color: #16213e; padding: 15px; border-radius: 5px;")
         layout.addWidget(info_label)
 
-        # 内容
+        # 内容（单条/总量截断，超长会话完整内容走导出）
         self.content = QTextEdit()
         self.content.setReadOnly(True)
-
-        # 生成内容
-        lines = []
-        for i, entry in enumerate(session.entries):
-            entry_type = "═══ INPUT ═══" if entry.type == 'input' else "─── OUTPUT ───"
-            content = strip_ansi(entry.content)
-
-            lines.append(f"\n{entry_type} [{i + 1}] {entry.timestamp}")
-            lines.append(content)
-
-            if entry.files:
-                lines.append("\n📎 " + t("session_detail.files_label", files=', '.join(entry.files)))
-
-        self.content.setText('\n'.join(lines))
+        self.content.setPlainText(_build_detail_text(session))
         layout.addWidget(self.content)
 
         # 关闭按钮
