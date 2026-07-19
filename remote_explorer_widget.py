@@ -14,7 +14,6 @@ import posixpath
 import tempfile
 import time
 from collections import deque
-from pathlib import Path
 from typing import Optional
 
 from PyQt6.QtWidgets import (
@@ -1499,7 +1498,8 @@ class RemoteExplorerPanel(QWidget):
         self._pending_password_request = result_holder
         try:
             self._password_prompt_signal.emit(label)
-        except Exception:
+        except Exception as e:
+            logger.warning(f"[RemoteExplorerPanel] password prompt emit failed: {e}")
             return None
         # 不能在工作线程里 processEvents（会和主线程冲突），单纯轮询就行
         while not result_holder['done']:
@@ -1582,8 +1582,8 @@ class RemoteExplorerPanel(QWidget):
         if self._session is not None:
             try:
                 self._session.disconnect()
-            except Exception:
-                pass
+            except Exception as e:
+                logger.debug(f"[RemoteExplorerPanel] disconnect failed: {e}")
             self._session = None
         self._auto_refresh_timer.stop()
         self._auto_refresh_fingerprints.clear()
@@ -3073,8 +3073,9 @@ class RemoteExplorerPanel(QWidget):
         fut = sess.submit(sess.mkdir, remote_dir)
         try:
             fut.result()
-        except Exception:
-            pass  # 可能已存在，忽略
+        except Exception as e:
+            # 可能已存在，忽略；真实权限问题会在后续上传时显式报错
+            logger.debug(f"[RemoteExplorerPanel] mkdir {remote_dir} failed: {e}")
         futures = []
         sizes = []  # 与 futures 对齐：upload 记文件字节数，mkdir 记 0
         # 单 worker 线程串行执行 → 所有文件共用一个 live 字节计数即可，
@@ -3141,8 +3142,10 @@ class RemoteExplorerPanel(QWidget):
             try:
                 import shutil as _shutil
                 _shutil.rmtree(tmp_root, ignore_errors=True)
-            except Exception:
-                pass
+                if os.path.exists(tmp_root):
+                    logger.warning(f"[RemoteExplorerPanel] temp dir not fully removed: {tmp_root}")
+            except Exception as e:
+                logger.warning(f"[RemoteExplorerPanel] temp dir cleanup failed: {tmp_root}: {e}")
 
     def _download_remote_recursive(self, sess: SSHSession, remote_path: str, local_path: str):
         """通过 src session 把远程文件 / 目录递归下载到 local_path（阻塞）"""
@@ -3199,8 +3202,8 @@ class RemoteExplorerPanel(QWidget):
                     if s is not None:
                         try:
                             s.abort()
-                        except Exception:
-                            pass
+                        except Exception as e:
+                            logger.debug(f"[RemoteExplorerPanel] session abort failed: {e}")
             progress.canceled.connect(_on_cancel)
         done = {"n": 0, "errors": [], "bytes": 0}
         total_bytes = sum(s or 0 for s in sizes) if sizes else 0
@@ -4187,7 +4190,7 @@ class RemoteExplorerPanel(QWidget):
             reconnect_btn = box.addButton(
                 t("remote.reconnect"), QMessageBox.ButtonRole.AcceptRole,
             )
-            cancel_btn = box.addButton(
+            box.addButton(
                 t("paste.btn_cancel"), QMessageBox.ButtonRole.RejectRole,
             )
             box.setDefaultButton(reconnect_btn)
