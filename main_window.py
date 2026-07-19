@@ -9014,12 +9014,27 @@ class MainWindow(QMainWindow):
         except Exception:
             self.presets = []
 
-        # 确保当前目录在历史中
+        # 确保当前目录在历史中。
+        # 例外：文件系统根目录（mac 打包 app 从 Dock/Finder/升级脚本启动时
+        # cwd 就是 "/"，Windows 下可能是盘符根）不是用户选过的目录，不自动
+        # 加入；历史里已被旧版本自动加入的根目录也顺手登记为待删——否则
+        # 用户删掉 "/" 后每次启动都被加回来，永远删不干净。
+        def _is_fs_root(p):
+            ap = os.path.abspath(p or os.sep)
+            return os.path.dirname(ap) == ap
+
+        stale_roots = {p for p in self.working_dir_history if _is_fs_root(p)}
+        if stale_roots:
+            self.working_dir_history = [
+                p for p in self.working_dir_history if p not in stale_roots]
+            # 借用显式删除通道：下次保存与磁盘并集时把根目录从共享配置剔除
+            self._dir_history_pending_removals |= stale_roots
         current_dir = os.getcwd()
-        if current_dir not in self.working_dir_history:
-            self.working_dir_history.append(current_dir)
-        if current_dir not in self._working_dir_freq:
-            self._working_dir_freq[current_dir] = 1
+        if not _is_fs_root(current_dir):
+            if current_dir not in self.working_dir_history:
+                self.working_dir_history.append(current_dir)
+            if current_dir not in self._working_dir_freq:
+                self._working_dir_freq[current_dir] = 1
         # 按频率倒序排列
         self.working_dir_history.sort(key=lambda p: self._working_dir_freq.get(p, 0), reverse=True)
 
