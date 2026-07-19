@@ -40,7 +40,7 @@ from PyQt6.QtWidgets import (
 )
 from PyQt6 import sip  # 用于检查 C++ 对象是否已被删除
 from PyQt6.QtCore import Qt, QTimer, QEvent, QPoint, QMimeData, pyqtSignal, QObject, QSize, QRectF, QVariantAnimation, QEasingCurve, QUrl
-from PyQt6.QtGui import QAction, QActionGroup, QIcon, QFont, QFontInfo, QColor, QPixmap, QPainter, QPainterPath, QPen, QDrag, QCursor, QBrush, QPalette, QShortcut, QKeySequence, QDesktopServices
+from PyQt6.QtGui import QAction, QActionGroup, QIcon, QFont, QColor, QPixmap, QPainter, QPainterPath, QPen, QDrag, QCursor, QBrush, QPalette, QShortcut, QKeySequence, QDesktopServices
 from PyQt6.QtWidgets import QWidgetAction, QStylePainter, QStyleOptionComboBox
 
 from terminal_widget import TerminalWidget
@@ -198,7 +198,7 @@ class MainWindow(QMainWindow):
         self.current_theme = "午夜黑"  # 当前主题名称（初装默认：Midnight Black）
         self._use_icon_tint = False  # 是否给图标添加主题色蒙版
         self._global_zoom_delta = 0  # 全局缩放偏移量（相对于默认字体大小）
-        self._gui_font_size = 0  # GUI 字体大小（0 表示跟随全局缩放）
+        self._gui_font_size = 0  # GUI 字体大小（0 = Auto，跟随系统默认字号）
         self._original_widget_styles = {}  # {id(widget): (weakref, original_stylesheet)}
         self._pin_toolbar_row2 = True  # 是否固定显示第二排工具栏（默认开启）
         self._window_opacity = 100  # 窗口透明度百分比（10-100）
@@ -2999,12 +2999,12 @@ class MainWindow(QMainWindow):
         self._update_spring_width_gate()
 
     def _global_zoom_in(self):
-        """全局放大字体 — 同步缩放所有区域"""
+        """放大内容区字体（终端/编辑器/文件树）；界面字体只由 GUI Font 控制"""
         self._global_zoom_delta += 1
         self._apply_global_zoom()
 
     def _global_zoom_out(self):
-        """全局缩小字体 — 同步缩放所有区域"""
+        """缩小内容区字体（终端/编辑器/文件树）；界面字体只由 GUI Font 控制"""
         self._global_zoom_delta -= 1
         self._apply_global_zoom()
 
@@ -3027,9 +3027,11 @@ class MainWindow(QMainWindow):
         self._save_config()
 
     def _apply_global_zoom(self):
-        """应用全局缩放到所有组件"""
+        """应用字体设置：缩放偏移（Cmd+±）只动内容区（终端/编辑器/文件树），
+        界面（工具栏/标签/按钮/Git 面板）字体只由 GUI Font 下拉框控制——
+        二者解耦，互不影响（用户明确要求分开）。"""
         delta = self._global_zoom_delta
-        # GUI 字体大小：0 表示跟随全局缩放，>0 表示固定大小
+        # GUI 字体大小：0 = Auto（跟随系统默认字号），>0 = 固定大小
         gui_font_size = self._gui_font_size
 
         # 1. 所有终端 (默认12pt, 范围8-32) — 始终跟随全局缩放
@@ -3042,26 +3044,14 @@ class MainWindow(QMainWindow):
                     term._update_terminal_size()
                     term.update()
 
-        # GUI 组件字体大小：使用固定值或跟随全局缩放
-        def gui_target(default, lo, hi):
-            if gui_font_size > 0:
-                return max(lo, min(hi, gui_font_size))
-            return max(lo, min(hi, default + delta))
-
-        # 2. 全局 GUI 字体（工具栏、标签栏、状态栏等）
-        #    - 缩放样式表中显式写了 font-size 的控件
-        #    - 同时更新 QApplication 默认字体，让未显式设置 font-size 的控件（Start/Stop/Switch 等）也等比缩放
-        # Auto（=0）跟随系统默认字号：不下发 app 级 font-size，让各控件用
-        # 平台原生字体观感（mac 上强制 12px 反而比系统字号显大、把固定宽度
-        # 下拉框挤出省略号——用户反馈"太大不好看"，故撤销 12px 锚定）。
-        # 有全局缩放偏移时以系统默认字号为基准加减。
-        if gui_font_size > 0:
-            effective_px = gui_font_size
-        elif delta != 0:
-            effective_px = max(8, min(32, self._system_default_font_px() + delta))
-        else:
-            effective_px = None
-        self._scale_gui_font_sizes(gui_font_size, delta)
+        # 2. 全局 GUI 字体（工具栏、标签栏、状态栏等）——只由 GUI Font 控制，
+        #    与 Cmd+± 的缩放偏移无关：
+        #    - 显式选了字号：缩放样式表里写死 font-size 的控件 + 下发 app 级
+        #      font-size（覆盖 Start/Stop/Switch 等未显式设字号的控件）
+        #    - Auto（=0）：恢复原始样式、不下发 app 级 font-size，跟随系统
+        #      默认字号（mac 上强制 12px 反而比系统字号显大、挤出省略号）
+        effective_px = gui_font_size if gui_font_size > 0 else None
+        self._scale_gui_font_sizes(gui_font_size)
         self._apply_application_font(effective_px)
 
         # 3. 文件编辑器 — 与终端字号完全联动（同一字号、同一范围 8-32），不受 GUI 字号影响
@@ -3095,11 +3085,11 @@ class MainWindow(QMainWindow):
         """
         if not (hasattr(self, 'git_panel') and self.git_panel is not None):
             return
-        # 与 _apply_global_zoom 的 gui_target(12, 6, 32) 同一公式
+        # 只认 GUI Font：显式字号钳制到 6-32；Auto 用默认 12（缩放偏移不参与）
         if self._gui_font_size > 0:
             target = max(6, min(32, self._gui_font_size))
         else:
-            target = max(6, min(32, 12 + self._global_zoom_delta))
+            target = 12
         if hasattr(self.git_panel, 'diff_text'):
             font = self.git_panel.diff_text.font()
             if font.pointSize() != target:
@@ -3113,24 +3103,22 @@ class MainWindow(QMainWindow):
 
         与 _scale_gui_font_sizes 同一套公式，供需要单独重算某个控件字号的地方
         （如 _update_title_label_color）复用，避免硬编码字号在重设样式时丢掉缩放。
+        只认 GUI Font 显式字号；缩放偏移（Cmd+±）不影响界面字体。
         """
         base_px = 12
         if self._gui_font_size > 0:
             return self._gui_font_size / base_px
-        if self._global_zoom_delta != 0:
-            return (base_px + self._global_zoom_delta) / base_px
         return 1.0
 
-    def _scale_gui_font_sizes(self, gui_font_size: int, delta: int):
-        """缩放所有 GUI 组件样式表中的 font-size 值"""
+    def _scale_gui_font_sizes(self, gui_font_size: int):
+        """按 GUI Font 缩放所有 GUI 组件样式表中的 font-size 值。
+        只认显式 GUI 字号；Auto（=0）恢复原始样式（Cmd+± 缩放偏移不再影响界面）。"""
         # 计算缩放比例：以 12px 为基准
         base_px = 12
         if gui_font_size > 0:
             scale = gui_font_size / base_px
-        elif delta != 0:
-            scale = (base_px + delta) / base_px
         else:
-            # 恢复原始样式
+            # Auto：恢复原始样式
             self._restore_original_styles()
             return
 
@@ -3178,16 +3166,6 @@ class MainWindow(QMainWindow):
                 dead_ids.append(wid)
         for wid in dead_ids:
             del self._original_widget_styles[wid]
-
-    @staticmethod
-    def _system_default_font_px() -> int:
-        """系统默认 GUI 字号（px）。app 级 stylesheet 不影响 QApplication.font()，
-        随时取都是未被本应用改过的平台默认值；取不到时退回 12。"""
-        app = QApplication.instance()
-        if app is None:
-            return 12
-        px = QFontInfo(app.font()).pixelSize()
-        return px if px > 0 else 12
 
     def _apply_application_font(self, effective_px):
         """让 QApplication 层面的 stylesheet 承担通用字号缩放。
@@ -8716,8 +8694,8 @@ class MainWindow(QMainWindow):
 
         # 主题切换后重新应用 GUI 字体缩放（样式表已被主题覆盖；缓存已在方法开头
         # 还原+清空，此时所有控件都处于未缩放基准，缩放不会复合放大）。
-        if self._gui_font_size != 0 or self._global_zoom_delta != 0:
-            self._scale_gui_font_sizes(self._gui_font_size, self._global_zoom_delta)
+        if self._gui_font_size != 0:
+            self._scale_gui_font_sizes(self._gui_font_size)
 
         # 样式变更后刷新 flow layout 高度
         if hasattr(self, '_pinned_flow_toolbar') and self._pinned_flow_toolbar and self._pinned_flow_toolbar.isVisible():
