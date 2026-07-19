@@ -22,7 +22,7 @@ from PyQt6.QtCore import (
 from PyQt6.QtGui import (
     QFont, QFontMetrics, QColor, QTextCharFormat, QSyntaxHighlighter,
     QKeySequence, QPalette, QShortcut, QPainter, QTextCursor, QTextDocument,
-    QPixmap, QImageReader, QCursor, QGuiApplication, QIcon, QWheelEvent,
+    QPixmap, QImage, QImageReader, QCursor, QGuiApplication, QIcon, QWheelEvent,
     QDesktopServices, QTextBlockFormat, QTextFormat, QTextFrameFormat,
     QTextTable, QFontDatabase, QTextImageFormat, QTextLength,
 )
@@ -1866,6 +1866,7 @@ class FileEditorWidget(QWidget):
         # Markdown 预览：只读渲染页（源文本 → 预览单向转换，绝不写回缓冲区/文件）
         self._md_preview_supported = False  # 当前文件是否为 Markdown
         self._in_md_preview = False         # 当前是否显示渲染预览页
+        self._md_img_cache = {}             # 预览图片解码/缩放缓存 {(path, mtime, w): QImage}
         # 多窗格分屏：是否高亮当前活动窗格（仅在 >1 窗格时由 EditorArea 打开）
         self._is_active = False
         self._show_active_indicator = False
@@ -2803,6 +2804,7 @@ class FileEditorWidget(QWidget):
         self._inline_md_html_images(doc)
         self._apply_md_html_layout(doc)
         self._fit_md_images(doc)
+        self._preload_md_images(doc)
         self._prepare_md_blocks(doc)
         self._polish_md_document(doc)
         self._md_browser.verticalScrollBar().setValue(scroll_pos)
@@ -2858,6 +2860,63 @@ class FileEditorWidget(QWidget):
             c.setPosition(pos)
             c.setPosition(pos + ln, QTextCursor.MoveMode.KeepAnchor)
             c.setCharFormat(nf)
+
+    def _preload_md_images(self, doc):
+        """渲染时一次性解码文档引用的本地图片，预缩放后注册为文档资源。
+
+        Qt 默认在图片首次滚入视口被绘制时才同步解码文件（实测 README 里
+        数 MB 的截图 PNG 首帧 19–90ms，弱机器更久），表现为滚动到图片处
+        明显卡一下；且每次重渲染（setMarkdown）都清空文档资源缓存，视口
+        resize 防抖重渲染后卡顿会反复出现。这里把解码挪到渲染时一次做完，
+        有显式显示宽度的图按 显示宽 × DPR 预缩放（只缩不放，省内存也省
+        每帧缩放），结果缓存在窗格上跨重渲染复用——滚动路径只剩贴图。
+        """
+        base_dir = (os.path.dirname(os.path.abspath(self._current_file))
+                    if self._current_file else '')
+        dpr = self._md_browser.devicePixelRatioF() or 1.0
+        used = {}
+        block = doc.begin()
+        while block.isValid():
+            it = block.begin()
+            while not it.atEnd():
+                frag = it.fragment()
+                cf = frag.charFormat()
+                if cf.isImageFormat():
+                    name = cf.toImageFormat().name()
+                    path = (name if os.path.isabs(name)
+                            else os.path.join(base_dir, name))
+                    try:
+                        mtime = os.stat(path).st_mtime_ns
+                    except OSError:
+                        it += 1
+                        continue   # 网络图/不存在的路径维持原行为
+                    disp_w = cf.toImageFormat().width()
+                    target_w = int(disp_w * dpr) if disp_w > 0 else 0
+                    key = (path, mtime, target_w)
+                    img = self._md_img_cache.get(key)
+                    if img is None:
+                        img = QImage(path)
+                        if img.isNull():
+                            it += 1
+                            continue
+                        if 0 < target_w < img.width():
+                            img = img.scaledToWidth(
+                                target_w,
+                                Qt.TransformationMode.SmoothTransformation)
+                            # 布局尺寸由 QTextImageFormat 的显式宽高决定，
+                            # DPR 标记只为让 1:1 贴图路径成立（Retina 不糊）
+                            img.setDevicePixelRatio(dpr)
+                    used[key] = img
+                    # 同时按原始名与 baseUrl 解析后的 URL 注册：绘制端以
+                    # QUrl(name) 查询，QTextDocument 内部又可能先做解析
+                    doc.addResource(QTextDocument.ResourceType.ImageResource,
+                                    QUrl(name), img)
+                    doc.addResource(QTextDocument.ResourceType.ImageResource,
+                                    doc.baseUrl().resolved(QUrl(name)), img)
+                it += 1
+            block = block.next()
+        # 只保留本轮仍在用的条目，文件切换/图片删除后不积压内存
+        self._md_img_cache = used
 
     # 匹配按字面显示的 <img ...> 标签（NoHTML 模式的产物）及其属性
     _MD_IMG_TAG_RE = re.compile(r'<img\b[^<>]*?>', re.IGNORECASE)
