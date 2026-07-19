@@ -1901,8 +1901,8 @@ class FileEditorWidget(QWidget):
         self._md_refit_timer = QTimer(self)
         self._md_refit_timer.setSingleShot(True)
         self._md_refit_timer.setInterval(200)
-        self._md_refit_timer.timeout.connect(
-            lambda: self._render_md_preview() if self._in_md_preview else None)
+        self._md_refit_timer.timeout.connect(self._md_refit_tick)
+        self._md_last_render_width = -1  # 上次预览渲染时的视口宽（重渲染判据）
         # 上次写入备份的内容指纹：内容没变就不重复写盘
         self._last_autosave_hash: str | None = None
 
@@ -2782,12 +2782,31 @@ class FileEditorWidget(QWidget):
         apply()
         QTimer.singleShot(0, apply)
 
+    def _md_refit_tick(self):
+        """视口 resize 防抖到点后的预览重渲染。
+
+        两道闸：正在拖拽预览滚动条时顺延（重渲染会整个重建文档、重置
+        滚动条，把拖到一半的拖拽直接打断——弹簧模式下点击预览就会触发
+        resize，表现为"拖着拖着就断了"）；视口宽度没变时跳过（高度变化
+        不影响图片按宽缩放，重渲染纯属浪费且会打断选区/滚动惯性）。
+        """
+        if not self._in_md_preview:
+            return
+        if (self._md_browser.verticalScrollBar().isSliderDown()
+                or self._md_browser.horizontalScrollBar().isSliderDown()):
+            self._md_refit_timer.start()   # 拖完这一下再渲染
+            return
+        if self._md_browser.viewport().width() == self._md_last_render_width:
+            return
+        self._render_md_preview()
+
     def _render_md_preview(self):
         """把编辑器缓冲区的 Markdown 源文本渲染到预览页（单向，只读）。
 
         baseUrl 指向文件所在目录，使相对路径的本地图片能显示（只读加载）。
         重渲染尽量保留预览页滚动位置（外部变更重载时不跳回顶部）。
         """
+        self._md_last_render_width = self._md_browser.viewport().width()
         doc = self._md_browser.document()
         if self._current_file:
             doc.setBaseUrl(QUrl.fromLocalFile(
