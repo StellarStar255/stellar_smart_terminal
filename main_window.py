@@ -40,7 +40,7 @@ from PyQt6.QtWidgets import (
 )
 from PyQt6 import sip  # 用于检查 C++ 对象是否已被删除
 from PyQt6.QtCore import Qt, QTimer, QEvent, QPoint, QMimeData, pyqtSignal, QObject, QSize, QRectF, QVariantAnimation, QEasingCurve, QUrl
-from PyQt6.QtGui import QAction, QActionGroup, QIcon, QFont, QColor, QPixmap, QPainter, QPainterPath, QPen, QDrag, QCursor, QBrush, QPalette, QShortcut, QKeySequence, QDesktopServices
+from PyQt6.QtGui import QAction, QActionGroup, QIcon, QFont, QFontInfo, QColor, QPixmap, QPainter, QPainterPath, QPen, QDrag, QCursor, QBrush, QPalette, QShortcut, QKeySequence, QDesktopServices
 from PyQt6.QtWidgets import QWidgetAction, QStylePainter, QStyleOptionComboBox
 
 from terminal_widget import TerminalWidget
@@ -346,8 +346,8 @@ class MainWindow(QMainWindow):
             self.pin_row2_checkbox.setChecked(True)
             self.pin_row2_checkbox.blockSignals(False)
 
-        # 恢复全局缩放（无偏移也要跑一次：Auto 的 GUI 字号以 12px 为基准，
-        # 需把 app 级 font-size 固定到 12px，而不是跟随系统默认字号）
+        # 恢复全局缩放（无偏移也要跑一次：显式 GUI 字号需要在启动时应用；
+        # Auto 且无偏移时等价于清掉 app 级 font-size，跟随系统默认字号）
         self._apply_global_zoom()
 
         # 恢复左右分屏偏好
@@ -3051,12 +3051,16 @@ class MainWindow(QMainWindow):
         # 2. 全局 GUI 字体（工具栏、标签栏、状态栏等）
         #    - 缩放样式表中显式写了 font-size 的控件
         #    - 同时更新 QApplication 默认字体，让未显式设置 font-size 的控件（Start/Stop/Switch 等）也等比缩放
-        # Auto（=0）不再跟随系统默认字号（mac 约 13px，且各平台不一）：
-        # 以 12px 为基准，观感与显式选 12pt 一致；有全局缩放偏移时按 12+delta。
+        # Auto（=0）跟随系统默认字号：不下发 app 级 font-size，让各控件用
+        # 平台原生字体观感（mac 上强制 12px 反而比系统字号显大、把固定宽度
+        # 下拉框挤出省略号——用户反馈"太大不好看"，故撤销 12px 锚定）。
+        # 有全局缩放偏移时以系统默认字号为基准加减。
         if gui_font_size > 0:
             effective_px = gui_font_size
+        elif delta != 0:
+            effective_px = max(8, min(32, self._system_default_font_px() + delta))
         else:
-            effective_px = max(8, min(32, 12 + delta))
+            effective_px = None
         self._scale_gui_font_sizes(gui_font_size, delta)
         self._apply_application_font(effective_px)
 
@@ -3174,6 +3178,16 @@ class MainWindow(QMainWindow):
                 dead_ids.append(wid)
         for wid in dead_ids:
             del self._original_widget_styles[wid]
+
+    @staticmethod
+    def _system_default_font_px() -> int:
+        """系统默认 GUI 字号（px）。app 级 stylesheet 不影响 QApplication.font()，
+        随时取都是未被本应用改过的平台默认值；取不到时退回 12。"""
+        app = QApplication.instance()
+        if app is None:
+            return 12
+        px = QFontInfo(app.font()).pixelSize()
+        return px if px > 0 else 12
 
     def _apply_application_font(self, effective_px):
         """让 QApplication 层面的 stylesheet 承担通用字号缩放。
