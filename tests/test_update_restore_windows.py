@@ -63,11 +63,13 @@ class TestUpdateRestoreWindows(unittest.TestCase):
             cls.app.sendPostedEvents(None, QEvent.Type.DeferredDelete)
             cls.app.processEvents()
 
+    # 配置随 _save_config 落盘时含中文（预设名等）；Windows 的 read_text
+    # 默认 cp1252 会炸，必须显式 UTF-8（CI 曾以此崩红 Windows 构建）
     def _read_cfg(self) -> dict:
-        return json.loads(self._cfg_path.read_text())
+        return json.loads(self._cfg_path.read_text(encoding='utf-8'))
 
     def _write_cfg(self, d: dict):
-        self._cfg_path.write_text(json.dumps(d))
+        self._cfg_path.write_text(json.dumps(d), encoding='utf-8')
 
     def test_stash_writes_window_snapshot(self):
         self.w._stash_windows_for_restore()
