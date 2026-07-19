@@ -62,6 +62,43 @@ class TestWindowNavigatorExtraction(unittest.TestCase):
                 self.app.sendPostedEvents(None, QEvent.Type.DeferredDelete)
                 self.app.processEvents()
 
+    def test_title_change_refreshes_without_polling(self):
+        """标题变化经 windowTitleChanged 信号即时刷新列表（不等 30 秒兜底轮询）；
+        重复刷新不重复挂钩。"""
+        import main_window
+        from window_navigator import WindowNavigatorPanel
+        w = None
+        nav = None
+        try:
+            w = main_window.MainWindow()
+            w.setWindowTitle('NAV_EVT_BEFORE')
+            w.show()
+            self.app.processEvents()
+
+            nav = WindowNavigatorPanel()
+            nav._compact_mode = False   # 显示原始标题，便于断言（默认提取文件夹名）
+            nav._refresh_window_list()
+            hooked = len(nav._hooked_window_ids)
+            self.assertGreaterEqual(hooked, 1)
+            nav._refresh_window_list()   # 再刷一次不应重复挂钩
+            self.assertEqual(len(nav._hooked_window_ids), hooked)
+
+            w.setWindowTitle('NAV_EVT_AFTER')
+            self.app.processEvents()
+            titles = [nav.window_list.item(i).text()
+                      for i in range(nav.window_list.count())]
+            self.assertTrue(any('NAV_EVT_AFTER' in t for t in titles), titles)
+        finally:
+            from PyQt6.QtCore import QEvent
+            if nav is not None:
+                nav.deleteLater()
+            if w is not None:
+                w.close()
+                w.deleteLater()
+            for _ in range(5):
+                self.app.sendPostedEvents(None, QEvent.Type.DeferredDelete)
+                self.app.processEvents()
+
     def test_dock_mode_static_roundtrip(self):
         import main_window
         MW = main_window.MainWindow

@@ -137,10 +137,14 @@ class WindowNavigatorPanel(QWidget):
         self._last_window_info = []  # [(title, color), ...]
         self._cached_windows = []  # 缓存窗口引用
 
-        # 定时刷新窗口列表（降低频率以减少开销）
+        # 刷新以事件驱动为主：建/关窗、换色、换目录、切 tab 走
+        # _broadcast_navigator_refresh 主动推；标题变化/异常销毁由每个窗口的
+        # windowTitleChanged/destroyed 信号即时触发（_refresh_window_list 里挂钩）。
+        # 轮询只留低频兜底，接住不经上述任何路径的漏网变化（如窗口被隐藏）。
+        self._hooked_window_ids = set()
         self._refresh_timer = QTimer(self)
         self._refresh_timer.timeout.connect(self._check_and_refresh)
-        self._refresh_timer.start(5000)  # 每5秒检查一次（进一步降低频率）
+        self._refresh_timer.start(30000)
 
     def _setup_ui(self):
         layout = QVBoxLayout(self)
@@ -481,6 +485,15 @@ class WindowNavigatorPanel(QWidget):
         if current_info != self._last_window_info:
             self._refresh_window_list()
 
+    def _on_hooked_window_destroyed(self, obj=None):
+        """被挂钩的窗口销毁：把 id 从已挂钩集合摘除（防 id 复用导致新窗口漏挂），
+        并让出到下一轮事件循环再刷新 —— destroyed 回调时对象半死，
+        立刻遍历窗口列表有段错误风险。"""
+        if obj is not None:
+            self._hooked_window_ids.discard(id(obj))
+        QTimer.singleShot(
+            0, lambda: None if sip.isdeleted(self) else self._check_and_refresh())
+
     def _filter_window_list(self, text: str):
         """根据搜索文本过滤窗口列表（支持空格分隔的多关键词）"""
         keywords = text.lower().split()
@@ -617,6 +630,19 @@ class WindowNavigatorPanel(QWidget):
                 windows.append(w)
             except Exception:
                 continue  # 窗口已被删除/不稳定，跳过
+
+        # 给新出现的窗口挂标题/销毁信号（每窗口只挂一次），把变化即时推过来；
+        # 接收方是本面板，面板销毁时 Qt 自动断开这些连接
+        for w in windows:
+            wid = id(w)
+            if wid in self._hooked_window_ids:
+                continue
+            try:
+                w.windowTitleChanged.connect(self._check_and_refresh)
+                w.destroyed.connect(self._on_hooked_window_destroyed)
+                self._hooked_window_ids.add(wid)
+            except Exception:
+                pass
 
         # 根据排序模式排序（包一层 try：window 可能在 sort key 取值时被销毁）
         try:
