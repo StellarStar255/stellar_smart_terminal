@@ -9026,25 +9026,27 @@ class MainWindow(QMainWindow):
         # 确保有默认预设
         if not self.presets:
             default_shell = get_default_shell()
+
             # Windows 使用 set，Unix 使用 export 设置环境变量
-            if sys.platform == 'win32':
-                proxy_cmds = [
-                    'set http_proxy=http://127.0.0.1:1081/',
-                    'set https_proxy=http://127.0.0.1:1081/'
+            def _proxy_cmds(port):
+                prefix = 'set' if sys.platform == 'win32' else 'export'
+                return [
+                    f'{prefix} http_proxy=http://127.0.0.1:{port}/',
+                    f'{prefix} https_proxy=http://127.0.0.1:{port}/'
                 ]
-            else:
-                proxy_cmds = [
-                    'export http_proxy=http://127.0.0.1:1081/',
-                    'export https_proxy=http://127.0.0.1:1081/'
-                ]
+
             self.presets = [
                 {
                     'name': default_shell,
                     'commands': [default_shell]
                 },
                 {
+                    'name': 'Claude Fable (with proxy)',
+                    'commands': [default_shell] + _proxy_cmds(7897) + ['claude --model fable']
+                },
+                {
                     'name': 'Claude Opus (with proxy)',
-                    'commands': [default_shell] + proxy_cmds + ['claude --model opus']
+                    'commands': [default_shell] + _proxy_cmds(1081) + ['claude --model opus']
                 },
                 {
                     'name': 'Claude Sonnet',
