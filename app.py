@@ -352,6 +352,10 @@ def main():
     window = MainWindow()
     window.show()
 
+    # 升级重启后恢复升级前打开的窗口（仅当上次「下载并安装」时勾选了
+    # 「升级后自动重新打开当前这些窗口」，快照一次性消费，无快照零开销）
+    MainWindow.restore_windows_after_update(window)
+
     # 安装 Ctrl+C (SIGINT) 处理器：在终端里按两次 Ctrl+C 可保存并退出
     install_sigint_handler(app)
 

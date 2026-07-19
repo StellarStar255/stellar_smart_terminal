@@ -7436,11 +7436,20 @@ class MainWindow(QMainWindow):
                 return   # 取消后才送达的完成信号：不再弹重启确认
             state['finished'] = True
             progress.close()
-            ret = self._styled_message_box(
+            box = self._make_styled_message_box(
                 QMessageBox.Icon.Question, t("update.title"),
                 t("update.restart_confirm"),
                 QMessageBox.StandardButton.Ok | QMessageBox.StandardButton.Cancel)
-            if ret == QMessageBox.StandardButton.Ok:
+            reopen_chk = QCheckBox(t("update.reopen_windows"), box)
+            reopen_chk.setChecked(bool(app_config.read_config().get(
+                'update_reopen_windows', True)))
+            box.setCheckBox(reopen_chk)
+            if box.exec() == QMessageBox.StandardButton.Ok:
+                reopen = reopen_chk.isChecked()
+                app_config.update_config({'update_reopen_windows': reopen},
+                                         description='update reopen pref')
+                if reopen:
+                    self._stash_windows_for_restore()
                 if app_updater.install_and_restart(app_path):
                     QApplication.instance().closeAllWindows()
 
@@ -7459,6 +7468,112 @@ class MainWindow(QMainWindow):
         dl.finished_ok.connect(on_done)
         dl.error.connect(on_error)
         dl.start()
+
+    # 升级重启的窗口恢复快照有效期。换包脚本最多等 60 秒，正常升级几分钟内
+    # 必然重启完成；超过视为陈旧快照（比如用户在退出确认里点了取消、几天后
+    # 才再启动），启动时只消费不恢复。
+    _UPDATE_RESTORE_MAX_AGE = 30 * 60
+
+    def _stash_windows_for_restore(self):
+        """升级重启前把所有打开的窗口快照进配置（工作目录/几何/颜色），
+        供新版本首次启动时恢复（见 restore_windows_after_update）。"""
+        wins = [w for w in QApplication.instance().topLevelWidgets()
+                if isinstance(w, MainWindow) and not sip.isdeleted(w)
+                and w.isVisible()]
+        # 按创建时间排序：首条对应升级后的主窗口，其余按原顺序重开
+        wins.sort(key=lambda w: getattr(w, '_created_time', datetime.now()))
+        entries = []
+        for w in wins:
+            geo = w.geometry()
+            entries.append({
+                'cwd': getattr(w, '_window_cwd', '') or '',
+                'geometry': [geo.x(), geo.y(), geo.width(), geo.height()],
+                'maximized': bool(w.isMaximized()),
+                'color': getattr(w, '_window_color', None),
+            })
+        app_config.update_config(
+            {'update_restore_windows': {'ts': time.time(), 'windows': entries}},
+            description='stash windows for update restore')
+
+    @staticmethod
+    def restore_windows_after_update(primary):
+        """新版本首次启动时恢复升级前打开的窗口（一次性消费快照）。
+
+        由 app.py 在主窗口 show() 之后调用。首条快照套用到主窗口
+        （目录/几何/颜色），其余各开一个新窗口。快照消费即删，失败或
+        过期都不会反复触发。
+        """
+        pending = app_config.read_config().get('update_restore_windows')
+        if not pending:
+            return
+
+        def _consume(cfg):
+            if 'update_restore_windows' not in cfg:
+                return False
+            del cfg['update_restore_windows']
+        app_config.update_config_with(
+            _consume, description='consume update restore stash')
+
+        if not isinstance(pending, dict):
+            return
+        if time.time() - float(pending.get('ts') or 0) \
+                > MainWindow._UPDATE_RESTORE_MAX_AGE:
+            return
+        entries = [e for e in (pending.get('windows') or [])
+                   if isinstance(e, dict)]
+        if not entries:
+            return
+        try:
+            primary._apply_restored_window_state(entries[0])
+        except Exception:
+            logger.exception("failed to restore primary window after update")
+        if len(entries) <= 1:
+            return
+
+        # 其余窗口延后创建：先让主窗口完成首次显示/布局，避免启动期
+        # 多个窗口同时初始化互相抢占
+        def _open_rest():
+            if sip.isdeleted(primary):
+                return
+            for entry in entries[1:]:
+                try:
+                    primary._open_restored_window(entry)
+                except Exception:
+                    logger.exception("failed to reopen window after update")
+        QTimer.singleShot(300, _open_rest)
+
+    def _apply_restored_window_state(self, entry: dict):
+        """把一条窗口快照套用到本窗口：目录 → 颜色 → 几何/最大化。"""
+        cwd = entry.get('cwd') or ''
+        if cwd and os.path.isdir(cwd) and cwd != self._window_cwd:
+            self.working_dir_combo.setCurrentText(cwd)
+            self._apply_working_dir()
+        color = entry.get('color')
+        if color:
+            try:
+                self._set_window_color(color)
+            except Exception:
+                pass
+        geo = entry.get('geometry')
+        if isinstance(geo, (list, tuple)) and len(geo) == 4:
+            try:
+                self.setGeometry(*[int(v) for v in geo])
+            except Exception:
+                pass
+        if entry.get('maximized'):
+            self.showMaximized()
+
+    def _open_restored_window(self, entry: dict):
+        """按快照新开一个独立窗口（目录随快照；目录已不存在则用默认目录）。"""
+        cwd = entry.get('cwd') or ''
+        initial = {'cwd': cwd} if cwd and os.path.isdir(cwd) else None
+        win = MainWindow(initial_tab_data=initial)
+        win._apply_restored_window_state(entry)
+        win.show()
+        win.raise_()
+        # 保持引用防 GC，与拖拽分离/远程新窗口同一跟踪列表
+        self.detached_windows.append(win)
+        return win
 
     def _set_parse_off_gui(self, enabled: bool):
         """切换"终端解析放到后台线程"。立即对所有终端生效（on_output 每次按此分流），
@@ -8817,8 +8932,8 @@ class MainWindow(QMainWindow):
         dialog = HistoryDialog(self.session_manager, self)
         dialog.exec()
 
-    def _styled_message_box(self, icon, title, text, buttons=QMessageBox.StandardButton.Ok):
-        """创建带明确样式的消息框，避免深色主题导致文字不可见"""
+    def _make_styled_message_box(self, icon, title, text, buttons=QMessageBox.StandardButton.Ok):
+        """构造带明确样式的消息框（不 exec），供需要附加勾选框等定制的调用方使用"""
         msg_box = QMessageBox(self)
         msg_box.setWindowTitle(title)
         msg_box.setText(text)
@@ -8831,6 +8946,9 @@ class MainWindow(QMainWindow):
             QMessageBox QLabel {
                 color: #333333;
                 font-size: 14px;
+            }
+            QMessageBox QCheckBox {
+                color: #333333;
             }
             QMessageBox QPushButton {
                 background-color: #e0e0e0;
@@ -8847,7 +8965,11 @@ class MainWindow(QMainWindow):
                 background-color: #c0c0c0;
             }
         """)
-        return msg_box.exec()
+        return msg_box
+
+    def _styled_message_box(self, icon, title, text, buttons=QMessageBox.StandardButton.Ok):
+        """创建带明确样式的消息框，避免深色主题导致文字不可见"""
+        return self._make_styled_message_box(icon, title, text, buttons).exec()
 
     def _load_config(self):
         """加载配置（预设命令等）"""

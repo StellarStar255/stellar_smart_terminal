@@ -37,6 +37,7 @@ TRANSLATIONS = {
     "update.cancelled": {"zh": "已取消更新下载", "en": "Update download cancelled"},
     "update.auto_check": {"zh": "启动时自动检查更新", "en": "Check for updates at launch"},
     "update.badge": {"zh": "⬆ 新版本 {version} 可用", "en": "⬆ {version} available"},
+    "update.reopen_windows": {"zh": "升级后自动重新打开当前这些窗口", "en": "Reopen these windows after the update"},
     "scrollback.applied": {"zh": "已更新历史行数上限，对之后新建的终端生效", "en": "Scrollback limit updated; applies to newly created terminals"},
 
     # ===== 键盘快捷键设置 =====
