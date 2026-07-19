@@ -117,6 +117,57 @@ class TestUpdateRestoreWindows(unittest.TestCase):
         main_window.MainWindow.restore_windows_after_update(self.w)
         self.assertNotIn('update_restore_windows', self._read_cfg())
 
+    def test_stash_records_sidebar_panel(self):
+        self.w._apply_sidebar_panel('git')
+        try:
+            self.w._stash_windows_for_restore()
+            entry = self._read_cfg()['update_restore_windows']['windows'][0]
+            self.assertEqual(entry['panel'], 'git')
+        finally:
+            self.w._apply_sidebar_panel(None)
+        self.w._stash_windows_for_restore()
+        entry = self._read_cfg()['update_restore_windows']['windows'][0]
+        self.assertIsNone(entry['panel'])
+
+    def test_restore_reopens_sidebar_panel(self):
+        self._write_cfg({'update_restore_windows': {
+            'ts': time.time(),
+            'windows': [{'cwd': '', 'geometry': [60, 80, 1360, 820],
+                         'maximized': False, 'panel': 'git'}],
+        }})
+        main_window.MainWindow.restore_windows_after_update(self.w)
+        self.app.processEvents()
+        try:
+            self.assertEqual(self.w._current_sidebar_panel(), 'git')
+            self.assertTrue(self.w.left_panel_container.isVisible())
+        finally:
+            self.w._apply_sidebar_panel(None)
+
+    def test_restore_closes_sidebar_when_snapshot_closed(self):
+        self.w._apply_sidebar_panel('explorer')
+        self._write_cfg({'update_restore_windows': {
+            'ts': time.time(),
+            'windows': [{'cwd': '', 'geometry': [60, 80, 1360, 820],
+                         'maximized': False, 'panel': None}],
+        }})
+        main_window.MainWindow.restore_windows_after_update(self.w)
+        self.assertIsNone(self.w._current_sidebar_panel())
+        self.assertFalse(self.w.left_panel_container.isVisible())
+
+    def test_restore_without_panel_key_keeps_current_state(self):
+        # 旧版本写的快照没有 panel 键：不动当前侧边栏状态
+        self.w._apply_sidebar_panel('git')
+        self._write_cfg({'update_restore_windows': {
+            'ts': time.time(),
+            'windows': [{'cwd': '', 'geometry': [60, 80, 1360, 820],
+                         'maximized': False}],
+        }})
+        main_window.MainWindow.restore_windows_after_update(self.w)
+        try:
+            self.assertEqual(self.w._current_sidebar_panel(), 'git')
+        finally:
+            self.w._apply_sidebar_panel(None)
+
     def test_missing_cwd_skipped(self):
         old_cwd = self.w._window_cwd
         self._write_cfg({'update_restore_windows': {

@@ -7483,6 +7483,7 @@ class MainWindow(QMainWindow):
                 'geometry': [geo.x(), geo.y(), geo.width(), geo.height()],
                 'maximized': bool(w.isMaximized()),
                 'color': getattr(w, '_window_color', None),
+                'panel': w._current_sidebar_panel(),
             })
         app_config.update_config(
             {'update_restore_windows': {'ts': time.time(), 'windows': entries}},
@@ -7555,6 +7556,42 @@ class MainWindow(QMainWindow):
                 pass
         if entry.get('maximized'):
             self.showMaximized()
+        # 侧边栏保持升级前的开关状态。旧版本写的快照没有 panel 键，
+        # 此时不动——沿用启动时按全局配置恢复出的状态
+        if 'panel' in entry:
+            try:
+                self._apply_sidebar_panel(entry.get('panel'))
+            except Exception:
+                logger.exception("failed to restore sidebar panel after update")
+
+    def _current_sidebar_panel(self):
+        """当前打开的侧边栏面板名（explorer/git/remote 互斥），全关则 None。"""
+        if getattr(self, 'explorer_panel_visible', False):
+            return 'explorer'
+        if getattr(self, 'git_panel_visible', False):
+            return 'git'
+        if getattr(self, 'remote_panel_visible', False):
+            return 'remote'
+        return None
+
+    def _apply_sidebar_panel(self, panel):
+        """把侧边栏调到指定面板（None=全关）。toggle 打开时会自动关掉
+        互斥的其它面板，所以目标面板直接 toggle 一次即可。"""
+        current = self._current_sidebar_panel()
+        if current == panel:
+            return
+        if panel == 'explorer':
+            self._toggle_explorer_panel()
+        elif panel == 'git':
+            self._toggle_git_panel()
+        elif panel == 'remote':
+            self._toggle_remote_panel()
+        elif current == 'explorer':
+            self._toggle_explorer_panel()
+        elif current == 'git':
+            self._toggle_git_panel()
+        elif current == 'remote':
+            self._toggle_remote_panel()
 
     def _open_restored_window(self, entry: dict):
         """按快照新开一个独立窗口（目录随快照；目录已不存在则用默认目录）。"""
