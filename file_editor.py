@@ -1865,6 +1865,7 @@ class FileEditorWidget(QWidget):
         self._image_pixmap: QPixmap | None = None  # 原始未缩放的 QPixmap
         # Markdown 预览：只读渲染页（源文本 → 预览单向转换，绝不写回缓冲区/文件）
         self._md_preview_supported = False  # 当前文件是否为 Markdown
+        self._html_preview_supported = False  # 当前文件是否为 HTML（预览走系统浏览器）
         self._in_md_preview = False         # 当前是否显示渲染预览页
         self._md_img_cache = {}             # 预览图片解码/缩放缓存 {(path, mtime, w): QImage}
         # 多窗格分屏：是否高亮当前活动窗格（仅在 >1 窗格时由 EditorArea 打开）
@@ -1948,7 +1949,7 @@ class FileEditorWidget(QWidget):
         self.md_btn.setFixedSize(26, 26)
         self.md_btn.setCheckable(True)
         self.md_btn.setToolTip(t("editor.md_preview_tooltip"))
-        self.md_btn.clicked.connect(self._set_md_preview)
+        self.md_btn.clicked.connect(self._on_preview_btn_clicked)
         self.md_btn.setVisible(False)
         header_layout.addWidget(self.md_btn)
 
@@ -2509,7 +2510,10 @@ class FileEditorWidget(QWidget):
         if hasattr(self, 'ai_btn'):
             self.ai_btn.setToolTip(t("editor.ai_toggle_tooltip"))
         if hasattr(self, 'md_btn'):
-            self.md_btn.setToolTip(t("editor.md_preview_tooltip"))
+            self.md_btn.setToolTip(t(
+                "editor.html_preview_tooltip"
+                if getattr(self, '_html_preview_supported', False)
+                else "editor.md_preview_tooltip"))
         if not self._current_file:
             self.file_label.setText(t("editor.no_file"))
         if hasattr(self, 'search_bar'):
@@ -2694,9 +2698,13 @@ class FileEditorWidget(QWidget):
         # 根据文件类型设置语法高亮
         self._setup_highlighter(file_path)
 
-        # Markdown 文件默认进渲染预览（Typora 式阅读视图），点 ◎ 切回源码编辑
-        is_md = Path(file_path).suffix.lower() in ('.md', '.markdown')
+        # Markdown 文件默认进渲染预览（Typora 式阅读视图），点 ◎ 切回源码编辑；
+        # HTML 文件复用同一个 ◎ 按钮，但走系统浏览器预览（Qt 富文本渲染不了
+        # 真实网页的 CSS/JS，内嵌 WebEngine 又太重）
+        suffix = Path(file_path).suffix.lower()
+        is_md = suffix in ('.md', '.markdown')
         self._set_md_support(is_md)
+        self._set_html_support(suffix in ('.html', '.htm'))
         if is_md:
             self._set_md_preview(True, sync_scroll=False)
 
@@ -2724,9 +2732,50 @@ class FileEditorWidget(QWidget):
                 self.md_btn.blockSignals(False)
             self._md_browser.clear()
 
+    def _set_html_support(self, supported: bool):
+        """标记当前文件是否为 HTML（预览走系统浏览器），并调整 ◎ 按钮语义。
+
+        HTML 模式下按钮不是开关（浏览器打开是一次性动作），置为不可勾选；
+        与 _set_md_support 共用同一个按钮，二者互斥（一个文件不会既是 md
+        又是 html），谁为真谁接管按钮的可见性/提示语。
+        """
+        supported = bool(supported)
+        self._html_preview_supported = supported
+        if supported:
+            self.md_btn.setVisible(True)
+            self.md_btn.setCheckable(False)
+            self.md_btn.setToolTip(t("editor.html_preview_tooltip"))
+        else:
+            # 交还给 markdown 语义（可见性已由 _set_md_support 决定）
+            self.md_btn.setCheckable(True)
+            self.md_btn.setToolTip(t("editor.md_preview_tooltip"))
+
+    def _on_preview_btn_clicked(self, checked: bool):
+        """◎ 按钮点击分发：HTML → 系统浏览器；Markdown → 内置渲染预览。"""
+        if getattr(self, '_html_preview_supported', False):
+            self._open_html_preview()
+        else:
+            self._set_md_preview(checked)
+
+    def _open_html_preview(self):
+        """把当前 HTML 文件交给系统默认浏览器预览。
+
+        有未保存修改时先落盘——预览的意义就是看当前内容；不落盘的话
+        浏览器打开的是旧版本，更迷惑。save_file 失败（只读/冲突弹窗被
+        取消等）则不打开，避免看着旧内容误以为是新改动。
+        """
+        if not self._current_file:
+            return
+        if self.is_modified() and not self.save_file():
+            return
+        QDesktopServices.openUrl(QUrl.fromLocalFile(self._current_file))
+
     def _toggle_md_preview(self):
-        """快捷键入口：markdown 文件上切换 源码/预览，其他文件无操作。"""
-        if self._md_preview_supported and not self._in_image_mode:
+        """快捷键入口：markdown 文件上切换 源码/预览；HTML 文件打开浏览器
+        预览；其他文件无操作。"""
+        if getattr(self, '_html_preview_supported', False) and not self._in_image_mode:
+            self._open_html_preview()
+        elif self._md_preview_supported and not self._in_image_mode:
             self._set_md_preview(not self._in_md_preview)
 
     def _set_md_preview(self, on: bool, sync_scroll: bool = True):
