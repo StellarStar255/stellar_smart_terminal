@@ -1212,13 +1212,16 @@ class TerminalWidget(QWidget):
         self._last_ctrl_c_time = 0
         self._ctrl_c_interval = 0.5  # 500ms 内按两次视为双击
 
-        # 颜色缓存（避免重复创建 QColor 对象）—— LRU（OrderedDict）
-        self._color_cache = OrderedDict()
-        # 宽字符缓存（避免重复调用 unicodedata.east_asian_width）—— LRU
-        self._wide_char_cache = OrderedDict()
-        # 可见性调整后的颜色缓存 —— LRU
-        self._visible_color_cache = OrderedDict()
-        # 缓存上限（命中时 move_to_end，超限时淘汰最久未用项）
+        # 颜色缓存（避免重复创建 QColor 对象）
+        # 普通 dict + 满员整体清空：这些键空间实际都很小（调色板颜色、
+        # 屏上出现过的字符），远到不了上限；LRU 的 move_to_end 反而是
+        # 渲染热循环里每次命中的白付开销（profile 实测占比可观）
+        self._color_cache = {}
+        # 宽字符缓存（避免重复调用 unicodedata.east_asian_width）
+        self._wide_char_cache = {}
+        # 可见性调整后的颜色缓存
+        self._visible_color_cache = {}
+        # 缓存上限（超限整体清空，护栏用，正常永远打不到）
         self._WIDE_CHAR_CACHE_MAX = 8192
         self._COLOR_CACHE_MAX = 4096
 
@@ -2405,21 +2408,20 @@ class TerminalWidget(QWidget):
         self._update_scrollback_level()  # 历史归零 → 压力等级降回 0，指示点消失
 
     def _is_wide_char(self, char: str) -> bool:
-        """判断字符是否为宽字符（中文等）- 带 LRU 缓存"""
-        if not char or len(char) == 0:
+        """判断字符是否为宽字符（中文等）- 带缓存"""
+        if not char:
             return False
-        # 检查缓存（命中时移到队尾，标记为最近使用）
+        # 可打印 ASCII 快速路径：永远是窄字符（渲染循环里的绝大多数）
+        if len(char) == 1 and ' ' <= char <= '\x7e':
+            return False
         cache = self._wide_char_cache
         result = cache.get(char)
-        if result is not None:
-            cache.move_to_end(char)
-            return result
-        # 计算并缓存 - east_asian_width 只接受单个字符，取第一个字符判断
-        result = unicodedata.east_asian_width(char[0]) in ('F', 'W')
-        # 超限时淘汰最久未用项（LRU）
-        if len(cache) >= self._WIDE_CHAR_CACHE_MAX:
-            cache.popitem(last=False)
-        cache[char] = result
+        if result is None:
+            # east_asian_width 只接受单个字符，取第一个字符判断
+            result = unicodedata.east_asian_width(char[0]) in ('F', 'W')
+            if len(cache) >= self._WIDE_CHAR_CACHE_MAX:
+                cache.clear()
+            cache[char] = result
         return result
 
     # 判断应用层软换行拼接时是否需要在边界处插入空格
@@ -2802,6 +2804,10 @@ class TerminalWidget(QWidget):
         batch_ok = getattr(self, '_ascii_batch_ok', False)
         padding = self.PADDING  # 局部变量加速（横向用）
         pad_top = self.PADDING + self._header_h  # 纵向起点（含标题栏占用）
+        # 帧级属性 memo：同帧内 (fg, bg, bold, reverse) 组合高度重复
+        # （整屏通常只有个位数种），把每格 2 次颜色解析 + 1 次可见性
+        # 校正折叠成一次字典查询。值：(可见前景色, 背景色, 是否非默认背景)
+        attr_memo = {}
         if rows_to_draw is None:
             # 整屏重绘：清空为背景色（opaque_bg 为不透明色，fillRect 等效 fill；
             # +1 防御分数 DPR 下 logical→physical 取整在边缘留下残留像素）
@@ -2818,7 +2824,16 @@ class TerminalWidget(QWidget):
             text_y = int(row_y + self.char_ascent)
             row_cells = []
 
-            for col in range(num_cols):
+            # pyte 的行是稀疏 dict：没写过的列走 __missing__ 造默认空格。
+            # 默认空格（无背景）画不出任何东西，按行内实际占用的最大列
+            # 截断循环，行尾大段空白不再逐格全速处理。
+            row_cols = num_cols
+            keys = getattr(buffer_line, 'keys', None)
+            if keys is not None:
+                max_col = max((k for k in keys() if k < num_cols), default=-1)
+                row_cols = max_col + 1
+
+            for col in range(row_cols):
                 try:
                     char = buffer_line[col]
                 except (KeyError, IndexError, TypeError):
@@ -2826,39 +2841,56 @@ class TerminalWidget(QWidget):
 
                 # 优化：一次性获取所有属性，避免多次 getattr 调用
                 # pyte 的 Char 是 namedtuple，可以直接访问属性
-                if hasattr(char, 'data'):
+                try:
                     char_text = char.data
                     char_fg = char.fg
                     char_bg = char.bg
                     char_bold = char.bold
                     char_reverse = char.reverse
-                elif isinstance(char, str):
-                    char_text = char
-                    char_fg = 'default'
-                    char_bg = 'default'
-                    char_bold = False
-                    char_reverse = False
-                else:
-                    continue
+                except AttributeError:
+                    if isinstance(char, str):
+                        char_text = char
+                        char_fg = 'default'
+                        char_bg = 'default'
+                        char_bold = False
+                        char_reverse = False
+                    else:
+                        continue
 
                 # 计算颜色（提前到 skip 之前，以便空 data 时也能填充背景）
-                fg_color = self._get_char_color(char_fg, char_bold)
-                bg_color = self._get_char_color(char_bg, False, is_bg=True)
+                try:
+                    attr_key = (char_fg, char_bg, char_bold, char_reverse)
+                    attrs = attr_memo.get(attr_key)
+                except TypeError:
+                    # 防御：不可哈希的颜色值（如 list），直连慢路径
+                    attr_key = None
+                    attrs = None
+                if attrs is None:
+                    fg_color = self._get_char_color(char_fg, char_bold)
+                    bg_color = self._get_char_color(char_bg, False, is_bg=True)
+                    # 处理反转
+                    if char_reverse:
+                        fg_color, bg_color = bg_color, fg_color
+                    attrs = (self._ensure_visible(fg_color, bg_color),
+                             bg_color,
+                             bg_color != bg_default)
+                    if attr_key is not None:
+                        attr_memo[attr_key] = attrs
+                vis_fg, bg_color, has_bg = attrs
 
-                # 处理反转
-                if char_reverse:
-                    fg_color, bg_color = bg_color, fg_color
-
-                has_bg = bg_color != bg_default
                 # 空 data 且无背景色 → 真的没东西可画，跳过
                 if not char_text and not has_bg:
                     continue
 
                 cell_x = int(padding + col * char_width)
 
-                # 判断宽字符（空 data 视为单宽，等同于普通空格的填充）
-                is_wide = bool(char_text) and self._is_wide_char(char_text)
-                span = 2 if is_wide else 1
+                # 判断宽字符（空 data 视为单宽，等同于普通空格的填充）；
+                # 可打印 ASCII 内联判窄，免去每格一次方法调用
+                if not char_text or (len(char_text) == 1
+                                     and ' ' <= char_text <= '\x7e'):
+                    span = 1
+                else:
+                    span = 2 if self._is_wide_char(char_text) else 1
 
                 # 用「下一格起点 - 当前格起点」算宽度，使背景在水平方向也无缝拼接
                 char_draw_width = int(padding + (col + span) * char_width) - cell_x
@@ -2866,7 +2898,7 @@ class TerminalWidget(QWidget):
                     cell_x,
                     char_draw_width,
                     char_text,
-                    fg_color,
+                    vis_fg,
                     bg_color,
                     has_bg,
                 ))
@@ -2889,7 +2921,7 @@ class TerminalWidget(QWidget):
             run_next = -1
             run_color = None
             run_parts = []
-            for cell_x, cell_w, char_text, fg_color, bg_color, _has_bg in row_cells:
+            for cell_x, cell_w, char_text, fg, _bg_color, _has_bg in row_cells:
                 if not char_text or char_text == ' ':
                     # 空格无字形；恰好接在 run 尾部时并入串保持推进，避免
                     # "hello world" 因中间空格断成两次 drawText
@@ -2897,7 +2929,7 @@ class TerminalWidget(QWidget):
                         run_parts.append(' ')
                         run_next = cell_x + cell_w
                     continue
-                fg = self._ensure_visible(fg_color, bg_color)
+                # fg 已是可见性校正后的前景色（cell 循环里随属性 memo 算好）
                 if batch_ok and len(char_text) == 1 and '!' <= char_text <= '~':
                     if run_parts and fg == run_color and cell_x == run_next:
                         run_parts.append(char_text)
@@ -2948,7 +2980,6 @@ class TerminalWidget(QWidget):
         cache = self._visible_color_cache
         cached = cache.get(cache_key)
         if cached is not None:
-            cache.move_to_end(cache_key)
             return cached
 
         # 计算亮度 (perceived luminance)
@@ -2994,9 +3025,9 @@ class TerminalWidget(QWidget):
         else:
             result = fg
 
-        # 超限时淘汰最久未用项（LRU）
+        # 超限整体清空（护栏，正常打不到）
         if len(cache) >= self._COLOR_CACHE_MAX:
-            cache.popitem(last=False)
+            cache.clear()
         cache[cache_key] = result
         return result
 
@@ -3012,19 +3043,18 @@ class TerminalWidget(QWidget):
         else:
             cache_key = (color, bold, is_bg)
 
-        # 检查缓存（命中时移到队尾，标记为最近使用）
+        # 检查缓存
         cache = self._color_cache
         cached = cache.get(cache_key)
         if cached is not None:
-            cache.move_to_end(cache_key)
             return cached
 
         # 计算颜色
         result = self._compute_color(color, bold, is_bg)
 
-        # 超限时淘汰最久未用项（LRU）
+        # 超限整体清空（护栏，正常打不到）
         if len(cache) >= self._COLOR_CACHE_MAX:
-            cache.popitem(last=False)
+            cache.clear()
 
         cache[cache_key] = result
         return result
@@ -4740,8 +4770,8 @@ class TerminalWidget(QWidget):
         if cursor_color:
             self._cursor_color = QColor(*cursor_color)
         # 清空颜色缓存
-        self._color_cache = OrderedDict()
-        self._visible_color_cache = OrderedDict()
+        self._color_cache = {}
+        self._visible_color_cache = {}
         # 颜色映射变化 → 渲染状态失配，强制下次整屏重绘
         self._render_epoch += 1
 
@@ -4752,8 +4782,8 @@ class TerminalWidget(QWidget):
         self._selection_color = QColor(100, 149, 237, 100)
         self._cursor_color = QColor(200, 200, 200, 180)
         # 清空颜色缓存
-        self._color_cache = OrderedDict()
-        self._visible_color_cache = OrderedDict()
+        self._color_cache = {}
+        self._visible_color_cache = {}
         # 颜色映射变化 → 渲染状态失配，强制下次整屏重绘
         self._render_epoch += 1
 

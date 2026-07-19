@@ -224,3 +224,45 @@ class TestAsciiBatch(_RenderTestBase):
 
 if __name__ == '__main__':
     unittest.main()
+
+
+class TestCellLoopOptimizations(_RenderTestBase):
+    """cell 循环优化守卫：行截断/属性 memo 不改变渲染结果"""
+
+    def _cell_probe(self, w, row, col):
+        """取 (row, col) 格中心的像素颜色"""
+        img = self._image(w)
+        dpr = round(w.devicePixelRatioF())
+        x = int((w.PADDING + (col + 0.5) * w.char_width) * dpr)
+        y = int((w.PADDING + w._header_h + (row + 0.5) * w.char_height) * dpr)
+        return img.pixelColor(x, y).name()
+
+    def test_trailing_bg_cell_still_painted(self):
+        """行内只有行尾一个带背景色的格子：行截断不得把它跳过"""
+        w = self._widget(lines=5)
+        last_col = w.term_cols - 1
+        # 光标定位到本行行尾，写一个红底空格（SGR 41）
+        w.stream.feed(f"\x1b[6;{last_col + 1}H\x1b[41m \x1b[0m")
+        self._force_full_rebuild(w)
+        # 红底（ANSI red），非默认背景
+        probe = self._cell_probe(w, 5, last_col)
+        self.assertNotEqual(probe, w.bg_color.name())
+
+    def test_reverse_and_bold_render_differently(self):
+        """属性 memo 键含 bold/reverse：不同属性不得串色"""
+        w = self._widget(lines=1)
+        w.stream.feed("\x1b[3;1Hnormal\r\n")
+        w.stream.feed("\x1b[4;1H\x1b[7mreverse\x1b[0m\r\n")
+        self._force_full_rebuild(w)
+        # reverse 行的字符格背景应为前景色（非默认背景）
+        self.assertNotEqual(self._cell_probe(w, 3, 0),
+                            self._cell_probe(w, 2, 0))
+
+    def test_full_redraw_pixel_stable_across_two_rebuilds(self):
+        """两次整屏重绘逐像素一致（memo/缓存不引入不确定性）"""
+        w = self._widget(lines=30)
+        w.stream.feed("\x1b[31m红色 red\x1b[0m \x1b[1;34mbold blue\x1b[0m\r\n")
+        self._force_full_rebuild(w)
+        img1 = self._image(w).copy()
+        self._force_full_rebuild(w)
+        self.assertEqual(img1, self._image(w))
