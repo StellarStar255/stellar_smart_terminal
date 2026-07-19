@@ -346,9 +346,9 @@ class MainWindow(QMainWindow):
             self.pin_row2_checkbox.setChecked(True)
             self.pin_row2_checkbox.blockSignals(False)
 
-        # 恢复全局缩放
-        if self._global_zoom_delta != 0 or self._gui_font_size != 0:
-            self._apply_global_zoom()
+        # 恢复全局缩放（无偏移也要跑一次：Auto 的 GUI 字号以 12px 为基准，
+        # 需把 app 级 font-size 固定到 12px，而不是跟随系统默认字号）
+        self._apply_global_zoom()
 
         # 恢复左右分屏偏好
         if hasattr(self, '_explorer_split_checkbox') and self._explorer_split_horizontal:
@@ -3047,12 +3047,12 @@ class MainWindow(QMainWindow):
         # 2. 全局 GUI 字体（工具栏、标签栏、状态栏等）
         #    - 缩放样式表中显式写了 font-size 的控件
         #    - 同时更新 QApplication 默认字体，让未显式设置 font-size 的控件（Start/Stop/Switch 等）也等比缩放
+        # Auto（=0）不再跟随系统默认字号（mac 约 13px，且各平台不一）：
+        # 以 12px 为基准，观感与显式选 12pt 一致；有全局缩放偏移时按 12+delta。
         if gui_font_size > 0:
             effective_px = gui_font_size
-        elif delta != 0:
-            effective_px = max(8, min(32, 12 + delta))
         else:
-            effective_px = None
+            effective_px = max(8, min(32, 12 + delta))
         self._scale_gui_font_sizes(gui_font_size, delta)
         self._apply_application_font(effective_px)
 
