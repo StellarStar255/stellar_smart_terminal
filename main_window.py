@@ -30,13 +30,13 @@ from PyQt6.QtWidgets import (
     QPushButton, QLabel, QStatusBar,
     QMessageBox, QFileDialog, QSplitter,
     QTextEdit, QFrame, QDialog, QLineEdit, QListWidget,
-    QListWidgetItem, QTabWidget, QTabBar,
+    QListWidgetItem, QTabWidget,
     QApplication, QInputDialog, QMenu, QSizePolicy,
     QStackedWidget
 )
 from PyQt6 import sip  # 用于检查 C++ 对象是否已被删除
 from PyQt6.QtCore import Qt, QTimer, QEvent, QPoint, QObject, QVariantAnimation, QEasingCurve
-from PyQt6.QtGui import QAction, QIcon, QColor, QPixmap, QPainter, QCursor, QKeySequence
+from PyQt6.QtGui import QAction, QIcon, QColor, QPixmap, QPainter, QKeySequence
 
 from terminal_widget import TerminalWidget
 from session_manager import SessionManager
@@ -52,6 +52,7 @@ from main_window_config import ConfigMixin  # 配置读写（从 main_window 拆
 from main_window_explorer import ExplorerPanelMixin  # Explorer 侧面板（从 main_window 拆出）
 from main_window_git import GitPanelMixin  # Git 侧面板（从 main_window 拆出）
 from main_window_remote import RemotePanelMixin  # 远程 SSH/SFTP 侧面板（从 main_window 拆出）
+from main_window_tabs import TabSplitMixin  # 标签页与分屏（从 main_window 拆出）
 import themes  # 主题配色表（纯数据，从 main_window 拆出）
 from i18n import t, set_language
 from utils import get_config_path, list_notify_sounds, play_notify_sound
@@ -62,7 +63,7 @@ logger = get_logger(__name__)
 import shutil
 import subprocess
 from widgets import (
-    InlineRenameEdit, DetachableTabBar, _NavResizeHandle,
+    DetachableTabBar, _NavResizeHandle,
 )
 from dialogs import (
     get_default_shell, PresetDialog, LLMConfigDialog,
@@ -72,7 +73,8 @@ from dialogs import (
 
 
 class MainWindow(ThemeMixin, ToolbarMixin, ConfigMixin, ExplorerPanelMixin,
-                 GitPanelMixin, RemotePanelMixin, UpdateMixin, QMainWindow):
+                 GitPanelMixin, RemotePanelMixin, TabSplitMixin, UpdateMixin,
+                 QMainWindow):
     """主窗口"""
 
     # 配置文件路径（源码运行=项目目录；打包运行=平台用户数据目录，见 utils.get_data_dir）
@@ -2037,16 +2039,6 @@ class MainWindow(ThemeMixin, ToolbarMixin, ConfigMixin, ExplorerPanelMixin,
             lst.setCurrentRow(0)
         lst.setUpdatesEnabled(True)
 
-    @staticmethod
-    def _ql_detach_modifier_held() -> bool:
-        """快速启动激活瞬间是否按着 Shift/Cmd（Qt 在 macOS 上把 Cmd 映射为 Control）。
-
-        按住即表示「启动后直接扩展为新窗口」。
-        """
-        mods = QApplication.keyboardModifiers()
-        return bool(mods & (Qt.KeyboardModifier.ShiftModifier
-                            | Qt.KeyboardModifier.ControlModifier
-                            | Qt.KeyboardModifier.MetaModifier))
 
     def _ql_on_item_activated(self, item):
         """列表项被点击/回车选中。"""
@@ -2123,13 +2115,6 @@ class MainWindow(ThemeMixin, ToolbarMixin, ConfigMixin, ExplorerPanelMixin,
         self._ql_search.setFocus(Qt.FocusReason.PopupFocusReason)
         QTimer.singleShot(100, lambda: setattr(self, '_ql_ready', True))
 
-    @staticmethod
-    def _tab_name_for_dir(dir_path: str) -> str:
-        """由目录路径取标签名：末级文件夹名；根目录等无末级名时退回整条路径。
-
-        约定入参已 normpath（去掉尾斜杠），否则 basename 可能为空。
-        """
-        return os.path.basename(dir_path) or dir_path
 
     def _quick_launch_with_dir(self, dir_path: str, detach: bool = False):
         """以指定目录快速启动新终端标签页并自动启动预设
@@ -2208,152 +2193,7 @@ class MainWindow(ThemeMixin, ToolbarMixin, ConfigMixin, ExplorerPanelMixin,
             # 保存到配置文件
             self._save_config()
 
-    def _add_new_tab(self, external_splitter=None, external_terminals=None, external_session=None, tab_name=None, tab_cwd=None):
-        """添加新的终端标签页
 
-        Args:
-            external_splitter: 外部传入的 splitter（用于接收分离的 tab）
-            external_terminals: 外部传入的 terminal 列表
-            external_session: 外部传入的 session
-            tab_name: 自定义标签名
-            tab_cwd: 该标签页独立的工作目录
-        """
-        self.tab_counter += 1
-        if tab_name is None:
-            tab_name = t("terminal.default_name", n=self.tab_counter)
-
-        if external_splitter and external_terminals:
-            # 使用外部传入的 splitter 和 terminals
-            splitter = external_splitter
-            terminals = external_terminals
-            session = external_session
-
-            # 重新设置 parent
-            splitter.setParent(self.tab_widget)
-
-            # 重新连接 terminal 信号
-            for terminal in terminals:
-                # 断开旧连接（如果有的话）
-                try:
-                    terminal.input_recorded.disconnect()
-                    terminal.output_recorded.disconnect()
-                    terminal.session_ended.disconnect()
-                    terminal.image_pasted.disconnect()
-                    terminal.close_tab_requested.disconnect()
-                    terminal.new_tab_requested.disconnect()
-                    terminal.manage_presets_requested.disconnect()
-                    terminal.add_command_requested.disconnect()
-                    terminal.manage_local_presets_requested.disconnect()
-                    terminal.add_local_command_requested.disconnect()
-                    terminal.close_split_requested.disconnect()
-                    terminal.split_horizontal_requested.disconnect()
-                    terminal.split_vertical_requested.disconnect()
-                    terminal.rename_split_requested.disconnect()
-                    terminal.attention_requested.disconnect()
-                    terminal.interaction_requested.disconnect()
-                except (TypeError, RuntimeError):
-                    pass  # Signal may already be disconnected
-
-                # 重新连接到当前窗口
-                terminal.input_recorded.connect(self._on_input)
-                terminal.output_recorded.connect(self._on_output)
-                terminal.session_ended.connect(lambda t=terminal: self._on_terminal_ended(t))
-                terminal.image_pasted.connect(self._on_image_pasted)
-                terminal.close_tab_requested.connect(self._close_tab_or_window)
-                terminal.new_tab_requested.connect(self._add_new_tab)
-                terminal.manage_presets_requested.connect(self._manage_presets)
-                terminal.add_command_requested.connect(self._add_new_preset)
-                terminal.manage_local_presets_requested.connect(self._manage_local_presets)
-                terminal.add_local_command_requested.connect(self._add_new_local_preset)
-                terminal.close_split_requested.connect(self._close_current_split)
-                terminal.split_horizontal_requested.connect(lambda: self._split_current_tab(self._shift_held()))
-                terminal.split_vertical_requested.connect(lambda: self._split_vertical_current_terminal(self._shift_held()))
-                terminal.move_split_left_requested.connect(self._move_split_left)
-                terminal.move_split_up_requested.connect(self._move_split_up)
-                terminal.rename_split_requested.connect(lambda t=terminal: self._rename_split(t))
-                terminal.attention_requested.connect(lambda t=terminal: self._on_terminal_attention(t))
-                terminal.interaction_requested.connect(lambda t=terminal: self._on_terminal_interaction(t))
-                terminal.scrollback_pressure_changed.connect(lambda lv, t=terminal: self._on_scrollback_pressure(t))
-                terminal.installEventFilter(self)
-
-                # 重新设置快速命令提供者，指向当前窗口的预设
-                terminal.quick_commands_provider = lambda: self.presets
-                terminal.local_quick_commands_provider = lambda: self.local_presets
-
-                # 确保 terminal 正确显示（修复从其他窗口拖拽后的显示问题）
-                terminal.setUpdatesEnabled(True)  # 恢复绘制更新（detach 时会暂停）
-                terminal.show()
-                terminal.update()
-        else:
-            # 创建新的分屏容器
-            splitter = QSplitter(Qt.Orientation.Horizontal)
-            splitter.setHandleWidth(2)
-            splitter.setStyleSheet("""
-                QSplitter::handle {
-                    background-color: #3d3d5c;
-                }
-                QSplitter::handle:hover {
-                    background-color: #667eea;
-                }
-            """)
-
-            # 创建第一个终端
-            terminal = self._create_terminal()
-            splitter.addWidget(terminal)
-            terminals = [terminal]
-            session = None
-
-        # 添加到标签页
-        idx = self.tab_widget.addTab(splitter, tab_name)
-        self.tab_splitters[idx] = splitter
-        self.tab_terminals[idx] = terminals
-        self.tab_sessions[idx] = session
-        self.tab_cwds[idx] = tab_cwd if tab_cwd else self._window_cwd  # 存储独立工作目录
-
-        # 添加自定义关闭按钮到标签页
-        close_btn = QPushButton("×")
-        close_btn.setFixedSize(20, 20)
-        close_btn.setStyleSheet("""
-            QPushButton {
-                background-color: #e74c3c;
-                color: white;
-                border: none;
-                border-radius: 10px;
-                font-size: 16px;
-                font-family: 'Segoe UI Emoji', 'Apple Color Emoji', 'Noto Color Emoji', Arial, sans-serif;
-                padding: 0;
-                margin: 0;
-            }
-            QPushButton:hover {
-                background-color: #ff6b6b;
-            }
-        """)
-        close_btn.clicked.connect(lambda checked, i=idx: self._close_tab_by_button(i))
-        self.tab_widget.tabBar().setTabButton(idx, QTabBar.ButtonPosition.RightSide, close_btn)
-
-        # 切换到新标签页
-        self.tab_widget.setCurrentIndex(idx)
-        self.active_terminal = terminals[0]
-        terminals[0].setFocus()
-
-        # 如果有外部会话且终端正在运行，更新状态
-        if external_session and any(t.is_running() for t in terminals):
-            self.current_session = external_session
-            self._update_running_state(True)
-
-        return idx
-
-    def _close_tab_by_button(self, index):
-        """通过按钮关闭标签页（需要找到正确的索引）"""
-        # 由于标签页可能被移动，需要找到按钮对应的实际索引
-        sender = self.sender()
-        for i in range(self.tab_widget.count()):
-            if self.tab_widget.tabBar().tabButton(i, QTabBar.ButtonPosition.RightSide) is sender:
-                self._close_tab(i)
-                return
-        # 如果找不到，尝试使用原始索引
-        if index < self.tab_widget.count():
-            self._close_tab(index)
 
     def _create_terminal(self) -> TerminalWidget:
         """创建一个新终端并连接信号"""
@@ -2441,403 +2281,14 @@ class MainWindow(ThemeMixin, ToolbarMixin, ConfigMixin, ExplorerPanelMixin,
         """是否按住 Shift —— 按住时分屏作用于整个标签页，而非当前小窗口"""
         return bool(QApplication.keyboardModifiers() & Qt.KeyboardModifier.ShiftModifier)
 
-    def _styled_splitter(self, orientation):
-        """创建一个带统一手柄样式的 QSplitter"""
-        splitter = QSplitter(orientation)
-        splitter.setHandleWidth(2)
-        splitter.setStyleSheet("""
-            QSplitter::handle {
-                background-color: #3d3d5c;
-            }
-            QSplitter::handle:hover {
-                background-color: #667eea;
-            }
-        """)
-        return splitter
 
-    def _restore_tab_close_button(self, idx):
-        """为第 idx 个标签页重新创建右上角的关闭按钮（removeTab 会丢弃原按钮）"""
-        close_btn = QPushButton("×")
-        close_btn.setFixedSize(20, 20)
-        close_btn.setStyleSheet("""
-            QPushButton {
-                background-color: #e74c3c;
-                color: white;
-                border: none;
-                border-radius: 10px;
-                font-size: 16px;
-                font-family: 'Segoe UI Emoji', 'Apple Color Emoji', 'Noto Color Emoji', Arial, sans-serif;
-                padding: 0;
-                margin: 0;
-            }
-            QPushButton:hover {
-                background-color: #ff6b6b;
-            }
-        """)
-        close_btn.clicked.connect(lambda checked, i=idx: self._close_tab_by_button(i))
-        self.tab_widget.tabBar().setTabButton(idx, QTabBar.ButtonPosition.RightSide, close_btn)
 
-    def _wrap_tab_page(self, idx, orientation, new_terminal):
-        """把整个标签页内容包进一个新的 orientation 方向的 splitter，并加入 new_terminal。
 
-        用于对整个标签页（而非单个小窗口）进行分屏：让 new_terminal 贯穿整个宽（垂直分屏）
-        或整个高（水平分屏）。会更新 tab_splitters[idx] 指向新的外层 splitter，
-        以保持 “标签页页面控件 == tab_splitters[idx]” 的不变式（detach / 重建映射依赖它）。
-        """
-        old_page = self.tab_splitters.get(idx)
-        outer = self._styled_splitter(orientation)
-        title = self.tab_widget.tabText(idx)
-        was_current = self.tab_widget.currentIndex() == idx
 
-        # 先把旧页面从 tab 中摘下（removeTab 不销毁控件，Python 引用仍在），再重组
-        self.tab_widget.removeTab(idx)
-        outer.addWidget(old_page)
-        outer.addWidget(new_terminal)
-        old_page.show()
 
-        self.tab_widget.insertTab(idx, outer, title)
-        self._restore_tab_close_button(idx)
-        if was_current:
-            self.tab_widget.setCurrentIndex(idx)
 
-        self.tab_splitters[idx] = outer
 
-        if orientation == Qt.Orientation.Horizontal:
-            size = outer.width() if outer.width() > 0 else 800
-        else:
-            size = outer.height() if outer.height() > 0 else 600
-        outer.setSizes([size // 2, size // 2])
-        return outer
 
-    def _split_current_tab(self, whole_tab=False):
-        """左右分屏。
-
-        默认只分裂当前活动终端所在的小窗口；按住 Shift（whole_tab=True）时
-        对整个标签页进行左右分屏，新终端贯穿整个高度。
-        """
-        idx = self.tab_widget.currentIndex()
-        if idx < 0:
-            return
-
-        splitter = self.tab_splitters.get(idx)
-        if not splitter:
-            return
-
-        # 获取当前活动终端的工作目录，回退到标签页的工作目录，再回退到窗口级别的工作目录
-        current_cwd = None
-        if self.active_terminal and self.active_terminal.is_running():
-            current_cwd = self.active_terminal.get_cwd()
-        if not current_cwd:
-            current_cwd = self.tab_cwds.get(idx, self._window_cwd)
-
-        terminals = self.tab_terminals.get(idx, [])
-        new_terminal = self._create_terminal()
-
-        # 没有有效活动终端时，也按整页分屏处理
-        split_whole = whole_tab or not self.active_terminal or self.active_terminal not in terminals
-
-        if split_whole:
-            # 对整个标签页左右分屏：新终端成为贯穿整高的一列
-            top = splitter
-            if top.orientation() == Qt.Orientation.Horizontal:
-                top.addWidget(new_terminal)
-                count = top.count()
-                total_width = top.width()
-                top.setSizes([total_width // count] * count)
-            else:
-                # 顶层是垂直方向，需要包裹整页才能让新列贯穿整高
-                self._wrap_tab_page(idx, Qt.Orientation.Horizontal, new_terminal)
-        else:
-            # 只分裂当前活动终端所在的小窗口
-            parent_widget = self.active_terminal.parent()
-            if not isinstance(parent_widget, QSplitter):
-                self.statusbar.showMessage(t("msg.cannot_find_container"), 3000)
-                new_terminal.deleteLater()
-                return
-
-            parent_splitter = parent_widget
-            terminal_index = parent_splitter.indexOf(self.active_terminal)
-
-            if parent_splitter.orientation() == Qt.Orientation.Horizontal:
-                # 父级已是水平方向：直接在活动终端右侧插入，把原终端的空间一分为二
-                parent_sizes = parent_splitter.sizes()
-                parent_splitter.insertWidget(terminal_index + 1, new_terminal)
-                if terminal_index < len(parent_sizes):
-                    orig = parent_sizes[terminal_index]
-                    new_sizes = list(parent_sizes)
-                    new_sizes[terminal_index] = orig // 2
-                    new_sizes.insert(terminal_index + 1, orig - orig // 2)
-                    parent_splitter.setSizes(new_sizes)
-            else:
-                # 父级是垂直方向：把原终端包裹进一个新的水平 splitter
-                parent_sizes = parent_splitter.sizes()
-                original_terminal = self.active_terminal
-                horizontal_splitter = self._styled_splitter(Qt.Orientation.Horizontal)
-                horizontal_splitter.addWidget(original_terminal)
-                horizontal_splitter.addWidget(new_terminal)
-                parent_splitter.insertWidget(terminal_index, horizontal_splitter)
-                if parent_sizes and len(parent_sizes) == parent_splitter.count():
-                    parent_splitter.setSizes(parent_sizes)
-                h_width = horizontal_splitter.width() if horizontal_splitter.width() > 0 else 400
-                horizontal_splitter.setSizes([h_width // 2, h_width // 2])
-
-        # 更新终端列表
-        self.tab_terminals[idx].append(new_terminal)
-
-        # 启动 shell 在当前终端的工作目录
-        new_terminal.start_process([get_default_shell()], cwd=current_cwd)
-
-        # 设置新终端为活动终端
-        self.active_terminal = new_terminal
-        new_terminal.setFocus()
-
-        count = len(self.tab_terminals[idx])
-        msg = "status.split_tab_done" if split_whole else "status.split_done"
-        self.statusbar.showMessage(t(msg, count=count), 3000)
-
-    def _split_vertical_current_terminal(self, whole_tab=False):
-        """上下分屏。
-
-        默认只分裂当前活动终端所在的小窗口；按住 Shift（whole_tab=True）时
-        对整个标签页进行上下分屏，新终端贯穿整个宽度。
-        """
-        idx = self.tab_widget.currentIndex()
-        if idx < 0:
-            return
-
-        splitter = self.tab_splitters.get(idx)
-        if not splitter:
-            return
-
-        terminals = self.tab_terminals.get(idx, [])
-
-        # 获取当前终端的工作目录，回退到标签页的工作目录，再回退到窗口级别的工作目录
-        current_cwd = None
-        if self.active_terminal and self.active_terminal.is_running():
-            current_cwd = self.active_terminal.get_cwd()
-        if not current_cwd:
-            current_cwd = self.tab_cwds.get(idx, self._window_cwd)
-
-        new_terminal = self._create_terminal()
-
-        # 没有有效活动终端时，也按整页分屏处理
-        split_whole = whole_tab or not self.active_terminal or self.active_terminal not in terminals
-
-        if split_whole:
-            # 对整个标签页上下分屏：新终端成为贯穿整宽的一行
-            top = splitter
-            if top.orientation() == Qt.Orientation.Vertical:
-                top.addWidget(new_terminal)
-                count = top.count()
-                total_height = top.height()
-                top.setSizes([total_height // count] * count)
-            else:
-                # 顶层是水平方向，需要包裹整页才能让新行贯穿整宽
-                self._wrap_tab_page(idx, Qt.Orientation.Vertical, new_terminal)
-        else:
-            # 只分裂当前活动终端所在的小窗口
-            parent_widget = self.active_terminal.parent()
-            if not isinstance(parent_widget, QSplitter):
-                self.statusbar.showMessage(t("msg.cannot_find_container"), 3000)
-                new_terminal.deleteLater()
-                return
-
-            parent_splitter = parent_widget
-            terminal_index = parent_splitter.indexOf(self.active_terminal)
-            parent_sizes = parent_splitter.sizes()
-
-            if parent_splitter.orientation() == Qt.Orientation.Vertical:
-                # 父级已是垂直方向：直接在活动终端下方插入，把原终端的空间一分为二
-                parent_splitter.insertWidget(terminal_index + 1, new_terminal)
-                if terminal_index < len(parent_sizes):
-                    orig = parent_sizes[terminal_index]
-                    new_sizes = list(parent_sizes)
-                    new_sizes[terminal_index] = orig // 2
-                    new_sizes.insert(terminal_index + 1, orig - orig // 2)
-                    parent_splitter.setSizes(new_sizes)
-            else:
-                # 父级是水平方向：把原终端包裹进一个新的垂直 splitter
-                original_terminal = self.active_terminal
-                vertical_splitter = self._styled_splitter(Qt.Orientation.Vertical)
-                vertical_splitter.addWidget(original_terminal)
-                vertical_splitter.addWidget(new_terminal)
-                parent_splitter.insertWidget(terminal_index, vertical_splitter)
-                if parent_sizes and len(parent_sizes) == parent_splitter.count():
-                    parent_splitter.setSizes(parent_sizes)
-                v_height = vertical_splitter.height() if vertical_splitter.height() > 0 else 400
-                vertical_splitter.setSizes([v_height // 2, v_height // 2])
-
-        # 更新终端列表
-        self.tab_terminals[idx].append(new_terminal)
-
-        # 启动新终端
-        new_terminal.start_process([get_default_shell()], cwd=current_cwd)
-
-        # 设置新终端为活动终端
-        self.active_terminal = new_terminal
-        new_terminal.setFocus()
-
-        count = len(self.tab_terminals[idx])
-        msg = "status.vsplit_tab_done" if split_whole else "status.vsplit_done"
-        self.statusbar.showMessage(t(msg, count=count), 3000)
-
-    def _collapse_singleton_splitter(self, splitter, idx):
-        """若某个嵌套 splitter 关闭后只剩一个子组件，则解除这层嵌套：
-
-        用唯一的子组件替换该 splitter，并继承它在父 splitter 中的位置和尺寸。
-        这样剩下的分屏会自动扩展占满原来的区域，同时**完全不影响**父 splitter
-        里其它分屏的尺寸。顶层标签页 splitter 不会被解除。
-        """
-        top = self.tab_splitters.get(idx)
-        while (
-            isinstance(splitter, QSplitter)
-            and splitter is not top
-            and splitter.count() == 1
-        ):
-            grandparent = splitter.parent()
-            if not isinstance(grandparent, QSplitter):
-                break
-            child = splitter.widget(0)
-            gp_index = grandparent.indexOf(splitter)
-            gp_sizes = grandparent.sizes()  # 关闭前父级各分屏的尺寸，需原样保留
-            # 把唯一子组件移动到父 splitter 中 splitter 原来的位置
-            child.setParent(None)
-            grandparent.insertWidget(gp_index, child)
-            # 删除已空的嵌套 splitter
-            splitter.setParent(None)
-            splitter.deleteLater()
-            # 恢复父 splitter 的尺寸分配（其它分屏宽/高保持不变）
-            if len(gp_sizes) == grandparent.count():
-                grandparent.setSizes(gp_sizes)
-            # 继续向上检查（一般一层即可）
-            splitter = grandparent
-
-    def _close_current_split(self):
-        """关闭当前聚焦的分屏终端。
-
-        只在该终端所在的局部 splitter 范围内回收空间，空出的空间交给相邻分屏
-        自动扩展，**不影响**其它 splitter / 分屏的尺寸。
-        """
-        idx = self.tab_widget.currentIndex()
-        if idx < 0:
-            return
-
-        terminals = self.tab_terminals.get(idx, [])
-        if len(terminals) <= 1:
-            # 只有一个终端时不能关闭，提示用户
-            self.statusbar.showMessage(t("msg.cannot_close_only_terminal"), 3000)
-            return
-
-        # 找到当前活动的终端
-        terminal_to_close = self.active_terminal
-        if terminal_to_close not in terminals:
-            # 如果活动终端不在当前标签页，关闭最后一个
-            terminal_to_close = terminals[-1]
-
-        # 记录被关闭终端所在的父 splitter 及其尺寸（只在这个局部范围内重新分配空间）
-        parent = terminal_to_close.parent()
-        parent_sizes = parent.sizes() if isinstance(parent, QSplitter) else None
-        close_index = parent.indexOf(terminal_to_close) if isinstance(parent, QSplitter) else -1
-
-        # 完整清理终端资源
-        terminal_to_close.cleanup()
-
-        # 从列表中移除
-        terminals.remove(terminal_to_close)
-
-        # 从分屏容器中移除并销毁
-        terminal_to_close.setParent(None)
-        terminal_to_close.deleteLater()
-
-        # 在局部父 splitter 内，把空出的空间合并给相邻分屏（其它分屏尺寸不变）
-        if isinstance(parent, QSplitter) and parent_sizes and 0 <= close_index < len(parent_sizes):
-            freed = parent_sizes[close_index]
-            new_sizes = parent_sizes[:close_index] + parent_sizes[close_index + 1:]
-            if new_sizes:
-                # 优先把空间给前一个分屏，否则给后一个
-                give = close_index - 1 if close_index - 1 >= 0 else 0
-                new_sizes[give] += freed
-                if len(new_sizes) == parent.count():
-                    parent.setSizes(new_sizes)
-
-        # 若父 splitter 因此只剩一个子组件，解除这层嵌套，让剩余分屏自动扩展
-        self._collapse_singleton_splitter(parent, idx)
-
-        # 更新活动终端为剩余的第一个
-        if terminals:
-            self.active_terminal = terminals[0]
-            terminals[0].setFocus()
-
-        self.statusbar.showMessage(t("status.close_split_done", count=len(terminals)), 3000)
-
-    def _move_split_left(self):
-        """将当前分屏与左边的分屏交换位置"""
-        idx = self.tab_widget.currentIndex()
-        if idx < 0:
-            return
-
-        splitter = self.tab_splitters.get(idx)
-        if not splitter:
-            return
-
-        # 找到当前活动终端在 splitter 中的索引
-        terminal = self.active_terminal
-        if not terminal:
-            return
-
-        # 查找终端（或其父 vertical splitter）在主 splitter 中的位置
-        widget_in_splitter = terminal
-        while widget_in_splitter.parent() != splitter:
-            widget_in_splitter = widget_in_splitter.parent()
-            if widget_in_splitter is None:
-                return
-
-        current_index = splitter.indexOf(widget_in_splitter)
-        if current_index <= 0:
-            self.statusbar.showMessage(t("status.move_split_left_fail"), 3000)
-            return
-
-        # 保存当前 sizes
-        sizes = splitter.sizes()
-
-        # 交换：把当前 widget 插入到左边位置
-        splitter.insertWidget(current_index - 1, widget_in_splitter)
-
-        # 交换 sizes
-        sizes[current_index], sizes[current_index - 1] = sizes[current_index - 1], sizes[current_index]
-        splitter.setSizes(sizes)
-
-        # 同步 tab_terminals 列表中的顺序
-        terminals = self.tab_terminals.get(idx, [])
-        term_idx = terminals.index(terminal) if terminal in terminals else -1
-        if term_idx > 0:
-            terminals[term_idx], terminals[term_idx - 1] = terminals[term_idx - 1], terminals[term_idx]
-
-        terminal.setFocus()
-        self.statusbar.showMessage(t("status.move_split_left_done"), 3000)
-
-    def _move_split_up(self):
-        """在垂直分屏内，把当前终端与上方的兄弟交换位置"""
-        terminal = self.active_terminal
-        if not terminal:
-            return
-        parent_splitter = terminal.parent()
-        if not isinstance(parent_splitter, QSplitter):
-            self.statusbar.showMessage(t("status.move_split_up_fail"), 3000)
-            return
-        if parent_splitter.orientation() != Qt.Orientation.Vertical:
-            self.statusbar.showMessage(t("status.move_split_up_fail"), 3000)
-            return
-        current_index = parent_splitter.indexOf(terminal)
-        if current_index <= 0:
-            self.statusbar.showMessage(t("status.move_split_up_fail"), 3000)
-            return
-        sizes = parent_splitter.sizes()
-        parent_splitter.insertWidget(current_index - 1, terminal)
-        sizes[current_index], sizes[current_index - 1] = sizes[current_index - 1], sizes[current_index]
-        parent_splitter.setSizes(sizes)
-        terminal.setFocus()
-        self.statusbar.showMessage(t("status.move_split_up_done"), 3000)
 
     def _on_terminal_ended(self, terminal):
         """单个终端进程结束"""
@@ -2850,53 +2301,7 @@ class MainWindow(ThemeMixin, ToolbarMixin, ConfigMixin, ExplorerPanelMixin,
                     self._on_tab_session_ended(terminal)
                 break
 
-    def _close_tab(self, index, auto_create_new=True):
-        """关闭指定标签页
 
-        Args:
-            index: 要关闭的标签页索引
-            auto_create_new: 如果关闭后没有标签页了，是否自动创建新的
-        """
-        # 先停止 OpenAI API 服务器（如果有）
-        if self.openai_server_manager.is_running(index):
-            self.openai_server_manager.stop_server(index)
-
-        terminals = self.tab_terminals.get(index, [])
-        for terminal in terminals:
-            # 完整清理终端资源
-            terminal.cleanup()
-
-        # 结束会话
-        session = self.tab_sessions.get(index)
-        if session:
-            self.session_manager.end_session()
-
-        # 移除标签页。removeTab 会同步发出 currentChanged，而此时 tab_cwds 等映射
-        # 还是旧索引 → _on_tab_changed 会用新索引查到被关 tab 的目录，导致
-        # Directory/Current 回退到旧路径。先屏蔽信号，重建映射后再手动同步一次。
-        self.tab_widget.blockSignals(True)
-        try:
-            self.tab_widget.removeTab(index)
-        finally:
-            self.tab_widget.blockSignals(False)
-
-        # 更新映射（重建索引）
-        self._rebuild_tab_mappings()
-
-        # 映射已就绪，手动触发一次 tab 切换回调，让目录栏/导航面板同步到新当前 tab
-        current = self.tab_widget.currentIndex()
-        if current >= 0:
-            self._on_tab_changed(current)
-
-        # 如果没有标签页了，根据参数决定是否创建新的
-        if self.tab_widget.count() == 0 and auto_create_new:
-            self._add_new_tab()
-            # 确保新 tab 的 UI 状态正确（启动按钮可用）
-            self._update_running_state(False)
-
-    def _close_current_tab(self):
-        """关闭当前标签页"""
-        self._close_tab(self.tab_widget.currentIndex())
 
     def _focus_in_editor_area(self) -> bool:
         """当前键盘焦点是否落在编辑器区域（某个文件编辑窗格）里。"""
@@ -2907,52 +2312,6 @@ class MainWindow(ThemeMixin, ToolbarMixin, ConfigMixin, ExplorerPanelMixin,
             fw is self.editor_area or self.editor_area.isAncestorOf(fw)
         )
 
-    def _close_tab_or_window(self):
-        """关闭当前分屏/标签页/窗口 (Cmd+W)
-
-        优先级：
-        0. 如果焦点在编辑器窗格里，关闭当前选中的编辑器窗格
-        1. 如果当前标签页有多个分屏，关闭当前选中的分屏
-        2. 如果只有一个分屏，关闭整个标签页
-        3. 如果没有标签页了，关闭窗口
-        """
-        # 焦点在编辑器里 → Cmd+W 关闭当前选中的编辑器窗格（而不是终端标签）
-        if self._focus_in_editor_area():
-            if self.editor_area.close_focused_pane():
-                return
-
-        idx = self.tab_widget.currentIndex()
-
-        if idx >= 0:
-            terminals = self.tab_terminals.get(idx, [])
-            if len(terminals) > 1:
-                # 有多个分屏，关闭当前选中的分屏
-                self._close_current_split()
-            else:
-                # 只有一个分屏，关闭整个标签页。
-                # 若这是最后一个标签页，这一步会退出整个窗口 → 一律二次确认，
-                # 避免一次误触把整个窗口（布局/会话）丢掉。有进程在跑时用更强措辞。
-                if self.tab_widget.count() == 1:
-                    has_running_process = any(t.is_running() for t in terminals)
-                    msg = (t("msg.confirm_close_last_tab") if has_running_process
-                           else t("msg.confirm_close_window"))
-                    reply = QMessageBox.question(
-                        self, t("msg.confirm_close_title"), msg,
-                        QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No,
-                        QMessageBox.StandardButton.No  # 默认选择"否"，回车不会误关
-                    )
-                    if reply != QMessageBox.StandardButton.Yes:
-                        return
-                    # 已经确认过了，self.close() 触发的 closeEvent 不必再问一次
-                    self._force_closing = True
-
-                self._close_tab(idx, auto_create_new=False)
-                # 如果关闭后没有标签页了，关闭窗口
-                if self.tab_widget.count() == 0:
-                    self.close()
-        else:
-            # 没有标签页了，关闭整个窗口
-            self.close()
 
     @staticmethod
     def _clamp_window_pos(x, y, w, h, ref_point):
@@ -3005,479 +2364,10 @@ class MainWindow(ThemeMixin, ToolbarMixin, ConfigMixin, ExplorerPanelMixin,
         window._slide_anim = anim
         anim.start()
 
-    def _align_child_with_parent_geometry(self, new_window, abort_check=None):
-        """让子窗口与本窗口逐像素重合（位置+尺寸），并持续校正 macOS 的异步微调。
 
-        abort_check: 可选回调，返回 True 时立即停止校正并显形——拖拽分离场景
-        下用户继续拖动（接管窗口位置）后，校正循环不能再和用户抢窗口。
 
-        macOS 对新建原生窗口可能自行级联偏移、约束到屏幕（位置右移/尺寸压窄），
-        且调整常发生在首帧之后——单次 setGeometry（或固定次数的少量重试）会被
-        悄悄覆盖，这正是「新窗口宽度与父窗口对不齐」的根因。这里在 ~3s 内反复
-        断言目标几何，连续 3 次确认无偏差才收手；每次几何就位后还把左侧栏宽度
-        按共享值对齐——窗口被压窄再校正回来时 QSplitter 的比例缩放会破坏左侧栏
-        的绝对像素宽度，而 _prime_left_panel_sync 的 300ms 兜底可能跑在几何
-        稳定之前，必须在这里补一次。
-        """
-        parent_maximized = self.isMaximized()
-        target_geo = self.geometry()
-        logger.debug(
-            "[align] start: parent_geo=%s parent_max=%s child_visible=%s",
-            target_geo, parent_maximized, new_window.isVisible())
 
-        # 未显示的子窗口（菜单 expand 路径）：先以全透明显示，几何对齐后再显形。
-        # 系统（台前调度等）会先把新窗口放到错误位置、我们再纠正——这一来一回
-        # 在隐形期间完成，用户看到的就是窗口直接出现在正确位置，没有跳变。
-        # 拖拽路径窗口本就可见（要跟随光标），不走隐形逻辑。
-        reveal_state = {'revealed': new_window.isVisible()}
 
-        def _reveal():
-            if reveal_state['revealed'] or sip.isdeleted(new_window):
-                return
-            reveal_state['revealed'] = True
-            op = getattr(new_window, '_window_opacity', 100)
-            if not (isinstance(op, int) and 10 <= op <= 100):
-                op = 100
-            new_window.setWindowOpacity(op / 100.0)
-
-        if not reveal_state['revealed']:
-            new_window.setWindowOpacity(0.0)
-            # 兜底：即使始终对不齐，450ms 后也必须显形，绝不留下隐形窗口
-            QTimer.singleShot(450, _reveal)
-
-        loop_delay = 0
-        if parent_maximized:
-            # 先尝试直接继承最大化状态（对最大化几何做 setGeometry 经常不生效）。
-            # 注意 showMaximized 可能被台前调度（Stage Manager）拦下而静默失败
-            # ——子窗口拿到被压窄的普通几何且从未进入最大化状态。校正循环里
-            # 会检测这种情况并退回逐像素几何断言。
-            new_window.showMaximized()
-        else:
-            if new_window.isVisible():
-                # 已显示的窗口（拖拽松手路径）：吸附从瞬移改为短促平滑滑移。
-                # 尺寸差异（被系统压窄等）在动画前一次性补齐，动画只动位置；
-                # 滑移结束后由校正循环断言精确几何，修掉可能的残余偏差。
-                if new_window.size() != target_geo.size():
-                    new_window.resize(target_geo.size())
-                cur = new_window.geometry()
-                fx = new_window.x() + (target_geo.x() - cur.x())
-                fy = new_window.y() + (target_geo.y() - cur.y())
-                if (fx, fy) != (new_window.x(), new_window.y()):
-                    MainWindow._slide_window_to(new_window, fx, fy)
-                    loop_delay = 160  # 等滑移（140ms）结束再开始校正
-                else:
-                    new_window.setGeometry(target_geo)
-            else:
-                # 未显示的窗口（菜单 expand 路径）：不能在 show 前就把几何设成
-                # 目标值——macOS 可能在首次显示时自行挪动/压窄原生窗口，而 Qt
-                # 侧缓存仍等于目标值，之后的 setGeometry 全被当作「无变化」
-                # 跳过，一次都不会真正下发，窗口永远校不回来。拖拽路径之所以
-                # 可靠，正是因为窗口先显示在别处、对齐时必然发生一次真实的
-                # 几何变化。这里模仿它：刻意偏移一点显示，让校正循环的首次
-                # setGeometry 成为真实变化。
-                ox, oy = MainWindow._clamp_window_pos(
-                    target_geo.x() + 24, target_geo.y() + 24,
-                    target_geo.width(), target_geo.height(),
-                    target_geo.center())
-                if (ox, oy) == (target_geo.x(), target_geo.y()):
-                    # 父窗口贴满可视区时偏移会被钳回原位，强制保留 1px 差异
-                    oy += 1
-                new_window.setGeometry(
-                    ox, oy, target_geo.width(), target_geo.height())
-                new_window.show()
-
-        def _fix_left_width():
-            """左侧栏宽度对齐到共享值（偏差 >2px 才动，避免抖动）"""
-            try:
-                sw = MainWindow._shared_left_panel_width
-                if isinstance(sw, int) and sw > 0 and hasattr(new_window, 'main_splitter'):
-                    sizes = new_window.main_splitter.sizes()
-                    if sizes and sizes[0] > 0 and abs(sizes[0] - sw) > 2:
-                        new_window._apply_shared_left_panel_width(sw)
-            except Exception:
-                pass
-
-        def _realign(attempt=0, stable=0):
-            if sip.isdeleted(new_window):
-                return
-            if abort_check is not None and abort_check():
-                # 用户已接管拖拽：停止校正并立即显形，不和用户抢窗口
-                logger.debug("[align] aborted by user drag at tick %d", attempt)
-                _reveal()
-                return
-            if new_window.isMaximized():
-                # 子窗口确已最大化：几何由系统接管，只校左侧栏
-                _fix_left_width()
-                _reveal()
-                stable += 1
-            elif parent_maximized and attempt < 2:
-                # showMaximized 可能尚未生效（异步/动画），先等两个快速 tick。
-                # 若被台前调度拦下（子窗口始终进不了最大化状态），随即退回
-                # 下面的逐像素几何断言——等待期越短，窗口停在系统给的错误
-                # 位置上的可见时间就越短。
-                stable = 0
-            elif new_window.geometry() != target_geo:
-                new_window.setGeometry(target_geo)
-                stable = 0
-            elif attempt < 8:
-                # 前几个 tick 即使 Qt 侧已读到目标几何，也强制重新下发一次：
-                # 刚显示的窗口可能被系统（台前调度 Stage Manager、屏幕约束等）
-                # 挪走而 Qt 几何缓存未同步——看似已对齐实则没有，直接 setGeometry
-                # 会被 Qt 当作「无变化」跳过。先把高度收 1px 制造真实变化再设回
-                # 目标（向屏幕内收缩永远合法，不会反过来触发系统约束；位置偏移
-                # 则可能顶到菜单栏被再次约束）。两次调用在同一事件循环内完成，
-                # 不会渲染出中间态。
-                new_window.resize(target_geo.width(), target_geo.height() - 1)
-                new_window.setGeometry(target_geo)
-                # 几何已到位（即便还在强制下发确认期）：左侧栏与显形都尽早做，
-                # 不必等稳定期——同一事件循环内完成，显形时画面已是最终状态
-                _fix_left_width()
-                _reveal()
-                stable = 0
-            else:
-                stable += 1
-                _fix_left_width()
-                _reveal()
-            if stable >= 3:
-                logger.debug("[align] settled at tick %d: child_geo=%s", attempt, new_window.geometry())
-                return
-            if attempt < 24:
-                # 前期密集校正（30ms）让窗口尽快吸附到位，减少停在系统给的
-                # 错误位置上的可见时间；后期放缓到 120ms 守护偶发的迟到微调。
-                interval = 30 if attempt < 8 else 120
-                QTimer.singleShot(interval, lambda: _realign(attempt + 1, stable))
-            else:
-                logger.debug("[align] gave up after tick %d: child_geo=%s target=%s",
-                             attempt, new_window.geometry(), target_geo)
-        QTimer.singleShot(loop_delay, _realign)
-
-    def _detach_tab(self, index, global_pos, follow_drag=True):
-        """将标签页分离为独立窗口（创建完整的 MainWindow）
-
-        follow_drag=True 时新窗口跟随鼠标拖拽（拖出标签触发）；
-        False 时直接在父窗口附近层叠展开（右键菜单触发）。
-        """
-        # 至少保留一个标签页
-        if self.tab_widget.count() <= 1:
-            return
-
-        # 获取标签页标题
-        title = self.tab_widget.tabText(index)
-
-        # 获取相关数据
-        splitter = self.tab_splitters.get(index)
-        terminals = self.tab_terminals.get(index, [])
-        session = self.tab_sessions.get(index)
-        # 优先使用存储的工作目录（在删除映射之前获取）
-        tab_cwd = self.tab_cwds.get(index)
-
-        if not splitter or not terminals:
-            return
-
-        # 停止 OpenAI API 服务器（如果有）
-        if self.openai_server_manager.is_running(index):
-            self.openai_server_manager.stop_server(index)
-
-        # 在移除 tab 前，暂停所有终端的绘制更新，防止过渡期间在零尺寸 widget 上触发 paintEvent 导致 segfault
-        for terminal in terminals:
-            terminal.setUpdatesEnabled(False)
-            terminal._cache_valid = False
-            terminal._cache_pixmap = None
-
-        # 从标签页移除（但不销毁内容）
-        self.tab_widget.removeTab(index)
-
-        # 清理映射
-        if index in self.tab_splitters:
-            del self.tab_splitters[index]
-        if index in self.tab_terminals:
-            del self.tab_terminals[index]
-        if index in self.tab_sessions:
-            del self.tab_sessions[index]
-        if index in self.tab_cwds:
-            del self.tab_cwds[index]
-
-        # 重建映射
-        self._rebuild_tab_mappings()
-
-        # removeTab 触发的 currentChanged 发生在重建映射「之前」，那时读到的是错位的
-        # tab_cwds（可能正好读成被分离标签的目录）。这里按重建后的正确索引再同步一次，
-        # 让残留窗口的 Directory 输入框与 Current 标签都回到真正的当前标签目录。
-        cur_idx = self.tab_widget.currentIndex()
-        if cur_idx >= 0:
-            self._on_tab_changed(cur_idx)
-
-        # 如果没有存储的工作目录，尝试从终端获取或使用窗口默认值
-        if not tab_cwd:
-            if terminals:
-                # 尝试从第一个 terminal 获取当前工作目录
-                tab_cwd = terminals[0].get_cwd()
-            if not tab_cwd:
-                # 如果获取不到，使用当前窗口的工作目录
-                tab_cwd = self._window_cwd
-
-        # 创建完整的新 MainWindow，传入 tab 数据
-        initial_tab_data = {
-            'splitter': splitter,
-            'terminals': terminals,
-            'session': session,
-            'tab_name': title,
-            'cwd': tab_cwd  # 传递工作目录
-        }
-
-        # 生成唯一的窗口标题
-        MainWindow._window_counter += 1
-        window_title = f"{title} - Smart Terminal #{MainWindow._window_counter}"
-
-        new_window = MainWindow(initial_tab_data=initial_tab_data, window_title=window_title)
-
-        # 自动为新窗口选择一个未使用的颜色，方便区分
-        available_color = self._get_available_window_color()
-        new_window._set_window_color(available_color)
-
-        # 继承父窗口面板的开关状态（Explorer / Git / Remote 互斥，开一个即可；
-        # Log 独立），让分离出的窗口与父窗口外观一致，不造成认知负担
-        try:
-            if getattr(self, 'explorer_panel_visible', False):
-                new_window._toggle_explorer_panel()
-            elif getattr(self, 'git_panel_visible', False):
-                new_window._toggle_git_panel()
-            elif getattr(self, 'remote_panel_visible', False):
-                new_window._toggle_remote_panel()
-            if getattr(self, 'log_panel_visible', False):
-                new_window._toggle_log_panel()
-        except Exception:
-            pass
-
-        # 扩展的是远程 SSH 终端 → 让新窗口的 Remote 面板自动连到同一主机，
-        # 这样新窗口里终端 + SFTP 文件树都指向这台远端（终端已随 tab 搬过去）。
-        ssh_host = None
-        for _term in terminals:
-            hc = getattr(_term, '_ssh_host_config', None)
-            if hc is not None:
-                ssh_host = hc
-                break
-        if ssh_host is not None:
-            self._auto_connect_remote_in_window(new_window, ssh_host)
-
-        # 新窗口初始尺寸先继承父窗口像素尺寸，让隐形对齐期间的首次显示就在
-        # 正确大小附近；最大化状态等几何细节由下面的对齐流程接管
-        try:
-            new_window.resize(self.size())
-        except Exception:
-            pass
-
-        # 拖拽与菜单 expand 共用「原地出现」语义：新窗口直接与父窗口逐像素
-        # 重合（隐形对齐后显形，见 _align_child_with_parent_geometry）。
-        # 拖拽路径在此基础上，若用户松手前继续拖动超过阈值，则中止对齐、
-        # 转为跟随光标的相对拖拽（见 _start_detach_drag_follow）——既做到
-        # 「拖出即与父窗口同大小同位置」，又保留自由摆放能力。
-        if follow_drag:
-            drag_state = {'moved': False}
-            new_window._detach_drag_state = drag_state
-            self._align_child_with_parent_geometry(
-                new_window, abort_check=lambda: drag_state['moved'])
-        else:
-            self._align_child_with_parent_geometry(new_window)
-
-        # 激活窗口
-        new_window.raise_()
-        new_window.activateWindow()
-
-        # 添加到列表以跟踪
-        self.detached_windows.append(new_window)
-
-        # 菜单触发时无拖拽，直接聚焦新窗口终端即可
-        if not follow_drag:
-            if new_window.active_terminal:
-                new_window.active_terminal.setFocus()
-        else:
-            self._start_detach_drag_follow(new_window)
-
-        # 如果主窗口没有标签页了，创建一个新的
-        if self.tab_widget.count() == 0:
-            self._add_new_tab()
-            self._update_running_state(False)
-
-    def _start_detach_drag_follow(self, new_window):
-        """拖拽分离后的跟随逻辑：窗口已「原地出现」与父窗口重合。
-
-        松手前若继续拖动超过阈值（DRAG_THRESH），中止对齐校正、转为跟随光标
-        的相对拖拽（按拖出时刻起的光标位移挪窗口）；原地松手则窗口保持与父
-        窗口逐像素重合，零移动。松手时按既有规则做吸附对齐。
-        （macOS 上 startSystemMove() 因鼠标按下事件不在新窗口上而导致窗口漂移，
-        故用 timer 轮询鼠标位置实现跟随。）
-        """
-        start_cursor = QCursor.pos()
-        drag_state = getattr(new_window, '_detach_drag_state', None) or {'moved': False}
-        base_pos = [0, 0]  # 转入相对拖拽时的窗口位置基准（frame 坐标）
-        DRAG_THRESH = 8
-        drag_timer = QTimer()
-        drag_timer.setInterval(16)  # ~60fps 平滑跟随
-        new_window._detach_drag_timer = drag_timer  # prevent GC
-
-        def _follow_mouse():
-            if sip.isdeleted(new_window):
-                drag_timer.stop()
-                return
-            buttons = QApplication.mouseButtons()
-            if buttons & Qt.MouseButton.LeftButton:
-                cursor_pos = QCursor.pos()
-                dx = cursor_pos.x() - start_cursor.x()
-                dy = cursor_pos.y() - start_cursor.y()
-                if not drag_state['moved']:
-                    if abs(dx) <= DRAG_THRESH and abs(dy) <= DRAG_THRESH:
-                        return  # 还没拖出阈值：窗口保持与父窗口重合
-                    # 接管拖拽（对齐校正循环检测到后会自动退出并显形）。
-                    # 基准取「当前窗口位置 - 当前位移」，从现位置平滑续接。
-                    drag_state['moved'] = True
-                    base_pos[0] = new_window.x() - dx
-                    base_pos[1] = new_window.y() - dy
-                mx, my = MainWindow._clamp_window_pos(
-                    base_pos[0] + dx, base_pos[1] + dy,
-                    new_window.width(), new_window.height(), cursor_pos)
-                new_window.move(mx, my)
-            else:
-                # 鼠标释放，停止拖拽跟随
-                drag_timer.stop()
-                if not sip.isdeleted(new_window) and new_window.isVisible():
-                    # 没拖动过：窗口已与父窗口重合（或正在对齐中），无需吸附
-                    if not drag_state['moved']:
-                        new_window.raise_()
-                        new_window.activateWindow()
-                        if new_window.active_terminal:
-                            new_window.active_terminal.setFocus()
-                        return
-                    # 吸附对齐：松手时若与父窗口的边缘只差一点（肉眼想对齐但差
-                    # 几十像素），自动贴齐父窗口，消除"差一丁点错位"。
-                    if not sip.isdeleted(self) and self.isVisible():
-                        pf = self.frameGeometry()
-                        nf = new_window.frameGeometry()
-                        inter = pf.intersected(nf)
-                        overlap = inter.width() * inter.height()
-                        if overlap >= 0.6 * nf.width() * nf.height():
-                            # 大面积叠在父窗口上 → 视为想完全重合，继承父窗口
-                            # 几何（位置+尺寸逐像素一致，持续校正 macOS 微调）
-                            self._align_child_with_parent_geometry(new_window)
-                        else:
-                            # 拖拽期间 macOS 可能把越界窗口悄悄压小（级联/约束
-                            # 到屏幕），松手时先把尺寸还原成父窗口尺寸再做吸附，
-                            # 位置按还原后的尺寸重新约束在屏幕内。
-                            if (not self.isMaximized()
-                                    and new_window.size() != self.size()):
-                                new_window.resize(self.size())
-                                cx, cy = MainWindow._clamp_window_pos(
-                                    new_window.x(), new_window.y(),
-                                    self.width(), self.height(),
-                                    new_window.frameGeometry().center())
-                                new_window.move(cx, cy)
-                                nf = new_window.frameGeometry()
-                            SNAP = 56
-                            nx, ny = new_window.x(), new_window.y()
-                            # 上对齐 / 贴在父窗口正下方
-                            if abs(ny - pf.y()) <= SNAP:
-                                ny = pf.y()
-                            elif abs(ny - pf.bottom()) <= SNAP:
-                                ny = pf.bottom() + 1
-                            # 左对齐 / 贴在父窗口右侧 / 贴在父窗口左侧
-                            if abs(nx - pf.x()) <= SNAP:
-                                nx = pf.x()
-                            elif abs(nx - (pf.right() + 1)) <= SNAP:
-                                nx = pf.right() + 1
-                            elif abs((nx + nf.width()) - pf.x()) <= SNAP:
-                                nx = pf.x() - nf.width()
-                            if (nx, ny) != (new_window.x(), new_window.y()):
-                                # 边缘贴齐同样用平滑滑移代替瞬移
-                                MainWindow._slide_window_to(new_window, nx, ny)
-                    new_window.raise_()
-                    new_window.activateWindow()
-                    if new_window.active_terminal:
-                        new_window.active_terminal.setFocus()
-
-        drag_timer.timeout.connect(_follow_mouse)
-        drag_timer.start()
-
-    def _rebuild_tab_mappings(self):
-        """重建标签页映射"""
-        new_splitters = {}
-        new_terminals = {}
-        new_sessions = {}
-        new_cwds = {}
-        old_to_new = {}  # 旧索引 -> 新索引，用于同步按 tab 索引存储的其他状态
-        for i in range(self.tab_widget.count()):
-            widget = self.tab_widget.widget(i)
-            if widget:
-                # 找到对应的旧映射
-                for old_idx, splitter in self.tab_splitters.items():
-                    if splitter is widget:
-                        old_to_new[old_idx] = i
-                        new_splitters[i] = splitter
-                        new_terminals[i] = self.tab_terminals.get(old_idx, [])
-                        new_sessions[i] = self.tab_sessions.get(old_idx)
-                        new_cwds[i] = self.tab_cwds.get(old_idx, self._window_cwd)
-                        break
-        self.tab_splitters = new_splitters
-        self.tab_terminals = new_terminals
-        self.tab_sessions = new_sessions
-        self.tab_cwds = new_cwds
-
-        # 同步同样按 tab 索引存储的 OpenAI 服务器状态与 "查询后清除会话" 设置，
-        # 否则关闭/分离左侧 tab 后这些 key 会指向错误的 tab。
-        if hasattr(self, 'api_server_clear_after_query'):
-            self.api_server_clear_after_query = {
-                old_to_new[old_idx]: val
-                for old_idx, val in self.api_server_clear_after_query.items()
-                if old_idx in old_to_new
-            }
-        if hasattr(self, 'openai_server_manager'):
-            self.openai_server_manager.remap_indices(old_to_new)
-
-    def _on_tab_changed(self, index):
-        """标签页切换时的回调"""
-        # 切到别的 tab 也算"已查看"，清除提醒小标
-        if self.isActiveWindow():
-            self._clear_nav_attention()
-        terminals = self.tab_terminals.get(index, [])
-        if terminals:
-            # 设置第一个终端为活动终端
-            self.active_terminal = terminals[0]
-            terminals[0].setFocus()
-            # 更新状态栏 - 检查是否有任何终端在运行
-            any_running = any(t.is_running() for t in terminals)
-            self._update_running_state(any_running)
-            self._update_stats()
-
-        # 更新窗口标题为当前 tab 名称
-        self._update_window_title_from_tab(index)
-
-        # 同步导航面板到当前标签页的工作目录
-        tab_cwd = self.tab_cwds.get(index)
-        if not tab_cwd and terminals:
-            tab_cwd = terminals[0].get_cwd()
-        if not tab_cwd:
-            tab_cwd = getattr(self, '_window_cwd', None)
-        if tab_cwd and os.path.isdir(tab_cwd):
-            cwd_changed = (tab_cwd != getattr(self, '_window_cwd', None))
-            self._window_cwd = tab_cwd
-            if hasattr(self, 'current_dir_label'):
-                self.current_dir_label.setText(t("dir.current", cwd=tab_cwd))
-                self.current_dir_label.setToolTip(tab_cwd)
-            # 让 "Directory:" 输入框也跟随当前标签页（之前只更新 Current 标签，
-            # 导致分离标签页后输入框仍停留在被分离标签的目录上、与 Current 不一致）。
-            if hasattr(self, 'working_dir_combo'):
-                self.working_dir_combo.blockSignals(True)
-                self.working_dir_combo.setCurrentText(tab_cwd)
-                self.working_dir_combo.blockSignals(False)
-            if hasattr(self, 'explorer_panel') and self.explorer_panel_visible:
-                self.explorer_panel.set_root_path(tab_cwd)
-            if hasattr(self, 'git_panel') and self.git_panel_visible:
-                self.git_panel.set_repository(tab_cwd)
-            # 本地命令是「目录级」的：tab 切到不同目录时必须重载，否则 local_presets
-            # 仍是上一个目录的内容，而保存路径已指向当前目录 → 跨文件夹串写/覆盖。
-            # （local_presets 始终是「磁盘加载」或「刚保存」的状态，无未落盘的内存修改，
-            #   故重载是安全的，不会丢失编辑。）
-            if cwd_changed:
-                self._load_local_commands()
 
     def _scrollback_dot_icon(self, level: int) -> QIcon:
         """生成/缓存 scrollback 压力指示点图标：0=空 / 1=琥珀 / 2=红。"""
@@ -3525,58 +2415,9 @@ class MainWindow(ThemeMixin, ToolbarMixin, ConfigMixin, ExplorerPanelMixin,
         except Exception as e:
             logger.warning(f"[Scrollback] update tab indicator failed: {e}")
 
-    def _on_tab_session_ended(self, terminal):
-        """某个标签页的会话结束"""
-        # 找到对应的标签页索引
-        for idx, terminals in self.tab_terminals.items():
-            if terminal in terminals:
-                # 检查是否所有终端都停止了
-                all_stopped = all(not t.is_running() for t in terminals)
-                if all_stopped:
-                    # 更新标签页标题，保留原名称，添加已停止标记
-                    current_title = self.tab_widget.tabText(idx)
-                    stopped_mark = t("status.tab_stopped")
-                    if stopped_mark not in current_title:
-                        self.tab_widget.setTabText(idx, f"{current_title} {stopped_mark}")
-                break
 
-        # 如果是当前标签页，更新状态
-        if terminal is self.terminal:
-            self._on_session_ended()
 
-    def _update_window_title_from_tab(self, index=None):
-        """根据当前 tab 更新窗口标题"""
-        if index is None:
-            index = self.tab_widget.currentIndex()
-        if index >= 0:
-            tab_name = self.tab_widget.tabText(index)
-            # 去掉 stopped 后缀
-            stopped_mark = t("status.tab_stopped")
-            if f" {stopped_mark}" in tab_name:
-                tab_name = tab_name.replace(f" {stopped_mark}", "")
-            new_title = f"{tab_name} - Smart Terminal"
-            if new_title != self.windowTitle():
-                self.setWindowTitle(new_title)
-                # 立即刷新导航面板，让列表项即时跟随当前激活的 tab（本地/远程），
-                # 不必等 5 秒轮询。
-                try:
-                    MainWindow._broadcast_navigator_refresh()
-                except Exception:
-                    pass
 
-    def _next_tab(self):
-        """切换到下一个标签页"""
-        count = self.tab_widget.count()
-        if count > 1:
-            current = self.tab_widget.currentIndex()
-            self.tab_widget.setCurrentIndex((current + 1) % count)
-
-    def _prev_tab(self):
-        """切换到上一个标签页"""
-        count = self.tab_widget.count()
-        if count > 1:
-            current = self.tab_widget.currentIndex()
-            self.tab_widget.setCurrentIndex((current - 1) % count)
 
     def _connect_signals(self):
         """连接信号 - 注意：终端信号在 _add_new_tab 中连接"""
@@ -3973,45 +2814,6 @@ class MainWindow(ThemeMixin, ToolbarMixin, ConfigMixin, ExplorerPanelMixin,
         if self._spring_applicable():
             self._apply_spring('editor')
 
-    def _capture_explorer_layout(self):
-        """记录当前资源管理器/编辑器的尺寸用于下次还原
-
-        - 仅在用户能看到完整布局时记录（相关 widget 都未折叠）
-        - 通过 splitterMoved 信号触发，由 setSizes 引发的程序性变更也会进入此处，
-          但目标布局各项均 > 0，记录无害
-        """
-        if not hasattr(self, 'editor_area'):
-            return
-
-        # 弹簧动画/程序性设置尺寸期间不记忆，避免把临时的偏置布局写进记忆值
-        if getattr(self, '_applying_spring', False):
-            return
-
-        editor_in_main = self.main_splitter.indexOf(self.editor_area) >= 0
-        editor_in_internal = self.explorer_splitter.indexOf(self.editor_area) >= 0
-
-        # 1) 编辑器在 explorer_splitter 中（上下分屏）— 记录内部分屏尺寸
-        if editor_in_internal and self.editor_area.isVisible():
-            isizes = self.explorer_splitter.sizes()
-            if len(isizes) == 2 and isizes[0] > 0 and isizes[1] > 0:
-                self._saved_explorer_internal_sizes = list(isizes)
-
-        # 2) main_splitter 处理（左面板宽度始终是 sizes[0]）
-        msizes = self.main_splitter.sizes()
-        left_visible = (
-            getattr(self, 'explorer_panel_visible', False)
-            or getattr(self, 'git_panel_visible', False)
-            or getattr(self, 'remote_panel_visible', False)
-        )
-
-        if editor_in_main and self.editor_area.isVisible() and len(msizes) == 4:
-            # 4 widget: 左面板 + 编辑器 + 终端 + 日志
-            if msizes[0] > 0 and msizes[1] > 0 and msizes[2] > 0:
-                self._saved_explorer_main_sizes = list(msizes)
-                self._set_left_panel_width(msizes[0])
-        elif (not editor_in_main) and left_visible and len(msizes) >= 3 and msizes[0] > 0:
-            # 3 widget: 左面板 + 终端 + 日志（无编辑器）
-            self._set_left_panel_width(msizes[0])
 
     def _set_left_panel_width(self, width):
         """记录左侧栏宽度（进程级共享）并在拖动时实时联动到其它已打开窗口。
@@ -4102,35 +2904,7 @@ class MainWindow(ThemeMixin, ToolbarMixin, ConfigMixin, ExplorerPanelMixin,
                 MainWindow._shared_left_panel_width = left_width
                 self._broadcast_left_panel_width(left_width)
 
-    def _resolve_main_splitter_sizes_with_editor(self):
-        """计算编辑器在 main_splitter 中时的目标尺寸（优先使用记忆值）
 
-        QSplitter 会按实际宽度对 setSizes 入参做比例归一化，因此各项之和必须
-        等于 splitter 的实际宽度，才能让记忆的绝对像素值被原样还原。
-        """
-        log_width = 300 if self.log_panel_visible else 0
-        saved_left = getattr(self, '_saved_left_panel_width', None)
-        saved_left = saved_left if isinstance(saved_left, int) and saved_left > 0 else None
-        total = max(self.main_splitter.width(), 1000)
-
-        saved = getattr(self, '_saved_explorer_main_sizes', None)
-        if saved and len(saved) == 4 and saved[0] > 0 and saved[1] > 0 and saved[2] > 0:
-            left = saved_left if saved_left is not None else saved[0]
-            editor = saved[1]
-            terminal = max(100, total - left - editor - log_width)
-            return [left, editor, terminal, log_width]
-        # 默认值：左面板 300（或记忆值）, 编辑器 400, 其余给终端
-        left = saved_left if saved_left is not None else 300
-        editor = 400
-        terminal = max(100, total - left - editor - log_width)
-        return [left, editor, terminal, log_width]
-
-    def _resolve_explorer_splitter_sizes_with_editor(self):
-        """计算编辑器在 explorer_splitter 中时的目标尺寸（优先使用记忆值）"""
-        saved = getattr(self, '_saved_explorer_internal_sizes', None)
-        if saved and len(saved) == 2 and saved[0] > 0 and saved[1] > 0:
-            return list(saved)
-        return [200, 400]
 
     def _editor_placed_and_visible(self, splitter) -> bool:
         """编辑器已经在目标 splitter 里且可见。
@@ -4145,39 +2919,7 @@ class MainWindow(ThemeMixin, ToolbarMixin, ConfigMixin, ExplorerPanelMixin,
             and splitter.indexOf(self.editor_area) >= 0
         )
 
-    def _place_editor_in_main_splitter(self):
-        """将编辑器放到 main_splitter 中（左右分屏模式）"""
-        if self.main_splitter.indexOf(self.editor_area) >= 0:
-            # 已经在 main_splitter 中，只需确保可见并调整大小
-            self.editor_area.show()
-        else:
-            # 从 explorer_splitter 中取出
-            self.editor_area.setParent(None)
-            self.editor_area.show()
-            # 插入到 main_splitter 的 index 1（left_panel 和 tab_widget 之间）
-            self.main_splitter.insertWidget(1, self.editor_area)
 
-        self.main_splitter.setSizes(self._resolve_main_splitter_sizes_with_editor())
-
-        # explorer_splitter 中只剩文件树，让它占满
-        self.explorer_splitter.setSizes([400, 0])
-
-    def _place_editor_in_explorer_splitter(self):
-        """将编辑器放到 explorer_splitter 中（上下分屏模式）"""
-        if self.explorer_splitter.indexOf(self.editor_area) >= 0:
-            # 已经在 explorer_splitter 中，只需确保可见并调整大小
-            self.editor_area.show()
-        else:
-            # 从 main_splitter 中取出
-            self.editor_area.setParent(None)
-            self.editor_area.show()
-            # 放回 explorer_splitter
-            self.explorer_splitter.addWidget(self.editor_area)
-
-        self.explorer_splitter.setSizes(self._resolve_explorer_splitter_sizes_with_editor())
-
-        # 恢复 main_splitter 正常比例
-        self._update_splitter_sizes()
 
     def _on_editor_closed(self):
         """编辑器关闭时"""
@@ -4196,62 +2938,7 @@ class MainWindow(ThemeMixin, ToolbarMixin, ConfigMixin, ExplorerPanelMixin,
         if hasattr(self, 'explorer_panel'):
             self.explorer_panel.clear_editing_file()
 
-    def _toggle_editor_collapsed(self):
-        """收起 / 展开已打开的文件区（Ctrl+E，可在「键盘快捷键」里改）。
 
-        与「关闭」不同：收起只是隐藏 editor_area 腾出屏幕空间，已打开的文件和
-        split 分屏结构仍保留在内存中，再次触发即原样展开。没有任何已打开文件
-        时不做切换，仅在状态栏提示。
-        """
-        if not hasattr(self, 'editor_area'):
-            return
-        if not self._editor_has_any_file():
-            self.statusbar.showMessage(t("status.editor_no_file"), 2000)
-            return
-
-        if self.editor_area.isVisible():
-            # 收起：隐藏并把空间还给资源管理器/终端（保留文件，不清除编辑标记）
-            self.editor_area.hide()
-            if self.explorer_splitter.indexOf(self.editor_area) < 0:
-                self.editor_area.setParent(None)
-                self.explorer_splitter.addWidget(self.editor_area)
-                self.editor_area.hide()
-            self.explorer_splitter.setSizes([400, 0])
-            self._update_splitter_sizes()
-        else:
-            # 展开：按当前分屏方向重新放置并显示
-            if self._explorer_split_horizontal:
-                self._place_editor_in_main_splitter()
-            else:
-                self._place_editor_in_explorer_splitter()
-            # 先弹宽编辑器，再移焦点。顺序很重要：_apply_spring 会先把
-            # _spring_current_side 置为 'editor'，这样紧接着 setFocus 触发的
-            # focusChanged → _on_focus_changed_for_spring 会因「目标侧已是 editor」
-            # 提前返回，不会再 stop/重启一次动画（否则动画「起步即被打断」会卡一下）。
-            if self._spring_applicable():
-                self._apply_spring('editor')
-            # 把键盘焦点移到编辑器活动窗格。否则从终端用 Cmd+E 展开后焦点仍留在
-            # 终端，与「编辑器被弹宽」的状态不一致：随后点击终端因焦点未变化而不
-            # 触发 focusChanged，弹簧无法把终端展宽。聚焦编辑器后状态一致，再点
-            # 终端会正常 focusChanged → 弹宽终端。
-            pane = self.editor_area.active_pane
-            if pane is not None:
-                pane.editor.setFocus()
-
-    def _on_explorer_split_orientation_changed(self, state):
-        """切换资源管理器与编辑器的分屏方向"""
-        horizontal = (state == Qt.CheckState.Checked.value)
-        self._explorer_split_horizontal = horizontal
-
-        # 如果编辑器正在显示，立即切换位置
-        if hasattr(self, 'editor_area') and self.editor_area.isVisible():
-            if horizontal:
-                self._place_editor_in_main_splitter()
-            else:
-                self._place_editor_in_explorer_splitter()
-        # 切回上下分屏时弹簧失去意义，重置已展开侧标记
-        if not horizontal:
-            self._spring_current_side = None
 
     # ---------- 弹簧模式：编辑器 / 终端 左右并排时点哪边哪边展宽 ----------
     # 比例：被聚焦的一侧占编辑器+终端合计宽度的大头，另一侧收窄但保留约 30%
@@ -4618,38 +3305,7 @@ class MainWindow(ThemeMixin, ToolbarMixin, ConfigMixin, ExplorerPanelMixin,
             if hasattr(term, 'set_fast_resize'):
                 term.set_fast_resize(on)
 
-    def _on_splitter_drag_tick(self):
-        """splitterMoved 的拖拽流识别：首拍开启终端快速渲染，之后每拍续命静默定时器。
 
-        手动拖分隔条没有「开始/结束」信号，只能由连续的 splitterMoved 推断：
-        静默 160ms 视为松手。弹簧动画期间的 setSizes 也会发 splitterMoved，
-        但动画自己管理 fast_resize（_applying_spring 置位），跳过。
-        被其它窗口同步宽度时（_applying_shared_left_width）同样是连续 setSizes 流,
-        正需要快速渲染，故不跳过。
-        """
-        if getattr(self, '_applying_spring', False):
-            return
-        if not self._splitter_drag_active:
-            self._splitter_drag_active = True
-            self._set_terminals_fast_resize(True)
-        self._splitter_drag_settle.start()
-
-    def _end_splitter_drag_fast_resize(self):
-        """拖拽流静默：恢复终端清晰渲染（按最终尺寸整屏重建一次）。"""
-        if not self._splitter_drag_active:
-            return
-        self._splitter_drag_active = False
-        # 拖拽触发 spring 门控翻转时弹簧动画可能正在进行并已接管 fast_resize，
-        # 让动画的 finished 回调去恢复，这里不抢着关。
-        if getattr(self, '_spring_anim', None) is None:
-            self._set_terminals_fast_resize(False)
-        # 拖拽期间挂起的左侧栏宽度在此一次性广播给其它窗口
-        # （见 _set_left_panel_width：拖拽中不实时联动，避免堵死事件循环）
-        self._left_width_broadcast_timer.stop()
-        self._flush_left_width_broadcast()
-        # 被同步窗口在同步期间跳过了 spring 门控判定（_update_spring_width_gate
-        # 对 _applying_shared_left_width 早退），静默后按最终宽度补判一次
-        self._update_spring_width_gate()
 
     def _flush_left_width_broadcast(self):
         """节流定时器到点：把最新的左侧栏宽度推给其它窗口。"""
@@ -4708,47 +3364,9 @@ class MainWindow(ThemeMixin, ToolbarMixin, ConfigMixin, ExplorerPanelMixin,
 
     # ---------- Remote 面板的分屏（与 Explorer 行为一致） ----------
 
-    def _resolve_remote_splitter_sizes_with_editor(self):
-        """计算编辑器在 remote_splitter 中时的目标尺寸（优先使用记忆值）"""
-        saved = getattr(self, '_saved_remote_internal_sizes', None)
-        if saved and len(saved) == 2 and saved[0] > 0 and saved[1] > 0:
-            return list(saved)
-        return [200, 400]
 
-    def _place_editor_in_remote_splitter(self):
-        """将编辑器放到 remote_splitter 中（Remote 上下分屏模式）"""
-        if self.remote_splitter.indexOf(self.editor_area) >= 0:
-            self.editor_area.show()
-        else:
-            self.editor_area.setParent(None)
-            self.editor_area.show()
-            self.remote_splitter.addWidget(self.editor_area)
 
-        self.remote_splitter.setSizes(self._resolve_remote_splitter_sizes_with_editor())
-        # 恢复 main_splitter 正常比例（编辑器不在 main_splitter 里）
-        self._update_splitter_sizes()
 
-    def _capture_remote_layout(self):
-        """记录 remote_splitter 的内部尺寸（上下分屏），供下次还原。"""
-        if not hasattr(self, 'editor_area') or not hasattr(self, 'remote_splitter'):
-            return
-        if self.remote_splitter.indexOf(self.editor_area) >= 0 and self.editor_area.isVisible():
-            isizes = self.remote_splitter.sizes()
-            if len(isizes) == 2 and isizes[0] > 0 and isizes[1] > 0:
-                self._saved_remote_internal_sizes = list(isizes)
-
-    def _on_remote_split_orientation_changed(self, state):
-        """切换 Remote 树与编辑器的分屏方向"""
-        horizontal = (state == Qt.CheckState.Checked.value)
-        self._remote_split_horizontal = horizontal
-
-        # 仅当编辑器正显示且 Remote 面板可见时，立即切换位置
-        if (hasattr(self, 'editor_area') and self.editor_area.isVisible()
-                and getattr(self, 'remote_panel_visible', False)):
-            if horizontal:
-                self._place_editor_in_main_splitter()
-            else:
-                self._place_editor_in_remote_splitter()
 
     def _home_editor_hidden(self):
         """把编辑器归位到 explorer_splitter 并隐藏（编辑器的默认家）。
@@ -4788,33 +3406,6 @@ class MainWindow(ThemeMixin, ToolbarMixin, ConfigMixin, ExplorerPanelMixin,
         return "'" + s.replace("'", "'\\''") + "'"
 
 
-    def _update_splitter_sizes(self):
-        """更新分割器大小"""
-        left_visible = (
-            self.explorer_panel_visible
-            or self.git_panel_visible
-            or getattr(self, 'remote_panel_visible', False)
-        )
-        saved_left = getattr(self, '_saved_left_panel_width', None)
-        saved_left = saved_left if isinstance(saved_left, int) and saved_left > 0 else None
-        if left_visible:
-            left_width = saved_left if saved_left is not None else 300
-        else:
-            left_width = 0
-        log_width = 300 if self.log_panel_visible else 0
-
-        # 检查编辑器是否在 main_splitter 中（左右分屏模式，splitter 有 4 个 widget）
-        editor_in_main = hasattr(self, 'editor_area') and self.main_splitter.indexOf(self.editor_area) >= 0
-        if editor_in_main:
-            self.main_splitter.setSizes(self._resolve_main_splitter_sizes_with_editor())
-        elif left_width > 0 or log_width > 0:
-            # 用 splitter 实际宽度作为总和，让 left_width 被原样保留（参见 _resolve... 的注释）
-            total = max(self.main_splitter.width(), 1000)
-            terminal_width = max(100, total - left_width - log_width)
-            self.main_splitter.setSizes([left_width, terminal_width, log_width])
-        else:
-            # 如果都隐藏，让终端占满
-            self.main_splitter.setSizes([0, 1000, 0])
 
     def _flush_terminal_resizes(self):
         """强制当前活动标签页的终端立即完成 resize（跳过防抖），避免面板切换时闪烁"""
@@ -4932,18 +3523,6 @@ class MainWindow(ThemeMixin, ToolbarMixin, ConfigMixin, ExplorerPanelMixin,
         except Exception as e:
             QMessageBox.warning(self, t("msg.open_failed"), t("msg.cursor_open_error", error=str(e)))
 
-    def open_directory_tab(self, dir_path: str):
-        """在本窗口新开一个标签并在指定目录直接起会话。
-
-        入口：macOS FileOpen 事件（Finder 快速操作/拖到 Dock）。
-        复用工作目录历史的快速启动流程（建 tab + 自动启动当前预设）。
-        """
-        if not dir_path or not os.path.isdir(dir_path):
-            return
-        self._quick_launch_with_dir(dir_path)
-        # 从 Finder 触发时应用可能在后台，把窗口带到前面
-        self.raise_()
-        self.activateWindow()
 
     def launch_initial_session(self, cwd: str):
         """--working-dir 启动路径：首个标签仍是启动页时直接在该目录起会话"""
@@ -6267,82 +4846,6 @@ class MainWindow(ThemeMixin, ToolbarMixin, ConfigMixin, ExplorerPanelMixin,
 
     # ================== OpenAI API 服务器相关方法 ==================
 
-    def _show_tab_context_menu(self, pos):
-        """显示 Tab 右键菜单"""
-        tab_bar = self.tab_widget.tabBar()
-        tab_index = tab_bar.tabAt(pos)
-
-        if tab_index < 0:
-            return
-
-        menu = QMenu(self)
-        menu.setStyleSheet("""
-            QMenu {
-                background-color: #2d2d44;
-                color: #eaeaea;
-                border: 1px solid #3d3d5c;
-                border-radius: 4px;
-                padding: 4px;
-            }
-            QMenu::item {
-                padding: 6px 20px;
-                border-radius: 3px;
-            }
-            QMenu::item:selected {
-                background-color: #667eea;
-            }
-            QMenu::item:disabled {
-                color: #666;
-            }
-        """)
-
-        # 扩展为新窗口（等同拖出标签，但不需要手动拖拽）—— 放最上面，最常用
-        detach_action = menu.addAction(t("tab.detach"))
-        detach_action.setEnabled(self.tab_widget.count() > 1)
-        detach_action.triggered.connect(
-            lambda: self._detach_tab(tab_index, None, follow_drag=False))
-
-        menu.addSeparator()
-
-        # 切换工作目录到该 tab 终端的当前路径
-        switch_path_action = menu.addAction(t("tab.switch_to_path"))
-        switch_path_action.triggered.connect(lambda: self._switch_dir_to_tab_path(tab_index))
-
-        # OpenAI API 服务器选项
-        is_server_running = self.openai_server_manager.is_running(tab_index)
-
-        if is_server_running:
-            port = self.openai_server_manager.get_port(tab_index)
-            stop_action = menu.addAction(t("openai.stop_server", port=port))
-            stop_action.triggered.connect(lambda: self._stop_openai_server(tab_index))
-
-            # 复制 API URL
-            copy_url_action = menu.addAction(t("openai.copy_url"))
-            copy_url_action.triggered.connect(lambda: self._copy_api_url(port))
-
-            # 每次 Query 后清除会话
-            clear_after = self.api_server_clear_after_query.get(tab_index, False)
-            clear_action = menu.addAction(t("openai.clear_session"))
-            clear_action.setCheckable(True)
-            clear_action.setChecked(clear_after)
-            clear_action.triggered.connect(lambda checked: self._toggle_clear_after_query(tab_index, checked))
-        else:
-            start_action = menu.addAction(t("openai.set_as_server"))
-            start_action.triggered.connect(lambda: self._show_openai_server_dialog(tab_index))
-
-        menu.addSeparator()
-
-        # 重命名标签页（可复用历史名称）
-        rename_action = menu.addAction(t("tab.rename"))
-        rename_action.triggered.connect(lambda: self._rename_tab(tab_index))
-
-        menu.addSeparator()
-
-        # 关闭标签页
-        close_action = menu.addAction(t("tab.close"))
-        close_action.triggered.connect(lambda: self._close_tab(tab_index))
-
-        menu.exec(tab_bar.mapToGlobal(pos))
 
     # ==================== 标签 / 分屏自定义命名 ====================
 
@@ -6388,110 +4891,12 @@ class MainWindow(ThemeMixin, ToolbarMixin, ConfigMixin, ExplorerPanelMixin,
                 out.append(n)
         return out[:30]
 
-    def _apply_tab_name(self, index, name):
-        """统一应用标签名：非空则「锁定」为自定义名，留空则解除锁定恢复默认编号。"""
-        if index < 0 or index >= self.tab_widget.count():
-            return
-        name = (name or "").strip()
-        page = self.tab_widget.widget(index)
-        if name:
-            if page is not None:
-                page._custom_tab_name = name  # 锁定标记：存在该属性即视为用户自定义
-            self.tab_widget.setTabText(index, name)
-            self._remember_label_name(name)
-        else:
-            # 清除自定义名 → 解除锁定，恢复默认编号命名
-            if page is not None:
-                page._custom_tab_name = None
-            self.tab_widget.setTabText(index, t("terminal.default_name", n=index + 1))
-        self._update_window_title_from_tab(index)
-        self._save_config()
 
-    def _switch_dir_to_tab_path(self, index):
-        """把工作目录切换到该 tab 终端进程的当前路径（右键菜单入口）。"""
-        if index < 0 or index >= self.tab_widget.count():
-            return
-        terminals = self.tab_terminals.get(index, [])
-        # 优先用该 tab 内当前激活的终端，否则退回第一个
-        terminal = None
-        if self.active_terminal and self.active_terminal in terminals:
-            terminal = self.active_terminal
-        elif terminals:
-            terminal = terminals[0]
-        cwd = terminal.get_cwd() if terminal else None
-        if not cwd or not os.path.isdir(cwd):
-            self.statusbar.showMessage(t("tab.switch_to_path_unavailable"), 3000)
-            return
-        # 复用现有切换逻辑：填入输入框后应用
-        self.working_dir_combo.setCurrentText(cwd)
-        self._apply_working_dir()
 
-    def _rename_tab(self, index):
-        """通过对话框重命名标签页（右键菜单入口，可从历史复用名称）。"""
-        if index < 0 or index >= self.tab_widget.count():
-            return
-        page = self.tab_widget.widget(index)
-        current = getattr(page, '_custom_tab_name', None) or self.tab_widget.tabText(index)
-        name, ok = self._prompt_label_name(t("tab.rename_title"), t("tab.rename_prompt"), current)
-        if not ok:
-            return
-        self._apply_tab_name(index, name)
 
-    def _begin_inline_tab_rename(self, index):
-        """双击标签 → 在标签上就地弹出输入框直接编辑。"""
-        if index < 0 or index >= self.tab_widget.count():
-            return
-        # 已有正在编辑的输入框先收掉，避免重叠
-        self._discard_inline_tab_rename()
-        tab_bar = self.tab_widget.tabBar()
-        page = self.tab_widget.widget(index)
-        current = getattr(page, '_custom_tab_name', None) or tab_bar.tabText(index)
 
-        editor = InlineRenameEdit(tab_bar)
-        editor.setText(current)
-        editor.selectAll()
-        rect = tab_bar.tabRect(index)
-        # 右侧留出关闭按钮的空间
-        editor.setGeometry(rect.adjusted(4, 3, -26, -3))
-        editor.setStyleSheet(
-            "QLineEdit{background:#282c34;color:#ffffff;border:1px solid #667eea;"
-            "border-radius:3px;padding:0px 4px;font-weight:bold;}"
-        )
-        editor.committed.connect(lambda text, i=index: self._finish_inline_tab_rename(i, text))
-        editor.cancelled.connect(self._discard_inline_tab_rename)
-        self._tab_rename_editor = editor
-        editor.show()
-        editor.raise_()
-        editor.setFocus()
 
-    def _finish_inline_tab_rename(self, index, text):
-        """就地编辑提交"""
-        ed = getattr(self, '_tab_rename_editor', None)
-        self._tab_rename_editor = None
-        if ed is not None:
-            ed.deleteLater()
-        self._apply_tab_name(index, text)
 
-    def _discard_inline_tab_rename(self):
-        """取消就地编辑（Esc 或被新的编辑取代）"""
-        ed = getattr(self, '_tab_rename_editor', None)
-        self._tab_rename_editor = None
-        if ed is not None:
-            ed.deleteLater()
-
-    def _rename_split(self, terminal):
-        """重命名某个分屏（窗格）。名称非空时在窗格顶部显示标题栏，留空则清除。"""
-        if terminal is None:
-            return
-        current = terminal.get_split_label() or ""
-        name, ok = self._prompt_label_name(t("split.rename_title"), t("split.rename_prompt"), current)
-        if not ok:
-            return
-        name = (name or "").strip()
-        terminal.set_split_label(name)
-        if name:
-            self._remember_label_name(name)
-        self._save_config()
 
     # ==================== 导航提醒小标（Claude/命令执行完毕） ====================
 
