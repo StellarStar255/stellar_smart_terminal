@@ -325,10 +325,24 @@ def _win_installed() -> bool:
 
 
 # ---------- Linux (Nautilus) ----------
+# 两条腿：
+# - Nautilus Python 扩展（首选）：空白处右键 + 选中项右键都直接出现
+#   「Open in Stellar Terminal」菜单项。需要系统装 python3-nautilus。
+#   兼容 Nautilus 4.0（GNOME 42+，GTK4）与旧的 3.0 API。
+# - 脚本（兜底）：没装 python3-nautilus 时，仍可在「脚本」子菜单里用
+#   （但 GNOME 42+ 空白处右键无「脚本」子菜单，仅选中项可用）。
+
+_NAUTILUS_EXT_NAME = "stellar_open_terminal.py"
+
 
 def _linux_script_path() -> Path:
     return (Path.home() / ".local" / "share" / "nautilus" / "scripts"
             / _NAUTILUS_SCRIPT_NAME)
+
+
+def _linux_ext_path() -> Path:
+    return (Path.home() / ".local" / "share" / "nautilus-python"
+            / "extensions" / _NAUTILUS_EXT_NAME)
 
 
 def _linux_script_body() -> str:
@@ -345,29 +359,126 @@ done
 '''
 
 
+def _linux_ext_body() -> str:
+    """Nautilus Python 扩展源码（在 Nautilus 自带的 python 里运行）。
+
+    把启动 argv 以字面量烘进去；用 *args 取最后一个位置参数，同时兼容
+    Nautilus 3.0（get_file_items(window, files)）与 4.0（get_file_items(files)）
+    两种签名。菜单标签写死英文，避免依赖本应用的 i18n（扩展进程独立）。
+    """
+    argv_literal = repr(list(_launch_argv()))
+    label = "Open in Stellar Terminal"
+    return f'''# Stellar Smart Terminal — Nautilus 右键菜单扩展
+# 由应用设置里的「系统右键菜单」开关生成/移除，勿手改。
+import os
+import subprocess
+
+import gi
+try:
+    gi.require_version("Nautilus", "4.0")
+except ValueError:
+    gi.require_version("Nautilus", "3.0")
+from gi.repository import Nautilus, GObject  # noqa: E402
+
+APP_ARGV = {argv_literal}
+LABEL = {label!r}
+
+
+def _path_of(fileinfo):
+    try:
+        loc = fileinfo.get_location()
+        return loc.get_path() if loc is not None else None
+    except Exception:
+        return None
+
+
+def _launch(dir_path):
+    if not dir_path:
+        return
+    try:
+        subprocess.Popen(
+            APP_ARGV + ["--working-dir", dir_path],
+            stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
+            start_new_session=True)
+    except Exception:
+        pass
+
+
+class StellarOpenTerminal(GObject.GObject, Nautilus.MenuProvider):
+    def _make_item(self, ident, dir_path):
+        item = Nautilus.MenuItem(
+            name="StellarOpenTerminal::" + ident, label=LABEL,
+            tip=LABEL)
+        item.connect("activate", lambda *_a: _launch(dir_path))
+        return item
+
+    def get_file_items(self, *args):
+        files = args[-1] if args else []
+        if not files:
+            return []
+        f = files[0]
+        p = _path_of(f)
+        if not p:
+            return []
+        try:
+            is_dir = f.is_directory()
+        except Exception:
+            is_dir = os.path.isdir(p)
+        if not is_dir:
+            p = os.path.dirname(p)
+        return [self._make_item("file", p)]
+
+    def get_background_items(self, *args):
+        folder = args[-1] if args else None
+        if folder is None:
+            return []
+        p = _path_of(folder)
+        if not p:
+            return []
+        return [self._make_item("bg", p)]
+'''
+
+
 def _linux_install() -> tuple:
+    ok_any = False
+    errs = []
+    # 扩展（首选）
+    try:
+        ext = _linux_ext_path()
+        ext.parent.mkdir(parents=True, exist_ok=True)
+        ext.write_text(_linux_ext_body(), encoding='utf-8')
+        ok_any = True
+    except OSError as e:
+        logger.warning(f"install nautilus extension failed: {e}")
+        errs.append(str(e))
+    # 脚本（兜底）
     try:
         path = _linux_script_path()
         path.parent.mkdir(parents=True, exist_ok=True)
         path.write_text(_linux_script_body(), encoding='utf-8')
         path.chmod(0o755)
-        return True, ""
+        ok_any = True
     except OSError as e:
         logger.warning(f"install nautilus script failed: {e}")
-        return False, str(e)
+        errs.append(str(e))
+    if ok_any:
+        return True, ""
+    return False, "; ".join(errs)
 
 
 def _linux_uninstall() -> tuple:
-    try:
-        _linux_script_path().unlink(missing_ok=True)
-        return True, ""
-    except OSError as e:
-        logger.warning(f"uninstall nautilus script failed: {e}")
-        return False, str(e)
+    errs = []
+    for p in (_linux_ext_path(), _linux_script_path()):
+        try:
+            p.unlink(missing_ok=True)
+        except OSError as e:
+            logger.warning(f"uninstall {p} failed: {e}")
+            errs.append(str(e))
+    return (not errs), "; ".join(errs)
 
 
 def _linux_installed() -> bool:
-    return _linux_script_path().exists()
+    return _linux_ext_path().exists() or _linux_script_path().exists()
 
 
 # ---------- 公共入口 ----------

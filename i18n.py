@@ -28,6 +28,33 @@ TRANSLATIONS = {
     "settings.shell_menu_removed": {
         "zh": "已从系统右键菜单移除",
         "en": "Removed from system context menu"},
+    "settings.shell_menu_linux_title": {
+        "zh": "已启用 · 还差两步生效",
+        "en": "Enabled · two more steps"},
+    "settings.shell_menu_linux_guide": {
+        "zh": ("已写入 Nautilus 右键菜单扩展。要让「空白处右键」也直接出现"
+               "「Open in Stellar Terminal」，需要：\n\n"
+               "1. 安装扩展运行时（只需一次）：\n"
+               "   sudo apt install python3-nautilus\n\n"
+               "2. 重启 Nautilus 让扩展加载：\n"
+               "   nautilus -q\n"
+               "   （下次打开文件管理器时自动重启）\n\n"
+               "之后在任意文件夹的空白处或选中项右键，都能看到该菜单项。\n"
+               "若未安装 python3-nautilus，仍可在「右键选中的文件夹 → 脚本」"
+               "子菜单里使用（GNOME 42+ 空白处无脚本子菜单）。"),
+        "en": ("A Nautilus context-menu extension has been installed. To make "
+               "\"Open in Stellar Terminal\" appear on empty-space right-click "
+               "too, you need:\n\n"
+               "1. Install the extension runtime (once):\n"
+               "   sudo apt install python3-nautilus\n\n"
+               "2. Restart Nautilus so it loads the extension:\n"
+               "   nautilus -q\n"
+               "   (it relaunches next time you open Files)\n\n"
+               "Then the menu item shows on empty space or a selected item in "
+               "any folder.\n"
+               "Without python3-nautilus, you can still use it via right-click "
+               "a folder → Scripts (GNOME 42+ has no Scripts submenu on empty "
+               "space).")},
     "settings.shell_menu_failed_title": {
         "zh": "右键菜单设置失败", "en": "Context Menu Setup Failed"},
     "settings.shell_menu_failed_msg": {

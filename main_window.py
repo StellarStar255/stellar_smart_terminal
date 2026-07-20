@@ -7251,14 +7251,20 @@ class MainWindow(QMainWindow):
         import shell_integration
         ok, err = (shell_integration.install() if enabled
                    else shell_integration.uninstall())
-        if ok:
-            self.statusBar().showMessage(
-                t("settings.shell_menu_installed") if enabled
-                else t("settings.shell_menu_removed"), 5000)
-        else:
+        if not ok:
             QMessageBox.warning(
                 self, t("settings.shell_menu_failed_title"),
                 t("settings.shell_menu_failed_msg", error=err))
+            return
+        # Linux：扩展要 python3-nautilus + 重启 Nautilus 才生效，给一次性图文指引
+        if enabled and sys.platform == "linux":
+            QMessageBox.information(
+                self, t("settings.shell_menu_linux_title"),
+                t("settings.shell_menu_linux_guide"))
+            return
+        self.statusBar().showMessage(
+            t("settings.shell_menu_installed") if enabled
+            else t("settings.shell_menu_removed"), 5000)
 
     def _install_finder_toolbar_launcher(self):
         """生成 Finder 工具栏启动器并引导用户拖入工具栏（仅 macOS）。
