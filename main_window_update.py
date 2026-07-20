@@ -18,6 +18,12 @@ import app_config
 from i18n import t
 
 
+# 延迟引用宿主类：进程级共享类属性（跨窗口导航器/停靠方式/一次性
+# 标志）必须落在真正的 MainWindow 上，而非 type(self)（对假 self /
+# 子类会取错）。只在方法内访问 .MainWindow，循环 import 安全。
+import main_window as _mw
+
+
 class UpdateMixin:
     """应用内更新相关方法。依赖宿主类提供 self.statusbar、
     self._styled_message_box / _make_styled_message_box、
@@ -35,14 +41,14 @@ class UpdateMixin:
         """
         import time
         import app_updater
-        if type(self)._auto_update_check_done or sip.isdeleted(self):
+        if _mw.MainWindow._auto_update_check_done or sip.isdeleted(self):
             return
         cfg = app_config.read_config()
         if not cfg.get('auto_update_check', True):
             return
         if time.time() - float(cfg.get('update_last_check_ts', 0)) < 24 * 3600:
             return
-        type(self)._auto_update_check_done = True
+        _mw.MainWindow._auto_update_check_done = True
         app_config.update_config({'update_last_check_ts': time.time()},
                                  description='auto update check throttle')
         checker = app_updater.UpdateChecker(self)
