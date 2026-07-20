@@ -179,7 +179,7 @@ class RemotePanelMixin:
             pw = self.remote_panel.get_cached_password(host_config.alias)
             new_window.remote_panel.prime_cached_password(host_config.alias, pw)
         except Exception:
-            pass
+            logger.debug("_auto_connect_remote_in_window: suppressed exception", exc_info=True)
 
         def _go():
             if sip.isdeleted(new_window):
@@ -194,7 +194,7 @@ class RemotePanelMixin:
                     new_window.statusbar.showMessage(
                         f"Remote connect failed: {e}", 5000)
                 except Exception:
-                    pass
+                    logger.debug("_go: suppressed exception", exc_info=True)
         QTimer.singleShot(120, _go)
 
     def _open_ssh_terminal_tab(self, host_config, remote_cd_path):
@@ -262,7 +262,7 @@ class RemotePanelMixin:
             if cached_pw:
                 term.arm_password_autofill(cached_pw)
         except Exception:
-            pass
+            logger.debug("_open_ssh_terminal_tab: suppressed exception", exc_info=True)
         cmd_string = " ".join(self._shell_quote(a) for a in ssh_args)
         # 用 _start_and_execute：先起 shell，再回车跑 ssh；ssh 退出后用户回到本地 shell
         try:
@@ -288,7 +288,7 @@ class RemotePanelMixin:
         try:
             new_window._set_window_color(self._get_available_window_color())
         except Exception:
-            pass
+            logger.debug("_open_ssh_in_new_window: suppressed exception", exc_info=True)
 
         # 把父窗口已缓存的密码带给新窗口（和「expand to new window」一致）。
         # 否则新窗口 _connect_to 会弹模态密码框——而新窗口此刻正与父窗口逐像素
@@ -308,7 +308,7 @@ class RemotePanelMixin:
         try:
             new_window.resize(self.size())
         except Exception:
-            pass
+            logger.debug("_open_ssh_in_new_window: suppressed exception", exc_info=True)
         self._align_child_with_parent_geometry(new_window)
         new_window.raise_()
         new_window.activateWindow()
@@ -331,7 +331,7 @@ class RemotePanelMixin:
                     new_window.raise_()
                     new_window.activateWindow()
                 except Exception:
-                    pass
+                    logger.debug("_connect_after_init: suppressed exception", exc_info=True)
                 # 显示新窗口的 Remote 面板，让用户看到连上的文件树
                 if not getattr(new_window, 'remote_panel_visible', False):
                     new_window._toggle_remote_panel()
@@ -363,7 +363,7 @@ class RemotePanelMixin:
             try:
                 pane.file_saved.disconnect(old)
             except Exception:
-                pass
+                logger.debug("_open_remote_file_in_editor: suppressed exception", exc_info=True)
         def on_saved(saved_path: str):
             if saved_path != local_temp_path:
                 return
@@ -379,7 +379,7 @@ class RemotePanelMixin:
                 f"{current}  ·  {t('remote.editing_remote', host=host_alias, path=remote_path)}"
             )
         except Exception:
-            pass
+            logger.debug("_open_remote_file_in_editor: suppressed exception", exc_info=True)
 
         # 按 Side-by-Side 开关放置编辑器，行为与本地 Explorer 一致：
         # 勾选=左右分屏（编辑器进 main_splitter，紧邻 Remote 树）；

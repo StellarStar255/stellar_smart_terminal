@@ -31,7 +31,7 @@ def setup_qt_plugin_path():
             os.environ['QT_QPA_PLATFORM_PLUGIN_PATH'] = str(qt_path / "platforms")
             os.environ['QT_PLUGIN_PATH'] = str(qt_path)
     except Exception:
-        pass
+        logger.debug("setup_qt_plugin_path: suppressed exception", exc_info=True)
 
 setup_qt_plugin_path()
 
@@ -104,14 +104,14 @@ def install_global_excepthook():
             sys.stderr.write(tb_text)
             sys.stderr.flush()
         except Exception:
-            pass
+            logger.debug("_hook: suppressed exception", exc_info=True)
         # 追加写入崩溃日志，方便复盘真正抛异常的位置
         try:
             with open(log_path, "a", encoding="utf-8") as f:
                 f.write(f"\n===== {datetime.now().isoformat()} =====\n")
                 f.write(tb_text)
         except Exception:
-            pass
+            logger.debug("_hook: suppressed exception", exc_info=True)
         # 同步记录到统一日志系统
         try:
             logger.error(
@@ -119,7 +119,7 @@ def install_global_excepthook():
                 exc_info=(exc_type, exc_value, exc_tb),
             )
         except Exception:
-            pass
+            logger.debug("_hook: suppressed exception", exc_info=True)
 
     sys.excepthook = _hook
 
@@ -164,7 +164,7 @@ def install_sigint_handler(app: QApplication):
         try:
             os.write(2, text.encode("utf-8", "replace"))
         except Exception:
-            pass
+            logger.debug("_notify: suppressed exception", exc_info=True)
 
     def _graceful_quit():
         # 优先走带“保存会话+配置”的强制关闭；任何异常都不能阻断退出
@@ -175,9 +175,9 @@ def install_sigint_handler(app: QApplication):
                     try:
                         w.force_close_with_save()
                     except Exception:
-                        pass
+                        logger.debug("_graceful_quit: suppressed exception", exc_info=True)
         except Exception:
-            pass
+            logger.debug("_graceful_quit: suppressed exception", exc_info=True)
         # 兜底：无论保存/关闭是否成功，都确保事件循环退出
         QTimer.singleShot(300, app.quit)
 

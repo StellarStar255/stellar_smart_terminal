@@ -4267,7 +4267,7 @@ class FileEditorWidget(QWidget):
             cur.setPosition(min(cursor_pos, len(new_content)))
             self.editor.setTextCursor(cur)
         except Exception:
-            pass
+            logger.debug("_handle_external_change: suppressed exception", exc_info=True)
         self._update_title()
         if path not in self._file_watcher.files():
             self._file_watcher.addPath(path)
@@ -4484,7 +4484,7 @@ class EditorArea(QWidget):
                     return False
             except Exception:
                 # 单个窗格异常不阻断其它窗格的保存提示
-                pass
+                logger.debug("prompt_save_all: suppressed exception", exc_info=True)
         return True
 
     def flush_autosave_all(self):

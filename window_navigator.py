@@ -131,7 +131,7 @@ class WindowNavigatorPanel(QWidget):
                 self.drag_hint_label.setVisible(self._sort_mode == 'manual')
                 break
         except Exception:
-            pass
+            logger.debug("__init__: suppressed exception", exc_info=True)
 
         # 缓存上次的窗口信息，避免不必要的刷新
         self._last_window_info = []  # [(title, color), ...]
@@ -301,10 +301,10 @@ class WindowNavigatorPanel(QWidget):
                     try:
                         nav.drag_hint_label.setVisible(self._sort_mode == 'manual')
                     except Exception:
-                        pass
+                        logger.debug("_broadcast_sort_state: suppressed exception", exc_info=True)
                 nav._force_refresh()
             except Exception:
-                pass
+                logger.debug("_broadcast_sort_state: suppressed exception", exc_info=True)
 
     def _resolve_window(self, item):
         """从 QListWidgetItem 安全地拿回对应的 MainWindow。
@@ -355,7 +355,7 @@ class WindowNavigatorPanel(QWidget):
             try:
                 nav._apply_compact_mode(compact)
             except Exception:
-                pass
+                logger.debug("_toggle_compact_mode: suppressed exception", exc_info=True)
 
     def _apply_compact_mode(self, compact: bool):
         """同步外部设置的简洁显示状态：更新复选框、内部标志并刷新列表。"""
@@ -642,7 +642,7 @@ class WindowNavigatorPanel(QWidget):
                 w.destroyed.connect(self._on_hooked_window_destroyed)
                 self._hooked_window_ids.add(wid)
             except Exception:
-                pass
+                logger.debug("_refresh_window_list: suppressed exception", exc_info=True)
 
         # 根据排序模式排序（包一层 try：window 可能在 sort key 取值时被销毁）
         try:
@@ -786,7 +786,7 @@ class WindowNavigatorPanel(QWidget):
                 self._hovered_item = None
                 self._update_all_item_colors()
         except Exception:
-            pass
+            logger.debug("eventFilter: suppressed exception", exc_info=True)
         return super().eventFilter(obj, event)
 
     def _update_item_colors(self, selected_item):
@@ -893,7 +893,7 @@ class WindowNavigatorPanel(QWidget):
             try:
                 nav._apply_quick_close(self._quick_close)
             except Exception:
-                pass
+                logger.debug("_on_quick_close_changed: suppressed exception", exc_info=True)
 
     def _apply_quick_close(self, quick_close: bool):
         """同步外部设置的 Quick Close 状态：更新复选框与内部标志。"""
@@ -996,7 +996,7 @@ class WindowNavigatorPanel(QWidget):
                         nav._refresh_window_list()
                     except Exception:
                         # 由 QTimer 回调，异常绝不能逃逸（否则 PyQt6 abort 闪退）
-                        pass
+                        logger.debug("safe_refresh: suppressed exception", exc_info=True)
             QTimer.singleShot(200, safe_refresh)
 
         # 80ms 足以让 macOS native menu 完成 dismiss 与 popup widget 的
@@ -1041,7 +1041,7 @@ class WindowNavigatorPanel(QWidget):
                 patch['navigator_geometry'] = [self.x(), self.y(), self.width(), self.height()]
             app_config.update_config(patch, description='navigator')
         except Exception:
-            pass
+            logger.debug("_save_navigator_config: suppressed exception", exc_info=True)
 
     def _load_navigator_config(self):
         """从主配置文件加载导航面板设置"""
@@ -1078,7 +1078,7 @@ class WindowNavigatorPanel(QWidget):
                                 y + h > 0 and y < screen_rect.height()):
                             self.setGeometry(x, y, max(w, 200), max(h, 150))
         except Exception:
-            pass
+            logger.debug("_load_navigator_config: suppressed exception", exc_info=True)
 
     def closeEvent(self, event):
         """关闭时保存设置、停止定时器并发送关闭信号"""

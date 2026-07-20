@@ -872,7 +872,7 @@ class ExplorerPanel(QWidget):
                 folder_icon.pixmap(QSize(16, 16))
                 file_icon.pixmap(QSize(16, 16))
         except Exception:
-            pass  # 预热失败不影响功能，首次展开退回原有（稍慢）路径
+            logger.debug("prewarm: suppressed exception", exc_info=True)
 
     def refresh(self):
         """刷新文件树"""
@@ -1071,7 +1071,7 @@ class ExplorerPanel(QWidget):
             try:
                 proc.kill()
             except Exception:
-                pass
+                logger.debug("_run_content_search_rg: suppressed exception", exc_info=True)
             return False  # rg 读取异常 → 回退纯 Python
         # rg 退出码：0=有命中，1=无命中（均正常），>=2 表示出错（如旧版本不识别参数）。
         # 出错且未截断时回退纯 Python，避免静默地把「报错」显示成「无结果」。
@@ -1778,7 +1778,7 @@ class ExplorerPanel(QWidget):
                 send2trash(file_path)
                 return
             except Exception:
-                pass
+                logger.debug("_send_to_trash: suppressed exception", exc_info=True)
             # 回退 2：永久删除（不进废纸篓，但保证「删得掉」）
             if is_dir:
                 shutil.rmtree(file_path)
@@ -1999,7 +1999,7 @@ class ExplorerPanel(QWidget):
                         try:
                             s.abort()
                         except Exception:
-                            pass
+                            logger.debug("_on_cancel: suppressed exception", exc_info=True)
             progress.canceled.connect(_on_cancel)
         done = {"n": 0, "errors": []}
 

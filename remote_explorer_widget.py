@@ -335,7 +335,7 @@ class _HostListWidget(QListWidget):
             if sip.isdeleted(self) or sip.isdeleted(item):
                 return
         except Exception:
-            pass
+            logger.debug("_fire_pending_rename: suppressed exception", exc_info=True)
         # 仍是唯一选中项才进入编辑（延迟期间用户可能已切走 / 双击已连接）
         if self.row(item) >= 0 and item.isSelected() and len(self.selectedItems()) == 1:
             self.editItem(item)
@@ -390,7 +390,7 @@ class _HostListWidget(QListWidget):
             if sip.isdeleted(self) or sip.isdeleted(item):
                 return
         except Exception:
-            pass
+            logger.debug("_safe_edit: suppressed exception", exc_info=True)
         # 条目仍存在且仍是当前选中项才编辑
         if self.row(item) >= 0:
             self.editItem(item)
@@ -441,7 +441,7 @@ class _RemoteTreeWidget(QTreeWidget):
             if sip.isdeleted(item):
                 return
         except Exception:
-            pass
+            logger.debug("_fire_pending_rename: suppressed exception", exc_info=True)
         # 仍是唯一选中项时才进入编辑，避免延迟期间用户已切走
         if item.isSelected() and len(self.selectedItems()) == 1:
             self.editItem(item, 0)
@@ -4216,7 +4216,7 @@ class RemoteExplorerPanel(QWidget):
             try:
                 sess.connected.disconnect(restore_once)
             except Exception:
-                pass
+                logger.debug("restore_once: suppressed exception", exc_info=True)
             if sess is self._session and saved_cwd:
                 self._current_path = saved_cwd
                 self._path_edit.setText(saved_cwd)

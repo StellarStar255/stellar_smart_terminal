@@ -479,7 +479,7 @@ class MainWindow(ThemeMixin, ToolbarMixin, ConfigMixin, ExplorerPanelMixin,
                     try:
                         nav.select_window(self)
                     except Exception:
-                        pass
+                        logger.debug("changeEvent: suppressed exception", exc_info=True)
                 # 跨窗口左侧栏联动：激活时窗口已铺满稳定，按共享宽度对齐一次。
                 # 修正启动时因窗口尚未到最终尺寸、setSizes 被当成比例缩放而导致各
                 # 窗口左侧栏宽度不一致的问题（无需用户先手动拖一次才联动）。
@@ -491,7 +491,7 @@ class MainWindow(ThemeMixin, ToolbarMixin, ConfigMixin, ExplorerPanelMixin,
                         if sizes and sizes[0] > 0 and abs(sizes[0] - sw) > 2:
                             self._apply_shared_left_panel_width(sw)
                 except Exception:
-                    pass
+                    logger.debug("changeEvent: suppressed exception", exc_info=True)
             else:
                 # 窗口失活时暂停日志刷新定时器（减少后台开销）
                 if hasattr(self, '_log_timer') and self._log_timer:
@@ -1221,7 +1221,7 @@ class MainWindow(ThemeMixin, ToolbarMixin, ConfigMixin, ExplorerPanelMixin,
         try:
             MainWindow._broadcast_navigator_refresh(invalidate_cache=True)
         except Exception:
-            pass
+            logger.debug("_apply_working_dir: suppressed exception", exc_info=True)
 
 
 
@@ -1380,7 +1380,7 @@ class MainWindow(ThemeMixin, ToolbarMixin, ConfigMixin, ExplorerPanelMixin,
         try:
             wins.sort(key=lambda w: w.get_created_time())
         except Exception:
-            pass
+            logger.debug("_cycle_windows: suppressed exception", exc_info=True)
         active_idx = [i for i, w in enumerate(wins) if w.isActiveWindow()]
         cur = active_idx[0] if active_idx else 0
         target = wins[(cur + direction) % len(wins)]
@@ -1426,7 +1426,7 @@ class MainWindow(ThemeMixin, ToolbarMixin, ConfigMixin, ExplorerPanelMixin,
                         cls._cycle_windows(direction)
                         return None  # 吞掉，阻止系统原生 Cmd+` 再处理一次
             except Exception:
-                pass
+                logger.debug("_handler: suppressed exception", exc_info=True)
             return event
 
         try:
@@ -1526,7 +1526,7 @@ class MainWindow(ThemeMixin, ToolbarMixin, ConfigMixin, ExplorerPanelMixin,
                 old.close()
                 old.deleteLater()
             except Exception:
-                pass
+                logger.debug("_show_shortcut_cheatsheet: suppressed exception", exc_info=True)
         dialog = ShortcutCheatSheetDialog(self._shortcut_cheatsheet_groups(), self)
         dialog.customize_requested.connect(self._show_shortcut_settings)
         self._cheatsheet_dialog = dialog
@@ -1865,7 +1865,7 @@ class MainWindow(ThemeMixin, ToolbarMixin, ConfigMixin, ExplorerPanelMixin,
                 self.working_dir_history = merged_history
                 self._working_dir_freq = merged_freq
         except Exception:
-            pass
+            logger.debug("_reload_dir_history_from_config: suppressed exception", exc_info=True)
 
     def _mark_quick_launch_closed(self, *args):
         """记录快速启动弹窗关闭时刻（供 ⚡ 的开/关判定使用）。弹窗复用，不销毁。"""
@@ -2331,7 +2331,7 @@ class MainWindow(ThemeMixin, ToolbarMixin, ConfigMixin, ExplorerPanelMixin,
             else:
                 y = max(avail.top(), min(y, avail.bottom() - h + 1))
         except Exception:
-            pass
+            logger.debug("_clamp_window_pos: suppressed exception", exc_info=True)
         return x, y
 
     @staticmethod
@@ -2999,7 +2999,7 @@ class MainWindow(ThemeMixin, ToolbarMixin, ConfigMixin, ExplorerPanelMixin,
                     self.statusBar().showMessage(
                         t("status.ai_need_llm_config"), 6000)
                 except Exception:
-                    pass
+                    logger.debug("_on_ai_completion_toggled: suppressed exception", exc_info=True)
 
     def _broadcast_ai_completion_state(self):
         """把 AI 补全开关同步到所有 MainWindow 窗口（含其编辑器窗格），
@@ -3567,7 +3567,7 @@ class MainWindow(ThemeMixin, ToolbarMixin, ConfigMixin, ExplorerPanelMixin,
             subprocess.run(["/usr/bin/open", "-R", path],
                            capture_output=True, timeout=10)
         except Exception:
-            pass
+            logger.debug("_install_finder_toolbar_launcher: suppressed exception", exc_info=True)
         QMessageBox.information(
             self, t("settings.toolbar_launcher_title"),
             t("settings.toolbar_launcher_guide"))
@@ -3712,13 +3712,13 @@ class MainWindow(ThemeMixin, ToolbarMixin, ConfigMixin, ExplorerPanelMixin,
             try:
                 self._set_window_color(color)
             except Exception:
-                pass
+                logger.debug("_apply_restored_window_state: suppressed exception", exc_info=True)
         geo = entry.get('geometry')
         if isinstance(geo, (list, tuple)) and len(geo) == 4:
             try:
                 self.setGeometry(*[int(v) for v in geo])
             except Exception:
-                pass
+                logger.debug("_apply_restored_window_state: suppressed exception", exc_info=True)
         if entry.get('maximized'):
             self.showMaximized()
         # 侧边栏保持升级前的开关状态。旧版本写的快照没有 panel 键，
@@ -4095,7 +4095,7 @@ class MainWindow(ThemeMixin, ToolbarMixin, ConfigMixin, ExplorerPanelMixin,
             try:
                 self._remote_title.setText(t("remote.title"))
             except Exception:
-                pass
+                logger.debug("_apply_language: suppressed exception", exc_info=True)
         if hasattr(self, 'editor_area'):
             self.editor_area.apply_language()
 
@@ -4261,7 +4261,7 @@ class MainWindow(ThemeMixin, ToolbarMixin, ConfigMixin, ExplorerPanelMixin,
             self._working_dir_freq = merged_freq
         except Exception:
             # 合并失败不应阻断保存：保持内存中的历史原样写出
-            pass
+            logger.debug("_merge_dir_history_for_save: suppressed exception", exc_info=True)
 
 
 
@@ -4351,7 +4351,7 @@ class MainWindow(ThemeMixin, ToolbarMixin, ConfigMixin, ExplorerPanelMixin,
             try:
                 self.nav_panel._force_refresh()
             except Exception:
-                pass
+                logger.debug("_sync_embedded_nav: suppressed exception", exc_info=True)
 
     @staticmethod
     def _set_embed_enabled_all(enabled: bool):
@@ -4410,7 +4410,7 @@ class MainWindow(ThemeMixin, ToolbarMixin, ConfigMixin, ExplorerPanelMixin,
                         g.close()
                         g.deleteLater()
                 except Exception:
-                    pass
+                    logger.debug("_set_navigator_dock_mode: suppressed exception", exc_info=True)
             # 启用内嵌导航条（所有窗口联动；与已打开的文件面板一起显示）
             was_on = floating_on or any(
                 hasattr(w, 'window_nav_checkbox') and w.window_nav_checkbox.isChecked()
@@ -4442,7 +4442,7 @@ class MainWindow(ThemeMixin, ToolbarMixin, ConfigMixin, ExplorerPanelMixin,
                 cb.setChecked(mode == 'embed')
                 cb.blockSignals(False)
             except Exception:
-                pass
+                logger.debug("_set_navigator_dock_mode: suppressed exception", exc_info=True)
         MainWindow._persist_navigator_dock_mode()
 
     @staticmethod
@@ -4483,7 +4483,7 @@ class MainWindow(ThemeMixin, ToolbarMixin, ConfigMixin, ExplorerPanelMixin,
                     nav._last_window_info = []
                 nav._refresh_window_list()
             except Exception:
-                pass
+                logger.debug("_broadcast_navigator_refresh: suppressed exception", exc_info=True)
 
     @staticmethod
     def _on_navigator_closed_global():
@@ -4605,7 +4605,7 @@ class MainWindow(ThemeMixin, ToolbarMixin, ConfigMixin, ExplorerPanelMixin,
                 try:
                     w._load_local_commands()
                 except Exception:
-                    pass
+                    logger.debug("_broadcast_local_commands_reload: suppressed exception", exc_info=True)
 
     # ==================== 本地快速命令相关方法结束 ====================
 
@@ -4741,7 +4741,7 @@ class MainWindow(ThemeMixin, ToolbarMixin, ConfigMixin, ExplorerPanelMixin,
             try:
                 self.hide()
             except Exception:
-                pass
+                logger.debug("closeEvent: suppressed exception", exc_info=True)
 
         # 停止所有 OpenAI API 服务器（独立 try：服务器停不掉不该阻塞关窗）
         try:
@@ -4753,11 +4753,11 @@ class MainWindow(ThemeMixin, ToolbarMixin, ConfigMixin, ExplorerPanelMixin,
         try:
             self.auto_save_timer.stop()
         except Exception:
-            pass
+            logger.debug("closeEvent: suppressed exception", exc_info=True)
         try:
             self._log_timer.stop()
         except Exception:
-            pass
+            logger.debug("closeEvent: suppressed exception", exc_info=True)
 
         # 等待 Git 面板的后台线程（fetch/push/pull/生成提交信息）跑完，
         # 否则线程仍在运行时被销毁会触发 QThread abort
@@ -4837,7 +4837,7 @@ class MainWindow(ThemeMixin, ToolbarMixin, ConfigMixin, ExplorerPanelMixin,
                     nav._save_navigator_config()
                     nav.close()
                 except Exception:
-                    pass
+                    logger.debug("_quit_if_last_main_window: suppressed exception", exc_info=True)
             # 推迟一拍退出，避免在 closeEvent / native 事件链内同步退出
             QTimer.singleShot(0, app.quit)
         except Exception as e:
@@ -4934,11 +4934,11 @@ class MainWindow(ThemeMixin, ToolbarMixin, ConfigMixin, ExplorerPanelMixin,
         try:
             play_notify_sound(getattr(self, '_notify_sound', ''))
         except Exception:
-            pass
+            logger.debug("_request_nav_attention: suppressed exception", exc_info=True)
         try:
             MainWindow._broadcast_navigator_refresh(invalidate_cache=True)
         except Exception:
-            pass
+            logger.debug("_request_nav_attention: suppressed exception", exc_info=True)
 
     def _clear_nav_attention(self):
         """清除本窗口的导航提醒小标（用户已查看）"""
@@ -4948,7 +4948,7 @@ class MainWindow(ThemeMixin, ToolbarMixin, ConfigMixin, ExplorerPanelMixin,
             try:
                 MainWindow._broadcast_navigator_refresh(invalidate_cache=True)
             except Exception:
-                pass
+                logger.debug("_clear_nav_attention: suppressed exception", exc_info=True)
 
     def _show_openai_server_dialog(self, tab_index: int):
         """显示 OpenAI 服务器配置对话框"""

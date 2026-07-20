@@ -12,6 +12,9 @@ from typing import List, Optional, Tuple
 from PyQt6.QtCore import QObject, pyqtSignal, QThread
 import urllib.request
 import urllib.parse
+from app_logging import get_logger
+
+logger = get_logger(__name__)
 
 # Windows: code/cursor CLI 是 .cmd 批处理，窗口化应用不加 CREATE_NO_WINDOW
 # 每次调用都会闪一个控制台窗口（列扩展、装/卸扩展时尤其频繁）
@@ -222,7 +225,7 @@ class VSCodeManager(QObject):
             if result.returncode == 0:
                 return result.stdout.strip().split('\n')[0]
         except Exception:
-            pass
+            logger.debug("get_vscode_version: suppressed exception", exc_info=True)
         return "未知"
 
     def search_extensions(self, query: str):

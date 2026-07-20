@@ -73,11 +73,11 @@ def _inter_process_lock():
                         handle.seek(0)
                         msvcrt.locking(handle.fileno(), msvcrt.LK_UNLCK, 1)
                 except Exception:
-                    pass
+                    logger.debug("_inter_process_lock: suppressed exception", exc_info=True)
             try:
                 handle.close()
             except Exception:
-                pass
+                logger.debug("_inter_process_lock: suppressed exception", exc_info=True)
 
 
 def read_config() -> dict:

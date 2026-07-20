@@ -19,6 +19,9 @@ from i18n import t
 # 标志）必须落在真正的 MainWindow 上，而非 type(self)（对假 self /
 # 子类会取错）。只在方法内访问 .MainWindow，循环 import 安全。
 import main_window as _mw
+from app_logging import get_logger
+
+logger = get_logger(__name__)
 
 
 class ThemeMixin:
@@ -840,7 +843,7 @@ class ThemeMixin:
                 if not sip.isdeleted(_global_nav):
                     _global_nav.apply_theme(t)
             except Exception:
-                pass
+                logger.debug("_apply_theme: suppressed exception", exc_info=True)
 
         # 更新所有终端的颜色
         for terminals in self.tab_terminals.values():

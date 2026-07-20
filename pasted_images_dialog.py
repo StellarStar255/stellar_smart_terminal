@@ -19,6 +19,9 @@ from PyQt6.QtGui import QPixmap, QDesktopServices
 
 from flow_layout import FlowLayout
 from i18n import t
+from app_logging import get_logger
+
+logger = get_logger(__name__)
 
 
 THUMB_SIZE = 140  # 缩略图边长（像素）
@@ -35,7 +38,7 @@ def _reveal_in_file_manager(path: str):
             # Linux：退而求其次，打开所在目录
             QDesktopServices.openUrl(QUrl.fromLocalFile(str(Path(path).parent)))
     except Exception:
-        pass
+        logger.debug("_reveal_in_file_manager: suppressed exception", exc_info=True)
 
 
 class _Thumbnail(QFrame):

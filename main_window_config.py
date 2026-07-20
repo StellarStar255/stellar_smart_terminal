@@ -24,6 +24,9 @@ from utils import atomic_write_json
 # 顶层 import main_window 会与 main_window 顶层 import 本模块形成循环，但
 # 只在方法内访问 .MainWindow（调用时两模块都已加载完），是既定安全模式。
 import main_window as _mw
+from app_logging import get_logger
+
+logger = get_logger(__name__)
 
 
 class ConfigMixin:
@@ -296,9 +299,9 @@ class ConfigMixin:
                 try:
                     self.statusbar.showMessage(t("status.config_save_failed"), 5000)
                 except Exception:
-                    pass
+                    logger.debug("_save_config: suppressed exception", exc_info=True)
         except Exception:
-            pass
+            logger.debug("_save_config: suppressed exception", exc_info=True)
 
     def _build_config_for_save(self, existing_config: dict):
         """在 app_config 锁内执行：把本窗口的设置原地合并进 existing_config。

@@ -53,7 +53,7 @@ def _ssl_context() -> ssl.SSLContext:
         import certifi
         return ssl.create_default_context(cafile=certifi.where())
     except Exception:
-        pass
+        logger.debug("_ssl_context: suppressed exception", exc_info=True)
     for cafile in ('/etc/ssl/cert.pem', '/etc/ssl/certs/ca-certificates.crt'):
         if os.path.exists(cafile):
             try:

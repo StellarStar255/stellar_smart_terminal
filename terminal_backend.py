@@ -584,7 +584,7 @@ if IS_WINDOWS:
                 try:
                     kernel32.ClosePseudoConsole(wintypes.HANDLE(self._hpc))
                 except Exception:
-                    pass
+                    logger.debug("_cleanup: suppressed exception", exc_info=True)
                 self._hpc = None
 
             # 等待读取线程退出
@@ -600,7 +600,7 @@ if IS_WINDOWS:
                     try:
                         kernel32.CloseHandle(wintypes.HANDLE(handle))
                     except Exception:
-                        pass
+                        logger.debug("_cleanup: suppressed exception", exc_info=True)
                     setattr(self, pipe_attr, None)
 
             # 关闭进程和线程 handles
@@ -608,14 +608,14 @@ if IS_WINDOWS:
                 try:
                     kernel32.CloseHandle(wintypes.HANDLE(self._h_thread))
                 except Exception:
-                    pass
+                    logger.debug("_cleanup: suppressed exception", exc_info=True)
                 self._h_thread = None
 
             if self._h_process is not None:
                 try:
                     kernel32.CloseHandle(wintypes.HANDLE(self._h_process))
                 except Exception:
-                    pass
+                    logger.debug("_cleanup: suppressed exception", exc_info=True)
                 self._h_process = None
 
             # Delete attribute list if it was initialized
@@ -623,7 +623,7 @@ if IS_WINDOWS:
                 try:
                     kernel32.DeleteProcThreadAttributeList(self._attr_list_buf)
                 except Exception:
-                    pass
+                    logger.debug("_cleanup: suppressed exception", exc_info=True)
                 self._attr_list_buf = None
 
         @property
@@ -787,7 +787,7 @@ else:
                 size = struct.pack('HHHH', rows, cols, 0, 0)
                 fcntl.ioctl(fd, termios.TIOCSWINSZ, size)
             except Exception:
-                pass
+                logger.debug("_set_pty_size: suppressed exception", exc_info=True)
 
         def _read_loop(self):
             """后台读取循环"""
@@ -958,7 +958,7 @@ else:
                 try:
                     os.close(self._master_fd)
                 except Exception:
-                    pass
+                    logger.debug("_cleanup: suppressed exception", exc_info=True)
                 self._master_fd = None
 
             # Reap the child process to prevent zombies

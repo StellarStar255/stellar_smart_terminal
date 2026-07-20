@@ -772,7 +772,7 @@ class TabSplitMixin:
                     if sizes and sizes[0] > 0 and abs(sizes[0] - sw) > 2:
                         new_window._apply_shared_left_panel_width(sw)
             except Exception:
-                pass
+                logger.debug("_fix_left_width: suppressed exception", exc_info=True)
 
         def _realign(attempt=0, stable=0):
             if sip.isdeleted(new_window):
@@ -924,7 +924,7 @@ class TabSplitMixin:
             if getattr(self, 'log_panel_visible', False):
                 new_window._toggle_log_panel()
         except Exception:
-            pass
+            logger.debug("_detach_tab: suppressed exception", exc_info=True)
 
         # 扩展的是远程 SSH 终端 → 让新窗口的 Remote 面板自动连到同一主机，
         # 这样新窗口里终端 + SFTP 文件树都指向这台远端（终端已随 tab 搬过去）。
@@ -942,7 +942,7 @@ class TabSplitMixin:
         try:
             new_window.resize(self.size())
         except Exception:
-            pass
+            logger.debug("_detach_tab: suppressed exception", exc_info=True)
 
         # 拖拽与菜单 expand 共用「原地出现」语义：新窗口直接与父窗口逐像素
         # 重合（隐形对齐后显形，见 _align_child_with_parent_geometry）。
@@ -1193,7 +1193,7 @@ class TabSplitMixin:
                 try:
                     _mw.MainWindow._broadcast_navigator_refresh()
                 except Exception:
-                    pass
+                    logger.debug("_update_window_title_from_tab: suppressed exception", exc_info=True)
 
     def _next_tab(self):
         """切换到下一个标签页"""

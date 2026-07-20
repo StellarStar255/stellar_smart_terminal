@@ -255,7 +255,7 @@ class SessionManager:
             try:
                 future.result(timeout=timeout)
             except Exception:
-                pass  # 写入失败已在 _write_session_data 内记录
+                logger.debug("_wait_pending_save: suppressed exception", exc_info=True)
 
     def _write_session_data(self, data: dict, session_id: str) -> Path:
         file_path = self.sessions_dir / f"{session_id}.json"

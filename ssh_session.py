@@ -536,7 +536,7 @@ class SSHSession(QObject):
             if chan is not None:
                 chan.settimeout(SFTP_OP_TIMEOUT)
         except Exception:
-            pass
+            logger.debug("_establish: suppressed exception", exc_info=True)
         try:
             home = sftp.normalize(".")
         except Exception:
@@ -576,7 +576,7 @@ class SSHSession(QObject):
                 self.host_key_check_degraded.emit(
                     t("ssh.host_key_degraded", path=known_hosts))
             except Exception:
-                pass
+                logger.debug("_connect_client: suppressed exception", exc_info=True)
         host_key_policy = _PersistOnFirstUsePolicy()
         client.set_missing_host_key_policy(host_key_policy)
 
@@ -631,7 +631,7 @@ class SSHSession(QObject):
             try:
                 client.close()
             except Exception:
-                pass
+                logger.debug("_connect_client: suppressed exception", exc_info=True)
             raise
 
         # 首次接受的未知主机 key 写回 known_hosts，让后续连接受 MITM 校验保护
@@ -640,7 +640,7 @@ class SSHSession(QObject):
                 os.makedirs(os.path.dirname(known_hosts), exist_ok=True)
                 client.save_host_keys(known_hosts)
             except Exception:
-                pass
+                logger.debug("_connect_client: suppressed exception", exc_info=True)
 
         # keep-alive：定期发 transport 层心跳，防止 NAT/防火墙把空闲连接掐掉
         transport = client.get_transport()
@@ -757,7 +757,7 @@ class SSHSession(QObject):
             try:
                 c.close()
             except Exception:
-                pass
+                logger.debug("_close_clients: suppressed exception", exc_info=True)
 
     def disconnect(self):
         """关闭连接（在 UI 线程调用安全）"""
@@ -788,11 +788,11 @@ class SSHSession(QObject):
                 if tr is not None:
                     tr.close()      # 关 socket → 阻塞的 recv 立刻抛错
             except Exception:
-                pass
+                logger.debug("abort: suppressed exception", exc_info=True)
             try:
                 c.close()
             except Exception:
-                pass
+                logger.debug("abort: suppressed exception", exc_info=True)
 
     def _do_disconnect(self):
         self._was_connected = False  # 主动断开后不再自动重连
@@ -810,7 +810,7 @@ class SSHSession(QObject):
             try:
                 sftp.close()
             except Exception:
-                pass
+                logger.debug("_teardown_connection: suppressed exception", exc_info=True)
         self._close_clients(([client] if client is not None else []) + jumps)
 
     # --- liveness & auto-reconnect ---
@@ -1006,7 +1006,7 @@ class SSHSession(QObject):
             try:
                 sftp.remove(tmp_path)
             except Exception:
-                pass
+                logger.debug("upload_with_progress: suppressed exception", exc_info=True)
             raise
         self.invalidate_cache(self._parent(remote_path))
 
@@ -1037,7 +1037,7 @@ class SSHSession(QObject):
                 if os.path.exists(tmp_path):
                     os.remove(tmp_path)
             except Exception:
-                pass
+                logger.debug("download_with_progress: suppressed exception", exc_info=True)
             raise
         return attr
 

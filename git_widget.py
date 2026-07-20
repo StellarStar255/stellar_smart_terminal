@@ -3386,7 +3386,7 @@ class GitPanel(QWidget):
         try:
             self._git_manager.cancel_running()
         except Exception:
-            pass
+            logger.debug("shutdown: suppressed exception", exc_info=True)
         for worker in list(self._active_workers):
             try:
                 if worker.isRunning():

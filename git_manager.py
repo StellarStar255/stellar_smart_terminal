@@ -14,6 +14,9 @@ from typing import List, Tuple, Optional
 from PyQt6.QtCore import QObject, pyqtSignal, QFileSystemWatcher, QTimer
 
 from i18n import t
+from app_logging import get_logger
+
+logger = get_logger(__name__)
 
 
 # 网络类 git 操作（push / pull / fetch 等）的统一超时秒数。
@@ -227,7 +230,7 @@ class GitManager(QObject):
                         if os.path.isdir(gitdir):
                             return gitdir
                 except Exception:
-                    pass
+                    logger.debug("_find_git_dir: suppressed exception", exc_info=True)
             current = os.path.dirname(current)
         return None
 
@@ -347,7 +350,7 @@ class GitManager(QObject):
             try:
                 proc.terminate()
             except Exception:
-                pass
+                logger.debug("_kill_proc: suppressed exception", exc_info=True)
 
     def _release_proc(self, proc: subprocess.Popen):
         with self._proc_lock:
@@ -367,7 +370,7 @@ class GitManager(QObject):
                 try:
                     p.kill()
                 except Exception:
-                    pass
+                    logger.debug("cancel_running: suppressed exception", exc_info=True)
 
     def _run_git(self, *args, check: bool = True, timeout: int = 30,
                  input_text: str = None) -> Tuple[bool, str]:
@@ -398,7 +401,7 @@ class GitManager(QObject):
                 try:
                     proc.communicate(timeout=3)
                 except Exception:
-                    pass
+                    logger.debug("_run_git: suppressed exception", exc_info=True)
                 return False, t("git_mgr.timeout")
 
             if check and proc.returncode != 0:
@@ -1133,7 +1136,7 @@ class GitManager(QObject):
                 try:
                     proc.communicate(timeout=3)
                 except Exception:
-                    pass
+                    logger.debug("_run_git_verbose: suppressed exception", exc_info=True)
                 return False, t("git_mgr.timeout")
             err = (stderr or '').strip()
             out = (stdout or '').strip()

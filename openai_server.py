@@ -491,7 +491,7 @@ class TerminalBridge(QObject):
                     self.output_buffer.get_nowait()
                     self.output_buffer.put_nowait(text)
                 except Exception:
-                    pass  # 极端情况下忽略
+                    logger.debug("on_output: suppressed exception", exc_info=True)
 
     def get_output(self, timeout: float = 0.1) -> Optional[str]:
         """获取输出（带超时）"""
@@ -851,7 +851,7 @@ class OpenAIRequestHandler(BaseHTTPRequestHandler):
                 if parsed.hostname in ('localhost', '127.0.0.1', '::1'):
                     return origin
             except Exception:
-                pass
+                logger.debug("_get_cors_origin: suppressed exception", exc_info=True)
             return ''  # Non-localhost origin blocked
         return ''  # No origin header
 
@@ -987,7 +987,7 @@ class OpenAIRequestHandler(BaseHTTPRequestHandler):
             try:
                 self._send_error(500, str(e))
             except Exception:
-                pass
+                logger.debug("_handle_chat_completions: suppressed exception", exc_info=True)
 
     def _build_input(self, messages: list) -> str:
         """提取当前 query 的 system prompt + 最后一条 user prompt"""

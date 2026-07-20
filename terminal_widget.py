@@ -1992,7 +1992,7 @@ class TerminalWidget(QWidget):
                         try:
                             self.stream.feed(ch)
                         except Exception:
-                            pass  # 跳过无法处理的单个字符
+                            logger.debug("_on_output: suppressed exception", exc_info=True)
 
                 new_total = self.screen._total_history_lines
                 lines_added = new_total - old_total
@@ -4812,7 +4812,7 @@ class TerminalWidget(QWidget):
                                 if os.path.isdir(path):
                                     return path
             except Exception:
-                pass
+                logger.debug("get_cwd: suppressed exception", exc_info=True)
 
         # 无法获取实际的子进程工作目录时返回 None，让调用方使用其自己的回退逻辑
         # 不再回退到 os.getcwd()，因为那是主进程的工作目录，不是终端的工作目录
@@ -4871,7 +4871,7 @@ class TerminalWidget(QWidget):
                 # 其他平台：使用 Qt API（通常不会 segfault）
                 self._paste_from_clipboard_qt(clipboard)
         except Exception:
-            pass
+            logger.debug("_paste_from_clipboard: suppressed exception", exc_info=True)
 
     def _write_paste(self, data: bytes) -> bool:
         """将粘贴内容写入后端，必要时以 Bracketed Paste 序列包裹
@@ -4954,7 +4954,7 @@ class TerminalWidget(QWidget):
             try:
                 cwd = self.get_cwd()
             except Exception:
-                pass
+                logger.debug("_image_save_dir: suppressed exception", exc_info=True)
             cwd = cwd or getattr(self, '_working_dir', None) or str(Path.home())
             candidates.append(Path(cwd) / ".images")
         candidates.append(Path(tempfile.gettempdir()) / "smart_terminal_images")

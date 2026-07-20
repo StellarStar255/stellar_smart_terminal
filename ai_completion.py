@@ -61,7 +61,7 @@ class CompletionWorker(QThread):
             try:
                 resp.close()
             except Exception:
-                pass
+                logger.debug("cancel: suppressed exception", exc_info=True)
 
     def run(self):
         try:
@@ -170,14 +170,14 @@ class CompletionWorker(QThread):
                 try:
                     resp.close()
                 except Exception:
-                    pass
+                    logger.debug("run: suppressed exception", exc_info=True)
                 return
             if resp.status_code != 200:
                 body = ''
                 try:
                     body = resp.text[:200]
                 except Exception:
-                    pass
+                    logger.debug("run: suppressed exception", exc_info=True)
                 self.failed.emit(self._gen, f'HTTP {resp.status_code}: {body}')
                 return
 
@@ -189,7 +189,7 @@ class CompletionWorker(QThread):
                     try:
                         resp.close()
                     except Exception:
-                        pass
+                        logger.debug("run: suppressed exception", exc_info=True)
                     return
                 if not line:
                     continue
@@ -225,7 +225,7 @@ class CompletionWorker(QThread):
                     acc = (ch0.get('text')
                            or ch0.get('message', {}).get('content', '') or '')
                 except Exception:
-                    pass
+                    logger.debug("run: suppressed exception", exc_info=True)
 
             if self._cancelled:
                 return
@@ -241,7 +241,7 @@ class CompletionWorker(QThread):
                 try:
                     resp.close()
                 except Exception:
-                    pass
+                    logger.debug("run: suppressed exception", exc_info=True)
 
 
 class InlineCompletionController(QObject):
@@ -295,7 +295,7 @@ class InlineCompletionController(QObject):
             try:
                 w.cancel()
             except Exception:
-                pass
+                logger.debug("shutdown: suppressed exception", exc_info=True)
         if wait_ms > 0:
             for w in list(self._workers):
                 try:
@@ -344,7 +344,7 @@ class InlineCompletionController(QObject):
             try:
                 w.cancel()
             except Exception:
-                pass
+                logger.debug("_cancel_active: suppressed exception", exc_info=True)
 
     def dismiss(self):
         """清除当前建议，并让在途请求结果作废。"""
@@ -435,7 +435,7 @@ class InlineCompletionController(QObject):
         try:
             language = ed.ai_get_language()
         except Exception:
-            pass
+            logger.debug("_start_request: suppressed exception", exc_info=True)
 
         self._cancel_active()  # 取消上一个在途请求
         self._gen += 1
