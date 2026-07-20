@@ -110,8 +110,8 @@ if sys.platform == "darwin":
         info_plist={
             "CFBundleName": APP_DISPLAY_NAME,
             "CFBundleDisplayName": APP_DISPLAY_NAME,
-            "CFBundleShortVersionString": "1.14.30",
-            "CFBundleVersion": "1.14.30",
+            "CFBundleShortVersionString": "1.14.31",
+            "CFBundleVersion": "1.14.31",
             "NSHighResolutionCapable": True,
             "NSRequiresAquaSystemAppearance": False,
             # 终端应用需要的权限说明（访问用户文件等由系统按需弹窗）。
@@ -135,8 +135,25 @@ if sys.platform == "darwin":
             "NSRemindersUsageDescription": "A program you run in Stellar Smart Terminal is requesting Reminders access.",
             "NSPhotoLibraryUsageDescription": "A program you run in Stellar Smart Terminal is requesting Photos access.",
             "NSLocationWhenInUseUsageDescription": "A program you run in Stellar Smart Terminal is requesting location access.",
+            "NSLocationUsageDescription": "A program you run in Stellar Smart Terminal is requesting location access.",
+            "NSLocationAlwaysAndWhenInUseUsageDescription": "A program you run in Stellar Smart Terminal is requesting location access.",
             "NSBluetoothAlwaysUsageDescription": "A program you run in Stellar Smart Terminal is requesting Bluetooth access.",
+            "NSBluetoothPeripheralUsageDescription": "A program you run in Stellar Smart Terminal is requesting Bluetooth access.",
             "NSLocalNetworkUsageDescription": "A program you run in Stellar Smart Terminal is requesting local network access.",
             "NSSystemAdministrationUsageDescription": "A program you run in Stellar Smart Terminal is requesting system administration access.",
+            # macOS 14+ 把日历/提醒拆成完整/只写访问；照 Add-only 照片一并声明
+            "NSCalendarsFullAccessUsageDescription": "A program you run in Stellar Smart Terminal is requesting full Calendar access.",
+            "NSCalendarsWriteOnlyAccessUsageDescription": "A program you run in Stellar Smart Terminal is requesting write access to Calendar.",
+            "NSRemindersFullAccessUsageDescription": "A program you run in Stellar Smart Terminal is requesting full Reminders access.",
+            "NSPhotoLibraryAddUsageDescription": "A program you run in Stellar Smart Terminal is requesting to add to Photos.",
+            # macOS 14+ 的卷访问（可移动/网络卷），终端做文件操作会触发
+            "NSRemovableVolumesUsageDescription": "A program you run in Stellar Smart Terminal is requesting access to removable volumes (USB drives, SD cards).",
+            "NSNetworkVolumesUsageDescription": "A program you run in Stellar Smart Terminal is requesting access to network volumes.",
+            "NSFileProviderDomainUsageDescription": "A program you run in Stellar Smart Terminal is requesting access to files managed by other apps.",
+            # 其它常见受保护能力
+            "NSSiriUsageDescription": "A program you run in Stellar Smart Terminal is requesting Siri access.",
+            "NSFocusStatusUsageDescription": "A program you run in Stellar Smart Terminal is requesting Focus status.",
+            "NSNearbyInteractionUsageDescription": "A program you run in Stellar Smart Terminal is requesting nearby interaction access.",
+            "NSMotionUsageDescription": "A program you run in Stellar Smart Terminal is requesting motion & fitness data.",
         },
     )
