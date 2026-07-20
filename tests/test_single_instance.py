@@ -46,20 +46,30 @@ import app as app_mod
 
 primary = app_mod.SmartTerminalApplication([])
 received = []
-primary._open_dir = lambda p: received.append(p)
+# 事件驱动：收到即退，消除固定定时在慢机（Windows CI 命名管道）上的竞态
+def _on_dir(p):
+    received.append(p)
+    primary.quit()
+primary._open_dir = _on_dir
 assert primary.start_single_instance_server(), "listen failed"
 name = app_mod._single_instance_server_name()
 target = os.path.expanduser("~")
 
 def forward():
     s = QLocalSocket()
-    s.connectToServer(name)
-    assert s.waitForConnected(500), "connect failed"
-    s.write((target + "\n").encode()); s.waitForBytesWritten(1000); s.flush()
-    s.waitForDisconnected(300)
+    # 命名管道可能尚未就绪，重试几次连接
+    for _ in range(20):
+        s.connectToServer(name)
+        if s.waitForConnected(500):
+            break
+        s.abort()
+    else:
+        return  # 连不上就让兜底定时退出，received 为空 → 断言失败可诊断
+    s.write((target + "\n").encode()); s.waitForBytesWritten(2000); s.flush()
+    s.waitForDisconnected(500)
 
 QTimer.singleShot(100, forward)
-QTimer.singleShot(700, primary.quit)
+QTimer.singleShot(8000, primary.quit)  # 兜底：正常路径早已由 _on_dir 退出
 primary.exec()
 assert received == [target], "primary did not receive: %%r" %% received
 # 无主实例时转发返回 False
@@ -81,7 +91,7 @@ class TestIpcRoundtrip(unittest.TestCase):
         if os.path.isdir(plugin):
             env.setdefault("QT_QPA_PLATFORM_PLUGIN_PATH", plugin)
         proc = subprocess.run([sys.executable, "-c", _HARNESS],
-                              capture_output=True, text=True, timeout=60, env=env)
+                              capture_output=True, text=True, timeout=120, env=env)
         self.assertIn("OK", proc.stdout,
                       msg=f"stdout={proc.stdout}\nstderr={proc.stderr}")
 
