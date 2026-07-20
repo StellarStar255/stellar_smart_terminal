@@ -20,8 +20,8 @@ TRANSLATIONS = {
         "zh": "系统右键菜单：在 Stellar 终端中打开",
         "en": "System context menu: Open in Stellar Terminal"},
     "settings.shell_context_menu_tooltip": {
-        "zh": "在文件管理器里右键目录即可在 Stellar 终端中打开（macOS 在「快速操作」子菜单）",
-        "en": "Right-click a folder in your file manager to open it in Stellar Terminal (on macOS under Quick Actions)"},
+        "zh": "在文件管理器里右键文件夹或文件即可在 Stellar 终端中打开（文件打开其所在目录；macOS 在「快速操作」子菜单）",
+        "en": "Right-click a folder or file in your file manager to open it in Stellar Terminal (files open their containing folder; on macOS under Quick Actions)"},
     "settings.shell_menu_installed": {
         "zh": "已添加到系统右键菜单（macOS 在 Finder 右键 → 快速操作）",
         "en": "Added to system context menu (macOS: Finder right-click → Quick Actions)"},

@@ -62,7 +62,8 @@ class TestMacosQuickAction:
         with open(contents / 'Info.plist', 'rb') as f:
             info = plistlib.load(f)
         svc = info['NSServices'][0]
-        assert svc['NSSendFileTypes'] == ['public.folder']
+        # public.item：文件+文件夹都出现在快速操作里
+        assert svc['NSSendFileTypes'] == ['public.item']
         assert svc['NSMessage'] == 'runWorkflowAsService'
         assert svc['NSMenuItem']['default']  # 菜单文案非空
 
@@ -73,6 +74,8 @@ class TestMacosQuickAction:
         # 源码形态：直接拉起 python 进程
         assert 'app.py' in params['COMMAND_STRING']
         assert '--working-dir' in params['COMMAND_STRING']
+        # 选中文件时归一化为所在目录
+        assert 'dirname' in params['COMMAND_STRING']
 
     def test_frozen_uses_open_a(self, fake_services, monkeypatch, tmp_path):
         bundle = tmp_path / 'Fake.app' / 'Contents' / 'MacOS'

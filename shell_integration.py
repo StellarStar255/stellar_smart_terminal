@@ -65,15 +65,22 @@ def _macos_workflow_path() -> Path:
 
 
 def _macos_shell_script() -> str:
-    """workflow 里执行的 zsh 片段。$@ 是 Finder 选中的目录列表。"""
+    """workflow 里执行的 zsh 片段。$@ 是 Finder 选中的条目列表。
+
+    接受 public.item（文件+文件夹）：选中文件时打开其所在目录，
+    等价于在空白处开当前目录（服务机制基于选中项，空白处右键
+    本身不会出现快速操作，只能靠这个途径覆盖）。
+    """
     bundle = _macos_app_bundle()
     if bundle is not None:
         open_target = shlex.quote(str(bundle))
         return (f'for f in "$@"; do\n'
+                f'  [ -d "$f" ] || f="$(dirname "$f")"\n'
                 f'  open -a {open_target} "$f"\n'
                 f'done')
     argv = ' '.join(shlex.quote(a) for a in _launch_argv())
     return (f'for f in "$@"; do\n'
+            f'  [ -d "$f" ] || f="$(dirname "$f")"\n'
             f'  nohup {argv} --working-dir "$f" >/dev/null 2>&1 &\n'
             f'done')
 
@@ -89,7 +96,8 @@ def _macos_install() -> tuple:
                 "NSMessage": "runWorkflowAsService",
                 "NSRequiredContext": {
                     "NSApplicationIdentifier": "com.apple.finder"},
-                "NSSendFileTypes": ["public.folder"],
+                # public.item = 文件+文件夹：右键文件时打开其所在目录
+                "NSSendFileTypes": ["public.item"],
             }],
         }
         with open(contents / "Info.plist", 'wb') as f:
