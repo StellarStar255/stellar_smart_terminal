@@ -4,6 +4,7 @@
 
 安装/卸载全部重定向到临时目录，不碰真实 ~/Library / 注册表。
 """
+import os
 import plistlib
 import sys
 from pathlib import Path
@@ -106,7 +107,10 @@ class TestLinuxNautilusScript:
         ok, err = si._linux_install()
         assert ok, err
         assert fake_script.exists()
-        assert fake_script.stat().st_mode & 0o111  # 可执行
+        if os.name == 'posix':
+            # Windows 上 chmod 不产生可执行位（st_mode 恒为 0o666），只在
+            # POSIX 校验；脚本内容断言仍全平台跑
+            assert fake_script.stat().st_mode & 0o111
         body = fake_script.read_text(encoding='utf-8')
         assert body.startswith('#!/bin/bash')
         assert '--working-dir' in body
