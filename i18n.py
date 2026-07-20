@@ -16,6 +16,25 @@ TRANSLATIONS = {
 
     # ===== 终端历史行数 (scrollback) =====
     "scrollback.menu": {"zh": "终端历史行数", "en": "Terminal Scrollback"},
+    "settings.shell_context_menu": {
+        "zh": "系统右键菜单：在 Stellar 终端中打开",
+        "en": "System context menu: Open in Stellar Terminal"},
+    "settings.shell_context_menu_tooltip": {
+        "zh": "在文件管理器里右键目录即可在 Stellar 终端中打开（macOS 在「快速操作」子菜单）",
+        "en": "Right-click a folder in your file manager to open it in Stellar Terminal (on macOS under Quick Actions)"},
+    "settings.shell_menu_installed": {
+        "zh": "已添加到系统右键菜单（macOS 在 Finder 右键 → 快速操作）",
+        "en": "Added to system context menu (macOS: Finder right-click → Quick Actions)"},
+    "settings.shell_menu_removed": {
+        "zh": "已从系统右键菜单移除",
+        "en": "Removed from system context menu"},
+    "settings.shell_menu_failed_title": {
+        "zh": "右键菜单设置失败", "en": "Context Menu Setup Failed"},
+    "settings.shell_menu_failed_msg": {
+        "zh": "操作失败：{error}", "en": "Operation failed: {error}"},
+    "shell_menu.entry_label": {
+        "zh": "在 Stellar 终端中打开",
+        "en": "Open in Stellar Terminal"},
     "settings.parse_off_gui": {"zh": "终端解析放到后台线程", "en": "Parse terminals off the GUI thread"},
     "settings.parse_off_gui_applied": {"zh": "已切换终端解析线程；高频/远程输出卡顿应缓解", "en": "Toggled off-GUI terminal parsing; heavy/remote-output lag should ease"},
     "settings.mouse_click_forward": {"zh": "鼠标点击转发给 TUI（lazygit/fzf 等）", "en": "Forward mouse clicks to TUI apps (lazygit/fzf…)"},

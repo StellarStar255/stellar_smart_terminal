@@ -37,7 +37,7 @@ setup_qt_plugin_path()
 
 from PyQt6.QtWidgets import QApplication, QDialog, QWidget
 from PyQt6.QtGui import QFont, QPalette, QColor, QIcon, QPixmap
-from PyQt6.QtCore import Qt, QSize, QObject, QEvent
+from PyQt6.QtCore import Qt, QSize, QObject, QEvent, QTimer
 
 
 class DialogCloseShortcutFilter(QObject):
@@ -279,6 +279,84 @@ StartupWMClass=smart-terminal
         pass  # 静默失败，不影响应用启动
 
 
+def parse_cli_args(argv):
+    """解析自有命令行参数，返回 (working_dir 或 None, 剩余 argv 给 Qt)。
+
+    --working-dir PATH 由系统右键菜单集成（shell_integration）传入；
+    路径无效时忽略（比如目录在点菜单和启动之间被删了），按正常启动走。
+    """
+    working_dir = None
+    rest = [argv[0]] if argv else []
+    i = 1
+    while i < len(argv):
+        arg = argv[i]
+        if arg == '--working-dir':
+            if i + 1 < len(argv):
+                candidate = argv[i + 1]
+                if os.path.isdir(candidate):
+                    working_dir = os.path.abspath(candidate)
+                i += 2
+            else:
+                i += 1  # 悬空参数：吞掉，不留给 Qt 报错
+            continue
+        if arg.startswith('--working-dir='):
+            candidate = arg.split('=', 1)[1]
+            if os.path.isdir(candidate):
+                working_dir = os.path.abspath(candidate)
+            i += 1
+            continue
+        rest.append(arg)
+        i += 1
+    return working_dir, rest
+
+
+class SmartTerminalApplication(QApplication):
+    """处理 macOS FileOpen 事件：Finder 快速操作 / 拖目录到 Dock 图标 →
+    已运行实例在现有窗口开新标签，而不是无响应。"""
+
+    def __init__(self, argv):
+        super().__init__(argv)
+        self._file_open_window = None   # 主窗口就绪后由 main() 注入
+        self._pending_open_dirs = []    # 窗口就绪前收到的事件先排队
+
+    def set_file_open_window(self, window):
+        self._file_open_window = window
+        pending, self._pending_open_dirs = self._pending_open_dirs, []
+        for path in pending:
+            self._open_dir(path)
+
+    def _open_dir(self, path: str):
+        win = self._file_open_window
+        if win is not None:
+            try:
+                win.open_directory_tab(path)
+                return
+            except RuntimeError:
+                # 记录的窗口已销毁，向下扫描其它存活窗口
+                self._file_open_window = None
+        for widget in self.topLevelWidgets():
+            if isinstance(widget, MainWindow):
+                try:
+                    widget.open_directory_tab(path)
+                    self._file_open_window = widget
+                    return
+                except RuntimeError:
+                    continue
+        self._pending_open_dirs.append(path)
+
+    def event(self, e):
+        if e.type() == QEvent.Type.FileOpen:
+            path = e.file()
+            if path:
+                # 传进来的是文件就打开它所在的目录
+                if not os.path.isdir(path):
+                    path = os.path.dirname(path)
+                if os.path.isdir(path):
+                    self._open_dir(path)
+            return True
+        return super().event(e)
+
+
 def main():
     """主函数"""
     # 尽早初始化日志系统，保证后续所有模块的 logger 输出有处可去
@@ -293,8 +371,11 @@ def main():
         import ctypes
         ctypes.windll.shell32.SetCurrentProcessExplicitAppUserModelID("SmartTerminal.SmartTerminal")
 
+    # 自有参数先摘出来（--working-dir 来自系统右键菜单集成）
+    cli_working_dir, qt_argv = parse_cli_args(sys.argv)
+
     # 创建应用
-    app = QApplication(sys.argv)
+    app = SmartTerminalApplication(qt_argv)
     app.setApplicationName(t("app.name"))
     app.setApplicationDisplayName("Smart Terminal")
     app.setOrganizationName("SmartTerminal")
@@ -348,9 +429,14 @@ def main():
     font.setStyleHint(QFont.StyleHint.SansSerif)
     app.setFont(font)
 
-    # 创建主窗口
-    window = MainWindow()
+    # 创建主窗口（--working-dir 指定时首个标签在该目录直接起会话）
+    initial_tab_data = {'cwd': cli_working_dir} if cli_working_dir else None
+    window = MainWindow(initial_tab_data=initial_tab_data)
     window.show()
+    app.set_file_open_window(window)
+    if cli_working_dir:
+        # 等窗口布局稳定后在首个标签起会话（与目录历史快速启动同款时序）
+        QTimer.singleShot(150, lambda: window.launch_initial_session(cli_working_dir))
 
     # 升级重启后恢复升级前打开的窗口（仅当上次「下载并安装」时勾选了
     # 「升级后自动重新打开当前这些窗口」，快照一次性消费，无快照零开销）

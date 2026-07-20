@@ -7217,6 +7217,37 @@ class MainWindow(QMainWindow):
         except Exception as e:
             QMessageBox.warning(self, t("msg.open_failed"), t("msg.cursor_open_error", error=str(e)))
 
+    def open_directory_tab(self, dir_path: str):
+        """在本窗口新开一个标签并在指定目录直接起会话。
+
+        入口：macOS FileOpen 事件（Finder 快速操作/拖到 Dock）。
+        复用工作目录历史的快速启动流程（建 tab + 自动启动当前预设）。
+        """
+        if not dir_path or not os.path.isdir(dir_path):
+            return
+        self._quick_launch_with_dir(dir_path)
+        # 从 Finder 触发时应用可能在后台，把窗口带到前面
+        self.raise_()
+        self.activateWindow()
+
+    def launch_initial_session(self, cwd: str):
+        """--working-dir 启动路径：首个标签仍是启动页时直接在该目录起会话"""
+        if os.path.isdir(cwd):
+            self._start_session(cwd=cwd)
+
+    def _toggle_shell_context_menu(self, enabled: bool):
+        import shell_integration
+        ok, err = (shell_integration.install() if enabled
+                   else shell_integration.uninstall())
+        if ok:
+            self.statusBar().showMessage(
+                t("settings.shell_menu_installed") if enabled
+                else t("settings.shell_menu_removed"), 5000)
+        else:
+            QMessageBox.warning(
+                self, t("settings.shell_menu_failed_title"),
+                t("settings.shell_menu_failed_msg", error=err))
+
     def _show_settings_popup_menu(self):
         """⚙ 按钮弹出菜单：工具栏布局 / 键盘快捷键。"""
         menu = QMenu(self)
@@ -7243,6 +7274,14 @@ class MainWindow(QMainWindow):
         click_fwd_act.setChecked(getattr(self, '_mouse_click_forward_enabled', False))
         click_fwd_act.setToolTip(t("settings.mouse_click_forward_tooltip"))
         click_fwd_act.toggled.connect(self._set_mouse_click_forward)
+        # 系统右键菜单：从文件管理器中「在 Stellar 终端中打开」目录
+        import shell_integration
+        if shell_integration.is_supported():
+            ctx_act = menu.addAction(t("settings.shell_context_menu"))
+            ctx_act.setCheckable(True)
+            ctx_act.setChecked(shell_integration.is_installed())
+            ctx_act.setToolTip(t("settings.shell_context_menu_tooltip"))
+            ctx_act.toggled.connect(self._toggle_shell_context_menu)
         menu.addSeparator()
         update_act = menu.addAction(t("update.menu_item"))
         update_act.triggered.connect(self._check_for_updates)
