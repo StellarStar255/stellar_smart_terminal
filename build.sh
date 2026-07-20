@@ -108,6 +108,7 @@ Exec=$PKG
 Icon=$PKG
 Terminal=false
 Categories=Development;Utility;
+StartupWMClass=$PKG
 EOF
 
     install -d "$ROOT/DEBIAN"

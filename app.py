@@ -252,21 +252,43 @@ QCheckBox::indicator:checked {{
 """)
 
 
-def _ensure_linux_desktop_file(icon_path: Path):
-    """在 Linux 上自动创建/更新 .desktop 文件，使任务栏/dock 能显示应用图标"""
-    desktop_dir = Path.home() / ".local" / "share" / "applications"
-    desktop_file = desktop_dir / "smart-terminal.desktop"
-    icon_abs = str(icon_path.resolve()) if icon_path.exists() else ""
+# .deb 打包安装自带的 desktop 条目文件名（见 build.sh 的 $PKG）。
+# 源码运行时生成同名文件，靠 XDG「~/.local 覆盖 /usr/share」collapse 成
+# 一个图标，而不是多出一个 Name 不同的重复项。
+_LINUX_DESKTOP_ID = "stellar-smart-terminal"
 
+
+def _ensure_linux_desktop_file(icon_path: Path):
+    """在 Linux 上维护 .desktop 桌面入口，避免出现重复图标。
+
+    - 打包(frozen)安装：.deb 已装了 /usr/share/applications 下的条目，
+      再生成一个就会多出一个图标 → 直接跳过。
+    - 源码运行：用与 .deb 一致的文件名/Name 生成到 ~/.local，二者同名，
+      XDG 覆盖规则下只显示一个。
+    - 顺手删掉历史遗留的旧文件名 smart-terminal.desktop（Name=Smart
+      Terminal 的那个重复项，删了会被旧版重新生成，此处一并清掉）。
+    """
+    desktop_dir = Path.home() / ".local" / "share" / "applications"
+    try:
+        (desktop_dir / "smart-terminal.desktop").unlink()
+    except OSError:
+        pass  # 不存在或删不掉都无所谓
+
+    # 打包安装：desktop 条目由 .deb 提供，别再生成第二个
+    if getattr(sys, 'frozen', False):
+        return
+
+    desktop_file = desktop_dir / f"{_LINUX_DESKTOP_ID}.desktop"
+    icon_abs = str(icon_path.resolve()) if icon_path.exists() else ""
     content = f"""[Desktop Entry]
-Name=Smart Terminal
-Comment=Smart Terminal with AI Integration
+Type=Application
+Name=Stellar Smart Terminal
+Comment=Smart terminal with file explorer, Git GUI, and LLM proxy
 Exec="{sys.executable}" "{Path(__file__).resolve()}"
 Icon={icon_abs}
 Terminal=false
-Type=Application
 Categories=Development;Utility;
-StartupWMClass=smart-terminal
+StartupWMClass={_LINUX_DESKTOP_ID}
 """
     try:
         # 只在内容变化或文件不存在时写入
@@ -391,7 +413,7 @@ def main():
     # Linux: 自动创建 .desktop 文件，用于dock/任务栏图标匹配
     if sys.platform == "linux":
         _ensure_linux_desktop_file(icon_path)
-    app.setDesktopFileName("smart-terminal")
+    app.setDesktopFileName(_LINUX_DESKTOP_ID)
 
     # 设置应用程序图标 (提供多个尺寸以适配 Windows 任务栏/标题栏)
     if icon_path.exists():
