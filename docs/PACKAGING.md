@@ -216,3 +216,4 @@ pyproject.toml(spec datas 已包含),源码运行读仓库 pyproject——发版
 - **未签名/未公证**:用户首次打开会被 Gatekeeper 拦截(macOS 15 Sequoia 起右键 → 打开已失效),需到 系统设置 → 隐私与安全性 → 仍要打开(Open Anyway),或执行 `xattr -cr "/Applications/Stellar Smart Terminal.app"`。彻底解决需要 Apple Developer 账号($99/年)做 codesign + notarytool 公证。
 - **仅 arm64**:PyInstaller 跟随构建机架构,Intel 包需在 Intel Mac 上另行构建。
 - 用户数据(配置、历史、书签)写在 bundle 外的用户目录,升级覆盖安装不会丢失。
+- **子程序权限 / 责任进程**:在终端里启动的程序用麦克风/摄像头/语音识别等受保护资源时,权限归属到发起进程(本 `.app`),须由 `smart_terminal.spec` 的 `info_plist` 声明 `NS*UsageDescription`(已声明 29 项),否则子进程调用即闪退。屏幕录制/辅助功能/完全磁盘访问/输入监控四类无 plist 键,需用户手动授权。完整说明见 [docs/macos-permissions.md](macos-permissions.md)。
