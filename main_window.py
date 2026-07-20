@@ -3509,6 +3509,14 @@ class MainWindow(QMainWindow):
         self._ql_search.setFocus(Qt.FocusReason.PopupFocusReason)
         QTimer.singleShot(100, lambda: setattr(self, '_ql_ready', True))
 
+    @staticmethod
+    def _tab_name_for_dir(dir_path: str) -> str:
+        """由目录路径取标签名：末级文件夹名；根目录等无末级名时退回整条路径。
+
+        约定入参已 normpath（去掉尾斜杠），否则 basename 可能为空。
+        """
+        return os.path.basename(dir_path) or dir_path
+
     def _quick_launch_with_dir(self, dir_path: str, detach: bool = False):
         """以指定目录快速启动新终端标签页并自动启动预设
 
@@ -3519,6 +3527,10 @@ class MainWindow(QMainWindow):
         本窗口当前选中的预设（新窗口的预设选择是各自独立的）。
         """
         dir_path = os.path.expanduser(dir_path)
+        # 归一化：Finder（工具栏/Dock 启动器）传来的路径带尾部斜杠，
+        # basename('.../foo/') == '' 会让标签名退回整条路径。normpath 去掉
+        # 尾斜杠后 basename 才拿得到真正的文件夹名，也让目录历史条目一致。
+        dir_path = os.path.normpath(dir_path)
 
         if not os.path.isdir(dir_path):
             self._styled_message_box(QMessageBox.Icon.Warning, t("msg.error"), t("msg.dir_not_found", path=dir_path))
@@ -3529,7 +3541,7 @@ class MainWindow(QMainWindow):
             self._add_to_dir_history(dir_path)
 
             # 获取目录名作为标签名
-            dir_name = os.path.basename(dir_path) or dir_path
+            dir_name = self._tab_name_for_dir(dir_path)
 
             # 创建新标签页，并存储独立的工作目录
             idx = self._add_new_tab(tab_name=dir_name, tab_cwd=dir_path)
