@@ -110,8 +110,8 @@ if sys.platform == "darwin":
         info_plist={
             "CFBundleName": APP_DISPLAY_NAME,
             "CFBundleDisplayName": APP_DISPLAY_NAME,
-            "CFBundleShortVersionString": "1.14.29",
-            "CFBundleVersion": "1.14.29",
+            "CFBundleShortVersionString": "1.14.30",
+            "CFBundleVersion": "1.14.30",
             "NSHighResolutionCapable": True,
             "NSRequiresAquaSystemAppearance": False,
             # 终端应用需要的权限说明（访问用户文件等由系统按需弹窗）。
@@ -122,5 +122,21 @@ if sys.platform == "darwin":
             "NSDocumentsFolderUsageDescription": "Terminal sessions and the file explorer need access to your project folders in Documents.",
             "NSDesktopFolderUsageDescription": "Terminal sessions and the file explorer need access to files on your Desktop.",
             "NSDownloadsFolderUsageDescription": "Terminal sessions and the file explorer need access to your Downloads folder.",
+            # 作为终端模拟器：在本应用里启动的程序（子进程）用受保护资源时，
+            # macOS 把「发起进程 = 本 .app」当作 responsible process 去查这些
+            # 用途描述；缺声明会导致子进程调用即被系统直接终止（闪退），而不是
+            # 弹权限授权。照 Terminal.app / iTerm2 的做法声明一整套，让在终端里
+            # 跑的任意程序（麦克风/语音识别/摄像头等）都能正常申请权限。
+            "NSMicrophoneUsageDescription": "A program you run in Stellar Smart Terminal is requesting microphone access.",
+            "NSSpeechRecognitionUsageDescription": "A program you run in Stellar Smart Terminal is requesting speech recognition.",
+            "NSCameraUsageDescription": "A program you run in Stellar Smart Terminal is requesting camera access.",
+            "NSCalendarsUsageDescription": "A program you run in Stellar Smart Terminal is requesting Calendar access.",
+            "NSContactsUsageDescription": "A program you run in Stellar Smart Terminal is requesting Contacts access.",
+            "NSRemindersUsageDescription": "A program you run in Stellar Smart Terminal is requesting Reminders access.",
+            "NSPhotoLibraryUsageDescription": "A program you run in Stellar Smart Terminal is requesting Photos access.",
+            "NSLocationWhenInUseUsageDescription": "A program you run in Stellar Smart Terminal is requesting location access.",
+            "NSBluetoothAlwaysUsageDescription": "A program you run in Stellar Smart Terminal is requesting Bluetooth access.",
+            "NSLocalNetworkUsageDescription": "A program you run in Stellar Smart Terminal is requesting local network access.",
+            "NSSystemAdministrationUsageDescription": "A program you run in Stellar Smart Terminal is requesting system administration access.",
         },
     )
