@@ -1,7 +1,7 @@
 """MainWindow 的主题/配色混入（从 main_window.py 拆出）。
 
 纯方法搬迁，行为不变；_apply_theme 里对类级 _global_window_navigator
-的引用改用 type(self)。（大量 Qt 控件名只出现在 QSS 选择器字符串里、
+的引用走延迟 _mw.MainWindow（见下方 import 注释）。（大量 Qt 控件名只出现在 QSS 选择器字符串里、
 并非 Python 符号，故不 import。）
 """
 import re
@@ -13,6 +13,12 @@ from PyQt6.QtWidgets import (
     QWidgetAction,
 )
 from i18n import t
+
+
+# 延迟引用宿主类：进程级共享类属性（跨窗口导航器/停靠方式/一次性
+# 标志）必须落在真正的 MainWindow 上，而非 type(self)（对假 self /
+# 子类会取错）。只在方法内访问 .MainWindow，循环 import 安全。
+import main_window as _mw
 
 
 class ThemeMixin:
@@ -828,7 +834,7 @@ class ThemeMixin:
         # 窗口导航面板：内嵌面板 + 全局浮动面板
         if getattr(self, 'nav_panel', None) is not None:
             self.nav_panel.apply_theme(t)
-        _global_nav = type(self)._global_window_navigator
+        _global_nav = _mw.MainWindow._global_window_navigator
         if _global_nav is not None:
             try:
                 if not sip.isdeleted(_global_nav):

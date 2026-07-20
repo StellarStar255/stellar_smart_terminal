@@ -2,7 +2,7 @@
 
 搭建主/浮动工具栏、固定项流式布局、工具栏配置的应用与持久化。纯方法
 搬迁，行为不变；对类级 _navigator_dock_mode / _global_window_navigator /
-_current_embed_enabled 的引用改用 type(self)。（部分 Qt 控件名只出现在
+_current_embed_enabled 的引用走延迟 _mw.MainWindow（见下方 import 注释）。（部分 Qt 控件名只出现在
 QSS 字符串里、非符号，不 import；_make_git_tool_icon 在方法内局部导入。）
 """
 from PyQt6.QtCore import QSize, QTimer, Qt
@@ -19,6 +19,12 @@ from widgets import (
     CenteredComboBox, MultiKeywordCompleter, QuietPopupComboBox,
     SelectAllLineEdit, _FlowSeparator, _ToolbarCheckBox,
 )
+
+
+# 延迟引用宿主类：进程级共享类属性（跨窗口导航器/停靠方式/一次性
+# 标志）必须落在真正的 MainWindow 上，而非 type(self)（对假 self /
+# 子类会取错）。只在方法内访问 .MainWindow，循环 import 安全。
+import main_window as _mw
 
 
 class ToolbarMixin:
@@ -290,12 +296,12 @@ class ToolbarMixin:
             }
         """)
         # 同步导航开关状态（新窗口与现有窗口联动）
-        if type(self)._navigator_dock_mode == 'embed':
+        if _mw.MainWindow._navigator_dock_mode == 'embed':
             # 内嵌模式：跟随其它窗口是否已启用导航条（stateChanged 尚未连接，不会触发回调）
-            enabled = type(self)._current_embed_enabled()
+            enabled = _mw.MainWindow._current_embed_enabled()
             self.nav_embed_enabled = enabled
             self.window_nav_checkbox.setChecked(enabled)
-        elif type(self)._global_window_navigator is not None and type(self)._global_window_navigator.isVisible():
+        elif _mw.MainWindow._global_window_navigator is not None and _mw.MainWindow._global_window_navigator.isVisible():
             self.window_nav_checkbox.setChecked(True)
         self.window_nav_checkbox.stateChanged.connect(self._on_window_nav_changed)
 
