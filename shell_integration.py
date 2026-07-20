@@ -27,6 +27,7 @@ logger = get_logger(__name__)
 _WORKFLOW_NAME = "Open in Stellar Terminal.workflow"
 _WIN_KEY_NAME = "StellarSmartTerminal"
 _NAUTILUS_SCRIPT_NAME = "Open in Stellar Terminal"
+_TOOLBAR_APP_NAME = "Open in Stellar Terminal.app"
 
 
 # ---------- 启动命令解析（打包/源码两种形态） ----------
@@ -184,6 +185,81 @@ def _macos_installed() -> bool:
     return (_macos_workflow_path() / "Contents" / "document.wflow").exists()
 
 
+# ---------- macOS Finder 工具栏启动器 ----------
+# 快速操作只在选中项右键时出现（空白处右键做不到，服务机制限制）。
+# 工具栏按钮更顺手：任何 Finder 窗口点一下就在当前目录开终端，
+# 无需选中任何东西。用 AppleScript 应用实现（osacompile 本地生成，
+# 不受 Gatekeeper 阻拦），用户 ⌘ 拖进工具栏即用。
+
+def _toolbar_app_path() -> Path:
+    return Path.home() / "Applications" / _TOOLBAR_APP_NAME
+
+
+def _toolbar_applescript() -> str:
+    """向 Finder 要当前窗口目录，再拉起本 app 打开它。"""
+    bundle = _macos_app_bundle()
+    if bundle is not None:
+        launch = f'do shell script "open -a " & quoted form of "{bundle}" ' \
+                 f'& " " & quoted form of dirPath'
+    else:
+        argv = ' '.join(shlex.quote(a) for a in _launch_argv())
+        launch = (f'do shell script "nohup {argv} --working-dir " '
+                  f'& quoted form of dirPath & " >/dev/null 2>&1 &"')
+    return f'''tell application "Finder"
+	if (count of windows) > 0 then
+		set dirTarget to target of front window as alias
+		set dirPath to POSIX path of dirTarget
+	else
+		set dirPath to POSIX path of (path to home folder)
+	end if
+end tell
+{launch}'''
+
+
+def _macos_install_toolbar() -> tuple:
+    """生成工具栏启动器 app（幂等：先删旧的再编译）。"""
+    app = _toolbar_app_path()
+    try:
+        app.parent.mkdir(parents=True, exist_ok=True)
+        if app.exists():
+            shutil.rmtree(app)
+        # osacompile 从脚本生成 .app
+        proc = subprocess.run(
+            ["/usr/bin/osacompile", "-o", str(app), "-e", _toolbar_applescript()],
+            capture_output=True, timeout=30, text=True)
+        if proc.returncode != 0:
+            return False, proc.stderr.strip() or "osacompile failed"
+        # 用主 app 图标（存在才拷，失败无妨）
+        bundle = _macos_app_bundle()
+        if bundle is not None:
+            icon = bundle / "Contents" / "Resources" / "AppIcon.icns"
+            dest = app / "Contents" / "Resources" / "applet.icns"
+            if icon.exists() and dest.parent.exists():
+                try:
+                    shutil.copyfile(icon, dest)
+                except OSError:
+                    pass
+        return True, str(app)
+    except (OSError, subprocess.SubprocessError) as e:
+        logger.warning(f"install toolbar launcher failed: {e}")
+        return False, str(e)
+
+
+def _macos_toolbar_installed() -> bool:
+    return _toolbar_app_path().exists()
+
+
+def _macos_uninstall_toolbar() -> tuple:
+    try:
+        app = _toolbar_app_path()
+        if app.exists():
+            shutil.rmtree(app)
+        return True, ""
+    except OSError as e:
+        logger.warning(f"uninstall toolbar launcher failed: {e}")
+        return False, str(e)
+
+
 # ---------- Windows ----------
 
 def _win_command() -> str:
@@ -328,4 +404,29 @@ def uninstall() -> tuple:
         return _win_uninstall()
     if sys.platform == "linux":
         return _linux_uninstall()
+    return False, "unsupported platform"
+
+
+# ---------- macOS 工具栏启动器（公共入口） ----------
+# 仅 macOS：解决空白处右键无入口的痛点——放进 Finder 工具栏后
+# 任意窗口点一下即在当前目录开终端。
+
+def toolbar_launcher_supported() -> bool:
+    return sys.platform == "darwin"
+
+
+def toolbar_launcher_installed() -> bool:
+    return sys.platform == "darwin" and _macos_toolbar_installed()
+
+
+def install_toolbar_launcher() -> tuple:
+    """返回 (ok, app 路径或错误信息)。"""
+    if sys.platform == "darwin":
+        return _macos_install_toolbar()
+    return False, "unsupported platform"
+
+
+def uninstall_toolbar_launcher() -> tuple:
+    if sys.platform == "darwin":
+        return _macos_uninstall_toolbar()
     return False, "unsupported platform"

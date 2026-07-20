@@ -35,6 +35,31 @@ TRANSLATIONS = {
     "shell_menu.entry_label": {
         "zh": "在 Stellar 终端中打开",
         "en": "Open in Stellar Terminal"},
+    "settings.toolbar_launcher_menu": {
+        "zh": "添加 Finder 工具栏按钮（当前目录开终端）…",
+        "en": "Add Finder toolbar button (open current folder)…"},
+    "settings.toolbar_launcher_tooltip": {
+        "zh": "生成一个可拖入 Finder 工具栏的按钮，在任意窗口点一下即在当前目录开终端（空白处右键无入口的替代）",
+        "en": "Create a button you drag into the Finder toolbar; click it in any window to open the current folder in Stellar Terminal"},
+    "settings.toolbar_launcher_title": {
+        "zh": "已生成 Finder 工具栏按钮",
+        "en": "Finder Toolbar Button Created"},
+    "settings.toolbar_launcher_guide": {
+        "zh": ("已在「个人 → 应用程序」中生成并选中「Open in Stellar Terminal」。\n\n"
+               "把它拖进 Finder 工具栏即可长期使用：\n"
+               "1. 打开任意 Finder 窗口\n"
+               "2. 按住 ⌘ 键，把该 app 图标拖到窗口顶部工具栏上\n"
+               "3. 之后在任意 Finder 窗口点这个按钮，就会在当前目录打开 Stellar 终端\n\n"
+               "（首次点击若弹出安全提示，右键该 app →「打开」确认一次即可。）"),
+        "en": ("\"Open in Stellar Terminal\" has been created and selected in "
+               "your ~/Applications folder.\n\n"
+               "Drag it into the Finder toolbar to keep it handy:\n"
+               "1. Open any Finder window\n"
+               "2. Hold ⌘ and drag the app icon onto the toolbar at the top\n"
+               "3. Then click that button in any Finder window to open the "
+               "current folder in Stellar Terminal\n\n"
+               "(If macOS shows a security prompt on first click, right-click "
+               "the app → Open once to confirm.)")},
     "settings.parse_off_gui": {"zh": "终端解析放到后台线程", "en": "Parse terminals off the GUI thread"},
     "settings.parse_off_gui_applied": {"zh": "已切换终端解析线程；高频/远程输出卡顿应缓解", "en": "Toggled off-GUI terminal parsing; heavy/remote-output lag should ease"},
     "settings.mouse_click_forward": {"zh": "鼠标点击转发给 TUI（lazygit/fzf 等）", "en": "Forward mouse clicks to TUI apps (lazygit/fzf…)"},

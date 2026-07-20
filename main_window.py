@@ -7248,6 +7248,30 @@ class MainWindow(QMainWindow):
                 self, t("settings.shell_menu_failed_title"),
                 t("settings.shell_menu_failed_msg", error=err))
 
+    def _install_finder_toolbar_launcher(self):
+        """生成 Finder 工具栏启动器并引导用户拖入工具栏（仅 macOS）。
+
+        解决空白处右键无入口：工具栏按钮任意窗口点一下即在当前目录开终端。
+        app 无法代替用户拖入工具栏（系统限制），生成后在 Finder 里选中它、
+        给出图文指引。
+        """
+        import shell_integration
+        ok, path = shell_integration.install_toolbar_launcher()
+        if not ok:
+            QMessageBox.warning(
+                self, t("settings.shell_menu_failed_title"),
+                t("settings.shell_menu_failed_msg", error=path))
+            return
+        # 在 Finder 里选中刚生成的 app，方便用户直接 ⌘ 拖到工具栏
+        try:
+            subprocess.run(["/usr/bin/open", "-R", path],
+                           capture_output=True, timeout=10)
+        except Exception:
+            pass
+        QMessageBox.information(
+            self, t("settings.toolbar_launcher_title"),
+            t("settings.toolbar_launcher_guide"))
+
     def _show_settings_popup_menu(self):
         """⚙ 按钮弹出菜单：工具栏布局 / 键盘快捷键。"""
         menu = QMenu(self)
@@ -7282,6 +7306,12 @@ class MainWindow(QMainWindow):
             ctx_act.setChecked(shell_integration.is_installed())
             ctx_act.setToolTip(t("settings.shell_context_menu_tooltip"))
             ctx_act.toggled.connect(self._toggle_shell_context_menu)
+        # macOS 专属：Finder 工具栏启动器（空白处右键无入口的替代，任意窗口
+        # 点一下即在当前目录开终端）
+        if shell_integration.toolbar_launcher_supported():
+            tb_act = menu.addAction(t("settings.toolbar_launcher_menu"))
+            tb_act.setToolTip(t("settings.toolbar_launcher_tooltip"))
+            tb_act.triggered.connect(self._install_finder_toolbar_launcher)
         menu.addSeparator()
         update_act = menu.addAction(t("update.menu_item"))
         update_act.triggered.connect(self._check_for_updates)

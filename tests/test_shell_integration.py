@@ -99,6 +99,51 @@ class TestMacosQuickAction:
         assert si._macos_uninstall()[0]
 
 
+@pytest.mark.skipif(sys.platform != 'darwin', reason='macOS only (osacompile)')
+class TestMacToolbarLauncher:
+    @pytest.fixture
+    def fake_app(self, tmp_path, monkeypatch):
+        path = tmp_path / 'Applications' / si._TOOLBAR_APP_NAME
+        monkeypatch.setattr(si, '_toolbar_app_path', lambda: path)
+        return path
+
+    def test_install_creates_runnable_app(self, fake_app):
+        ok, info = si.install_toolbar_launcher()
+        assert ok, info
+        assert fake_app.exists()
+        # osacompile 产物是标准 .app（含可执行 stub）
+        assert (fake_app / 'Contents' / 'MacOS').exists()
+        assert si.toolbar_launcher_installed()
+
+    def test_uninstall_idempotent(self, fake_app):
+        si.install_toolbar_launcher()
+        assert si.uninstall_toolbar_launcher()[0]
+        assert not fake_app.exists()
+        assert si.uninstall_toolbar_launcher()[0]
+
+    def test_reinstall_overwrites(self, fake_app):
+        assert si.install_toolbar_launcher()[0]
+        # 幂等：重复安装不报错、不残留旧包
+        assert si.install_toolbar_launcher()[0]
+        assert fake_app.exists()
+
+
+class TestToolbarScript:
+    def test_script_queries_finder_and_launches(self):
+        script = si._toolbar_applescript()
+        assert 'tell application "Finder"' in script
+        assert 'target of front window' in script
+        assert '--working-dir' in script or 'open -a' in script
+
+    def test_frozen_uses_open_a(self, monkeypatch, tmp_path):
+        bundle = tmp_path / 'Fake.app' / 'Contents' / 'MacOS'
+        bundle.mkdir(parents=True)
+        (bundle / 'fake').touch()
+        monkeypatch.setattr(sys, 'frozen', True, raising=False)
+        monkeypatch.setattr(sys, 'executable', str(bundle / 'fake'))
+        assert 'open -a' in si._toolbar_applescript()
+
+
 class TestLinuxNautilusScript:
     @pytest.fixture
     def fake_script(self, tmp_path, monkeypatch):
