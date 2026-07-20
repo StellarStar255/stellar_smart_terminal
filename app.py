@@ -332,14 +332,98 @@ def parse_cli_args(argv):
     return working_dir, rest
 
 
+def _single_instance_server_name() -> str:
+    """单实例 IPC 的本地 socket 名。
+
+    按用户 + 数据目录隔离：不同用户、或显式换了 STELLAR_DATA_DIR 的实例
+    互不并入（后者是有意分身，测试也走独立数据目录）。
+    """
+    try:
+        uid = str(os.getuid())
+    except AttributeError:
+        import getpass
+        uid = getpass.getuser()  # Windows 无 getuid
+    try:
+        from utils import get_data_dir
+        import hashlib
+        tag = hashlib.md5(str(get_data_dir()).encode('utf-8')).hexdigest()[:8]
+    except Exception:
+        tag = "default"
+    return f"stellar-smart-terminal-{uid}-{tag}"
+
+
 class SmartTerminalApplication(QApplication):
-    """处理 macOS FileOpen 事件：Finder 快速操作 / 拖目录到 Dock 图标 →
-    已运行实例在现有窗口开新标签，而不是无响应。"""
+    """单实例协调 + 打开目录请求分发。
+
+    - macOS：Finder 快速操作 / 拖目录到 Dock → FileOpen 事件 → 现有窗口开
+      新标签（macOS 本身单实例，不会起第二个进程）。
+    - Linux / Windows：系统右键菜单是 subprocess 拉起新进程，没有 FileOpen
+      语义。用 QLocalServer/QLocalSocket 做单实例：第二个进程把请求转发给
+      主实例并退出，从而并入现有窗口与导航器，而不是起一个孤立实例。
+    """
 
     def __init__(self, argv):
         super().__init__(argv)
         self._file_open_window = None   # 主窗口就绪后由 main() 注入
         self._pending_open_dirs = []    # 窗口就绪前收到的事件先排队
+        self._local_server = None
+
+    # ---------- 单实例 IPC ----------
+
+    def try_forward_to_primary(self, working_dir) -> bool:
+        """已有主实例在跑 → 把请求（工作目录，空=普通启动）发过去，返回 True；
+        没有主实例（或 QtNetwork 不可用）→ 返回 False，本进程应成为主实例。"""
+        try:
+            from PyQt6.QtNetwork import QLocalSocket
+        except ImportError:
+            return False
+        sock = QLocalSocket()
+        sock.connectToServer(_single_instance_server_name())
+        if not sock.waitForConnected(300):
+            return False
+        payload = ((working_dir or "") + "\n").encode("utf-8")
+        sock.write(payload)
+        sock.waitForBytesWritten(1000)
+        sock.flush()
+        sock.waitForDisconnected(300)
+        return True
+
+    def start_single_instance_server(self) -> bool:
+        """成为主实例：监听本地 socket，接收后续进程转发的打开请求。"""
+        try:
+            from PyQt6.QtNetwork import QLocalServer
+        except ImportError:
+            return False
+        name = _single_instance_server_name()
+        # 清理崩溃残留的 socket 文件（此前已确认无主实例连得上，删除安全）
+        QLocalServer.removeServer(name)
+        self._local_server = QLocalServer(self)
+        self._local_server.newConnection.connect(self._on_ipc_connection)
+        if not self._local_server.listen(name):
+            self._local_server = None
+            return False
+        return True
+
+    def _on_ipc_connection(self):
+        conn = self._local_server.nextPendingConnection()
+        if conn is None:
+            return
+        if not conn.waitForReadyRead(1000):
+            conn.disconnectFromServer()
+            return
+        data = bytes(conn.readAll()).decode("utf-8", "ignore").strip()
+        conn.disconnectFromServer()
+        if data and os.path.isdir(data):
+            self._open_dir(data)
+        else:
+            self._focus_existing_window()
+
+    def _focus_existing_window(self):
+        for widget in self.topLevelWidgets():
+            if isinstance(widget, MainWindow):
+                widget.raise_()
+                widget.activateWindow()
+                return
 
     def set_file_open_window(self, window):
         self._file_open_window = window
@@ -398,6 +482,13 @@ def main():
 
     # 创建应用
     app = SmartTerminalApplication(qt_argv)
+
+    # 单实例：已有实例在跑就把打开请求转发过去并退出，避免起一个孤立的
+    # 第二进程（系统右键菜单在 Linux/Windows 是 subprocess 拉起，没有 macOS
+    # 的 FileOpen 单实例语义，必须自己做 IPC 才能并入现有窗口/导航器）。
+    if app.try_forward_to_primary(cli_working_dir):
+        return
+
     app.setApplicationName(t("app.name"))
     app.setApplicationDisplayName("Smart Terminal")
     app.setOrganizationName("SmartTerminal")
@@ -450,6 +541,9 @@ def main():
         ])
     font.setStyleHint(QFont.StyleHint.SansSerif)
     app.setFont(font)
+
+    # 成为主实例：监听本地 socket，接收后续进程转发的打开请求
+    app.start_single_instance_server()
 
     # 创建主窗口（--working-dir 指定时首个标签在该目录直接起会话）
     initial_tab_data = {'cwd': cli_working_dir} if cli_working_dir else None

@@ -42,8 +42,9 @@ a = Analysis(
     pathex=[str(PROJ)],
     binaries=[],
     datas=datas,
-    # PyQt6 / pyte / paramiko 能被自动发现；requests 在函数内延迟导入，显式声明保险
-    hiddenimports=["requests"],
+    # PyQt6 / pyte / paramiko 能被自动发现；requests 与 QtNetwork（单实例
+    # IPC 用，仅函数内延迟导入）显式声明保险
+    hiddenimports=["requests", "PyQt6.QtNetwork"],
     hookspath=[],
     hooksconfig={},
     runtime_hooks=[],
@@ -109,8 +110,8 @@ if sys.platform == "darwin":
         info_plist={
             "CFBundleName": APP_DISPLAY_NAME,
             "CFBundleDisplayName": APP_DISPLAY_NAME,
-            "CFBundleShortVersionString": "1.14.27",
-            "CFBundleVersion": "1.14.27",
+            "CFBundleShortVersionString": "1.14.28",
+            "CFBundleVersion": "1.14.28",
             "NSHighResolutionCapable": True,
             "NSRequiresAquaSystemAppearance": False,
             # 终端应用需要的权限说明（访问用户文件等由系统按需弹窗）。
