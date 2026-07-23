@@ -238,8 +238,21 @@ class ConfigMixin:
         if not self.presets:
             default_shell = get_default_shell()
 
-            # Windows 使用 set，Unix 使用 export 设置环境变量
+            # 按 shell 语法设置代理环境变量：
+            # - PowerShell（Windows 默认 shell）：$env:http_proxy = "..."
+            #   注意：PowerShell 里 `set http_proxy=...` 不会设置进程环境变量，
+            #   子进程（claude）拿不到代理，后续 login 会失败。
+            # - cmd.exe：set http_proxy=...
+            # - Unix（bash/zsh）：export http_proxy=...
+            shell_name = os.path.basename(default_shell).lower()
+            is_powershell = 'powershell' in shell_name or 'pwsh' in shell_name
+
             def _proxy_cmds(port):
+                if is_powershell:
+                    return [
+                        f'$env:http_proxy = "http://127.0.0.1:{port}/"',
+                        f'$env:https_proxy = "http://127.0.0.1:{port}/"'
+                    ]
                 prefix = 'set' if sys.platform == 'win32' else 'export'
                 return [
                     f'{prefix} http_proxy=http://127.0.0.1:{port}/',

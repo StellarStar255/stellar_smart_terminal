@@ -222,8 +222,15 @@ class PresetDialog(QDialog):
         right_layout.addWidget(QLabel(t("preset.commands_label")))
         self.commands_edit = _IndentingPlainTextEdit()
         self.commands_edit.setPlaceholderText(t("preset.commands_placeholder"))
+        self.commands_edit.setToolTip(t("preset.commands_proxy_tip"))
         self.commands_edit.textChanged.connect(self._on_commands_changed)
         right_layout.addWidget(self.commands_edit)
+
+        # 常驻提示：代理 + PowerShell 必须用 $env: 形式，否则 login claude 会失败
+        proxy_tip = QLabel(t("preset.commands_proxy_tip"))
+        proxy_tip.setWordWrap(True)
+        proxy_tip.setStyleSheet("color: #f0a020; font-size: 11px;")
+        right_layout.addWidget(proxy_tip)
 
         content_layout.addLayout(right_layout, 2)
 

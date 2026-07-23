@@ -221,8 +221,12 @@ TRANSLATIONS = {
     "preset.name_label": {"zh": "名称:", "en": "Name:"},
     "preset.commands_label": {"zh": "命令 (每行一条):", "en": "Commands (one per line):"},
     "preset.commands_placeholder": {
-        "zh": "例如:\nexport http_proxy=http://127.0.0.1:1081/\nexport https_proxy=http://127.0.0.1:1081/\nclaude --model opus",
-        "en": "Example:\nexport http_proxy=http://127.0.0.1:1081/\nexport https_proxy=http://127.0.0.1:1081/\nclaude --model opus",
+        "zh": "例如 (PowerShell + 代理，login claude 前必须这样设置代理):\n$env:http_proxy = \"http://127.0.0.1:7897\"\n$env:https_proxy = \"http://127.0.0.1:7897\"\nclaude --model fable\n\n(cmd.exe 用 set http_proxy=... ；bash/zsh 用 export http_proxy=...)",
+        "en": "Example (PowerShell + proxy — set the proxy this way before you can login claude):\n$env:http_proxy = \"http://127.0.0.1:7897\"\n$env:https_proxy = \"http://127.0.0.1:7897\"\nclaude --model fable\n\n(cmd.exe uses set http_proxy=... ; bash/zsh uses export http_proxy=...)",
+    },
+    "preset.commands_proxy_tip": {
+        "zh": "使用代理 + PowerShell 时，必须用 $env:http_proxy = \"http://127.0.0.1:7897\" 的形式设置代理（不能用 set），否则子进程 claude 拿不到代理，login 会失败。",
+        "en": "With a proxy + PowerShell, you must set the proxy as $env:http_proxy = \"http://127.0.0.1:7897\" (not `set`), otherwise the child claude process won't get the proxy and login will fail.",
     },
     "preset.default_name": {"zh": "预设 {n}", "en": "Preset {n}"},
     "preset.unnamed": {"zh": "未命名", "en": "Unnamed"},
