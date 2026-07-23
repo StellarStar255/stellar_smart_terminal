@@ -1706,6 +1706,15 @@ class MainWindow(ThemeMixin, ToolbarMixin, ConfigMixin, ExplorerPanelMixin,
         # 5. Git 面板（diff 查看器 + 提交 graph，默认12pt, 范围6-32）
         self._apply_gui_font_to_git_panel()
 
+        # 6. 导航面板（全局单例 + 各窗口内嵌）——不在 findChildren 缩放遍历内，
+        #    必须显式下发 GUI Font 比例，否则列表字号与控制栏对不上（偏小）。
+        nav_scale = self._current_gui_font_scale()
+        for nav in MainWindow._iter_navigators():
+            try:
+                nav.apply_gui_font_scale(nav_scale)
+            except Exception:
+                logger.debug("_apply_global_zoom: nav font scale failed", exc_info=True)
+
         # 保存缩放偏移到配置
         self._save_config()
 
@@ -4317,6 +4326,9 @@ class MainWindow(ThemeMixin, ToolbarMixin, ConfigMixin, ExplorerPanelMixin,
                 _t = self.THEMES.get(self.current_theme)
                 if _t:
                     MainWindow._global_window_navigator.apply_theme(_t)
+                # 补上当前 GUI Font 比例，避免新建的浮动面板字号偏小
+                MainWindow._global_window_navigator.apply_gui_font_scale(
+                    self._current_gui_font_scale())
             MainWindow._global_window_navigator.show()
             MainWindow._global_window_navigator.raise_()
             MainWindow._sync_nav_checkbox_state(True)
@@ -4437,6 +4449,9 @@ class MainWindow(ThemeMixin, ToolbarMixin, ConfigMixin, ExplorerPanelMixin,
                         _t = wins[0].THEMES.get(wins[0].current_theme)
                         if _t:
                             MainWindow._global_window_navigator.apply_theme(_t)
+                        # 补上当前 GUI Font 比例，避免新建的浮动面板字号偏小
+                        MainWindow._global_window_navigator.apply_gui_font_scale(
+                            wins[0]._current_gui_font_scale())
                 MainWindow._global_window_navigator.show()
                 MainWindow._global_window_navigator.raise_()
                 MainWindow._sync_nav_checkbox_state(True)

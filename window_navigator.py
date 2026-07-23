@@ -227,6 +227,10 @@ class WindowNavigatorPanel(QWidget):
         # 列表字体大小：固定值（此前的可调下拉已移除）。仍读取历史持久化值，
         # 让老用户外观不突变；_apply_list_font_size() 据此渲染。
         self._font_size = 12  # 默认字体大小
+        # GUI Font 缩放比例（以 12px 为基准，1.0=Auto）。导航面板是全局单例、不在
+        # 主窗口 findChildren 的缩放遍历里，需由主窗口显式下发，否则同一 GUI Font 下
+        # 列表字号不跟着控制栏一起变大，看着偏小。见 apply_gui_font_scale()。
+        self._gui_font_scale = 1.0
 
         # 设置按钮（小齿轮）：与 Compact/Quick Close/Embed/字号 同在一行，靠最右。
         # 用矢量绘制的齿轮图标（_make_git_tool_icon），避免 macOS 上 ⚙ 字形被渲染成
@@ -367,15 +371,38 @@ class WindowNavigatorPanel(QWidget):
         self.compact_checkbox.blockSignals(False)
         self._force_refresh()
 
+    def _sf(self, px: int) -> int:
+        """按 GUI Font 缩放一个像素字号，最小 8px（与主窗口 _scale_gui_font_sizes 同思路）。"""
+        return max(8, round(px * self._gui_font_scale))
+
+    def apply_gui_font_scale(self, scale: float):
+        """接收主窗口下发的 GUI Font 缩放比例并重刷整个面板字号。
+
+        导航面板是全局单例，不在主窗口 findChildren 的缩放遍历内，必须显式下发，
+        否则列表字号不跟随 GUI Font，与控制栏字号对不上（看着偏小）。"""
+        try:
+            scale = float(scale)
+        except (TypeError, ValueError):
+            return
+        if scale <= 0:
+            scale = 1.0
+        if abs(scale - self._gui_font_scale) < 1e-3:
+            return
+        self._gui_font_scale = scale
+        # 整块面板样式（标题/搜索/勾选框/按钮/列表）都按新比例重算
+        self._apply_style()
+
     def _apply_list_font_size(self):
         """按当前主题 + 字号设置列表样式"""
         th = self._theme
+        # 列表项基准 14px（对齐控制栏按钮字号），再按 GUI Font 缩放。
+        list_px = self._sf(max(self._font_size, 14))
         self.window_list.setStyleSheet(f"""
             QListWidget {{
                 background-color: {th['bg_medium']};
                 border: 1px solid {th['border']};
                 border-radius: 4px;
-                font-size: {self._font_size}px;
+                font-size: {list_px}px;
                 outline: none;
             }}
             QListWidget::item {{
@@ -532,7 +559,7 @@ class WindowNavigatorPanel(QWidget):
                 border-radius: 4px;
                 padding: 6px 12px;
                 color: {th['text']};
-                font-size: 12px;
+                font-size: {self._sf(12)}px;
             }}
             QPushButton:hover {{
                 background-color: {th['accent']};
@@ -541,7 +568,7 @@ class WindowNavigatorPanel(QWidget):
         """)
 
         self.title_label.setStyleSheet(
-            f"color: {th['accent']}; font-weight: bold; font-size: 13px;")
+            f"color: {th['accent']}; font-weight: bold; font-size: {self._sf(13)}px;")
 
         self.search_input.setStyleSheet(f"""
             QLineEdit {{
@@ -550,7 +577,7 @@ class WindowNavigatorPanel(QWidget):
                 border-radius: 4px;
                 padding: 4px 8px;
                 color: {th['text']};
-                font-size: 12px;
+                font-size: {self._sf(12)}px;
             }}
             QLineEdit:focus {{
                 border-color: {th['accent']};
@@ -562,7 +589,7 @@ class WindowNavigatorPanel(QWidget):
         nav_checkbox_style = f"""
             QCheckBox {{
                 color: {th['text_dim']};
-                font-size: 11px;
+                font-size: {self._sf(11)}px;
                 border: none;
             }}
             QCheckBox::indicator {{
@@ -598,7 +625,7 @@ class WindowNavigatorPanel(QWidget):
         """)
 
         self.drag_hint_label.setStyleSheet(
-            f"color: {th['accent']}; font-size: 10px; border: none;")
+            f"color: {th['accent']}; font-size: {self._sf(10)}px; border: none;")
 
         # 列表样式依赖主题 + 字号，统一走 _apply_list_font_size
         self._apply_list_font_size()
