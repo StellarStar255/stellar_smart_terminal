@@ -1737,7 +1737,10 @@ class MainWindow(ThemeMixin, ToolbarMixin, ConfigMixin, ExplorerPanelMixin,
         _font_size_re = re.compile(r'font-size:\s*(\d+)px')
 
         from PyQt6.QtWidgets import QWidget
-        for widget in self.findChildren(QWidget):
+        # 含主窗口自身：主题写在窗口级样式表里的字号（QToolBar QPushButton 13px、
+        # QLineEdit 14px）也要参与缩放。findChildren 不含 self，漏掉这层会导致
+        # 工具栏按钮永远停在 13px、与输入框字号脱节。
+        for widget in (self, *self.findChildren(QWidget)):
             wid = id(widget)
             ss = widget.styleSheet()
             if not ss or 'font-size' not in ss:
@@ -2001,6 +2004,12 @@ class MainWindow(ThemeMixin, ToolbarMixin, ConfigMixin, ExplorerPanelMixin,
         self._ql_filter = filt
         self._ql_dirs = []
         self._ql_ready = False
+
+        # 弹层是惰性创建的：若此时 GUI Font 已选了显式字号，上一轮缩放没赶上它，
+        # 这里补跑一次，让搜索框的 14px 基准立刻按当前字号缩放（缓存会记下基准，
+        # 之后的字号切换正常复用）。
+        if self._gui_font_size > 0:
+            self._scale_gui_font_sizes(self._gui_font_size)
 
     def _ql_rebuild_dirs(self):
         """重建快速启动目录数据（当前目录 + 历史 + 特殊项）。"""

@@ -121,6 +121,7 @@ class ThemeMixin:
                 border-radius: 4px;
                 padding: 6px;
                 color: {t['text']};
+                font-size: 14px;
             }}
             QLineEdit:focus {{
                 border-color: {t['accent']};
