@@ -264,6 +264,15 @@ class ConfigMixin:
                     'name': default_shell,
                     'commands': [default_shell]
                 },
+                
+                {
+                    'name': 'Claude (no proxy)',
+                    'commands': [
+                        default_shell,
+                        'claude'
+                    ]
+                },
+                
                 {
                     'name': 'Claude Fable (with proxy)',
                     'commands': [default_shell] + _proxy_cmds(7897) + ['claude --model fable']
@@ -279,6 +288,7 @@ class ConfigMixin:
                         'claude --model sonnet'
                     ]
                 }
+
             ]
 
         # 确保有默认 LLM 配置
