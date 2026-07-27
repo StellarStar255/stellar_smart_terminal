@@ -431,9 +431,11 @@ class ExplorerPanel(QWidget):
         self._search_result_signal.connect(self._on_search_results)
 
         # 自动刷新兜底：QFileSystemModel 已经通过 FSEvents 监听本地变更；
-        # 这里只是一道保险，60s 检查一次当前目录的条目集合，差异时才 refresh。
-        # 没差异 = 一次 os.listdir，开销可忽略。
-        self._auto_refresh_fingerprint: frozenset = frozenset()
+        # 这里只是一道保险，60s 检查一次根目录 + 所有已展开目录的条目集合，
+        # 差异时才 refresh。没差异 = 几次 os.listdir，开销可忽略。
+        # path -> frozenset(条目名)；path 不在 dict 里表示基线未建立
+        # （不能用空集合当"未初始化"哨兵——空目录的合法指纹就是空集合）。
+        self._auto_refresh_fingerprints: dict = {}
         self._auto_refresh_timer = QTimer(self)
         self._auto_refresh_timer.setInterval(60_000)
         self._auto_refresh_timer.timeout.connect(self._auto_refresh_tick)
@@ -845,7 +847,7 @@ class ExplorerPanel(QWidget):
             self.model.setRootPath(path)
             self.tree_view.setRootIndex(self._proxy.mapFromSource(self.model.index(path)))
             # 切换了根 → 重置自动刷新基线
-            self._auto_refresh_fingerprint = frozenset()
+            self._auto_refresh_fingerprints.clear()
             # 换了目录 → 退出可能正在进行的搜索（结果属于旧根目录）
             if hasattr(self, 'search_edit') and self.search_edit.text():
                 self.search_edit.clear()
@@ -875,13 +877,61 @@ class ExplorerPanel(QWidget):
             logger.debug("prewarm: suppressed exception", exc_info=True)
 
     def refresh(self):
-        """刷新文件树"""
+        """刷新文件树（强制全量重扫，保留展开/选中状态）。
+
+        QFileSystemModel 对抓取过的目录节点做永久缓存：以前用的
+        setRootPath("") → setRootPath(current) 技巧只会重新枚举根目录本身，
+        已展开子目录里被 watcher 漏掉的变更（FSEvents 丢事件、网络卷上
+        远端写入无事件等）连 fetchMore 都补不回来。Qt 没有公开的强制
+        刷新 API，唯一可靠的方式是重建模型。"""
         current = self._current_path
-        # 重新设置根路径以触发目录重新扫描
+        expanded = self._expanded_dir_paths()
+        sel_path: Optional[str] = None
+        idx = self.tree_view.currentIndex()
+        if idx.isValid():
+            sel_path = self._proxy.filePath(idx)
+
+        old_model = self.model
+        self.model = FilteredFileSystemModel()
+        self.model.setIconProvider(self._icon_provider)
+        self.model.setFilter(self._build_filter())
+        self.model.setReadOnly(False)
         self.model.setRootPath("")
+        self._proxy.setSourceModel(self.model)
+        old_model.deleteLater()
+
         self.model.setRootPath(current)
         self.tree_view.setRootIndex(self._proxy.mapFromSource(self.model.index(current)))
-        self._auto_refresh_fingerprint = frozenset()
+        # 换源模型会重置表头，重新只留文件名列
+        for col in (1, 2, 3):
+            self.tree_view.hideColumn(col)
+        self._apply_sort()
+
+        # 恢复展开状态：由浅到深，父目录先展开。index(path) 会按需建节点，
+        # 目录内容随 fetchMore 异步装载，行到位后自动显示在已展开的节点下。
+        for p in sorted(expanded, key=len):
+            if os.path.isdir(p):
+                pi = self._proxy.mapFromSource(self.model.index(p))
+                if pi.isValid():
+                    self.tree_view.expand(pi)
+        if sel_path and os.path.exists(sel_path):
+            QTimer.singleShot(50, lambda p=sel_path: self._reselect_path(p))
+        self._auto_refresh_fingerprints.clear()
+
+    def _expanded_dir_paths(self, limit: int = 512) -> list:
+        """收集树里当前已展开的目录路径（只走已展开分支，数量有限、开销小）。"""
+        paths: list[str] = []
+        stack = [self.tree_view.rootIndex()]
+        while stack and len(paths) < limit:
+            parent = stack.pop()
+            for r in range(self._proxy.rowCount(parent)):
+                child = self._proxy.index(r, 0, parent)
+                if child.isValid() and self.tree_view.isExpanded(child):
+                    p = self._proxy.filePath(child)
+                    if p:
+                        paths.append(p)
+                        stack.append(child)
+        return paths
 
     # ---------- 文件搜索（递归、多关键词组合） ----------
 
@@ -1228,32 +1278,30 @@ class ExplorerPanel(QWidget):
 
     def _auto_refresh_tick(self):
         """60s 安全网：QFileSystemModel + FSEvents 已经处理大多数情况，
-        这里只在当前根目录条目集合发生过变化时才真正刷一次。
-        无变化 = 只做一次 os.listdir，几乎零开销。"""
+        这里对根目录 + 所有已展开目录做条目集合对比，任何一处变了才真正
+        刷一次。无变化 = 几次 os.listdir，几乎零开销。
+
+        某个目录第一次出现在检查范围（刚换根/刚展开/刚刷新过）只建基线
+        不刷新——模型此刻刚读过盘，数据是新的。"""
         if not self.isVisible():
             return
-        path = self._current_path
-        if not path or not os.path.isdir(path):
+        root = self._current_path
+        if not root or not os.path.isdir(root):
             return
-        try:
-            names = frozenset(os.listdir(path))
-        except OSError:
-            return
-        if names == self._auto_refresh_fingerprint:
-            return
-        # 第一次见这个目录 → 只建基线，不刷新（模型已经有数据了）
-        if not self._auto_refresh_fingerprint:
-            self._auto_refresh_fingerprint = names
-            return
-        # 有变化 → 保存当前选中再刷新，刷完恢复选中
-        sel_path: Optional[str] = None
-        idx = self.tree_view.currentIndex()
-        if idx.isValid():
-            sel_path = self._proxy.filePath(idx)
-        self.refresh()
-        self._auto_refresh_fingerprint = names
-        if sel_path and os.path.exists(sel_path):
-            QTimer.singleShot(50, lambda p=sel_path: self._reselect_path(p))
+        old = self._auto_refresh_fingerprints
+        fresh: dict = {}
+        changed = False
+        for path in [root] + self._expanded_dir_paths(limit=64):
+            try:
+                fresh[path] = frozenset(os.listdir(path))
+            except OSError:
+                continue
+            prev = old.get(path)
+            if prev is not None and prev != fresh[path]:
+                changed = True
+        if changed:
+            self.refresh()  # 内部保留展开/选中状态
+        self._auto_refresh_fingerprints = fresh
 
     def _reselect_path(self, path: str):
         idx = self._proxy.mapFromSource(self.model.index(path))
