@@ -167,6 +167,9 @@ class UpdateMixin:
         url = asset.get('browser_download_url')
         if not url:
             return
+        # GitHub API 给的权威字节数：下载器用它校验落盘是否完整，挡住被代理
+        # 截断的半截安装包（否则 Inno 会弹 "setup files are corrupted"）
+        expected_size = asset.get('size') or 0
         # 下载阶段只写临时目录，中途取消没有半成品风险（真正的换包发生在
         # 下载完成、用户确认重启之后），所以取消按钮和关窗都允许中止
         progress = QProgressDialog(t("update.downloading"),
@@ -176,7 +179,7 @@ class UpdateMixin:
         progress.setMinimumDuration(0)
         progress.setValue(0)
 
-        dl = app_updater.UpdateDownloader(url, self)
+        dl = app_updater.UpdateDownloader(url, expected_size, self)
         self._update_downloader = dl
         # finished: 正常收尾（on_done/on_error 关闭对话框也会触发 canceled，
         # 用它区分）；cancelled: 用户点了取消或关掉了进度窗

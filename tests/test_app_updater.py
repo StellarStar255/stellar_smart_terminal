@@ -397,5 +397,95 @@ class TestDownloadWorkdirCleanup(unittest.TestCase):
             shutil.rmtree(created['dir'], ignore_errors=True)
 
 
+class TestDownloadTruncation(unittest.TestCase):
+    """回归：下载被代理中途掐断成「干净 EOF」时，半截安装包绝不能当成功交给
+    Inno 安装器（否则弹 "The setup files are corrupted"）。落盘字节数不足
+    权威大小 → 重试 → 仍不足则上报错误并清理临时目录，绝不发 finished_ok。"""
+
+    @classmethod
+    def setUpClass(cls):
+        os.environ.setdefault('QT_QPA_PLATFORM', 'offscreen')
+        from PyQt6.QtWidgets import QApplication
+        cls.app = QApplication.instance() or QApplication([])
+
+    def _short_response(self, delivered: bytes):
+        """一个「声称更长、实际吐一半就 EOF」的响应替身。expected_size 由
+        UpdateDownloader 构造参数（asset size）给出，模拟代理丢了
+        Content-Length 的情形——headers 为空。"""
+        class _Resp:
+            headers = {}
+
+            def __init__(self):
+                self._sent = False
+
+            def __enter__(self):
+                return self
+
+            def __exit__(self, *a):
+                return False
+
+            def read(self, _n):
+                if self._sent:
+                    return b''
+                self._sent = True
+                return delivered
+        return _Resp
+
+    def test_truncated_download_errors_and_cleans_up(self):
+        import glob
+        import tempfile as _tf
+        from unittest import mock
+        before = set(glob.glob(os.path.join(_tf.gettempdir(),
+                                            'stellar_update_*')))
+        errors, results = [], []
+        # 权威大小 1000，实际每趟只吐 100 → 三次都不足
+        dl = app_updater.UpdateDownloader(
+            'https://example.invalid/x-setup.exe', 1000)
+        dl.error.connect(errors.append)
+        dl.finished_ok.connect(results.append)
+        with mock.patch.object(app_updater, '_urlopen',
+                               side_effect=self._short_response(b'a' * 100)):
+            dl.run()
+        self.assertEqual(results, [])          # 绝不交出半截包
+        self.assertTrue(errors)                # 明确报错让用户重试
+        after = set(glob.glob(os.path.join(_tf.gettempdir(),
+                                           'stellar_update_*')))
+        self.assertEqual(after - before, set())  # 残包清理干净
+
+    def test_retry_recovers_from_transient_truncation(self):
+        import shutil
+        from unittest import mock
+
+        created = {}
+        _real_mkdtemp = app_updater.tempfile.mkdtemp
+
+        def _tracking_mkdtemp(*a, **kw):
+            d = _real_mkdtemp(*a, **kw)
+            created['dir'] = d
+            return d
+
+        # 前两趟截断、第三趟完整
+        responses = [self._short_response(b'a' * 100)(),
+                     self._short_response(b'a' * 100)(),
+                     self._short_response(b'a' * 1000)()]
+        results, errors = [], []
+        dl = app_updater.UpdateDownloader(
+            'https://example.invalid/x-setup.exe', 1000)
+        dl.finished_ok.connect(results.append)
+        dl.error.connect(errors.append)
+        with mock.patch.object(app_updater.tempfile, 'mkdtemp',
+                               _tracking_mkdtemp), \
+             mock.patch.object(app_updater, '_urlopen',
+                               side_effect=lambda *a, **k: responses.pop(0)):
+            dl.run()
+        try:
+            self.assertEqual(errors, [])
+            self.assertTrue(results)             # 抖动过去后正常完成
+            self.assertTrue(os.path.exists(results[0]))
+        finally:
+            if 'dir' in created:
+                shutil.rmtree(created['dir'], ignore_errors=True)
+
+
 if __name__ == "__main__":
     unittest.main()
