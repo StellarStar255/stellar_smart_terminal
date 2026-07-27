@@ -42,7 +42,9 @@ class ExplorerRefreshTest(unittest.TestCase):
         cls.app = QApplication.instance() or QApplication([])
 
     def setUp(self):
-        self.tmp = tempfile.mkdtemp(prefix='explorer_refresh_')
+        # realpath：Windows 上 TEMP 是 8.3 短路径（RUNNER~1），Qt 返回的是
+        # 长路径，先解析成长路径才能与 Qt 侧的路径对得上
+        self.tmp = os.path.realpath(tempfile.mkdtemp(prefix='explorer_refresh_'))
         self.sub = os.path.join(self.tmp, 'subdir')
         os.makedirs(self.sub)
         open(os.path.join(self.tmp, 'root_a.txt'), 'w').close()
@@ -90,6 +92,15 @@ class ExplorerRefreshTest(unittest.TestCase):
         self.panel.tree_view.expand(idx)
         self._wait_loaded(self.panel.model, self.sub)
 
+    @staticmethod
+    def _norm(p):
+        """归一化路径再比较：Qt 的 filePath() 用正斜杠，os 路径在 Windows
+        上是反斜杠，直接字符串比对在 Windows CI 会失败。"""
+        return os.path.normcase(os.path.normpath(p))
+
+    def _fingerprint_keys(self):
+        return {self._norm(p) for p in self.panel._auto_refresh_fingerprints}
+
     def _visible_names(self, dir_path):
         proxy = self.panel._proxy
         parent = proxy.mapFromSource(self.panel.model.index(dir_path))
@@ -132,7 +143,7 @@ class ExplorerRefreshTest(unittest.TestCase):
         self.app.processEvents()
 
         self.panel._auto_refresh_tick()  # 第一轮：建基线，不刷新
-        self.assertIn(self.sub, self.panel._auto_refresh_fingerprints)
+        self.assertIn(self._norm(self.sub), self._fingerprint_keys())
 
         open(os.path.join(self.sub, 'sub_c_new.txt'), 'w').close()
         self.panel._auto_refresh_tick()  # 第二轮：发现子目录变化 → refresh
@@ -150,7 +161,7 @@ class ExplorerRefreshTest(unittest.TestCase):
         self.app.processEvents()
 
         self.panel._auto_refresh_tick()  # 建基线（空集合也是合法基线）
-        self.assertIn(empty_root, self.panel._auto_refresh_fingerprints)
+        self.assertIn(self._norm(empty_root), self._fingerprint_keys())
 
         open(os.path.join(empty_root, 'first.txt'), 'w').close()
         self.panel._auto_refresh_tick()  # 旧实现在这里把变化吞成"建基线"
