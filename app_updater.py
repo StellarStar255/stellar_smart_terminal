@@ -19,6 +19,7 @@
 - 打包版的版本号来源：mac 读 Info.plist，Windows/Linux 读随包携带的
   pyproject.toml（spec datas 已包含），发版仍零额外维护。
 """
+import http.client
 import os
 import plistlib
 import re
@@ -189,21 +190,61 @@ class UpdateChecker(QThread):
             self.error.emit(str(e))
 
 
+# 下载中途被掐断时的重试次数（一次抖动不该毁掉整次升级）
+_DOWNLOAD_ATTEMPTS = 3
+
+
+class _IncompleteDownload(Exception):
+    """落盘字节数不足权威大小：包被截断，绝不能交给安装器。"""
+
+
 class UpdateDownloader(QThread):
     """下载 zip 并用 ditto 解出 .app。finished 携带解压出的 .app 路径。"""
     progress = pyqtSignal(int, int)          # done_bytes, total_bytes
     finished_ok = pyqtSignal(str)
     error = pyqtSignal(str)
 
-    def __init__(self, url: str, parent=None):
+    def __init__(self, url: str, expected_size: int = 0, parent=None):
         super().__init__(parent)
         self._url = url
+        # GitHub release asset 的权威字节数（API 给的，非代理转发的
+        # Content-Length）。>0 时用它校验落盘是否完整；0 表示未知，
+        # 退回 Content-Length 校验。
+        self._expected_size = int(expected_size or 0)
         self._cancelled = False
 
     def cancel(self):
         """请求中止下载。线程在下一个读块边界收工并清理临时目录，
         之后不再发出任何信号（含已排队但未送达的除外，由调用方守卫）。"""
         self._cancelled = True
+
+    def _fetch_once(self, dl_path: str):
+        """下载一次到 dl_path。落盘字节数不足权威大小时抛 _IncompleteDownload；
+        被取消则提前返回（由 run 再判 self._cancelled）。每次都以 'wb' 从头
+        写，不复用上一趟的残包。"""
+        with _urlopen(self._url) as resp, open(dl_path, 'wb') as out:
+            # 权威大小优先用 asset size；没有再退回 Content-Length（代理可能
+            # 丢掉或伪造它，故不作为首选）
+            expected = self._expected_size or int(
+                resp.headers.get('Content-Length') or 0)
+            done = 0
+            while True:
+                if self._cancelled:
+                    return
+                chunk = resp.read(256 * 1024)
+                if not chunk:
+                    break
+                out.write(chunk)
+                done += len(chunk)
+                self.progress.emit(done, expected)
+        if self._cancelled:
+            return
+        # 关键校验：代理常用 connection-close 重帧、丢掉 Content-Length，
+        # 中途掐断会表现为「干净 EOF」——read 返回空、不抛异常。没有这一步，
+        # 半截 update.exe 会被当成功交给 Inno 安装器，弹「setup files are
+        # corrupted」。不足即抛，交由 run 的重试/清理处理，绝不交出残包。
+        if expected and done != expected:
+            raise _IncompleteDownload(f"got {done} of {expected} bytes")
 
     def run(self):
         workdir = None
@@ -220,21 +261,26 @@ class UpdateDownloader(QThread):
             else:
                 fname, is_installer = 'update.zip', False
             dl_path = os.path.join(workdir, fname)
-            with _urlopen(self._url) as resp, \
-                    open(dl_path, 'wb') as out:
-                total = int(resp.headers.get('Content-Length') or 0)
-                done = 0
-                while True:
-                    if self._cancelled:
-                        return
-                    chunk = resp.read(256 * 1024)
-                    if not chunk:
-                        break
-                    out.write(chunk)
-                    done += len(chunk)
-                    self.progress.emit(done, total)
+            # 下载被中途掐断（截断/连接错误）时重试几次再放弃——一次网络抖动
+            # 不该让本次乃至后续升级都失败（见用户反馈：中断一次后再也升不上去）
+            last_err = None
+            for attempt in range(_DOWNLOAD_ATTEMPTS):
+                if self._cancelled:
+                    return
+                try:
+                    self._fetch_once(dl_path)
+                    last_err = None
+                    break
+                except (_IncompleteDownload, OSError,
+                        http.client.HTTPException) as e:
+                    last_err = e
+                    logger.warning(
+                        "update download incomplete (attempt %d/%d): %s",
+                        attempt + 1, _DOWNLOAD_ATTEMPTS, e)
             if self._cancelled:
                 return
+            if last_err is not None:
+                raise last_err
             if is_installer:
                 # Windows：Inno 安装包本身就是安装载体，无需解包
                 keep = True
