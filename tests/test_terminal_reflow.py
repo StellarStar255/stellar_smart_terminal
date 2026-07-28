@@ -549,6 +549,20 @@ class TestScreenModuleSplit(unittest.TestCase):
         self.assertEqual(terminal_screen.CompatibleHistoryScreen.__module__,
                          'terminal_screen')
 
+    def test_render_mixin_split(self):
+        # 渲染层拆到 terminal_render.TerminalRenderMixin：方法住在新模块，
+        # TerminalWidget 经多继承获得；搬回去或断掉继承链都会在此失败
+        import terminal_render
+        import terminal_widget
+        mixin = terminal_render.TerminalRenderMixin
+        self.assertTrue(issubclass(terminal_widget.TerminalWidget, mixin))
+        for name in ('paintEvent', '_rebuild_cache', '_ensure_visible',
+                     '_get_char_color', '_compute_color', '_get_256_color',
+                     '_calculate_char_size', '_invalidate_render_cache'):
+            self.assertIs(getattr(terminal_widget.TerminalWidget, name),
+                          getattr(mixin, name))
+            self.assertEqual(getattr(mixin, name).__module__, 'terminal_render')
+
     def test_terminal_screen_is_qt_free(self):
         # 子进程冷启动检查：单独 import terminal_screen 不得拉起 PyQt6
         import subprocess
