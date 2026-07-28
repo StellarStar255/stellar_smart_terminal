@@ -65,6 +65,7 @@ py-modules = [
     "remote_bookmarks",
     "remote_explorer_widget",
     "session_manager",
+    "settings_transfer",
     "ssh_session",
     "terminal_backend",
     "terminal_render",

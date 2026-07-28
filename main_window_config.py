@@ -428,6 +428,62 @@ class ConfigMixin:
             # 清理已废弃的旧键（解析开关换键名后，旧键会因合并写永久残留）
             existing_config.pop('parse_off_gui_thread', None)
 
+
+    # ---------- 设置导出/导入（多机同步） ----------
+
+    def _export_settings_clicked(self):
+        """⚙ 菜单「导出设置…」：可移植配置打包为单个 JSON。"""
+        from PyQt6.QtWidgets import QFileDialog
+        default_name = f"stellar-settings-{datetime.now().strftime('%Y%m%d')}.json"
+        path, _ = QFileDialog.getSaveFileName(
+            self, t("settings.export_title"),
+            str(Path.home() / default_name), "JSON (*.json)")
+        if not path:
+            return
+        try:
+            import settings_transfer
+            n = settings_transfer.export_settings(path)
+        except Exception as e:
+            self._styled_message_box(
+                QMessageBox.Icon.Warning, t("msg.save_failed"),
+                t("settings.export_failed", error=str(e)))
+            return
+        self._styled_message_box(
+            QMessageBox.Icon.Information, t("settings.export_title"),
+            t("settings.export_done", count=n, path=path))
+
+    def _import_settings_clicked(self):
+        """⚙ 菜单「导入设置…」：合并另一台机器导出的设置包。"""
+        from PyQt6.QtWidgets import QFileDialog
+        path, _ = QFileDialog.getOpenFileName(
+            self, t("settings.import_title"), str(Path.home()),
+            "JSON (*.json)")
+        if not path:
+            return
+        # 逐键覆盖本机同名设置，确认后执行
+        ret = QMessageBox.question(
+            self, t("settings.import_title"),
+            t("settings.import_confirm"),
+            QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.Cancel)
+        if ret != QMessageBox.StandardButton.Yes:
+            return
+        try:
+            import settings_transfer
+            n, _keys = settings_transfer.import_settings(path)
+        except ValueError:
+            self._styled_message_box(
+                QMessageBox.Icon.Warning, t("settings.import_title"),
+                t("settings.import_invalid"))
+            return
+        except Exception as e:
+            self._styled_message_box(
+                QMessageBox.Icon.Warning, t("settings.import_title"),
+                t("settings.export_failed", error=str(e)))
+            return
+        self._styled_message_box(
+            QMessageBox.Icon.Information, t("settings.import_title"),
+            t("settings.import_done", count=n))
+
     def get_llm_config(self, name: str = None) -> dict:
         """获取指定名称的 LLM 配置，若不指定则返回默认配置
 
