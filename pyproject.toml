@@ -37,6 +37,13 @@ dependencies = [
 [project.gui-scripts]
 stellar-terminal = "app:main"
 
+[tool.pytest.ini_options]
+# 环境里若装有 pytest-qt，它会在 configure 阶段按自己的偏好初始化 PySide6，
+# 与本项目的 PyQt6 在同一进程混载 → QApplication 构造直接 abort/segfault。
+# 本仓库不用 pytest-qt 的 fixture（QApplication 均手动管理），显式禁用；
+# 未安装该插件时此选项无副作用。
+addopts = "-p no:pytest-qt"
+
 [tool.setuptools]
 py-modules = [
     "ai_completion",

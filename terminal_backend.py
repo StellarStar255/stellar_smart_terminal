@@ -412,6 +412,9 @@ if IS_WINDOWS:
                 env['FORCE_COLOR'] = '3'        # 强制 24-bit 颜色支持
                 env['TERM_PROGRAM'] = 'vscode'   # 标识为已知支持完整渲染的终端
                 env['TERM_PROGRAM_VERSION'] = '1.96.0'
+                # 同 UnixBackend：禁用 Claude Code 的备用屏幕模式，让输出走
+                # 终端本地 scrollback，跨页拖选复制才可用（详见 Unix 分支注释）
+                env.setdefault('CLAUDE_CODE_DISABLE_ALTERNATE_SCREEN', '1')
                 # Smart Terminal 自身标识（与 macOS 通知点击跳转配合使用）
                 env['SMART_TERMINAL'] = '1'
                 env['SMART_TERMINAL_PID'] = str(os.getpid())
@@ -717,6 +720,13 @@ else:
                     env['TERM_PROGRAM'] = 'vscode'
                     env['TERM_PROGRAM_VERSION'] = '1.96.0'
                     env['FORCE_COLOR'] = '3'  # 强制 24-bit 颜色支持
+                    # Claude Code 2.x 默认进备用屏幕（1049）+ 内部虚拟滚动 +
+                    # 鼠标上报："跨页"的历史都在 claude 进程内部，终端侧没有
+                    # scrollback，拖选到边缘无从滚动 → 无法跨页复制。禁用备用
+                    # 屏幕让 claude 回到内联渲染，输出进入本终端的 scrollback，
+                    # 现有的拖选自动滚动/跨页复制即可用。setdefault：用户在外部
+                    # 或 shell 里显式设置的值优先。
+                    env.setdefault('CLAUDE_CODE_DISABLE_ALTERNATE_SCREEN', '1')
                     # 用单独的变量标识 "运行在 Smart Terminal 里"。TERM_PROGRAM
                     # 不能改（会破坏 TUI 渲染兼容），所以另起一个。
                     # 配合 ~/.claude/scripts/claude-stop-notify.sh：用户点击
