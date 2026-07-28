@@ -204,29 +204,11 @@ class RemotePanelMixin:
             host_config: ssh_session.HostConfig（用别名/host/user/port/key/proxyjump）
             remote_cd_path: 可选，连接后在远程 cd 到该目录；为 None 则去 $HOME
         """
-        # 构造 ssh 命令
-        # 优先用别名（ssh CLI 会自动应用 ~/.ssh/config）；
-        # 别名形如 user@host:port 这种手工加的，就拆开来拼参数。
+        # 构造 ssh 命令：统一走 build_ssh_terminal_command（含 claude 相关
+        # 环境注入——export 后 exec 登录 shell，远程 claude 与本地体验一致）
+        from ssh_session import build_ssh_terminal_command
         alias = host_config.alias
-        is_config_alias = "@" not in alias and ":" not in alias
-        ssh_args = ["ssh"]
-        if is_config_alias:
-            ssh_args.append(alias)
-        else:
-            if host_config.identity_file and os.path.isfile(host_config.identity_file):
-                ssh_args.extend(["-i", host_config.identity_file])
-            if host_config.port and host_config.port != 22:
-                ssh_args.extend(["-p", str(host_config.port)])
-            target = f"{host_config.user}@{host_config.hostname}" if host_config.user else host_config.hostname
-            ssh_args.append(target)
-        # 交互式 shell + 可选 cd
-        if remote_cd_path:
-            # -t 强制分配 tty；cd 后 exec 登录 shell 进入交互。
-            # 整条 arg 之后会被 shlex.quote 用单引号包起来传给本地 ssh，
-            # 本地 shell 不会展开 $SHELL，故这里不能写 \$SHELL（会让远端收到
-            # 字面量 \$SHELL → exec: $SHELL: not found）。${SHELL:-/bin/bash}
-            # 兜底远端未设置 $SHELL 的情况。
-            ssh_args.extend(["-t", f"cd {self._shell_quote(remote_cd_path)} && exec ${{SHELL:-/bin/bash}} -l"])
+        cmd_string = build_ssh_terminal_command(host_config, remote_cd_path)
 
         # 标签名标记 SSH host
         tab_name = t("remote.terminal_tab_name", host=alias)
@@ -263,7 +245,6 @@ class RemotePanelMixin:
                 term.arm_password_autofill(cached_pw)
         except Exception:
             logger.debug("_open_ssh_terminal_tab: suppressed exception", exc_info=True)
-        cmd_string = " ".join(self._shell_quote(a) for a in ssh_args)
         # 用 _start_and_execute：先起 shell，再回车跑 ssh；ssh 退出后用户回到本地 shell
         try:
             term._start_and_execute([cmd_string])

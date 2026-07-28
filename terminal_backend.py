@@ -50,6 +50,21 @@ def scrub_packaging_env(env: dict) -> dict:
             env.pop(var, None)
     return env
 
+def remote_env_export_prefix() -> str:
+    """拼接注入远端 shell 的 export 前缀（含结尾 '; '）。
+
+    与本地子进程注入（各后端 start() 里的 CLAUDE_CODE_DISABLE_ALTERNATE_SCREEN）
+    保持同源：Remote 面板开 SSH 终端时，经 "export ...; exec $SHELL -l" 把
+    claude 相关环境带到远端登录 shell（env 跨 exec 继承），不依赖服务端
+    AcceptEnv 配置。本地显式设置的值优先跟随。
+    """
+    val = os.environ.get('CLAUDE_CODE_DISABLE_ALTERNATE_SCREEN', '1')
+    if val not in ('0', '1'):
+        # 防御：值来自外部环境且会拼进 shell 命令，仅放行已知取值
+        val = '1'
+    return f'export CLAUDE_CODE_DISABLE_ALTERNATE_SCREEN={val}; '
+
+
 logger = get_logger(__name__)
 
 # 平台检测

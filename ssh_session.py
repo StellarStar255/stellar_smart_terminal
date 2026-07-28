@@ -405,6 +405,47 @@ def update_ssh_config_host(alias: str, hostname: str, user: str = "",
     return True
 
 
+# ---------- 交互式 ssh 终端命令构造 ----------
+
+def build_ssh_terminal_command(host_config: "HostConfig",
+                               remote_cd_path: Optional[str] = None) -> str:
+    """构造在本地终端里运行的交互式 ssh 命令串（Remote 面板「打开终端」用）。
+
+    远程命令统一为 "export <注入>; [cd <dir> && ] exec ${SHELL:-/bin/bash} -l"：
+    - export 写在 exec 之前，登录 shell 经 exec 继承这些变量——把本地终端
+      注入的 claude 相关环境（见 terminal_backend.remote_env_export_prefix）
+      带到远端，远程跑 claude 与本地体验一致，且不依赖服务端 AcceptEnv；
+    - ${SHELL:-/bin/bash} 兜底远端未设置 $SHELL；整条远程命令经单引号传递，
+      本地 shell 不展开；
+    - 代价：显式远程命令会跳过 motd/lastlog 一类登录横幅。
+    """
+    import shlex
+    from terminal_backend import remote_env_export_prefix
+
+    alias = host_config.alias
+    is_config_alias = "@" not in alias and ":" not in alias
+    ssh_args = ["ssh"]
+    if is_config_alias:
+        # ssh CLI 自动应用 ~/.ssh/config（含 ProxyJump/IdentityFile 等）
+        ssh_args.append(alias)
+    else:
+        if host_config.identity_file and os.path.isfile(host_config.identity_file):
+            ssh_args.extend(["-i", host_config.identity_file])
+        if host_config.port and host_config.port != 22:
+            ssh_args.extend(["-p", str(host_config.port)])
+        target = (f"{host_config.user}@{host_config.hostname}"
+                  if host_config.user else host_config.hostname)
+        ssh_args.append(target)
+
+    remote_cmd = remote_env_export_prefix()
+    if remote_cd_path:
+        remote_cmd += f"cd {shlex.quote(remote_cd_path)} && "
+    remote_cmd += "exec ${SHELL:-/bin/bash} -l"
+    # -t 强制分配 tty（带远程命令时 ssh 默认不分配）
+    ssh_args.extend(["-t", remote_cmd])
+    return " ".join(shlex.quote(a) for a in ssh_args)
+
+
 # ---------- SFTP entry ----------
 
 @dataclass
