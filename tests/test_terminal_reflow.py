@@ -533,5 +533,34 @@ class TestReflowPerformance(TerminalReflowBase):
         self.assertEqual(len(screen.history.top), screen.history.top.maxlen)
 
 
+class TestScreenModuleSplit(unittest.TestCase):
+    """screen 层拆分到 terminal_screen 后的守卫（对齐 window_navigator 拆分模式）：
+    符号住在新模块、terminal_widget 只是再导出；screen 模块保持 Qt-free。
+    一旦有人把类搬回 terminal_widget 或给 terminal_screen 引入 Qt 依赖，先在这里失败。
+    """
+
+    def test_symbols_live_in_terminal_screen_and_reexport(self):
+        import terminal_screen
+        import terminal_widget
+        for name in ('CompatibleHistoryScreen', 'reflow_rows',
+                     'map_reflow_position'):
+            self.assertIs(getattr(terminal_widget, name),
+                          getattr(terminal_screen, name))
+        self.assertEqual(terminal_screen.CompatibleHistoryScreen.__module__,
+                         'terminal_screen')
+
+    def test_terminal_screen_is_qt_free(self):
+        # 子进程冷启动检查：单独 import terminal_screen 不得拉起 PyQt6
+        import subprocess
+        code = ("import sys; import terminal_screen; "
+                "sys.exit(1 if any(m.startswith('PyQt6') "
+                "for m in sys.modules) else 0)")
+        proj = str(Path(__file__).resolve().parent.parent)
+        r = subprocess.run([sys.executable, '-c', code], cwd=proj,
+                           capture_output=True, timeout=60)
+        self.assertEqual(r.returncode, 0,
+                         f"terminal_screen 引入了 Qt 依赖: {r.stderr.decode(errors='replace')}")
+
+
 if __name__ == "__main__":
     unittest.main(verbosity=2)

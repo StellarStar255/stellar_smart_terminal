@@ -67,6 +67,7 @@ py-modules = [
     "session_manager",
     "ssh_session",
     "terminal_backend",
+    "terminal_screen",
     "terminal_widget",
     "toolbar_manager",
     "utils",
