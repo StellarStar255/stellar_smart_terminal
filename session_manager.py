@@ -330,6 +330,63 @@ class SessionManager:
                 del self._summary_cache[name]
         return sessions
 
+    def search_sessions(self, query: str, max_results: int = 200,
+                        per_session_limit: int = 3,
+                        cancel_check=None) -> List[Dict[str, Any]]:
+        """在全部历史会话的输入/输出里搜关键词（大小写不敏感子串）。
+
+        - 匹配在 strip_ansi 之后的文本上进行：终端原始输出里的颜色转义会把
+          关键词切碎（如 "cd \\x1b[32mx"），按原始串搜会漏；
+        - 每个会话最多贡献 per_session_limit 条命中（避免一个 10MB 会话刷屏），
+          总量 max_results 封顶；按文件名倒序 = 新会话优先；
+        - cancel_check() 返回 True 时提前返回已得结果（后台线程可取消）。
+
+        返回 [{'session_id','command','start_time','entry_type','snippet'}...]
+        """
+        from utils import strip_ansi
+        q = (query or '').strip().lower()
+        if not q:
+            return []
+        results: List[Dict[str, Any]] = []
+        for file_path in sorted(self.sessions_dir.glob("*.json"), reverse=True):
+            if len(results) >= max_results:
+                break
+            if cancel_check is not None and cancel_check():
+                break
+            try:
+                with open(file_path, 'r', encoding='utf-8') as f:
+                    data = json.load(f)
+            except (OSError, json.JSONDecodeError):
+                continue
+            sid = data.get('session_id', '')
+            command = data.get('command', '')
+            start_time = data.get('start_time', '')
+            hits = 0
+            for entry in data.get('entries', []):
+                if hits >= per_session_limit or len(results) >= max_results:
+                    break
+                raw = entry.get('content', '') or ''
+                if not raw:
+                    continue
+                text = strip_ansi(raw)
+                low = text.lower()
+                i = low.find(q)
+                if i < 0:
+                    continue
+                # 命中片段：前 40 / 后 60 字符，压成单行
+                start = max(0, i - 40)
+                snippet = text[start:i + len(q) + 60]
+                snippet = ' '.join(snippet.split())
+                results.append({
+                    'session_id': sid,
+                    'command': command,
+                    'start_time': start_time,
+                    'entry_type': entry.get('type', ''),
+                    'snippet': snippet,
+                })
+                hits += 1
+        return results
+
     def delete_session(self, session_id: str) -> bool:
         """删除指定会话"""
         if not self._validate_session_id(session_id):

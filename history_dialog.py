@@ -4,10 +4,10 @@
 """
 from PyQt6.QtWidgets import (
     QDialog, QVBoxLayout, QHBoxLayout, QTableWidget,
-    QTableWidgetItem, QPushButton, QLabel, QMessageBox,
+    QTableWidgetItem, QPushButton, QLabel, QLineEdit, QMessageBox,
     QHeaderView, QTextEdit, QSplitter, QWidget, QSizePolicy
 )
-from PyQt6.QtCore import Qt, QThread, pyqtSignal
+from PyQt6.QtCore import Qt, QThread, QTimer, pyqtSignal
 from PyQt6.QtGui import QFont
 
 from session_manager import SessionManager, Session
@@ -130,6 +130,34 @@ class _SessionPreviewWorker(QThread):
         self.loaded.emit(self._session_id, session, text)
 
 
+class _SessionSearchWorker(QThread):
+    """后台全局搜索：在全部历史会话的输入/输出里搜关键词。
+
+    可达数百 MB 的会话目录整体扫描必须离开 GUI 线程；seq 用于
+    latest-wins（结果到达时若已发起新搜索则丢弃），_cancelled 让
+    被淘汰的旧扫描尽快退出。
+    """
+    done = pyqtSignal(int, list)  # (seq, results)
+
+    def __init__(self, manager: SessionManager, query: str, seq: int):
+        super().__init__()
+        self._manager = manager
+        self._query = query
+        self._seq = seq
+        self._cancelled = False
+
+    def cancel(self):
+        self._cancelled = True
+
+    def run(self):
+        try:
+            results = self._manager.search_sessions(
+                self._query, cancel_check=lambda: self._cancelled)
+        except Exception:
+            results = []
+        self.done.emit(self._seq, results)
+
+
 class HistoryDialog(QDialog):
     """历史记录对话框"""
 
@@ -139,6 +167,10 @@ class HistoryDialog(QDialog):
         self.current_session: Session = None
         self._list_worker = None
         self._reload_pending = False
+        self._sessions_cache = []   # 最近一次加载的会话摘要（退出搜索时恢复列表）
+        self._search_mode = False
+        self._search_seq = 0
+        self._search_worker = None
 
         self._setup_ui()
         self._load_sessions()
@@ -225,6 +257,25 @@ class HistoryDialog(QDialog):
         left_widget = QWidget()
         left_layout = QVBoxLayout(left_widget)
         left_layout.setContentsMargins(0, 0, 0, 0)
+
+        # 全局搜索行：关键词在全部历史会话的命令与输出里找
+        search_row = QHBoxLayout()
+        self.search_input = QLineEdit()
+        self.search_input.setPlaceholderText(t("history.search_placeholder"))
+        self.search_input.setClearButtonEnabled(True)
+        self.search_input.setStyleSheet(
+            "QLineEdit { background-color: #2d2d44; color: #eaeaea; border: none;"
+            " border-radius: 5px; padding: 8px; }")
+        self.search_input.textChanged.connect(self._on_search_text_changed)
+        search_row.addWidget(self.search_input, 1)
+        self.search_hits_label = QLabel("")
+        self.search_hits_label.setStyleSheet("color: #888;")
+        search_row.addWidget(self.search_hits_label)
+        left_layout.addLayout(search_row)
+        self._search_debounce = QTimer(self)
+        self._search_debounce.setSingleShot(True)
+        self._search_debounce.setInterval(400)
+        self._search_debounce.timeout.connect(self._run_search)
 
         self.table = QTableWidget()
         self.table.setColumnCount(5)
@@ -317,25 +368,51 @@ class HistoryDialog(QDialog):
             lambda w=worker: (_ACTIVE_WORKERS.discard(w), w.deleteLater()))
         worker.start()
 
+    def _row_session_id(self, row):
+        """取某行对应的会话 id。搜索结果模式下第 0 列显示的是时间，
+        真实 id 存在 UserRole；普通列表模式两者一致。"""
+        if row is None or row < 0:
+            return None
+        item = self.table.item(row, 0)
+        if item is None:
+            return None
+        data = item.data(Qt.ItemDataRole.UserRole)
+        return data if data else item.text()
+
     def _on_sessions_loaded(self, sessions):
         self._list_worker = None
         if self._reload_pending:
             # 加载期间又有删除/刷新请求，用新数据再跑一轮
             self._reload_pending = False
             self._load_sessions()
+        self._sessions_cache = list(sessions)
+        # 搜索模式下不去覆盖搜索结果表格，缓存留待退出搜索时恢复
+        if self._search_mode:
+            return
+        self._populate_session_rows(sessions)
+
+    def _populate_session_rows(self, sessions):
         # 记住当前选中的会话，重建后恢复
-        selected_id = None
-        row = self.table.currentRow()
-        if row >= 0 and self.table.item(row, 0):
-            selected_id = self.table.item(row, 0).text()
+        selected_id = self._row_session_id(self.table.currentRow())
 
         self.table.setUpdatesEnabled(False)
         try:
+            self.table.setColumnCount(5)
+            self.table.setHorizontalHeaderLabels([
+                t("history.col_session_id"), t("history.col_command"),
+                t("history.col_source"), t("history.col_start_time"),
+                t("history.col_entry_count"),
+            ])
+            header = self.table.horizontalHeader()
+            header.setSectionResizeMode(QHeaderView.ResizeMode.Interactive)
+            header.setSectionResizeMode(2, QHeaderView.ResizeMode.Stretch)
             self.table.setRowCount(0)
             self.table.setRowCount(len(sessions))
             restore_row = -1
             for row, session in enumerate(sessions):
-                self.table.setItem(row, 0, QTableWidgetItem(session['session_id']))
+                id_item = QTableWidgetItem(session['session_id'])
+                id_item.setData(Qt.ItemDataRole.UserRole, session['session_id'])
+                self.table.setItem(row, 0, id_item)
                 self.table.setItem(row, 1, QTableWidgetItem(session['command']))
                 src = session.get('working_directory', '') or t("history.source_unknown")
                 src_item = QTableWidgetItem(src)
@@ -350,6 +427,74 @@ class HistoryDialog(QDialog):
         finally:
             self.table.setUpdatesEnabled(True)
 
+    # ---------- 全局搜索（在全部历史会话的命令与输出里找） ----------
+
+    def _on_search_text_changed(self, text):
+        if not text.strip():
+            self._search_debounce.stop()
+            self._exit_search_mode()
+            return
+        self._search_debounce.start()
+
+    def _run_search(self):
+        query = self.search_input.text().strip()
+        if len(query) < 2:
+            return
+        self._search_seq += 1
+        # 旧扫描尽快退出（结果也会因 seq 不匹配被丢弃）
+        if self._search_worker is not None:
+            self._search_worker.cancel()
+        self.search_hits_label.setText(t("history.search_running"))
+        worker = _SessionSearchWorker(self.session_manager, query, self._search_seq)
+        self._search_worker = worker
+        _ACTIVE_WORKERS.add(worker)
+        worker.done.connect(self._on_search_done)
+        worker.finished.connect(
+            lambda w=worker: (_ACTIVE_WORKERS.discard(w), w.deleteLater()))
+        worker.start()
+
+    def _on_search_done(self, seq, results):
+        if seq != self._search_seq or not self.search_input.text().strip():
+            return  # 已有更新的搜索/已清空 → 丢弃过期结果
+        self._search_worker = None
+        self._search_mode = True
+        self.search_hits_label.setText(t("history.search_hits", count=len(results)))
+        self.table.setUpdatesEnabled(False)
+        try:
+            self.table.setColumnCount(3)
+            self.table.setHorizontalHeaderLabels([
+                t("history.col_start_time"), t("history.col_command"),
+                t("history.col_snippet"),
+            ])
+            header = self.table.horizontalHeader()
+            header.setSectionResizeMode(QHeaderView.ResizeMode.Interactive)
+            header.setSectionResizeMode(2, QHeaderView.ResizeMode.Stretch)
+            self.table.setColumnWidth(0, 150)
+            self.table.setColumnWidth(1, 120)
+            self.table.setRowCount(0)
+            self.table.setRowCount(len(results))
+            for row, hit in enumerate(results):
+                time_item = QTableWidgetItem(hit['start_time'])
+                time_item.setData(Qt.ItemDataRole.UserRole, hit['session_id'])
+                self.table.setItem(row, 0, time_item)
+                self.table.setItem(row, 1, QTableWidgetItem(hit['command']))
+                snip_item = QTableWidgetItem(hit['snippet'])
+                snip_item.setToolTip(hit['snippet'])
+                self.table.setItem(row, 2, snip_item)
+        finally:
+            self.table.setUpdatesEnabled(True)
+
+    def _exit_search_mode(self):
+        self._search_seq += 1  # 使在途搜索的结果全部过期
+        if self._search_worker is not None:
+            self._search_worker.cancel()
+            self._search_worker = None
+        self.search_hits_label.setText("")
+        if not self._search_mode:
+            return
+        self._search_mode = False
+        self._populate_session_rows(self._sessions_cache)
+
     def _on_selection_changed(self):
         """选择变化"""
         selected = self.table.selectedItems()
@@ -363,9 +508,9 @@ class HistoryDialog(QDialog):
         self.current_session = None
 
         if has_selection:
-            row = self.table.currentRow()
-            session_id = self.table.item(row, 0).text()
-            self._preview_session(session_id)
+            session_id = self._row_session_id(self.table.currentRow())
+            if session_id:
+                self._preview_session(session_id)
 
     def _preview_session(self, session_id: str):
         """预览会话：后台线程整文件解析 + 生成文本，完成后回填"""
@@ -379,9 +524,7 @@ class HistoryDialog(QDialog):
 
     def _on_preview_loaded(self, session_id: str, session, text: str):
         # 到达时选中已经变了 → 丢弃过期结果（快速换行选择时 latest-wins）
-        row = self.table.currentRow()
-        item = self.table.item(row, 0) if row >= 0 else None
-        if item is None or item.text() != session_id:
+        if self._row_session_id(self.table.currentRow()) != session_id:
             return
         if session is None:
             self.preview.setPlainText("")
@@ -434,11 +577,9 @@ class HistoryDialog(QDialog):
 
     def _delete_session(self):
         """删除会话"""
-        row = self.table.currentRow()
-        if row < 0:
+        session_id = self._row_session_id(self.table.currentRow())
+        if not session_id:
             return
-
-        session_id = self.table.item(row, 0).text()
 
         reply = QMessageBox.question(
             self, t("history.confirm_delete_title"),
@@ -449,6 +590,9 @@ class HistoryDialog(QDialog):
         if reply == QMessageBox.StandardButton.Yes:
             if self.session_manager.delete_session(session_id):
                 self._load_sessions()
+                # 搜索模式下重跑当前搜索，清掉已删会话的命中行
+                if self._search_mode:
+                    self._run_search()
                 self.preview.clear()
                 self.current_session = None
                 QMessageBox.information(self, t("history.delete_success_title"), t("history.delete_success_msg"))
