@@ -214,11 +214,43 @@ from PyQt6.QtWidgets import (
 )
 from PyQt6.QtCore import QThread, pyqtSignal, Qt, QTimer, QEvent, QPoint, QUrl, QMimeData
 from PyQt6.QtGui import (
-    QFont, QColor, QPen, QFontMetrics, QFontMetricsF, QFontInfo,
+    QFont, QColor, QPainter, QPen, QFontMetrics, QFontMetricsF, QFontInfo,
     QKeyEvent, QResizeEvent, QShortcut, QKeySequence,
     QMouseEvent, QAction, QDesktopServices, QDragEnterEvent, QDropEvent,
     QPixmap, QImage
 )
+
+
+class _MarkScrollBar(QScrollBar):
+    """终端右缘滚动条 + 命令标记刻度。
+
+    marks_fraction_provider 返回 0..1 的比例列表（命令输入行在全部内容中的
+    位置），在槽轨道上画细刻度线，配合 Alt+↑/↓ 的命令间跳转做视觉锚点。
+    """
+
+    def __init__(self, orientation, parent=None):
+        super().__init__(orientation, parent)
+        self.marks_fraction_provider = None
+
+    def paintEvent(self, event):
+        super().paintEvent(event)
+        provider = self.marks_fraction_provider
+        if provider is None:
+            return
+        try:
+            fractions = provider()
+        except Exception:
+            return
+        if not fractions:
+            return
+        painter = QPainter(self)
+        color = QColor(120, 180, 255, 170)
+        h = self.height()
+        w = self.width()
+        for f in fractions:
+            y = 1 + int(f * (h - 3))
+            painter.fillRect(2, y, w - 4, 2, color)
+        painter.end()
 
 
 class TerminalSignalBridge(QThread):
@@ -636,9 +668,16 @@ class TerminalWidget(TerminalRenderMixin, QWidget):
         self._search_line_cache = OrderedDict()
         self._SEARCH_LINE_CACHE_MAX = 30000
 
+        # 命令标记：用户按 Enter 提交命令时记录的行位置（累计行号坐标，
+        # 不随历史 deque 丢头失效；换算见 _current_mark_positions）。
+        # Alt+↑/↓ 在标记间跳转，滚动条画刻度。
+        self._command_marks = []
+        self._COMMAND_MARKS_MAX = 500
+
         # 垂直滚动条：覆盖在右缘的子控件，不参与布局（终端为自绘 widget）
         self._scrollbar_syncing = False  # 防止 setValue/setRange 触发信号回环
-        self._v_scrollbar = QScrollBar(Qt.Orientation.Vertical, self)
+        self._v_scrollbar = _MarkScrollBar(Qt.Orientation.Vertical, self)
+        self._v_scrollbar.marks_fraction_provider = self._mark_fractions
         self._v_scrollbar.setFixedWidth(self.SCROLLBAR_WIDTH)
         self._v_scrollbar.setFocusPolicy(Qt.FocusPolicy.NoFocus)
         self._v_scrollbar.hide()
@@ -859,6 +898,9 @@ class TerminalWidget(TerminalRenderMixin, QWidget):
             self._position_scrollbar()
             sb.show()
             sb.raise_()
+        else:
+            # range/value 未变时 Qt 不会重绘，但命令标记可能新增了 → 刷新刻度
+            sb.update()
 
     def _on_scrollbar_value_changed(self, value: int):
         """拖动滚动条 → 更新 scroll_offset 并整屏重绘"""
@@ -1814,6 +1856,18 @@ class TerminalWidget(TerminalRenderMixin, QWidget):
                 event.accept()
                 return
 
+        # Alt(Option)+Up/Down：在命令输入行之间跳转（配合滚动条刻度回看长输出）。
+        # 备用屏幕不拦截——TUI（vim/htop 等）可能用 Alt+方向键，原样透传。
+        if (key in (Qt.Key.Key_Up, Qt.Key.Key_Down)
+                and modifiers & Qt.KeyboardModifier.AltModifier
+                and not (modifiers & (Qt.KeyboardModifier.ControlModifier
+                                      | Qt.KeyboardModifier.ShiftModifier
+                                      | Qt.KeyboardModifier.MetaModifier))
+                and not getattr(self.screen, '_in_alt_screen', False)):
+            self._jump_to_command_mark(-1 if key == Qt.Key.Key_Up else 1)
+            event.accept()
+            return
+
         # Escape 关闭搜索栏
         if key == Qt.Key.Key_Escape and self._search_bar and self._search_bar.isVisible():
             self._hide_search_bar()
@@ -1935,6 +1989,8 @@ class TerminalWidget(TerminalRenderMixin, QWidget):
                 if self.input_buffer.strip():
                     self.input_recorded.emit(self.input_buffer)
                 self.input_buffer = ""
+                # 记录命令标记（Alt+↑/↓ 跳转 + 滚动条刻度）
+                self._record_command_mark()
         elif key == Qt.Key.Key_Backspace:
             data = b'\x7f'
             if self.input_buffer:
@@ -2171,6 +2227,67 @@ class TerminalWidget(TerminalRenderMixin, QWidget):
         """滚动到底部（最新内容）"""
         if self.scroll_offset != 0:
             self.scroll_offset = 0
+            self._invalidate_render_cache()
+
+    # ---------- 命令标记（Alt+↑/↓ 跳转 + 滚动条刻度） ----------
+
+    def _record_command_mark(self):
+        """按 Enter 提交命令时记录当前输入行的位置。
+
+        用「累计行号」坐标（_total_history_lines + cursor.y）：单调递增，
+        历史 deque 满员丢头后仍可换算，不会指错行。备用屏幕（TUI 内部回车）
+        不记录。
+        """
+        screen = getattr(self, 'screen', None)
+        if screen is None or getattr(screen, '_in_alt_screen', False):
+            return
+        cum = screen._total_history_lines + screen.cursor.y
+        marks = self._command_marks
+        if marks and marks[-1] == cum:
+            return
+        marks.append(cum)
+        if len(marks) > self._COMMAND_MARKS_MAX:
+            del marks[:len(marks) - self._COMMAND_MARKS_MAX]
+
+    def _current_mark_positions(self):
+        """把累计行号换算为当前绝对行号（0 = 现存历史最顶行），剪掉已被
+        deque 丢弃的旧标记。返回升序列表。"""
+        screen = getattr(self, 'screen', None)
+        if screen is None:
+            return []
+        shift = screen._total_history_lines - self._get_history_count()
+        return [cum - shift for cum in self._command_marks if cum - shift >= 0]
+
+    def _mark_fractions(self):
+        """标记在全部内容（历史+屏幕）中的比例位置，供滚动条画刻度。"""
+        total = self._get_history_count() + self.term_rows
+        if total <= 0:
+            return []
+        return [m / total for m in self._current_mark_positions()]
+
+    def _jump_to_command_mark(self, direction: int):
+        """Alt+↑/↓：跳到上一条/下一条命令输入行（该行置于视口顶部）。
+
+        以当前视口顶部的绝对行号为基准找相邻标记；向下越过最后一个标记时
+        回到底部（最新输出），与用户「跳完看结果」的预期一致。
+        """
+        hist = self._get_history_count()
+        view_top = hist - self.scroll_offset
+        marks = self._current_mark_positions()
+        if direction < 0:
+            cands = [m for m in marks if m < view_top]
+            target = cands[-1] if cands else None
+        else:
+            cands = [m for m in marks if m > view_top]
+            target = cands[0] if cands else None
+        if target is None:
+            if direction > 0:
+                self.scroll_to_bottom()
+            return
+        new_offset = max(0, min(hist - target, hist))
+        if new_offset != self.scroll_offset:
+            self.scroll_offset = new_offset
+            self._scroll_accum = 0.0
             self._invalidate_render_cache()
 
     def _auto_scroll_tick(self):

@@ -164,6 +164,7 @@ TRANSLATIONS = {
     "shortcuts.sc.term_page": {"zh": "向上/向下翻一页历史", "en": "Scroll history one page up/down"},
     "shortcuts.sc.term_home_end": {"zh": "跳到历史最顶部/最底部", "en": "Jump to top/bottom of history"},
     "shortcuts.sc.term_jump": {"zh": "跳到历史最顶部/最底部", "en": "Jump to top/bottom of history"},
+    "shortcuts.sc.term_cmd_marks": {"zh": "跳到上一条/下一条命令", "en": "Jump to previous/next command"},
     "shortcuts.sc.term_line_ends": {"zh": "光标跳到行首/行尾", "en": "Move cursor to line start/end"},
     "shortcuts.sc.term_open_search": {"zh": "打开终端搜索（含回滚历史）", "en": "Open terminal search (incl. scrollback)"},
     "shortcuts.sc.term_close_search": {"zh": "关闭搜索栏", "en": "Close the search bar"},
