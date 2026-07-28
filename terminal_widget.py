@@ -5878,10 +5878,10 @@ if (hasFileURL) {{
     def _get_default_shell(self) -> str:
         """获取系统默认 shell"""
         if sys.platform == 'win32':
-            if shutil.which('pwsh'):
-                return 'pwsh'
-            if shutil.which('powershell'):
-                return 'powershell'
+            # 与 dialogs.get_default_shell 保持一致：默认 cmd.exe，
+            # PowerShell 偶发启动失败会导致终端起不来
+            if shutil.which('cmd.exe'):
+                return 'cmd.exe'
             return os.environ.get('COMSPEC', 'cmd.exe')
         else:
             user_shell = os.environ.get('SHELL', '')

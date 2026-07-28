@@ -24,16 +24,15 @@ def get_default_shell():
     """
     获取系统默认 shell，跨平台支持：
     - macOS/Linux: 优先 $SHELL，然后 zsh -> bash -> sh
-    - Windows: 优先 PowerShell，然后 cmd.exe
+    - Windows: cmd.exe
     """
     if sys.platform == 'win32':
         # Windows 平台
-        # 优先使用 PowerShell（更现代）
-        if shutil.which('pwsh'):  # PowerShell Core (跨平台版本)
-            return 'pwsh'
-        if shutil.which('powershell'):  # Windows PowerShell
-            return 'powershell'
-        # 回退到 cmd.exe
+        # 默认用 cmd.exe，不用 PowerShell：预设的第一行就是要 spawn 的
+        # shell 进程，PowerShell 偶发启动失败/卡住（执行策略、Profile 加载），
+        # 会话就整个起不来。用户仍可在预设里手动填 powershell/pwsh。
+        if shutil.which('cmd.exe'):
+            return 'cmd.exe'
         comspec = os.environ.get('COMSPEC', '')
         if comspec and shutil.which(comspec):
             return comspec
