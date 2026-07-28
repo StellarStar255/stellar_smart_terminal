@@ -2294,6 +2294,11 @@ class MainWindow(ThemeMixin, ToolbarMixin, ConfigMixin, ExplorerPanelMixin,
             # （来自其他终端/Git 面板的提醒不受影响，仍靠切窗口/切 tab 清除）
             if obj is getattr(self, '_nav_attention_source', None):
                 self._clear_nav_attention()
+            # 标签页徽章：在该终端按键 = 已响应，挂起的橙/绿点回落
+            if isinstance(obj, TerminalWidget):
+                _idx = self._find_tab_of_terminal(obj)
+                if _idx is not None:
+                    self._clear_tab_pending_badge(_idx)
         return super().eventFilter(obj, event)
 
     def _shift_held(self):
@@ -2497,6 +2502,8 @@ class MainWindow(ThemeMixin, ToolbarMixin, ConfigMixin, ExplorerPanelMixin,
 
         # 更新标签页名称 (预设名-文件夹名)
         tab_idx = self.tab_widget.currentIndex()
+        # 标签页徽章：会话已启动 → 运行状态点
+        self._refresh_tab_badge(tab_idx)
 
         # 更新该标签页的工作目录记录（用于拖拽分离时传递给新窗口）
         self.tab_cwds[tab_idx] = working_dir
@@ -4943,6 +4950,8 @@ class MainWindow(ThemeMixin, ToolbarMixin, ConfigMixin, ExplorerPanelMixin,
         if self.isActiveWindow() and terminal is self.active_terminal:
             return
         self._request_nav_attention(terminal)
+        # 标签页徽章：完成（绿点）
+        self._set_tab_pending_badge(terminal, 'done')
 
     def _on_terminal_interaction(self, terminal):
         """某个终端正在等待用户操作（响铃 / 确认框 / y/n 询问）。
@@ -4952,6 +4961,73 @@ class MainWindow(ThemeMixin, ToolbarMixin, ConfigMixin, ExplorerPanelMixin,
         按键响应后由 eventFilter 清除。
         """
         self._request_nav_attention(terminal)
+        # 标签页徽章：等待确认（橙点）
+        self._set_tab_pending_badge(terminal, 'waiting')
+
+    # ---------- 标签页状态徽章（运行中/等确认/已完成） ----------
+    # 多标签同时跑 claude 时一眼定位：灰点=会话运行中，橙点=等你确认
+    # （BEL/询问），绿点=已完成（输出停顿）。切到该标签或在其终端按键即
+    # 视为已查看，回落到运行状态点。
+
+    _TAB_BADGE_COLORS = {
+        'running': '#8b95a5',
+        'waiting': '#f59e0b',
+        'done': '#22c55e',
+    }
+
+    def _tab_badge_icon(self, state) -> QIcon:
+        cache = getattr(self, '_tab_badge_icon_cache', None)
+        if cache is None:
+            cache = self._tab_badge_icon_cache = {}
+        icon = cache.get(state)
+        if icon is None:
+            pm = QPixmap(12, 12)
+            pm.fill(Qt.GlobalColor.transparent)
+            p = QPainter(pm)
+            p.setRenderHint(QPainter.RenderHint.Antialiasing)
+            p.setPen(Qt.PenStyle.NoPen)
+            p.setBrush(QColor(self._TAB_BADGE_COLORS[state]))
+            p.drawEllipse(2, 2, 8, 8)
+            p.end()
+            icon = QIcon(pm)
+            cache[state] = icon
+        return icon
+
+    def _find_tab_of_terminal(self, terminal):
+        for idx, terminals in self.tab_terminals.items():
+            if terminal in terminals:
+                return idx
+        return None
+
+    def _set_tab_pending_badge(self, terminal, state):
+        """给终端所在标签页挂起 waiting/done 徽章并刷新。"""
+        idx = self._find_tab_of_terminal(terminal)
+        if idx is None:
+            return
+        page = self.tab_widget.widget(idx)
+        if page is not None:
+            page._badge_pending = state
+        self._refresh_tab_badge(idx)
+
+    def _clear_tab_pending_badge(self, idx):
+        """用户已查看（切到该标签/按键）：清挂起态，回落运行状态点。"""
+        page = self.tab_widget.widget(idx)
+        if page is not None and getattr(page, '_badge_pending', None) is not None:
+            page._badge_pending = None
+        self._refresh_tab_badge(idx)
+
+    def _refresh_tab_badge(self, idx):
+        """按「挂起态优先，否则看是否有终端在运行」刷新一个标签页的图标。"""
+        page = self.tab_widget.widget(idx)
+        if page is None:
+            return
+        state = getattr(page, '_badge_pending', None)
+        if state is None:
+            terminals = self.tab_terminals.get(idx, [])
+            if any(t.is_running() for t in terminals):
+                state = 'running'
+        self.tab_widget.setTabIcon(
+            idx, self._tab_badge_icon(state) if state else QIcon())
 
     def _request_nav_attention(self, source=None):
         """点亮本窗口的导航绿点（后台任务完成提醒的通用入口）。

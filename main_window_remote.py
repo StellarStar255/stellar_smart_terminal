@@ -248,6 +248,8 @@ class RemotePanelMixin:
         # 用 _start_and_execute：先起 shell，再回车跑 ssh；ssh 退出后用户回到本地 shell
         try:
             term._start_and_execute([cmd_string])
+            # 标签页徽章：SSH 会话已启动 → 运行状态点
+            self._refresh_tab_badge(idx)
         except Exception as e:
             self.statusbar.showMessage(f"Failed to start SSH: {e}", 5000)
 

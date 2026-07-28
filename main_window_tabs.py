@@ -1114,6 +1114,8 @@ class TabSplitMixin:
         # 切到别的 tab 也算"已查看"，清除提醒小标
         if self.isActiveWindow():
             self._clear_nav_attention()
+        # 标签页徽章：切到即视为已查看，挂起的 等确认/已完成 回落为运行状态点
+        self._clear_tab_pending_badge(index)
         terminals = self.tab_terminals.get(index, [])
         if terminals:
             # 设置第一个终端为活动终端
@@ -1169,6 +1171,14 @@ class TabSplitMixin:
                     stopped_mark = t("status.tab_stopped")
                     if stopped_mark not in current_title:
                         self.tab_widget.setTabText(idx, f"{current_title} {stopped_mark}")
+                    # 徽章：后台标签的会话结束 → 绿点提醒；正在看的 → 清点
+                    page = self.tab_widget.widget(idx)
+                    if page is not None:
+                        if idx != self.tab_widget.currentIndex() or not self.isActiveWindow():
+                            page._badge_pending = 'done'
+                        else:
+                            page._badge_pending = None
+                    self._refresh_tab_badge(idx)
                 break
 
         # 如果是当前标签页，更新状态
