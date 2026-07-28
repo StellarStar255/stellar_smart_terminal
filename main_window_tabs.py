@@ -1464,6 +1464,13 @@ class TabSplitMixin:
         editor_in_main = hasattr(self, 'editor_area') and self.main_splitter.indexOf(self.editor_area) >= 0
         if editor_in_main:
             self.main_splitter.setSizes(self._resolve_main_splitter_sizes_with_editor())
+            # 上面的 setSizes 用的是记忆/默认比例，会把弹簧展开的一侧打回去。
+            # 这条路径不止面板切换会走：从别的程序切回窗口时 changeEvent 的
+            # 跨窗口左侧栏对齐、其它窗口拖侧栏的广播同样到这。而此类重排不挪
+            # 键盘焦点——点击已聚焦的编辑器不会再发 focusChanged，弹簧无法
+            # 自愈，表现为「切回窗口后点编辑框反而更窄」（Ubuntu 点击即激活
+            # 尤其常见）。统一在重排后按原侧无动画恢复弹簧比例。
+            self._reconcile_spring_after_layout_change()
         elif left_width > 0 or log_width > 0:
             # 用 splitter 实际宽度作为总和，让 left_width 被原样保留（参见 _resolve... 的注释）
             total = max(self.main_splitter.width(), 1000)

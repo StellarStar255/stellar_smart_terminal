@@ -3220,8 +3220,15 @@ class MainWindow(ThemeMixin, ToolbarMixin, ConfigMixin, ExplorerPanelMixin,
         if not self._spring_applicable():
             return
         target = self._spring_target_for_widget(new)
-        if target is None or target == self._spring_current_side:
+        if target is None:
             return
+        if target == self._spring_current_side:
+            # 目标侧与记录一致时通常无需重排。但记录可能与实际布局脱节
+            # （外部 setSizes 重排后记录未更新），此时按实际布局自愈：
+            # 点击/聚焦哪侧就展宽哪侧。动画进行中（正朝记录侧过渡）不打断，
+            # 否则「展开动画起步即被重启」会卡一下。
+            if self._spring_anim is not None or self._spring_actual_side() == target:
+                return
         self._apply_spring(target)
 
     def _spring_actual_side(self):
