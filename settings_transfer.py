@@ -50,6 +50,9 @@ PORTABLE_KEYS = (
     'image_prefix_enabled',
     'image_save_local',
     'auto_update_check',
+    'workspace_restore_enabled',
+    'output_alert_enabled',
+    'output_alert_patterns',
     # Git 代理
     'git_proxy',
     'git_proxies',
