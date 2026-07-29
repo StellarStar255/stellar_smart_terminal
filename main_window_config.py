@@ -431,6 +431,22 @@ class ConfigMixin:
                     config['navigator_font_size'] = existing_config['navigator_font_size']
             # 原地合并：保留由其它组件维护、本函数未列出的字段（如 git_widget
             # 写入的 git_proxy / git_proxies）。写盘由 app_config 在锁内原子完成。
+            # 工作区快照搭车：随每次配置落盘（30s 自动保存/各类设置动作）刷新，
+            # 让"只动了窗口位置/大小"这类无标签事件的变化也保持新鲜。
+            # 注意：此处已在 app_config 锁内，开关只能读 existing_config，
+            # 不能调 read_config（非重入锁会死锁）；关闭级联中不刷新
+            # （防止退出时快照逐窗缩水，同 _checkpoint_workspace 的约定）。
+            if (not getattr(self, '_closing_in_progress', False)
+                    and existing_config.get('workspace_restore_enabled', True)):
+                try:
+                    entries = _mw.MainWindow._collect_windows_snapshot()
+                    if entries:
+                        import time as _time
+                        config['workspace_snapshot'] = {
+                            'ts': _time.time(), 'windows': entries}
+                except Exception:
+                    logger.debug("_build_config_for_save: workspace snapshot skipped",
+                                 exc_info=True)
             existing_config.update(config)
             # 清理已废弃的旧键（解析开关换键名后，旧键会因合并写永久残留）
             existing_config.pop('parse_off_gui_thread', None)
