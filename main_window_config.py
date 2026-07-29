@@ -159,6 +159,11 @@ class ConfigMixin:
                 if os.environ.get('STELLAR_PARSE_OFF_GUI') is None:
                     TerminalWidget.PARSE_ON_READER_THREAD = bool(
                         config.get('parse_on_reader_thread', True))
+                # 输出规则提醒：默认模式 + 用户自定义（进程级，装到终端类上）
+                TerminalWidget.set_output_alert_rules(
+                    config.get('output_alert_patterns',
+                               _mw.MainWindow.DEFAULT_ALERT_PATTERNS),
+                    config.get('output_alert_enabled', True))
                 # 加载导航面板停靠方式（'float' / 'embed'，全局记忆）
                 _dock_mode = config.get('navigator_dock_mode', 'embed')
                 if _dock_mode in ('float', 'embed'):
@@ -394,6 +399,8 @@ class ConfigMixin:
                 'notify_sound': getattr(self, '_notify_sound', 'Submarine'),  # 保存完成提示音
                 'terminal_scrollback': TerminalWidget.SCROLLBACK_LINES,  # 保存终端 scrollback 上限
                 'parse_on_reader_thread': TerminalWidget.PARSE_ON_READER_THREAD,  # 保存"解析放后台线程"开关（旧键 parse_off_gui_thread 已废弃）
+                'output_alert_enabled': TerminalWidget.ALERT_RULES_ENABLED,
+                'output_alert_patterns': [p for p, _ in TerminalWidget._ALERT_COMPILED],
                 'language': get_language(),  # 保存语言设置
                 'keyboard_shortcuts': shortcuts_to_save,  # 保存自定义快捷键（带多窗口防覆盖）
                 'window_geometry': [self.x(), self.y(), self.width(), self.height()],

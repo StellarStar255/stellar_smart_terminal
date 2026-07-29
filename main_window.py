@@ -2259,6 +2259,7 @@ class MainWindow(ThemeMixin, ToolbarMixin, ConfigMixin, ExplorerPanelMixin,
         terminal.rename_split_requested.connect(lambda t=terminal: self._rename_split(t))
         terminal.attention_requested.connect(lambda t=terminal: self._on_terminal_attention(t))
         terminal.interaction_requested.connect(lambda t=terminal: self._on_terminal_interaction(t))
+        terminal.alert_matched.connect(lambda pat, t=terminal: self._on_terminal_alert(t, pat))
         terminal.scrollback_pressure_changed.connect(lambda lv, t=terminal: self._on_scrollback_pressure(t))
 
         # 设置工作目录（用于自动启动时）
@@ -3669,6 +3670,13 @@ class MainWindow(ThemeMixin, ToolbarMixin, ConfigMixin, ExplorerPanelMixin,
             lambda on: app_config.update_config(
                 {'workspace_restore_enabled': bool(on)},
                 description='workspace restore toggle'))
+        alert_act = menu.addAction(t("alert.menu_toggle"))
+        alert_act.setCheckable(True)
+        alert_act.setChecked(TerminalWidget.ALERT_RULES_ENABLED)
+        alert_act.setToolTip(t("alert.menu_toggle_tooltip"))
+        alert_act.toggled.connect(self._set_output_alerts_enabled)
+        alert_rules_act = menu.addAction(t("alert.menu_edit"))
+        alert_rules_act.triggered.connect(self._edit_output_alert_rules)
         btn = self.toolbar_settings_btn
         menu.exec(btn.mapToGlobal(QPoint(0, btn.height())))
 
@@ -3677,6 +3685,16 @@ class MainWindow(ThemeMixin, ToolbarMixin, ConfigMixin, ExplorerPanelMixin,
     # 必然重启完成；超过视为陈旧快照（比如用户在退出确认里点了取消、几天后
     # 才再启动），启动时只消费不恢复。
     _UPDATE_RESTORE_MAX_AGE = 30 * 60
+
+    # 输出规则提醒的默认模式（保守取值，降低 claude 叙述性文本的误报）：
+    # 仅匹配强失败信号；用户可在 ⚙ →「编辑输出提醒规则…」增删（正则，每行一条）
+    DEFAULT_ALERT_PATTERNS = [
+        r'Traceback \(most recent call last\)',
+        r'\bFAILED\b',
+        r'Segmentation fault',
+        r'\bpanic:',
+        r'^fatal:',
+    ]
 
     @staticmethod
     def _collect_windows_snapshot():
@@ -3949,6 +3967,31 @@ class MainWindow(ThemeMixin, ToolbarMixin, ConfigMixin, ExplorerPanelMixin,
         # 保持引用防 GC，与拖拽分离/远程新窗口同一跟踪列表
         self.detached_windows.append(win)
         return win
+
+    def _set_output_alerts_enabled(self, enabled: bool):
+        """切换输出规则提醒（对所有终端立即生效）并落盘。"""
+        TerminalWidget.set_output_alert_rules(
+            [p for p, _ in TerminalWidget._ALERT_COMPILED] or
+            MainWindow.DEFAULT_ALERT_PATTERNS, enabled)
+        self._save_config()
+
+    def _edit_output_alert_rules(self):
+        """编辑输出提醒规则：每行一条正则，空行忽略；清空恢复默认。"""
+        from PyQt6.QtWidgets import QInputDialog
+        current = [p for p, _ in TerminalWidget._ALERT_COMPILED]
+        text, ok = QInputDialog.getMultiLineText(
+            self, t("alert.edit_title"), t("alert.edit_label"),
+            "\n".join(current))
+        if not ok:
+            return
+        patterns = [ln.strip() for ln in text.splitlines() if ln.strip()]
+        if not patterns:
+            patterns = list(MainWindow.DEFAULT_ALERT_PATTERNS)
+        TerminalWidget.set_output_alert_rules(
+            patterns, TerminalWidget.ALERT_RULES_ENABLED)
+        self._save_config()
+        self.statusbar.showMessage(
+            t("alert.rules_saved", count=len(TerminalWidget._ALERT_COMPILED)), 4000)
 
     def _set_parse_off_gui(self, enabled: bool):
         """切换"终端解析放到后台线程"。立即对所有终端生效（on_output 每次按此分流），
@@ -5105,6 +5148,20 @@ class MainWindow(ThemeMixin, ToolbarMixin, ConfigMixin, ExplorerPanelMixin,
         self._request_nav_attention(terminal)
         # 标签页徽章：等待确认（橙点）
         self._set_tab_pending_badge(terminal, 'waiting')
+
+    def _on_terminal_alert(self, terminal, pattern: str):
+        """输出命中提醒规则（Traceback/FAILED 等）：橙点 + 导航提醒 + 状态栏。
+
+        与 interaction 同级对待——事故比"等确认"更需要人来看。终端侧已做
+        30s 静默去重，这里无需再防抖。
+        """
+        self._request_nav_attention(terminal)
+        self._set_tab_pending_badge(terminal, 'waiting')
+        try:
+            self.statusbar.showMessage(
+                t("alert.output_matched", pattern=pattern), 6000)
+        except Exception:
+            logger.debug("_on_terminal_alert: suppressed exception", exc_info=True)
 
     # ---------- 标签页状态徽章（运行中/等确认/已完成） ----------
     # 多标签同时跑 claude 时一眼定位：灰点=会话运行中，橙点=等你确认

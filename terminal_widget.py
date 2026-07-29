@@ -290,6 +290,7 @@ class TerminalWidget(TerminalRenderMixin, QWidget):
     rename_split_requested = pyqtSignal()  # 请求重命名当前分屏（显示/修改顶部标题栏）
     attention_requested = pyqtSignal()  # 疑似本轮命令/Claude 执行完毕（输出停顿），请求导航提醒
     interaction_requested = pyqtSignal()  # 终端响铃（BEL）：程序正在等待用户操作（如 Claude 确认提示）
+    alert_matched = pyqtSignal(str)  # 输出命中提醒规则（参数=命中的模式文本）
     _output_activity = pyqtSignal(int)  # 一批输出已处理（参数=字节数）：在 GUI 线程重置空闲计时器
     _history_grew = pyqtSignal(int)  # feed 新增历史行数：读取线程 marshal 回 GUI 线程做回滚位置补偿
     scrollback_pressure_changed = pyqtSignal(int)  # 回滚历史"卡顿压力"等级变化（0 无 / 1 琥珀 / 2 红）
@@ -309,6 +310,28 @@ class TerminalWidget(TerminalRenderMixin, QWidget):
     #   STELLAR_PARSE_OFF_GUI=0 → 强制关（回到 GUI 线程解析）
     #   STELLAR_PARSE_OFF_GUI=1 → 强制开
     PARSE_ON_READER_THREAD = os.environ.get('STELLAR_PARSE_OFF_GUI', '1') != '0'
+
+    # 输出规则提醒（进程级共享，由 MainWindow 从配置载入）：输出命中任一
+    # 正则 → alert_matched 信号（标签橙点 + 导航提醒）。典型用途：后台
+    # 标签里 claude 跑测试崩了（Traceback/FAILED），人在别的 tab 不知道。
+    ALERT_RULES_ENABLED = True
+    _ALERT_COMPILED = []          # [(pattern_str, compiled_regex)]
+    _ALERT_MUTE_SECONDS = 30      # 命中后静默窗口，避免同一事故连环提醒
+
+    @classmethod
+    def set_output_alert_rules(cls, patterns, enabled: bool):
+        """编译并安装提醒规则（对所有终端立即生效）。非法正则跳过并记日志。"""
+        compiled = []
+        for p in patterns or []:
+            p = (p or '').strip()
+            if not p:
+                continue
+            try:
+                compiled.append((p, re.compile(p)))
+            except re.error as e:
+                logger.warning("invalid alert pattern %r skipped: %s", p, e)
+        cls._ALERT_COMPILED = compiled
+        cls.ALERT_RULES_ENABLED = bool(enabled)
 
     # 每个终端的 scrollback（历史回滚）行数上限。pyte 用 deque(maxlen) 在构造时定死，
     # 所以只对「之后新建」的终端生效。值越大越占内存、resize reflow 越慢（O(历史行数)）。
@@ -673,6 +696,11 @@ class TerminalWidget(TerminalRenderMixin, QWidget):
         # Alt+↑/↓ 在标记间跳转，滚动条画刻度。
         self._command_marks = []
         self._COMMAND_MARKS_MAX = 500
+
+        # 输出规则提醒：跨块尾缓冲（模式可能被读取分块切开）+ 静默截止时刻。
+        # 只由输出线程读写（单读取线程），按键解除静默来自 GUI 线程——竞态无害
+        self._alert_tail = ''
+        self._alert_muted_until = 0.0
 
         # 垂直滚动条：覆盖在右缘的子控件，不参与布局（终端为自绘 widget）
         self._scrollbar_syncing = False  # 防止 setValue/setRange 触发信号回环
@@ -1286,6 +1314,13 @@ class TerminalWidget(TerminalRenderMixin, QWidget):
             # 注意：不要过滤可显示的 Unicode 符号（如 ⏺ U+23FA），否则 codex /
             # claude code 这类用 BMP 符号做行首/状态标记的工具会丢失关键信息。
             text = text.replace('\uFFFD', '')  # � (替换字符)
+
+            # 输出规则提醒：命中 Traceback/FAILED 等模式 → 标签橙点+导航提醒
+            if text and self.ALERT_RULES_ENABLED and self._ALERT_COMPILED:
+                try:
+                    self._scan_output_alerts(text)
+                except Exception:
+                    logger.debug("_scan_output_alerts: suppressed exception", exc_info=True)
 
             # 诊断捕获：记录过滤后的文本
             if self._debug_capture_enabled and self._debug_capture_file:
@@ -2036,6 +2071,8 @@ class TerminalWidget(TerminalRenderMixin, QWidget):
 
         if data:
             self._write_to_backend(data)
+            # 用户按键 = 已在处理该终端 → 解除提醒静默，下一次事故重新提醒
+            self._alert_muted_until = 0.0
             event.accept()
 
     def inputMethodEvent(self, event):
@@ -2228,6 +2265,33 @@ class TerminalWidget(TerminalRenderMixin, QWidget):
         if self.scroll_offset != 0:
             self.scroll_offset = 0
             self._invalidate_render_cache()
+
+    # ---------- 输出规则提醒 ----------
+
+    def _scan_output_alerts(self, text: str):
+        """在过滤后的输出上做增量模式匹配（与 feed 同线程，可能是读取线程）。
+
+        - strip_ansi 后再匹配：颜色转义会把关键词切碎；
+        - 保留 256 字符尾缓冲拼接下一块：模式被分块切开也不漏；
+        - 备用屏幕（vim 等全屏 TUI）不扫描；
+        - 命中后静默 _ALERT_MUTE_SECONDS 或直到用户按键，避免连环提醒。
+        """
+        if getattr(self.screen, '_in_alt_screen', False):
+            self._alert_tail = ''
+            return
+        now = time.time()
+        if now < self._alert_muted_until:
+            self._alert_tail = ''
+            return
+        from utils import strip_ansi
+        buf = self._alert_tail + strip_ansi(text)
+        for pattern_str, rx in self._ALERT_COMPILED:
+            if rx.search(buf):
+                self._alert_muted_until = now + self._ALERT_MUTE_SECONDS
+                self._alert_tail = ''
+                self.alert_matched.emit(pattern_str)
+                return
+        self._alert_tail = buf[-256:]
 
     # ---------- 命令标记（Alt+↑/↓ 跳转 + 滚动条刻度） ----------
 
