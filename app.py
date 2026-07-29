@@ -555,8 +555,11 @@ def main():
         QTimer.singleShot(150, lambda: window.launch_initial_session(cli_working_dir))
 
     # 升级重启后恢复升级前打开的窗口（仅当上次「下载并安装」时勾选了
-    # 「升级后自动重新打开当前这些窗口」，快照一次性消费，无快照零开销）
-    MainWindow.restore_windows_after_update(window)
+    # 「升级后自动重新打开当前这些窗口」，快照一次性消费，无快照零开销）。
+    # 未走升级恢复时，按设置恢复上次工作区（窗口/标签布局，运行期持续快照）。
+    # --working-dir 显式指定目录启动（Finder 右键等）时尊重用户意图，不恢复。
+    if not MainWindow.restore_windows_after_update(window) and not cli_working_dir:
+        MainWindow.restore_workspace_on_start(window)
 
     # 安装 Ctrl+C (SIGINT) 处理器：在终端里按两次 Ctrl+C 可保存并退出
     install_sigint_handler(app)

@@ -88,6 +88,8 @@ TRANSLATIONS = {
                "(If macOS shows a security prompt on first click, right-click "
                "the app → Open once to confirm.)")},
     "settings.parse_off_gui": {"zh": "终端解析放到后台线程", "en": "Parse terminals off the GUI thread"},
+    "settings.workspace_restore": {"zh": "启动时恢复上次窗口布局", "en": "Restore workspace on startup"},
+    "settings.workspace_restore_tooltip": {"zh": "重启后自动恢复上次的窗口、标签页与工作目录（不自动启动会话）", "en": "Reopen last windows, tabs and working directories after restart (sessions are not auto-started)"},
     "settings.export_menu": {"zh": "导出设置…", "en": "Export Settings…"},
     "settings.import_menu": {"zh": "导入设置…", "en": "Import Settings…"},
     "settings.export_title": {"zh": "导出设置", "en": "Export Settings"},

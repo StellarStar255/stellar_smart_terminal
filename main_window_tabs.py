@@ -175,6 +175,8 @@ class TabSplitMixin:
             self.current_session = external_session
             self._update_running_state(True)
 
+        # 工作区快照：标签结构变化，限流补写
+        self._checkpoint_workspace()
         return idx
 
     def _close_tab_by_button(self, index):
@@ -1157,6 +1159,8 @@ class TabSplitMixin:
             #   故重载是安全的，不会丢失编辑。）
             if cwd_changed:
                 self._load_local_commands()
+        # 工作区快照：当前标签变化（恢复时要记住停在哪个 tab）
+        self._checkpoint_workspace()
 
     def _on_tab_session_ended(self, terminal):
         """某个标签页的会话结束"""

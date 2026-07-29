@@ -3661,6 +3661,14 @@ class MainWindow(ThemeMixin, ToolbarMixin, ConfigMixin, ExplorerPanelMixin,
             lambda on: app_config.update_config(
                 {'auto_update_check': bool(on)},
                 description='auto update toggle'))
+        ws_act = menu.addAction(t("settings.workspace_restore"))
+        ws_act.setCheckable(True)
+        ws_act.setChecked(MainWindow.workspace_restore_enabled())
+        ws_act.setToolTip(t("settings.workspace_restore_tooltip"))
+        ws_act.toggled.connect(
+            lambda on: app_config.update_config(
+                {'workspace_restore_enabled': bool(on)},
+                description='workspace restore toggle'))
         btn = self.toolbar_settings_btn
         menu.exec(btn.mapToGlobal(QPoint(0, btn.height())))
 
@@ -3670,27 +3678,114 @@ class MainWindow(ThemeMixin, ToolbarMixin, ConfigMixin, ExplorerPanelMixin,
     # 才再启动），启动时只消费不恢复。
     _UPDATE_RESTORE_MAX_AGE = 30 * 60
 
-    def _stash_windows_for_restore(self):
-        """升级重启前把所有打开的窗口快照进配置（工作目录/几何/颜色），
-        供新版本首次启动时恢复（见 restore_windows_after_update）。"""
+    @staticmethod
+    def _collect_windows_snapshot():
+        """收集所有可见窗口的快照（目录/几何/颜色/侧栏/标签页列表）。
+
+        升级重启恢复与工作区恢复共用。首条对应主窗口，其余按创建顺序。
+        """
         wins = [w for w in QApplication.instance().topLevelWidgets()
                 if isinstance(w, MainWindow) and not sip.isdeleted(w)
                 and w.isVisible()]
-        # 按创建时间排序：首条对应升级后的主窗口，其余按原顺序重开
         wins.sort(key=lambda w: getattr(w, '_created_time', datetime.now()))
         entries = []
         for w in wins:
             geo = w.geometry()
+            tabs = []
+            try:
+                for i in range(w.tab_widget.count()):
+                    page = w.tab_widget.widget(i)
+                    tabs.append({
+                        'cwd': w.tab_cwds.get(i) or '',
+                        'name': getattr(page, '_custom_tab_name', None) or '',
+                    })
+            except Exception:
+                logger.debug("_collect_windows_snapshot: suppressed exception", exc_info=True)
             entries.append({
                 'cwd': getattr(w, '_window_cwd', '') or '',
                 'geometry': [geo.x(), geo.y(), geo.width(), geo.height()],
                 'maximized': bool(w.isMaximized()),
                 'color': getattr(w, '_window_color', None),
                 'panel': w._current_sidebar_panel(),
+                'tabs': tabs,
+                'current_tab': w.tab_widget.currentIndex(),
             })
+        return entries
+
+    def _stash_windows_for_restore(self):
+        """升级重启前把所有打开的窗口快照进配置（工作目录/几何/颜色/标签页），
+        供新版本首次启动时恢复（见 restore_windows_after_update）。"""
+        entries = MainWindow._collect_windows_snapshot()
         app_config.update_config(
             {'update_restore_windows': {'ts': time.time(), 'windows': entries}},
             description='stash windows for update restore')
+
+    # ---------- 工作区恢复（正常退出 → 重启找回窗口/标签布局） ----------
+    # 与升级恢复不同：快照不是一次性的，而是运行期持续刷新（30s 配置自动
+    # 保存搭车 + 标签结构变化时限流补写）。窗口关闭中不刷新——否则退出
+    # 级联里每关一个窗口快照就缩水一格，最后只剩最后关的那个；存活窗口的
+    # 周期刷新自然会收敛「用户手动关掉某窗口后继续用」的场景。
+
+    @staticmethod
+    def workspace_restore_enabled() -> bool:
+        return bool(app_config.read_config().get('workspace_restore_enabled', True))
+
+    def _checkpoint_workspace(self):
+        """限流刷新工作区快照（2s 合并窗口）。标签增删/切换等结构变化时调用。"""
+        if getattr(self, '_closing_in_progress', False) or not self.isVisible():
+            return
+        timer = getattr(self, '_ws_checkpoint_timer', None)
+        if timer is None:
+            timer = QTimer(self)
+            timer.setSingleShot(True)
+            timer.setInterval(2000)
+            timer.timeout.connect(self._write_workspace_snapshot)
+            self._ws_checkpoint_timer = timer
+        timer.start()
+
+    def _write_workspace_snapshot(self):
+        if getattr(self, '_closing_in_progress', False):
+            return
+        if not MainWindow.workspace_restore_enabled():
+            return
+        entries = MainWindow._collect_windows_snapshot()
+        if not entries:
+            return
+        app_config.update_config(
+            {'workspace_snapshot': {'ts': time.time(), 'windows': entries}},
+            description='workspace checkpoint')
+
+    @staticmethod
+    def restore_workspace_on_start(primary):
+        """启动时恢复上次工作区（app.py 在升级恢复未发生时调用）。
+
+        快照非一次性消费：运行期会持续刷新覆盖。首条套用到主窗口，
+        其余各开新窗口；标签页（目录/自定义名）一并恢复，会话不自动启动。
+        """
+        if not MainWindow.workspace_restore_enabled():
+            return
+        snap = app_config.read_config().get('workspace_snapshot')
+        if not isinstance(snap, dict):
+            return
+        entries = [e for e in (snap.get('windows') or []) if isinstance(e, dict)]
+        if not entries:
+            return
+        try:
+            primary._apply_restored_window_state(entries[0])
+        except Exception:
+            logger.exception("failed to restore primary window workspace")
+        if len(entries) <= 1:
+            return
+
+        def _open_rest():
+            if sip.isdeleted(primary):
+                return
+            for entry in entries[1:]:
+                try:
+                    primary._open_restored_window(entry)
+                except Exception:
+                    logger.exception("failed to reopen workspace window")
+        QTimer.singleShot(300, _open_rest)
 
     @staticmethod
     def restore_windows_after_update(primary):
@@ -3702,7 +3797,7 @@ class MainWindow(ThemeMixin, ToolbarMixin, ConfigMixin, ExplorerPanelMixin,
         """
         pending = app_config.read_config().get('update_restore_windows')
         if not pending:
-            return
+            return False
 
         def _consume(cfg):
             if 'update_restore_windows' not in cfg:
@@ -3712,20 +3807,20 @@ class MainWindow(ThemeMixin, ToolbarMixin, ConfigMixin, ExplorerPanelMixin,
             _consume, description='consume update restore stash')
 
         if not isinstance(pending, dict):
-            return
+            return False
         if time.time() - float(pending.get('ts') or 0) \
                 > MainWindow._UPDATE_RESTORE_MAX_AGE:
-            return
+            return False
         entries = [e for e in (pending.get('windows') or [])
                    if isinstance(e, dict)]
         if not entries:
-            return
+            return False
         try:
             primary._apply_restored_window_state(entries[0])
         except Exception:
             logger.exception("failed to restore primary window after update")
         if len(entries) <= 1:
-            return
+            return True
 
         # 其余窗口延后创建：先让主窗口完成首次显示/布局，避免启动期
         # 多个窗口同时初始化互相抢占
@@ -3738,6 +3833,7 @@ class MainWindow(ThemeMixin, ToolbarMixin, ConfigMixin, ExplorerPanelMixin,
                 except Exception:
                     logger.exception("failed to reopen window after update")
         QTimer.singleShot(300, _open_rest)
+        return True
 
     def _apply_restored_window_state(self, entry: dict):
         """把一条窗口快照套用到本窗口：目录 → 颜色 → 几何/最大化。"""
@@ -3766,6 +3862,52 @@ class MainWindow(ThemeMixin, ToolbarMixin, ConfigMixin, ExplorerPanelMixin,
                 self._apply_sidebar_panel(entry.get('panel'))
             except Exception:
                 logger.exception("failed to restore sidebar panel after update")
+        # 标签页恢复（目录/自定义名，不自动起会话）。旧快照没有 tabs 键则跳过
+        tabs = entry.get('tabs')
+        if isinstance(tabs, list) and tabs:
+            try:
+                self._restore_tabs_from_snapshot(tabs, entry.get('current_tab', 0))
+            except Exception:
+                logger.exception("failed to restore tabs from snapshot")
+
+    def _restore_tabs_from_snapshot(self, tabs, current_idx):
+        """按快照恢复标签页：首个复用现有空白标签，其余逐个新建。
+
+        只恢复结构（独立工作目录 + 自定义标签名），不自动启动会话——
+        避免重启后未经确认就批量拉起 claude/ssh。
+        """
+        first = tabs[0] if tabs else {}
+        cwd0 = first.get('cwd') or ''
+        if cwd0 and os.path.isdir(cwd0):
+            self.tab_cwds[0] = cwd0
+            terms = self.tab_terminals.get(0, [])
+            if terms and not terms[0].has_started():
+                terms[0].set_working_dir(cwd0)
+        name0 = first.get('name') or ''
+        if name0:
+            page0 = self.tab_widget.widget(0)
+            if page0 is not None:
+                page0._custom_tab_name = name0
+            self.tab_widget.setTabText(0, name0)
+        for tab in tabs[1:]:
+            if not isinstance(tab, dict):
+                continue
+            cwd = tab.get('cwd') or ''
+            cwd = cwd if cwd and os.path.isdir(cwd) else None
+            name = tab.get('name') or ''
+            idx = self._add_new_tab(tab_name=(name or None), tab_cwd=cwd)
+            page = self.tab_widget.widget(idx)
+            if name and page is not None:
+                page._custom_tab_name = name
+            elif cwd:
+                # 无自定义名时用目录名做标题，比「终端 N」可辨识
+                self.tab_widget.setTabText(idx, os.path.basename(cwd))
+        try:
+            cur = int(current_idx)
+        except (TypeError, ValueError):
+            cur = 0
+        self.tab_widget.setCurrentIndex(
+            max(0, min(cur, self.tab_widget.count() - 1)))
 
     def _current_sidebar_panel(self):
         """当前打开的侧边栏面板名（explorer/git/remote 互斥），全关则 None。"""
