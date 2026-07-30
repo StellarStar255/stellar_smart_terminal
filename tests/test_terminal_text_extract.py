@@ -442,6 +442,33 @@ class TestPureHelpers(TerminalTextExtractBase):
             self.assertIsNone(RE.match(s), s)
 
 
+class TestCopyNormalizesNbsp(TerminalTextExtractBase):
+    """复制时把 U+00A0 不换行空格归一化为普通空格
+
+    TUI 应用（如 Claude Code/Ink）用 NBSP 做布局缩进；原样进剪贴板后
+    粘贴到 shell/代码里会引发肉眼不可见的报错（command not found /
+    Python 语法错误），编辑器里显示为 <0xa0> 乱码标记。
+    """
+
+    def test_selection_copy_replaces_nbsp(self):
+        w = self.make_widget(cols=40, rows=10)
+        self.feed(w, "\u23bf\xa0Added 3 lines\r\n")
+        w._selection_start = (0, 0)
+        w._selection_end = (0, w.term_cols - 1)
+        w._copy_selection_to_clipboard()
+        text = QApplication.clipboard().text()
+        self.assertNotIn("\xa0", text)
+        self.assertEqual(text, "\u23bf Added 3 lines")
+
+    def test_visible_copy_replaces_nbsp(self):
+        w = self.make_widget(cols=40, rows=10)
+        self.feed(w, "a\xa0b\r\n")
+        w._copy_to_clipboard()
+        text = QApplication.clipboard().text()
+        self.assertNotIn("\xa0", text)
+        self.assertEqual(text, "a b")
+
+
 if __name__ == "__main__":
     unittest.main()
 

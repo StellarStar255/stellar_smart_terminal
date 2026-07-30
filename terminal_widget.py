@@ -3143,6 +3143,9 @@ class TerminalWidget(TerminalRenderMixin, QWidget):
             # 兜底再去一次尾部空白：软换行行会保留尾部空格，整段末尾的空白
             # 没有意义且会污染剪贴板（复制登录 URL / 授权码时末尾多空格会导致粘贴失效）
             text = text.rstrip()
+            # TUI 应用（如 Claude Code/Ink）用 U+00A0 不换行空格做布局缩进，
+            # 粘贴进 shell/代码会引发肉眼不可见的报错，复制时归一化为普通空格
+            text = text.replace('\xa0', ' ')
             if text:
                 clipboard = QApplication.clipboard()
                 clipboard.setText(text)
@@ -3851,7 +3854,8 @@ if (hasFileURL) {{
         content = self._get_visible_content()
         if content.strip():
             clipboard = QApplication.clipboard()
-            clipboard.setText(content)
+            # 与选区复制一致：NBSP 归一化为普通空格
+            clipboard.setText(content.replace('\xa0', ' '))
 
     def _get_visible_content(self) -> str:
         """获取当前可见区域的内容（包括历史记录部分）- 优化版本"""
