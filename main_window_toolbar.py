@@ -558,12 +558,16 @@ class ToolbarMixin:
         self.icon_tint_checkbox.stateChanged.connect(self._on_icon_tint_changed)
 
         # --- 设置组 ---
-        self.llm_config_btn = QPushButton("✨")
+        # 魔法帽矢量图标（曾是 "✨" emoji：彩色 emoji 卡通感重且跨平台渲染不一）
+        from git_widget import _make_git_tool_icon
+        self.llm_config_btn = QPushButton()
+        self.llm_config_btn.setIcon(_make_git_tool_icon('wizard_hat', 'white', 20))
+        self.llm_config_btn.setIconSize(QSize(20, 20))
         self.llm_config_btn.setObjectName("llmConfigBtn")
         self.llm_config_btn.setToolTip(t("toolbar.llm_config_tooltip"))
-        # 只固定宽度，高度交给布局（沿用全局 QPushButton 的 padding/font-size），
-        # 这样它的高度始终和其它工具栏按钮一致，GUI 字号缩放时也同步变化。
-        self.llm_config_btn.setFixedWidth(42)
+        # 图标按钮不吃全局 QPushButton 的文字 padding，跟随布局会比同行的
+        # 下拉框/齿轮高一截 —— 与齿轮按钮(32px)取齐，宽度略放到 40
+        self.llm_config_btn.setFixedSize(40, 32)
         self.llm_config_btn.setStyleSheet("""
             QPushButton {
                 background-color: #7c3aed;

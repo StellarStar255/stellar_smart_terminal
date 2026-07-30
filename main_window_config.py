@@ -534,7 +534,7 @@ class ConfigMixin:
     def get_completion_llm_config(self) -> dict:
         """AI 行内补全用的 LLM 配置。
 
-        优先级：① 在 ✨ 里用「设为补全模型」显式指派(for_completion) →
+        优先级：① 在魔法帽（LLM 配置）里用「设为补全模型」显式指派(for_completion) →
         ② 兼容旧约定：名字叫 completion/补全 等 → ③ 回退默认配置。
         """
         if self.llm_configs:

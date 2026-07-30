@@ -148,6 +148,32 @@ def _make_git_tool_icon(kind: str, color: str, px: int = 16) -> QIcon:
         hole = s * 0.13
         p.drawEllipse(QPointF(cx, cy), hole, hole)
 
+    elif kind == 'wizard_hat':
+        # 魔法帽：实心弯锥 + 椭圆帽檐，锥身镂空一颗四角星（LLM/AI 入口）
+        p.setBrush(QColor(color))
+        p.setPen(Qt.PenStyle.NoPen)
+        cone = QPainterPath()
+        cone.moveTo(s * 0.568, s * 0.114)
+        cone.quadTo(s * 0.318, s * 0.409, s * 0.227, s * 0.682)
+        cone.lineTo(s * 0.773, s * 0.682)
+        cone.quadTo(s * 0.636, s * 0.409, s * 0.568, s * 0.114)
+        cone.closeSubpath()
+        p.drawPath(cone)
+        p.drawEllipse(QPointF(cx, s * 0.727), s * 0.386, s * 0.102)
+        # 四角星镂空（腰部内收的菱形星，透出按钮底色）
+        scx, scy, r = s * 0.477, s * 0.545, s * 0.115
+        w = r * 0.28
+        star = QPainterPath()
+        star.moveTo(scx, scy - r)
+        star.quadTo(scx + w * 0.2, scy - w, scx + r, scy)
+        star.quadTo(scx + w * 0.2, scy + w, scx, scy + r)
+        star.quadTo(scx - w * 0.2, scy + w, scx - r, scy)
+        star.quadTo(scx - w * 0.2, scy - w, scx, scy - r)
+        star.closeSubpath()
+        p.setCompositionMode(QPainter.CompositionMode.CompositionMode_Clear)
+        p.fillPath(star, QColor(color))
+        p.setCompositionMode(QPainter.CompositionMode.CompositionMode_SourceOver)
+
     p.end()
     return QIcon(pm)
 
