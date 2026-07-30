@@ -2780,6 +2780,9 @@ class TerminalWidget(TerminalRenderMixin, QWidget):
             QMenu::item:selected {
                 background-color: #667eea;
             }
+            QMenu::item:disabled {
+                color: #666;
+            }
         """)
 
         # 复制选中内容

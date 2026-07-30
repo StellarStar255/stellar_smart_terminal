@@ -290,6 +290,9 @@ class ExplorerPanelMixin:
             QMenu::item:selected {
                 background-color: #667eea;
             }
+            QMenu::item:disabled {
+                color: #666;
+            }
             QMenu::separator {
                 height: 1px;
                 background-color: #3d3d5c;
