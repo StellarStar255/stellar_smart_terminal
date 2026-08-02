@@ -116,6 +116,44 @@ class TestWindowNavigatorExtraction(unittest.TestCase):
         import main_window
         main_window.MainWindow._broadcast_navigator_refresh()
 
+    def test_nav_font_not_double_scaled_after_theme_reapply(self):
+        """换主题后内嵌导航字号保持 GUI Font 单次缩放，不被二次放大。
+
+        回归：_apply_theme 会还原并清空 _scale_gui_font_sizes 的基准缓存，随后
+        nav_panel.apply_theme 写入的是「已按 GUI Font 缩放」的样式；若缩放遍历
+        不排除导航面板，会把 16px 误当基准再乘比例 → 19px，且只发生在换过主题
+        的窗口上，各窗口导航字号漂移不一致。"""
+        import re as _re
+        import main_window
+        w = None
+        try:
+            w = main_window.MainWindow()
+            w.show()
+            self.app.processEvents()
+
+            w._gui_font_size = 14
+            w._apply_global_zoom()  # 下发 GUI Font 比例到导航面板
+            expected = w.nav_panel._sf(14)  # 列表基准 14px × (14/12)
+
+            def list_px():
+                m = _re.search(r'font-size:\s*(\d+)px',
+                               w.nav_panel.window_list.styleSheet())
+                return int(m.group(1)) if m else None
+
+            self.assertEqual(list_px(), expected)
+            # 连续两次重应用主题：字号必须稳定在单次缩放值
+            for _ in range(2):
+                w._apply_theme(w.current_theme)
+                self.assertEqual(list_px(), expected)
+        finally:
+            from PyQt6.QtCore import QEvent
+            if w is not None:
+                w.close()
+                w.deleteLater()
+            for _ in range(5):
+                self.app.sendPostedEvents(None, QEvent.Type.DeferredDelete)
+                self.app.processEvents()
+
 
 class TestAttentionDotVisibility(unittest.TestCase):
     """「执行完毕」绿点必须始终画在可视区内。

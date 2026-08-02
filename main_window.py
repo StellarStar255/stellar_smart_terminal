@@ -1750,7 +1750,13 @@ class MainWindow(ThemeMixin, ToolbarMixin, ConfigMixin, ExplorerPanelMixin,
         # 含主窗口自身：主题写在窗口级样式表里的字号（QToolBar QPushButton 13px、
         # QLineEdit 14px）也要参与缩放。findChildren 不含 self，漏掉这层会导致
         # 工具栏按钮永远停在 13px、与输入框字号脱节。
+        # 内嵌导航面板除外：它经 apply_gui_font_scale 自管缩放，样式表里已是
+        # 缩放后的字号。若在此把它当基准会二次放大（_apply_theme 清缓存后
+        # 16px 被当原始值再乘比例 → 19px，各窗口字号漂移不一致）。
+        nav = getattr(self, 'nav_panel', None)
         for widget in (self, *self.findChildren(QWidget)):
+            if nav is not None and (widget is nav or nav.isAncestorOf(widget)):
+                continue
             wid = id(widget)
             ss = widget.styleSheet()
             if not ss or 'font-size' not in ss:
