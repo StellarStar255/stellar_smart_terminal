@@ -17,6 +17,7 @@ os.environ.setdefault('QT_QPA_PLATFORM', 'offscreen')
 import json
 import sys
 import tempfile
+import time
 import unittest
 from pathlib import Path
 
@@ -111,11 +112,15 @@ class TestHistoryDialogSearchMode(unittest.TestCase):
         self.sm.sessions_dir = Path(self._tmp.name)
         _write_session(self._tmp.name, 'sess1', [('input', 'echo needle')])
         self.dlg = HistoryDialog(self.sm)
-        # 等后台列表加载完成
-        for _ in range(100):
+        # 等后台列表加载完成。必须带真实延时：纯 processEvents 空转几毫秒就跑完
+        # 100 次，Windows CI 磁盘慢时 worker 还没读完，_sessions_cache 落空 →
+        # 退出搜索恢复出 0 行表格（v1.16.1 CI 实翻）。
+        deadline = time.monotonic() + 10
+        while self.dlg._list_worker is not None and time.monotonic() < deadline:
             self.app.processEvents()
-            if self.dlg._list_worker is None:
-                break
+            time.sleep(0.01)
+        self.assertIsNone(self.dlg._list_worker,
+                          "前置条件不成立：会话列表后台加载 10s 未完成")
 
     def tearDown(self):
         self.dlg.close()
