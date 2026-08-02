@@ -133,7 +133,7 @@ class TestWindowNavigatorExtraction(unittest.TestCase):
 
             w._gui_font_size = 14
             w._apply_global_zoom()  # 下发 GUI Font 比例到导航面板
-            expected = w.nav_panel._sf(14)  # 列表基准 14px × (14/12)
+            expected = w.nav_panel._sf(16)  # 列表基准 16px（控制栏+2）× (14/12)
 
             def list_px():
                 m = _re.search(r'font-size:\s*(\d+)px',

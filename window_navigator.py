@@ -395,8 +395,9 @@ class WindowNavigatorPanel(QWidget):
     def _apply_list_font_size(self):
         """按当前主题 + 字号设置列表样式"""
         th = self._theme
-        # 列表项基准 14px（对齐控制栏按钮字号），再按 GUI Font 缩放。
-        list_px = self._sf(max(self._font_size, 14))
+        # 列表项基准 16px：比控制栏按钮字号（14px）大两号（用户点名要的），
+        # 再按 GUI Font 缩放（14pt 时约 19px）。
+        list_px = self._sf(max(self._font_size, 14) + 2)
         self.window_list.setStyleSheet(f"""
             QListWidget {{
                 background-color: {th['bg_medium']};
