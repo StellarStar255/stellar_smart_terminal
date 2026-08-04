@@ -2509,7 +2509,7 @@ class MainWindow(ThemeMixin, ToolbarMixin, ConfigMixin, ExplorerPanelMixin,
 
         # 更新标签页名称 (预设名-文件夹名)
         tab_idx = self.tab_widget.currentIndex()
-        # 标签页徽章：会话已启动 → 运行状态点
+        # 标签页徽章：新会话启动，清掉上一会话残留的提醒点
         self._refresh_tab_badge(tab_idx)
 
         # 更新该标签页的工作目录记录（用于拖拽分离时传递给新窗口）
@@ -5174,13 +5174,17 @@ class MainWindow(ThemeMixin, ToolbarMixin, ConfigMixin, ExplorerPanelMixin,
     # （BEL/询问），绿点=已完成（输出停顿）。切到该标签或在其终端按键即
     # 视为已查看，回落到运行状态点。
 
+    # 只保留瞬态提醒徽章；常驻的「运行中」灰点没有信息量（会话几乎总在跑），
+    # 用户点名去掉（2026-08-04）。
     _TAB_BADGE_COLORS = {
-        'running': '#8b95a5',
         'waiting': '#f59e0b',
         'done': '#22c55e',
     }
 
     def _tab_badge_icon(self, state) -> QIcon:
+        color = self._TAB_BADGE_COLORS.get(state)
+        if color is None:
+            return QIcon()
         cache = getattr(self, '_tab_badge_icon_cache', None)
         if cache is None:
             cache = self._tab_badge_icon_cache = {}
@@ -5191,7 +5195,7 @@ class MainWindow(ThemeMixin, ToolbarMixin, ConfigMixin, ExplorerPanelMixin,
             p = QPainter(pm)
             p.setRenderHint(QPainter.RenderHint.Antialiasing)
             p.setPen(Qt.PenStyle.NoPen)
-            p.setBrush(QColor(self._TAB_BADGE_COLORS[state]))
+            p.setBrush(QColor(color))
             p.drawEllipse(2, 2, 8, 8)
             p.end()
             icon = QIcon(pm)
@@ -5215,22 +5219,18 @@ class MainWindow(ThemeMixin, ToolbarMixin, ConfigMixin, ExplorerPanelMixin,
         self._refresh_tab_badge(idx)
 
     def _clear_tab_pending_badge(self, idx):
-        """用户已查看（切到该标签/按键）：清挂起态，回落运行状态点。"""
+        """用户已查看（切到该标签/按键）：清挂起态，图标清空。"""
         page = self.tab_widget.widget(idx)
         if page is not None and getattr(page, '_badge_pending', None) is not None:
             page._badge_pending = None
         self._refresh_tab_badge(idx)
 
     def _refresh_tab_badge(self, idx):
-        """按「挂起态优先，否则看是否有终端在运行」刷新一个标签页的图标。"""
+        """按挂起提醒态（waiting/done）刷新一个标签页的图标；无挂起则清空。"""
         page = self.tab_widget.widget(idx)
         if page is None:
             return
         state = getattr(page, '_badge_pending', None)
-        if state is None:
-            terminals = self.tab_terminals.get(idx, [])
-            if any(t.is_running() for t in terminals):
-                state = 'running'
         self.tab_widget.setTabIcon(
             idx, self._tab_badge_icon(state) if state else QIcon())
 

@@ -77,26 +77,28 @@ class TestTabBadges(unittest.TestCase):
         if not any(t.is_running() for t in w.tab_terminals[self.idx]):
             self.assertTrue(w.tab_widget.tabIcon(self.idx).isNull())
 
-    def test_pending_overrides_running(self):
+    def test_no_persistent_dot_while_running(self):
+        """常驻「运行中」灰点已移除：挂起提醒显示图标，清除后即空——
+        哪怕会话仍在运行也不再回落出灰点（用户点名去掉，2026-08-04）。"""
         w = self.w
-        # 伪造运行态：挂起徽章仍优先显示
         orig = self.term.is_running
         self.term.is_running = lambda: True
         try:
             w._set_tab_pending_badge(self.term, 'waiting')
             icon_waiting = w.tab_widget.tabIcon(self.idx)
             self.assertFalse(icon_waiting.isNull())
-            # 清除挂起后回落到运行状态点（仍有图标）
             w._clear_tab_pending_badge(self.idx)
-            self.assertFalse(w.tab_widget.tabIcon(self.idx).isNull())
+            self.assertTrue(w.tab_widget.tabIcon(self.idx).isNull())
         finally:
             self.term.is_running = orig
             w._refresh_tab_badge(self.idx)
 
     def test_icon_cache_reuse(self):
         w = self.w
-        self.assertIs(w._tab_badge_icon('running'), w._tab_badge_icon('running'))
-        self.assertIsNot(w._tab_badge_icon('running'), w._tab_badge_icon('done'))
+        self.assertIs(w._tab_badge_icon('waiting'), w._tab_badge_icon('waiting'))
+        self.assertIsNot(w._tab_badge_icon('waiting'), w._tab_badge_icon('done'))
+        # 未知/已移除状态（如老的 'running'）安全返回空图标，不抛异常
+        self.assertTrue(w._tab_badge_icon('running').isNull())
 
 
 if __name__ == '__main__':
