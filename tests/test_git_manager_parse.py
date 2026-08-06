@@ -201,5 +201,75 @@ class TestGitManagerParse(unittest.TestCase):
             shutil.rmtree(bare, ignore_errors=True)
 
 
+class TestLockContentionRetry(unittest.TestCase):
+    """index.lock 竞争重试：另一 git 进程（终端里的 git commit、AI 助手等）
+    短暂持锁时，stage/commit 应退避重试而非直接弹错。"""
+
+    @classmethod
+    def setUpClass(cls):
+        os.environ.setdefault('QT_QPA_PLATFORM', 'offscreen')
+        from PyQt6.QtWidgets import QApplication
+        cls.app = QApplication.instance() or QApplication([])
+
+    def setUp(self):
+        import tempfile
+        self._tmp = tempfile.mkdtemp(prefix='git_lock_test_')
+        _git(self._tmp, 'init', '-b', 'main')
+        with open(os.path.join(self._tmp, 'a.txt'), 'w') as f:
+            f.write('hello\n')
+        _git(self._tmp, 'add', '.')
+        _git(self._tmp, 'commit', '-m', 'init')
+        self.gm = GitManager()
+        self.errors = []
+        self.gm.error_occurred.connect(self.errors.append)
+        self.assertTrue(self.gm.set_repository(self._tmp))
+        self._lock = os.path.join(self._tmp, '.git', 'index.lock')
+
+    def tearDown(self):
+        import shutil
+        self.gm.deleteLater()
+        self.app.processEvents()
+        shutil.rmtree(self._tmp, ignore_errors=True)
+
+    def test_is_lock_contention_detection(self):
+        from git_manager import _is_lock_contention
+        # 英文与中文 locale 的真实 git 报错（路径部分 locale 无关）
+        self.assertTrue(_is_lock_contention(
+            "fatal: Unable to create '/repo/.git/index.lock': File exists."))
+        self.assertTrue(_is_lock_contention(
+            "致命错误：无法创建 '/repo/.git/index.lock'：File exists。"))
+        self.assertTrue(_is_lock_contention(
+            "fatal: Unable to create '/repo/.git/HEAD.lock': File exists."))
+        # 非锁类错误不应触发重试
+        self.assertFalse(_is_lock_contention("fatal: pathspec 'x' did not match"))
+        self.assertFalse(_is_lock_contention(""))
+        self.assertFalse(_is_lock_contention("error: could not lock config file"))
+
+    def test_stage_all_retries_until_lock_released(self):
+        """持锁 ~0.5s 后释放：stage_all 应重试成功，不报错。"""
+        import threading, time
+        with open(os.path.join(self._tmp, 'b.txt'), 'w') as f:
+            f.write('new\n')
+        open(self._lock, 'w').close()
+        threading.Timer(0.5, lambda: os.path.exists(self._lock)
+                        and os.remove(self._lock)).start()
+        self.assertTrue(self.gm.stage_all())
+        self.assertEqual(self.errors, [])
+        staged, _ = self.gm.get_status()
+        self.assertIn('b.txt', [f.path for f in staged])
+
+    def test_stage_all_fails_after_exhausting_retries(self):
+        """锁一直不释放（残留的 stale lock）：重试耗尽后仍报错，不无限等。"""
+        with open(os.path.join(self._tmp, 'c.txt'), 'w') as f:
+            f.write('new\n')
+        open(self._lock, 'w').close()
+        try:
+            self.assertFalse(self.gm.stage_all())
+            self.assertEqual(len(self.errors), 1)
+            self.assertIn('index.lock', self.errors[0])
+        finally:
+            os.remove(self._lock)
+
+
 if __name__ == '__main__':
     unittest.main()

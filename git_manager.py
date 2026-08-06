@@ -8,6 +8,7 @@ import signal
 import subprocess
 import sys
 import threading
+import time
 from enum import Enum
 from dataclasses import dataclass
 from typing import List, Tuple, Optional
@@ -27,6 +28,32 @@ GIT_NETWORK_TIMEOUT = 120
 # 每次都会闪出一个 conhost 控制台窗口；状态刷新每 5 秒跑多个 git 命令,
 # 不加这个标志在 Windows 上表现为持续闪窗 + 卡顿。
 SUBPROCESS_FLAGS = subprocess.CREATE_NO_WINDOW if sys.platform == "win32" else 0
+
+# index.lock 竞争的退避重试间隔：仓库里另有 git 进程（终端里跑的
+# `git commit`、AI 助手的 git 操作等）短暂持有锁时，git 自身不等待、
+# 直接报 "Unable to create '.../index.lock': File exists"。锁通常在
+# 亚秒级释放，重试几次即可消化，避免动辄弹错误框。总计最多等 ~3s：
+# stage/unstage 在 GUI 线程执行，预算不能再大。
+_LOCK_RETRY_DELAYS = (0.2, 0.4, 0.8, 1.6)
+
+
+def _is_lock_contention(msg: str) -> bool:
+    """判断 git 失败输出是否为锁文件竞争（可安全重试）。
+
+    锁文件路径（index.lock / HEAD.lock / refs 下的 *.lock）在任何
+    locale 下都会原样出现在报错里，以此为主要依据；错误描述文案
+    （File exists / 无法创建）随系统语言变化，不能依赖。
+    """
+    if not msg:
+        return False
+    if 'index.lock' in msg:
+        return True
+    # 其他锁（如 commit 时的 HEAD.lock、分支 ref 锁）
+    low = msg.lower()
+    return ('.lock' in msg and ('unable to create' in low
+                                or 'file exists' in low
+                                or '无法创建' in msg
+                                or 'another git process' in low))
 
 
 def unquote_git_path(path: str) -> str:
@@ -384,14 +411,31 @@ class GitManager(QObject):
 
         Returns:
             (成功与否, 输出内容)
+
+        失败输出显示为锁文件竞争（另一 git 进程正持有 index.lock 等）时
+        按 _LOCK_RETRY_DELAYS 退避重试：git 拿不到锁即刻放弃且未做任何
+        修改，重跑同一命令是安全的。
         """
         if not self._repo_path:
             return False, t("git_mgr.no_repo_path")
 
+        for attempt in range(len(_LOCK_RETRY_DELAYS) + 1):
+            ok, output = self._run_git_once(list(args), check, timeout, input_text)
+            if ok or not check or not _is_lock_contention(output):
+                return ok, output
+            if attempt < len(_LOCK_RETRY_DELAYS):
+                logger.info("git %s hit lock contention, retry in %.1fs",
+                            args[0] if args else '?', _LOCK_RETRY_DELAYS[attempt])
+                time.sleep(_LOCK_RETRY_DELAYS[attempt])
+        return ok, output
+
+    def _run_git_once(self, args: list, check: bool, timeout: int,
+                      input_text: str) -> Tuple[bool, str]:
+        """单次执行 git 命令（无重试），供 _run_git 调用。"""
         proc = None
         try:
             proc = self._spawn_git(
-                list(args),
+                args,
                 stdin=subprocess.PIPE if input_text is not None else None,
             )
             try:
@@ -1123,12 +1167,26 @@ class GitManager(QObject):
         push/pull 的有用信息分散在 stdout（合并摘要/diffstat）和 stderr
         （远程进度、来自 URL、ref 更新），这里把两者合起来按自然顺序返回，
         便于直接展示给用户。
+
+        与 _run_git 同样处理锁竞争重试（pull 的 merge 阶段也要拿
+        index.lock）；本函数只在后台线程调用，重试等待不冻结 UI。
         """
         if not self._repo_path:
             return False, t("git_mgr.no_repo_path")
+        for attempt in range(len(_LOCK_RETRY_DELAYS) + 1):
+            ok, output = self._run_git_verbose_once(list(args), timeout)
+            if ok or not _is_lock_contention(output):
+                return ok, output
+            if attempt < len(_LOCK_RETRY_DELAYS):
+                logger.info("git %s hit lock contention, retry in %.1fs",
+                            args[0] if args else '?', _LOCK_RETRY_DELAYS[attempt])
+                time.sleep(_LOCK_RETRY_DELAYS[attempt])
+        return ok, output
+
+    def _run_git_verbose_once(self, args: list, timeout: int) -> Tuple[bool, str]:
         proc = None
         try:
-            proc = self._spawn_git(list(args))
+            proc = self._spawn_git(args)
             try:
                 stdout, stderr = proc.communicate(timeout=timeout)
             except subprocess.TimeoutExpired:
