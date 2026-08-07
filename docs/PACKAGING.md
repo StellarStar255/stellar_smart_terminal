@@ -128,6 +128,46 @@ open "dist/Stellar Smart Terminal.app"
 
 如需从头重新打包,删掉 `build/`、`dist/`(必要时连同 `.venv-build/`)再跑脚本。
 
+## 代码签名与公证 / Code signing & notarization (macOS)
+
+`build.sh` 自动探测钥匙串里的 **Developer ID Application** 证书:有则签名
+(Hardened Runtime + `entitlements.plist`),再尝试公证 + 盖章(stapling),
+DMG 也会签名;没有证书就照旧产出未签名包,流程不变。
+
+本地机器一次性配置公证凭据(app 专用密码在 appleid.apple.com 生成):
+
+```bash
+xcrun notarytool store-credentials stellar-notary \
+  --apple-id <AppleID邮箱> --team-id 3QCL9WNFBB --password <app专用密码>
+```
+
+CI(GitHub Actions)需要 4 个 repo secrets(Settings → Secrets → Actions):
+
+| Secret | 内容 |
+|--------|------|
+| `MACOS_CERT_P12` | 证书 + 私钥导出的 `.p12` 文件 base64(见下) |
+| `MACOS_CERT_PASSWORD` | 导出 `.p12` 时设置的密码 |
+| `NOTARY_APPLE_ID` | Apple ID 邮箱 |
+| `NOTARY_PASSWORD` | 该 Apple ID 的 app 专用密码 |
+
+导出 `.p12`:钥匙串访问 → 我的证书 → 右键 "Developer ID Application: ..." →
+导出(选中证书会连带私钥),设一个密码;然后:
+
+```bash
+base64 -i cert.p12 | pbcopy   # 粘贴到 MACOS_CERT_P12
+```
+
+验证签名/公证是否生效(模拟用户首次下载):
+
+```bash
+spctl -a -t exec -vv "dist/Stellar Smart Terminal.app"
+# 期望输出: accepted, source=Notarized Developer ID
+```
+
+相关文件:`entitlements.plist`(Hardened Runtime 豁免)、`smart_terminal.spec`
+(`MACOS_CODESIGN_IDENTITY` 环境变量传入身份)、`.github/workflows/release.yml`
+(证书导入步骤)。
+
 ## 发布新版本 / Release
 
 以发布 `v1.6.0` 为例:

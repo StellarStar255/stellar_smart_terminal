@@ -7,12 +7,26 @@ PyInstaller spec for Stellar Smart Terminal.
 - 代码用 Path(__file__).parent / "assets" 定位资源，因此 datas 保持 "assets" 相对布局，
   PyInstaller 会把它放进 _internal/（与打包后模块 __file__ 同级），路径解析不变。
 """
+import os
 import sys
 from pathlib import Path
 
 PROJ = Path(SPECPATH)  # noqa: F821 — SPECPATH 由 PyInstaller 注入
 APP_DISPLAY_NAME = "Stellar Smart Terminal"
 APP_NAME = "StellarSmartTerminal"
+
+# ---------------------------------------------------------------------------
+# macOS 代码签名（公证前提）。身份由 build.sh 自动探测（或手动 export）后
+# 经环境变量传入；未设置时出未签名包，流程与从前完全一致。
+# PyInstaller 会按由内向外的正确顺序签掉 bundle 里所有 Mach-O，
+# 并自动带 --options runtime --timestamp（公证的硬性要求）。
+# ---------------------------------------------------------------------------
+CODESIGN_IDENTITY = os.environ.get("MACOS_CODESIGN_IDENTITY") or None
+ENTITLEMENTS = (
+    str(PROJ / "entitlements.plist")
+    if CODESIGN_IDENTITY and sys.platform == "darwin"
+    else None
+)
 
 # ---------------------------------------------------------------------------
 # 资源文件：保持与源码运行时相同的相对布局（<root>/assets/...）
@@ -86,8 +100,8 @@ exe = EXE(
     disable_windowed_traceback=False,
     argv_emulation=False,
     target_arch=None,
-    codesign_identity=None,
-    entitlements_file=None,
+    codesign_identity=CODESIGN_IDENTITY,
+    entitlements_file=ENTITLEMENTS,
     icon=icon_file,
 )
 
@@ -110,8 +124,8 @@ if sys.platform == "darwin":
         info_plist={
             "CFBundleName": APP_DISPLAY_NAME,
             "CFBundleDisplayName": APP_DISPLAY_NAME,
-            "CFBundleShortVersionString": "1.16.3",
-            "CFBundleVersion": "1.16.3",
+            "CFBundleShortVersionString": "1.16.4",
+            "CFBundleVersion": "1.16.4",
             "NSHighResolutionCapable": True,
             "NSRequiresAquaSystemAppearance": False,
             # 终端应用需要的权限说明（访问用户文件等由系统按需弹窗）。

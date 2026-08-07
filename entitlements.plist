@@ -1,0 +1,18 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+    <!-- 公证要求 Hardened Runtime；以下是 PyInstaller/CPython 应用的必要豁免：
+         ctypes/FFI 需要可写可执行内存，Python 扩展与 Qt 插件不是全部由
+         同一 Team 签名，需关闭库校验。 -->
+    <key>com.apple.security.cs.allow-unsigned-executable-memory</key>
+    <true/>
+    <key>com.apple.security.cs.disable-library-validation</key>
+    <true/>
+    <!-- Hardened Runtime 下发送 Apple 事件需显式声明，否则
+         「在 Terminal.app 中打开」「移到废纸篓」等功能被静默拒绝
+         （配套的用途文案见 spec 里的 NSAppleEventsUsageDescription）。 -->
+    <key>com.apple.security.automation.apple-events</key>
+    <true/>
+</dict>
+</plist>

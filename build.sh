@@ -44,29 +44,106 @@ if [ "$(uname)" = "Darwin" ] && [ ! -f "$ICNS" ]; then
 fi
 
 # ---------------------------------------------------------------------------
-# 3. PyInstaller 构建（onedir + macOS .app bundle，见 smart_terminal.spec）
+# 3. macOS 代码签名准备：自动探测 Developer ID 证书（可用 MACOS_CODESIGN_IDENTITY
+#    覆盖；设为空串可强制跳过签名）。签名本身由 PyInstaller 在构建时完成
+#    （见 smart_terminal.spec），这里只负责把身份传进去。
+# ---------------------------------------------------------------------------
+if [ "$(uname)" = "Darwin" ]; then
+    if [ -z "${MACOS_CODESIGN_IDENTITY+x}" ]; then
+        MACOS_CODESIGN_IDENTITY=$(security find-identity -v -p codesigning 2>/dev/null \
+            | sed -n 's/.*"\(Developer ID Application: [^"]*\)".*/\1/p' | head -1)
+    fi
+    export MACOS_CODESIGN_IDENTITY
+    if [ -n "$MACOS_CODESIGN_IDENTITY" ]; then
+        echo "==> Codesigning as: $MACOS_CODESIGN_IDENTITY"
+    else
+        echo "==> WARNING: no Developer ID certificate found — building UNSIGNED app"
+    fi
+fi
+
+# ---------------------------------------------------------------------------
+# 4. PyInstaller 构建（onedir + macOS .app bundle，见 smart_terminal.spec）
 # ---------------------------------------------------------------------------
 echo "==> Running PyInstaller"
 "$VENV/bin/pyinstaller" --noconfirm smart_terminal.spec
 
 # ---------------------------------------------------------------------------
-# 4. macOS: 打包 DMG（内含 .app + Applications 软链接，拖拽即安装）
+# 5. macOS: 公证 + 盖章（stapling），然后打 DMG 并签名。
+#    公证凭据来自钥匙串 profile（本地一次性配置 / CI 由 workflow 注入）：
+#      xcrun notarytool store-credentials stellar-notary \
+#        --apple-id <appleid> --team-id <team> --password <app专用密码>
+#    没有证书或没有凭据时跳过对应步骤，仍产出可用（但未签名/未公证）的包。
 # ---------------------------------------------------------------------------
 DMG=""
 if [ "$(uname)" = "Darwin" ]; then
+    APP="dist/Stellar Smart Terminal.app"
+    NOTARY_PROFILE="${NOTARY_PROFILE:-stellar-notary}"
+
+    if [ -n "${MACOS_CODESIGN_IDENTITY:-}" ]; then
+        echo "==> Verifying code signature"
+        codesign --verify --deep --strict "$APP"
+
+        # 凭据两种来源，取其一：
+        # - CI：NOTARY_APPLE_ID / NOTARY_PASSWORD / NOTARY_TEAM_ID 环境变量
+        # - 本地：一次性 `xcrun notarytool store-credentials stellar-notary ...`
+        NOTARY_ARGS=()
+        if [ -n "${NOTARY_APPLE_ID:-}" ] && [ -n "${NOTARY_PASSWORD:-}" ] \
+                && [ -n "${NOTARY_TEAM_ID:-}" ]; then
+            NOTARY_ARGS=(--apple-id "$NOTARY_APPLE_ID" --team-id "$NOTARY_TEAM_ID" \
+                         --password "$NOTARY_PASSWORD")
+        elif xcrun notarytool history --keychain-profile "$NOTARY_PROFILE" \
+                >/dev/null 2>&1; then
+            NOTARY_ARGS=(--keychain-profile "$NOTARY_PROFILE")
+        fi
+
+        if [ ${#NOTARY_ARGS[@]} -gt 0 ]; then
+            echo "==> Notarizing (usually 1-5 min)"
+            NOTARY_ZIP=$(mktemp -d)/notarize.zip
+            ditto -c -k --keepParent "$APP" "$NOTARY_ZIP"
+            SUBMIT_OUT=$(xcrun notarytool submit "$NOTARY_ZIP" \
+                "${NOTARY_ARGS[@]}" --wait 2>&1 | tee /dev/stderr)
+            rm -rf "$(dirname "$NOTARY_ZIP")"
+            if ! echo "$SUBMIT_OUT" | grep -q "status: Accepted"; then
+                # notarytool 对 Invalid 结果也可能退出码 0，必须看状态文本。
+                # 拿提交 id 查详细原因：xcrun notarytool log <id> <凭据参数>
+                echo "ERROR: notarization not accepted — see output above" >&2
+                exit 1
+            fi
+            # 盖章：把公证票据钉进 .app，用户离线首启也能通过 Gatekeeper
+            xcrun stapler staple "$APP"
+        else
+            echo "==> WARNING: no notary credentials (env vars or profile '$NOTARY_PROFILE') — skipping notarization"
+        fi
+    fi
+
     VERSION=$(grep -m1 'CFBundleShortVersionString' smart_terminal.spec | sed 's/[^0-9.]//g')
     DMG="dist/Stellar-Smart-Terminal-v${VERSION}-macOS-$(uname -m).dmg"
     echo "==> Creating $DMG"
     STAGING=$(mktemp -d)
-    cp -R "dist/Stellar Smart Terminal.app" "$STAGING/"
+    cp -R "$APP" "$STAGING/"
     ln -s /Applications "$STAGING/Applications"
     hdiutil create -volname "Stellar Smart Terminal" -srcfolder "$STAGING" \
         -ov -format UDZO "$DMG" >/dev/null
     rm -rf "$STAGING"
+    if [ -n "${MACOS_CODESIGN_IDENTITY:-}" ]; then
+        codesign --sign "$MACOS_CODESIGN_IDENTITY" --timestamp "$DMG"
+        # DMG 本身也要公证+盖章：用户打开 DMG 时 Gatekeeper 查的是 DMG 的
+        # 公证状态，只公证里面的 .app 不够。内容已公证过，这次通常很快。
+        if [ ${#NOTARY_ARGS[@]} -gt 0 ]; then
+            echo "==> Notarizing DMG"
+            SUBMIT_OUT=$(xcrun notarytool submit "$DMG" \
+                "${NOTARY_ARGS[@]}" --wait 2>&1 | tee /dev/stderr)
+            if ! echo "$SUBMIT_OUT" | grep -q "status: Accepted"; then
+                echo "ERROR: DMG notarization not accepted — see output above" >&2
+                exit 1
+            fi
+            xcrun stapler staple "$DMG"
+        fi
+    fi
 fi
 
 # ---------------------------------------------------------------------------
-# 5. Linux: 把 onedir 打成 .deb（供 Ubuntu/Debian 用 apt/dpkg 安装）
+# 6. Linux: 把 onedir 打成 .deb（供 Ubuntu/Debian 用 apt/dpkg 安装）
 #    布局：程序 → /opt/StellarSmartTerminal，/usr/bin 放启动包装，
 #    外加 .desktop 桌面入口与 hicolor 图标，让应用出现在菜单/Dock。
 # ---------------------------------------------------------------------------
@@ -132,7 +209,7 @@ EOF
 fi
 
 # ---------------------------------------------------------------------------
-# 6. 输出位置提示
+# 7. 输出位置提示
 # ---------------------------------------------------------------------------
 echo ""
 echo "==> Build finished."
