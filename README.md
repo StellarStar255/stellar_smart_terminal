@@ -31,12 +31,19 @@ No Python required — grab a build from the [**Releases**](https://github.com/S
    Download the `.dmg` (recommended; a zip is also available)
 2. 打开 DMG，把 `Stellar Smart Terminal.app` 拖进 `Applications` 文件夹
    Open the DMG and drag the app into the `Applications` folder
-3. 首次启动若提示 **"Stellar Smart Terminal" Not Opened**（应用暂未签名）：点 **完成/Done**，到 **系统设置 → 隐私与安全性** 底部点 **仍要打开 (Open Anyway)**；或在终端执行：
-   On first launch, if macOS blocks the app (it is not code-signed yet): click **Done**, then go to **System Settings → Privacy & Security** and click **Open Anyway** — or run:
+3. 双击打开即可——自 v1.16.4 起，macOS 版本已使用 Developer ID 签名并通过 Apple 公证，不会再被 Gatekeeper 拦截。
+   Double-click to open — since v1.16.4 the macOS builds are Developer ID signed and notarized by Apple, so Gatekeeper opens them without any prompt.
+
+   <details><summary>仅旧版本（≤ v1.16.3）需要 / Only for old versions (≤ v1.16.3)</summary>
+
+   旧版未签名，首次启动若提示 **"Not Opened"**：到 **系统设置 → 隐私与安全性** 底部点 **仍要打开 (Open Anyway)**，或在终端执行：
+   Older unsigned builds may be blocked on first launch — go to **System Settings → Privacy & Security** and click **Open Anyway**, or run:
 
    ```bash
    xattr -cr "/Applications/Stellar Smart Terminal.app"
    ```
+
+   </details>
 
 > 目前仅提供 Apple Silicon (arm64) 构建。
 > Currently Apple Silicon (arm64) only.
