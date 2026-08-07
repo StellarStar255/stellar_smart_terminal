@@ -685,7 +685,16 @@ class TabSplitMixin:
             self.close()
 
     def _align_child_with_parent_geometry(self, new_window, abort_check=None):
-        """让子窗口与本窗口逐像素重合（位置+尺寸），并持续校正 macOS 的异步微调。
+        """让子窗口与本窗口逐像素重合（位置+尺寸），并持续校正 macOS 的异步微调。"""
+        self._align_window_to_geometry(
+            new_window, self.geometry(), self.isMaximized(), abort_check)
+
+    @staticmethod
+    def _align_window_to_geometry(new_window, target_geo, target_maximized,
+                                  abort_check=None):
+        """把窗口对齐到目标几何（位置+尺寸），并持续校正 macOS 的异步微调。
+
+        拖拽分离（对齐父窗口）与升级/工作区恢复（对齐快照几何）共用。
 
         abort_check: 可选回调，返回 True 时立即停止校正并显形——拖拽分离场景
         下用户继续拖动（接管窗口位置）后，校正循环不能再和用户抢窗口。
@@ -698,8 +707,7 @@ class TabSplitMixin:
         的绝对像素宽度，而 _prime_left_panel_sync 的 300ms 兜底可能跑在几何
         稳定之前，必须在这里补一次。
         """
-        parent_maximized = self.isMaximized()
-        target_geo = self.geometry()
+        parent_maximized = target_maximized
         logger.debug(
             "[align] start: parent_geo=%s parent_max=%s child_visible=%s",
             target_geo, parent_maximized, new_window.isVisible())

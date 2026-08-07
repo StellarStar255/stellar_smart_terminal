@@ -35,7 +35,7 @@ from PyQt6.QtWidgets import (
     QStackedWidget
 )
 from PyQt6 import sip  # 用于检查 C++ 对象是否已被删除
-from PyQt6.QtCore import Qt, QTimer, QEvent, QPoint, QObject, QVariantAnimation, QEasingCurve
+from PyQt6.QtCore import Qt, QTimer, QEvent, QPoint, QRect, QObject, QVariantAnimation, QEasingCurve
 from PyQt6.QtGui import QAction, QIcon, QColor, QPixmap, QPainter, QKeySequence
 
 from terminal_widget import TerminalWidget
@@ -3859,8 +3859,14 @@ class MainWindow(ThemeMixin, ToolbarMixin, ConfigMixin, ExplorerPanelMixin,
         QTimer.singleShot(300, _open_rest)
         return True
 
-    def _apply_restored_window_state(self, entry: dict):
-        """把一条窗口快照套用到本窗口：目录 → 颜色 → 几何/最大化。"""
+    def _apply_restored_window_state(self, entry: dict, apply_geometry: bool = True):
+        """把一条窗口快照套用到本窗口：目录 → 颜色 → 几何/最大化。
+
+        apply_geometry=False 时跳过几何/最大化——新开的恢复窗口由
+        _align_window_to_geometry 的校正循环负责（show 前 setGeometry 到
+        目标值会让 macOS 首显挪动后 Qt 缓存与真实几何脱节，后续 setGeometry
+        被当作「无变化」跳过，窗口永远校不回来）。
+        """
         cwd = entry.get('cwd') or ''
         if cwd and os.path.isdir(cwd) and cwd != self._window_cwd:
             self.working_dir_combo.setCurrentText(cwd)
@@ -3871,14 +3877,15 @@ class MainWindow(ThemeMixin, ToolbarMixin, ConfigMixin, ExplorerPanelMixin,
                 self._set_window_color(color)
             except Exception:
                 logger.debug("_apply_restored_window_state: suppressed exception", exc_info=True)
-        geo = entry.get('geometry')
-        if isinstance(geo, (list, tuple)) and len(geo) == 4:
-            try:
-                self.setGeometry(*[int(v) for v in geo])
-            except Exception:
-                logger.debug("_apply_restored_window_state: suppressed exception", exc_info=True)
-        if entry.get('maximized'):
-            self.showMaximized()
+        if apply_geometry:
+            geo = entry.get('geometry')
+            if isinstance(geo, (list, tuple)) and len(geo) == 4:
+                try:
+                    self.setGeometry(*[int(v) for v in geo])
+                except Exception:
+                    logger.debug("_apply_restored_window_state: suppressed exception", exc_info=True)
+            if entry.get('maximized'):
+                self.showMaximized()
         # 侧边栏保持升级前的开关状态。旧版本写的快照没有 panel 键，
         # 此时不动——沿用启动时按全局配置恢复出的状态
         if 'panel' in entry:
@@ -3963,41 +3970,32 @@ class MainWindow(ThemeMixin, ToolbarMixin, ConfigMixin, ExplorerPanelMixin,
             self._toggle_remote_panel()
 
     def _open_restored_window(self, entry: dict):
-        """按快照新开一个独立窗口（目录随快照；目录已不存在则用默认目录）。"""
+        """按快照新开一个独立窗口（目录随快照；目录已不存在则用默认目录）。
+
+        几何/最大化不在 show 前套用，而是交给拖拽分离同款的
+        _align_window_to_geometry 校正循环：先隐形显示在偏移位置、再逐拍
+        断言目标几何直到系统（台前调度等）不再乱动，显形时已是最终尺寸。
+        show 前 setGeometry 的老做法会因 macOS 首显挪动 + Qt 几何缓存脱节
+        而永远校不回来（表现为「要手动动一下窗口才恢复原尺寸」）。
+        """
         cwd = entry.get('cwd') or ''
         initial = {'cwd': cwd} if cwd and os.path.isdir(cwd) else None
         win = MainWindow(initial_tab_data=initial)
-        win._apply_restored_window_state(entry)
-        win.show()
-        win.raise_()
+        win._apply_restored_window_state(entry, apply_geometry=False)
         # 保持引用防 GC，与拖拽分离/远程新窗口同一跟踪列表
         self.detached_windows.append(win)
 
-        # macOS（尤其台前调度）会在 show 之后异步推挪/压窄新窗口：show 前
-        # setGeometry 一次并不够（主窗口不受此害，因为它是 show 之后才套
-        # 几何）。与拖拽分离的校正循环同思路，在短时间窗内反复断言快照
-        # 几何/最大化，直到系统不再乱动；窗口一旦最大化或被用户接管即停。
         geo = entry.get('geometry')
-        maximized = bool(entry.get('maximized'))
-        if maximized or (isinstance(geo, (list, tuple)) and len(geo) == 4):
-            target = [int(v) for v in geo] if geo else None
-
-            def _assert_state():
-                if sip.isdeleted(win):
-                    return
-                if maximized:
-                    # showMaximized 可能被台前调度拦下静默失败，重试即可
-                    if not win.isMaximized():
-                        win.showMaximized()
-                    return
-                if win.isMaximized() or target is None:
-                    return
-                r = win.geometry()
-                if [r.x(), r.y(), r.width(), r.height()] != target:
-                    win.setGeometry(*target)
-
-            for delay in (0, 150, 400, 800):
-                QTimer.singleShot(delay, _assert_state)
+        if isinstance(geo, (list, tuple)) and len(geo) == 4:
+            target = QRect(*[int(v) for v in geo])
+            MainWindow._align_window_to_geometry(
+                win, target, bool(entry.get('maximized')))
+        else:
+            # 旧快照无几何：按默认几何直接显示
+            win.show()
+            if entry.get('maximized'):
+                win.showMaximized()
+        win.raise_()
         return win
 
     def _set_output_alerts_enabled(self, enabled: bool):
