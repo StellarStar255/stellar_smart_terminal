@@ -161,6 +161,39 @@ class TestWorkspaceRestore(unittest.TestCase):
         self.assertTrue(snap.get('windows'))
         self.assertIn('tabs', snap['windows'][0])
 
+    def test_reopened_window_geometry_reasserted(self):
+        """次窗口 show 后被系统（台前调度等）推挪时，校正循环应拉回快照几何。
+
+        主窗口不受此害（show 后才套几何），历史 bug：其余窗口 show 前
+        setGeometry 一次就不管了，恢复后初始大小全偏。
+        """
+        w = self.w
+        # 尺寸需在 MainWindow 最小尺寸(1000x700)之上，否则被夹住
+        target = [80, 90, 1120, 760]
+        entry = {'cwd': '', 'geometry': target, 'maximized': False}
+        win = w._open_restored_window(entry)
+        try:
+            self.app.processEvents()  # 让 0ms 的首次断言先跑掉
+            # 模拟系统在 show 后异步推挪/压窄窗口
+            win.setGeometry(200, 210, 1000, 700)
+            deadline = time.time() + 3
+            while time.time() < deadline:
+                self.app.processEvents()
+                g = win.geometry()
+                if [g.x(), g.y(), g.width(), g.height()] == target:
+                    break
+                time.sleep(0.05)
+            g = win.geometry()
+            self.assertEqual([g.x(), g.y(), g.width(), g.height()], target)
+        finally:
+            from PyQt6.QtCore import QEvent
+            w.detached_windows.remove(win)
+            win.close()
+            win.deleteLater()
+            for _ in range(5):
+                self.app.sendPostedEvents(None, QEvent.Type.DeferredDelete)
+                self.app.processEvents()
+
 
 if __name__ == '__main__':
     unittest.main()

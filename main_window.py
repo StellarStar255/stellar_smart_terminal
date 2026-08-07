@@ -3972,6 +3972,32 @@ class MainWindow(ThemeMixin, ToolbarMixin, ConfigMixin, ExplorerPanelMixin,
         win.raise_()
         # 保持引用防 GC，与拖拽分离/远程新窗口同一跟踪列表
         self.detached_windows.append(win)
+
+        # macOS（尤其台前调度）会在 show 之后异步推挪/压窄新窗口：show 前
+        # setGeometry 一次并不够（主窗口不受此害，因为它是 show 之后才套
+        # 几何）。与拖拽分离的校正循环同思路，在短时间窗内反复断言快照
+        # 几何/最大化，直到系统不再乱动；窗口一旦最大化或被用户接管即停。
+        geo = entry.get('geometry')
+        maximized = bool(entry.get('maximized'))
+        if maximized or (isinstance(geo, (list, tuple)) and len(geo) == 4):
+            target = [int(v) for v in geo] if geo else None
+
+            def _assert_state():
+                if sip.isdeleted(win):
+                    return
+                if maximized:
+                    # showMaximized 可能被台前调度拦下静默失败，重试即可
+                    if not win.isMaximized():
+                        win.showMaximized()
+                    return
+                if win.isMaximized() or target is None:
+                    return
+                r = win.geometry()
+                if [r.x(), r.y(), r.width(), r.height()] != target:
+                    win.setGeometry(*target)
+
+            for delay in (0, 150, 400, 800):
+                QTimer.singleShot(delay, _assert_state)
         return win
 
     def _set_output_alerts_enabled(self, enabled: bool):
