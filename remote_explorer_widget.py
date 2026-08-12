@@ -3069,7 +3069,36 @@ class RemoteExplorerPanel(QWidget):
             self._await_remote(sess, sess.remove, path, label=label)
 
     def _upload_local_dir(self, sess: SSHSession, local_dir: str, remote_dir: str):
-        """把本地目录递归上传到 remote_dir"""
+        """把本地目录递归上传到 remote_dir。
+
+        快路径：远端有 tar（Linux 基本必有）→ 本地打 tar 流经单条 SSH 通道
+        直灌、远端边收边解。逐文件 SFTP 每个文件 5-6 次网络往返且串行，
+        小文件多的目录慢 1-2 个数量级，仅在远端无 tar 时兜底。
+        """
+        fut = sess.submit(sess.remote_has_tar)
+        self._wait_future_with_progress(
+            [fut], t("remote.pasting_progress", dst=remote_dir),
+            tolerate_errors=True, abort_sessions=[sess])
+        try:
+            has_tar = bool(fut.result())
+        except Exception:
+            has_tar = False
+        if has_tar:
+            total = 0
+            for root, _dirs, files in os.walk(local_dir):
+                for fname in files:
+                    try:
+                        total += os.path.getsize(os.path.join(root, fname))
+                    except OSError:
+                        pass
+            live = {"bytes": 0}
+            fut = sess.submit(sess.upload_dir_tar, local_dir, remote_dir,
+                              total, self._make_live_progress_cb(live))
+            self._wait_future_with_progress(
+                [fut], t("remote.pasting_progress", dst=remote_dir),
+                sizes=[total], live=live, abort_sessions=[sess])
+            return
+
         fut = sess.submit(sess.mkdir, remote_dir)
         try:
             fut.result()

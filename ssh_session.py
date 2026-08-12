@@ -13,7 +13,9 @@ Design notes:
 import functools
 import os
 import posixpath
+import shlex
 import stat
+import tarfile
 import threading
 import time
 from concurrent.futures import Future, ThreadPoolExecutor
@@ -528,6 +530,8 @@ class SSHSession(QObject):
         self._listdir_cache: dict[str, tuple[float, list["RemoteEntry"]]] = {}
         self._cache_ttl = 30.0  # seconds
         self._cache_lock = threading.Lock()
+        # 远端是否有 tar（目录上传快路径的探测结果，按会话缓存）
+        self._remote_has_tar: Optional[bool] = None
 
     # --- lifecycle ---
 
@@ -1050,6 +1054,119 @@ class SSHSession(QObject):
                 logger.debug("upload_with_progress: suppressed exception", exc_info=True)
             raise
         self.invalidate_cache(self._parent(remote_path))
+
+    def remote_has_tar(self) -> bool:
+        """探测远端是否可用 tar + POSIX shell（目录上传快路径的前置条件）。
+
+        结果按会话缓存；探测过程本身出错（连接抖动等）不缓存，下次再试。
+        `command -v` 返回 0 同时证明了默认 shell 是 POSIX 系（Windows sshd
+        的 cmd.exe 会直接失败），所以后续拼 shell 命令是安全的。
+        """
+        if self._remote_has_tar is not None:
+            return self._remote_has_tar
+        if self._client is None:
+            return False
+        try:
+            transport = self._client.get_transport()
+            if transport is None or not transport.is_active():
+                return False
+            chan = transport.open_session(timeout=CONNECT_TIMEOUT)
+            try:
+                chan.settimeout(CONNECT_TIMEOUT)
+                chan.exec_command("command -v tar")
+                rc = chan.recv_exit_status()
+            finally:
+                chan.close()
+            self._remote_has_tar = (rc == 0)
+            return self._remote_has_tar
+        except Exception:
+            logger.debug("remote_has_tar probe failed", exc_info=True)
+            return False
+
+    @_auto_reconnect
+    def upload_dir_tar(self, local_dir: str, remote_dir: str,
+                       total_bytes: int = 0, progress_cb=None):
+        """整目录上传快路径：本地打 tar 流 → 单条 SSH 通道 → 远端 tar 解包。
+
+        逐文件 SFTP 上传每个文件要 5-6 次网络往返（open/write/close/rename），
+        且在会话单 worker 上串行——几百个小文件的目录在几十 ms RTT 的链路上
+        光往返就要几分钟。tar 流没有按文件的往返，吞吐只受带宽/加密限制，
+        通常快 1-2 个数量级。语义与逐文件路径一致：解包进已存在/新建的
+        remote_dir；符号链接原样保留（不展开）。
+
+        progress_cb(bytes_done, total_bytes)：按已送入通道的字节回调（含
+        tar 头部开销，显示用 total_bytes 封顶）。取消走 session.abort()
+        关 socket → sendall 立刻抛错；abort 已置 _was_connected=False，
+        _auto_reconnect 不会把被取消的传输再重跑一遍。
+        """
+        client = self._client
+        transport = client.get_transport() if client is not None else None
+        if transport is None:
+            raise RuntimeError("not connected")
+        chan = transport.open_session(timeout=CONNECT_TIMEOUT)
+        err_buf = bytearray()
+
+        def _drain():
+            # 及时排空远端 stdout/stderr，防止远端输出填满通道窗口互相等死
+            while chan.recv_stderr_ready():
+                err_buf.extend(chan.recv_stderr(4096))
+            while chan.recv_ready():
+                chan.recv(4096)
+
+        try:
+            chan.settimeout(SFTP_OP_TIMEOUT)
+            q = shlex.quote(remote_dir)
+            chan.exec_command(f"mkdir -p {q} && tar -xpf - -C {q}")
+
+            sent = {"n": 0}
+
+            class _ChanWriter:
+                """把 tarfile 的写出转成 channel.sendall，顺带计数/回调/排空。"""
+                def write(self, data):
+                    chan.sendall(data)
+                    sent["n"] += len(data)
+                    if progress_cb is not None:
+                        done = sent["n"]
+                        if total_bytes:
+                            done = min(done, total_bytes)
+                        progress_cb(done, total_bytes)
+                    _drain()
+                    return len(data)
+
+                def flush(self):
+                    pass
+
+            # bufsize 调大：tar 块攒到 256KB 再 sendall，减少系统调用次数
+            tf = tarfile.open(mode="w|", fileobj=_ChanWriter(),
+                              bufsize=256 * 1024)
+            try:
+                tf.add(local_dir, arcname=".")
+            finally:
+                tf.close()
+            chan.shutdown_write()
+
+            # 等远端 tar 退出。流式解包（边收边解），EOF 后收尾极快；
+            # recv_exit_status() 无超时参数，这里自己带截止轮询，
+            # 避免远端异常挂死时 worker 永久阻塞。
+            deadline = time.monotonic() + 60
+            while not chan.exit_status_ready():
+                _drain()
+                if time.monotonic() > deadline:
+                    raise RuntimeError("remote tar did not finish in time")
+                time.sleep(0.05)
+            _drain()
+            rc = chan.recv_exit_status()
+            if rc != 0:
+                detail = bytes(err_buf).decode("utf-8", "replace").strip()
+                raise RuntimeError(
+                    f"remote tar exited {rc}: {detail[:400]}")
+        finally:
+            try:
+                chan.close()
+            except Exception:
+                logger.debug("upload_dir_tar: channel close failed", exc_info=True)
+        self.invalidate_cache(remote_dir)
+        self.invalidate_cache(self._parent(remote_dir))
 
     @_auto_reconnect
     def download(self, remote_path: str, local_path: str):

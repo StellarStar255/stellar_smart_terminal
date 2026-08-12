@@ -255,7 +255,10 @@ class TestTempLocalPath(_Base):
 
 
 class _FakeSession:
-    """submit 即刻完成的假 SSH 会话：只记录提交了什么，不做任何 IO。"""
+    """submit 即刻完成的假 SSH 会话：只记录提交了什么，不做任何 IO。
+
+    remote_has_tar 返回 False → _upload_local_dir 走逐文件 SFTP 兜底路径。
+    """
 
     def __init__(self):
         self.calls = []          # (fn_name, args)
@@ -263,13 +266,21 @@ class _FakeSession:
     def submit(self, fn, *args):
         self.calls.append((fn.__name__, args))
         fut = Future()
-        fut.set_result(None)
+        # remote_has_tar 的探测结果要真实返回，其余调用只记录不执行
+        fut.set_result(fn(*args) if fn.__name__ == "remote_has_tar" else None)
         return fut
+
+    def remote_has_tar(self):
+        return False
 
     def mkdir(self, path):
         pass
 
     def upload_with_progress(self, local_path, remote_path, cb):
+        pass
+
+    def upload_dir_tar(self, local_dir, remote_dir, total_bytes=0,
+                       progress_cb=None):
         pass
 
     def abort(self):
@@ -294,6 +305,117 @@ class TestUploadPathMapping(_Base):
         self.assertIn("/dst/dir/sub", mkdirs)      # 子目录用 posix 分隔符
         self.assertEqual(uploads["a.txt"], "/dst/dir/a.txt")
         self.assertEqual(uploads["b.txt"], "/dst/dir/sub/b.txt")
+
+    def test_tar_fast_path_used_when_remote_has_tar(self):
+        """远端有 tar → 整目录走 upload_dir_tar 单流上传，不逐文件 SFTP。"""
+        p = self._panel()
+        src = Path(tempfile.mkdtemp())
+        (src / "a.txt").write_text("aa", encoding="utf-8")
+        (src / "sub").mkdir()
+        (src / "sub" / "b.txt").write_text("bbb", encoding="utf-8")
+
+        sess = _FakeSession()
+
+        def remote_has_tar():
+            return True
+        sess.remote_has_tar = remote_has_tar
+        p._upload_local_dir(sess, str(src), "/dst/dir")
+
+        names = [n for n, _ in sess.calls]
+        self.assertIn("upload_dir_tar", names)
+        self.assertNotIn("upload_with_progress", names)
+        self.assertNotIn("mkdir", names)  # mkdir -p 由远端命令完成
+        tar_call = next(a for n, a in sess.calls if n == "upload_dir_tar")
+        self.assertEqual(tar_call[0], str(src))
+        self.assertEqual(tar_call[1], "/dst/dir")
+        self.assertEqual(tar_call[2], 2 + 3)  # total_bytes = 文件字节和
+
+
+class TestUploadDirTarStream(_Base):
+    """SSHSession.upload_dir_tar 的流正确性（假 channel，不碰网络）。"""
+
+    def test_streams_valid_tar_and_quotes_command(self):
+        import io
+        import tarfile as tarfile_mod
+        from ssh_session import SSHSession, HostConfig
+
+        buf = bytearray()
+
+        class _FakeChan:
+            cmd = None
+            write_closed = False
+
+            def settimeout(self, t):
+                pass
+
+            def exec_command(self, cmd):
+                self.cmd = cmd
+
+            def sendall(self, data):
+                buf.extend(data)
+
+            def recv_stderr_ready(self):
+                return False
+
+            def recv_ready(self):
+                return False
+
+            def shutdown_write(self):
+                self.write_closed = True
+
+            def exit_status_ready(self):
+                return True
+
+            def recv_exit_status(self):
+                return 0
+
+            def close(self):
+                pass
+
+        chan = _FakeChan()
+
+        class _FakeTransport:
+            def open_session(self, timeout=None):
+                return chan
+
+            def is_active(self):
+                return True
+
+        class _FakeClient:
+            def get_transport(self):
+                return _FakeTransport()
+
+        sess = SSHSession(HostConfig(alias="t", hostname="h"))
+        try:
+            sess._client = _FakeClient()
+
+            src = Path(tempfile.mkdtemp())
+            (src / "a.txt").write_text("hello", encoding="utf-8")
+            (src / "sub").mkdir()
+            (src / "sub" / "b.txt").write_text("world!", encoding="utf-8")
+
+            progress = []
+            sess.upload_dir_tar(str(src), "/dst/my dir", total_bytes=11,
+                                progress_cb=lambda d, t: progress.append((d, t)))
+
+            # 远端命令：mkdir -p + tar -x，目标路径经 shell 引号保护
+            self.assertIn("mkdir -p '/dst/my dir'", chan.cmd)
+            self.assertIn("tar -xpf - -C '/dst/my dir'", chan.cmd)
+            self.assertTrue(chan.write_closed)
+
+            # 灌出去的字节必须是合法 tar 且内容一致
+            tf = tarfile_mod.open(fileobj=io.BytesIO(bytes(buf)), mode="r:")
+            names = {m.name for m in tf.getmembers()}
+            self.assertIn("./a.txt", names)
+            self.assertIn("./sub/b.txt", names)
+            self.assertEqual(tf.extractfile("./a.txt").read(), b"hello")
+            self.assertEqual(tf.extractfile("./sub/b.txt").read(), b"world!")
+
+            # 进度回调发生过，且 bytes_done 被 total 封顶
+            self.assertTrue(progress)
+            self.assertLessEqual(max(d for d, _ in progress), 11)
+        finally:
+            sess._executor.shutdown(wait=False)
 
 
 class TestSortPersistence(_Base):
