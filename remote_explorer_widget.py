@@ -3193,7 +3193,12 @@ class RemoteExplorerPanel(QWidget):
         # 让卡在 recv 上的传输立刻失败、对话框随即关闭，避免网络切换时一直卡在传输框里。
         cancel_text = t("remote.cancel_transfer") if abort_sessions else None
         progress = QProgressDialog(label, cancel_text, 0, len(futures), self)
-        progress.setWindowModality(Qt.WindowModality.WindowModal)
+        progress.setWindowTitle(t("remote.title"))
+        # 非模态：大文件粘贴/传输期间应用可继续正常使用（后台传输），
+        # 进度框只悬浮展示进度。等待仍走下面的局部事件循环，传输间的
+        # 用户操作在嵌套循环里正常处理；同一 session 的操作由其单 worker
+        # 线程天然串行，不会并发冲突。
+        progress.setWindowModality(Qt.WindowModality.NonModal)
         progress.setMinimumDuration(300)
         progress.setValue(0)
         if abort_sessions:
@@ -3239,6 +3244,15 @@ class RemoteExplorerPanel(QWidget):
             # 此时 progress 也已 deleteLater'd → 任何访问都会段错误
             try:
                 if sip.isdeleted(progress):
+                    # 面板在传输中被销毁：abort 会话让 pending futures 快速
+                    # 失败，避免调用方后续 fut.result() 隐形阻塞主线程
+                    for s in (abort_sessions or []):
+                        if s is not None:
+                            try:
+                                s.abort()
+                            except Exception:
+                                logger.debug("abort on progress deletion failed",
+                                             exc_info=True)
                     timer.stop()
                     loop.quit()
                     return

@@ -2037,7 +2037,8 @@ class ExplorerPanel(QWidget):
             return
         cancel_text = t("remote.cancel_transfer") if abort_sessions else None
         progress = QProgressDialog(label, cancel_text, 0, len(futures), self)
-        progress.setWindowModality(Qt.WindowModality.WindowModal)
+        # 非模态：传输期间应用可继续正常使用（后台传输），与远程面板一致
+        progress.setWindowModality(Qt.WindowModality.NonModal)
         progress.setMinimumDuration(300)
         progress.setValue(0)
         if abort_sessions:
