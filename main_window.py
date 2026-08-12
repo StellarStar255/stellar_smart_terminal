@@ -3300,10 +3300,13 @@ class MainWindow(ThemeMixin, ToolbarMixin, ConfigMixin, ExplorerPanelMixin,
         combined = sizes[ed_idx] + sizes[term_idx]
         if combined <= 0:
             return
-        inactive = min(max(self.SPRING_INACTIVE_MIN, int(combined * self.SPRING_INACTIVE_RATIO)),
-                       combined - self.SPRING_INACTIVE_MIN)
-        if inactive < 1:
-            inactive = combined // 3  # 合计太窄时退化为均分式分配
+        inactive = max(self.SPRING_INACTIVE_MIN, int(combined * self.SPRING_INACTIVE_RATIO))
+        if combined - inactive < inactive * 2:
+            # 合计太窄（约 <660px）时 220px 地板会反噬：active 被压到与
+            # inactive 相差无几，点击后布局几乎不动，表现为「spring 失灵」。
+            # 此时放弃地板、改纯比例，保证被点的一侧始终拿到 ~70%——
+            # 窄窗口下优先让正在看的一侧有足够阅读区域。
+            inactive = max(1, int(combined * self.SPRING_INACTIVE_RATIO))
         active = combined - inactive
 
         new_sizes = list(sizes)

@@ -117,6 +117,36 @@ class TestSpringReconcile(unittest.TestCase):
         ed, tm = self._sizes()
         self.assertGreater(ed, tm, f"焦点自愈失败: editor={ed}, terminal={tm}")
 
+    def test_narrow_combined_still_springs_visibly(self):
+        """窄窗口回归：合计宽度低于 ~660px 时，220px 地板曾把 inactive 顶到
+        与 active 相差无几（如 500px → 220/280），点击后布局几乎不动，
+        表现为「多窗口很窄时 spring 失灵」。修复后应放弃地板、按纯比例
+        分配，被点侧拿到 ~70%。"""
+        w = self.w
+        ed_idx = w.main_splitter.indexOf(w.editor_area)
+        tm_idx = w.main_splitter.indexOf(w._main_content_stack)
+        sizes = list(w.main_splitter.sizes())
+        combined = sizes[ed_idx] + sizes[tm_idx]
+        # 把编辑器+终端合计压到 500px（余量挪给第一个面板），模拟很窄的窗口
+        squeeze = combined - 500
+        self.assertGreater(squeeze, 0, "前置失败：测试窗口应宽于 500px")
+        other_idx = next(i for i in range(len(sizes))
+                         if i not in (ed_idx, tm_idx))
+        sizes[other_idx] += squeeze
+        sizes[ed_idx], sizes[tm_idx] = 250, 250
+        w._applying_spring = True
+        try:
+            w.main_splitter.setSizes(sizes)
+        finally:
+            w._applying_spring = False
+        self.app.processEvents()
+
+        w._apply_spring('terminal', animate=False)
+        ed, tm = self._sizes()
+        self.assertGreater(
+            tm, ed * 2,
+            f"窄窗口下被点侧应占 ~70%: editor={ed}, terminal={tm}")
+
 
 if __name__ == '__main__':
     unittest.main()
