@@ -262,6 +262,88 @@ class TestSpringInnerPanes(unittest.TestCase):
         s = sp.sizes()
         self.assertGreater(s[0], s[1], f"被点窗格应更宽: {s}")
 
+    def test_sidebar_panels_never_participate(self):
+        """左侧栏（窗口导航 / Explorer / Git / Remote）绝不能被弹簧改宽。
+
+        这是 v1.16.8 引入的重大回归：内层弹簧当时用「排除 main_splitter」的
+        黑名单，Git 面板内部本来就有横向 splitter，点侧栏就会把控制面板撑开、
+        把终端挤没。改为白名单——只有终端区/编辑器区内部的 splitter 才参与。
+        """
+        from PyQt6.QtCore import Qt
+        from PyQt6.QtWidgets import QSplitter
+
+        w = self.w
+        # 直接在侧栏里放一个横向 splitter（等价于 Git 面板内部本来就有的那个，
+        # 它在离屏测试里未必已构建）——策略必须把它挡住。
+        from PyQt6.QtWidgets import QWidget
+        sidebar_split = QSplitter(Qt.Orientation.Horizontal)
+        sidebar_split.addWidget(QWidget())
+        sidebar_split.addWidget(QWidget())
+        w.left_panel_layout.addWidget(sidebar_split)
+        self.app.processEvents()
+        try:
+            self.assertTrue(w.left_panel_container.isAncestorOf(sidebar_split),
+                            "前置失败：构造的 splitter 应位于侧栏内")
+            self.assertFalse(
+                w._spring_allowed_splitter(sidebar_split),
+                "左侧栏内的 splitter 不得参与弹簧（导航/Explorer/Git 会被撑开）")
+            # main_splitter 也不走内层逻辑（左侧栏与编辑器/终端同属它）
+            self.assertFalse(w._spring_allowed_splitter(w.main_splitter))
+
+            # 端到端：点侧栏里的控件，该 splitter 尺寸不得变化
+            sidebar_split.setSizes([200, 200])
+            self.app.processEvents()
+            before = sidebar_split.sizes()
+            w._spring_expand_inner(sidebar_split.widget(0))
+            self._settle(sidebar_split)
+            self.assertEqual(sidebar_split.sizes(), before,
+                             "点击侧栏控件不应改动侧栏布局")
+        finally:
+            sidebar_split.setParent(None)
+            sidebar_split.deleteLater()
+            self.app.processEvents()
+
+    def test_clicking_sidebar_changes_no_layout(self):
+        """点侧栏里的控件不应改动任何 splitter 尺寸。"""
+        from PyQt6.QtWidgets import QSplitter, QTreeView
+
+        w = self.w
+        if not w.explorer_panel_visible:
+            w._toggle_explorer_panel()
+        self.app.processEvents()
+        before = {id(sp): sp.sizes() for sp in w.findChildren(QSplitter)}
+        for wdg in (w.explorer_panel.findChild(QTreeView),
+                    getattr(w, 'nav_panel', None)):
+            if wdg is not None:
+                w._spring_expand_inner(wdg)
+        self.app.processEvents()
+        changed = [sp for sp in w.findChildren(QSplitter)
+                   if before.get(id(sp)) != sp.sizes()]
+        self.assertFalse(changed, "点击侧栏不应触发任何重排")
+
+    def test_terminal_splits_still_allowed(self):
+        """白名单不能误伤正常功能：终端区内部的分屏仍要参与弹簧。"""
+        from PyQt6.QtCore import Qt
+        from PyQt6.QtWidgets import QSplitter
+
+        w = self.w
+        w._split_current_tab()
+        self.app.processEvents()
+        try:
+            inner = [sp for sp in w.findChildren(QSplitter)
+                     if sp.orientation() == Qt.Orientation.Horizontal
+                     and w._main_content_stack.isAncestorOf(sp)]
+            self.assertTrue(inner, "前置失败：应存在终端分屏 splitter")
+            self.assertTrue(any(w._spring_allowed_splitter(sp) for sp in inner),
+                            "终端分屏应当仍能弹簧")
+        finally:
+            idx = w.tab_widget.currentIndex()
+            terms = w.tab_terminals.get(idx, [])
+            while len(terms) > 1:
+                w._close_current_split()
+                self.app.processEvents()
+                terms = w.tab_terminals.get(idx, [])
+
     def test_vertical_splitter_untouched(self):
         """纵向分屏不参与横向弹簧（上下排列没有变窄的问题）。"""
         from PyQt6.QtCore import Qt

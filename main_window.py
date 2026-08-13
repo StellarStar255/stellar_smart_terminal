@@ -3422,20 +3422,43 @@ class MainWindow(ThemeMixin, ToolbarMixin, ConfigMixin, ExplorerPanelMixin,
         窄于 SPRING_PANE_ENABLE 才弹，已经够宽就不动。因此反复点同一个窗格
         不会抖动（第二次点时它已经宽了），点另一个窄窗格才会把焦点让过去。
 
-        main_splitter 那一层不在此处理：左侧栏（Explorer/Git）与编辑器、终端
-        同属该 splitter，不能参与重分配，仍由 _apply_spring 走专门逻辑。
+        只有「终端区」与「编辑器区」内部的 splitter 参与——左侧栏那一整列
+        （窗口导航 / Explorer / Git / Remote）是控制面板，绝不能被弹簧改宽。
+        main_splitter 本身也不在此处理（左侧栏与编辑器、终端同属它），
+        编辑器↔终端仍由 _apply_spring 走专门逻辑。
         """
         if not getattr(self, '_spring_mode_enabled', False):
             return
-        main_sp = getattr(self, 'main_splitter', None)
         node = widget
         parent = node.parentWidget() if node is not None else None
         while parent is not None and node is not self:
-            if (isinstance(parent, QSplitter) and parent is not main_sp
-                    and parent.orientation() == Qt.Orientation.Horizontal):
+            if (isinstance(parent, QSplitter)
+                    and parent.orientation() == Qt.Orientation.Horizontal
+                    and self._spring_allowed_splitter(parent)):
                 self._spring_expand_child(parent, node)
             node = parent
             parent = parent.parentWidget()
+
+    def _spring_allowed_splitter(self, splitter) -> bool:
+        """该 splitter 是否允许参与弹簧重分配。
+
+        白名单：必须严格位于终端区（_main_content_stack）或编辑器区
+        （editor_area）**内部**。用白名单而不是「排除 main_splitter」，
+        这样左侧栏的任何面板——包括 Git 面板内部本来就有的横向 splitter、
+        以及日后新增的面板——都不会被误伤。
+        """
+        for name in ('_main_content_stack', 'editor_area'):
+            anchor = getattr(self, name, None)
+            if anchor is None:
+                continue
+            try:
+                if sip.isdeleted(anchor):
+                    continue
+                if anchor is not splitter and anchor.isAncestorOf(splitter):
+                    return True
+            except RuntimeError:
+                continue
+        return False
 
     def _spring_expand_child(self, splitter, child):
         """把 splitter 中 child 这一支展宽，其余各支收窄（仅在 child 偏窄时）。"""
