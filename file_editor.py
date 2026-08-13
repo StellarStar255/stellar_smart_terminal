@@ -908,6 +908,17 @@ class CodeEditor(QPlainTextEdit):
         act_save.setEnabled(bool(pane_for_save and pane_for_save.get_current_file()))
         act_save.triggered.connect(self._context_save)
 
+        # 自动保存（离开编辑器时静默存盘）。与自动换行同为全局开关、重启记住。
+        act_auto = menu.addAction(t("editor.auto_save_menu"))
+        act_auto.setCheckable(True)
+        act_auto.setChecked(bool(area.is_auto_save_enabled()) if area is not None else False)
+        act_auto.setToolTip(t("editor.auto_save_tooltip"))
+        if area is not None:
+            act_auto.triggered.connect(
+                lambda checked: area.auto_save_toggled.emit(bool(checked)))
+        else:
+            act_auto.setEnabled(False)
+
         # 自动换行（全局开关，所有窗格统一、重启记住）。改动经 area 信号冒泡到主窗口落盘。
         act_wrap = menu.addAction(t("editor.word_wrap_menu"))
         act_wrap.setCheckable(True)
@@ -3878,9 +3889,17 @@ class FileEditorWidget(QWidget):
                 pass
             raise
 
-    def save_file(self) -> bool:
-        """保存文件"""
+    def save_file(self, silent: bool = False) -> bool:
+        """保存文件。
+
+        silent=True（自动保存用）：任何需要提问/报错的分支一律放弃保存并
+        返回 False，绝不弹对话框——自动保存发生在用户切走的瞬间，突然拦一个
+        模态框比不保存更糟。文件保持脏状态，标题栏 ● 仍在，用户手动保存时
+        会看到真正的冲突提示或错误原因。
+        """
         if not self._current_file:
+            if silent:
+                return False   # 未命名文件：save_file_as 会弹文件选择框
             return self.save_file_as()
 
         try:
@@ -3895,6 +3914,11 @@ class FileEditorWidget(QWidget):
                 except OSError:
                     disk_mtime = None
                 if disk_mtime is not None and disk_mtime - self._known_mtime > 0.001:
+                    if silent:
+                        # 磁盘副本更新：静默覆盖会吞掉别处的改动，留给手动保存确认
+                        logger.debug("auto-save skipped (disk newer): %s",
+                                     self._current_file)
+                        return False
                     reply = QMessageBox.question(
                         self, t("editor.save_conflict_title"),
                         t("editor.save_conflict_msg",
@@ -3930,8 +3954,20 @@ class FileEditorWidget(QWidget):
             self.file_saved.emit(self._current_file)
             return True
         except Exception as e:
+            if silent:
+                logger.debug("auto-save failed: %s", e, exc_info=True)
+                return False
             QMessageBox.warning(self, t("editor.save_failed_title"), t("editor.save_failed_msg", error=e))
             return False
+
+    def auto_save_if_dirty(self) -> bool:
+        """自动保存（失焦触发）：有改动就静默落盘，任何异常情况都留脏不打扰。
+
+        远程文件同样适用——保存会照常发出 file_saved，由主窗口转成 SFTP 上传。
+        """
+        if not self._current_file or self._in_image_mode or not self.is_modified():
+            return False
+        return self.save_file(silent=True)
 
     def save_file_as(self) -> bool:
         """另存为"""
@@ -4362,6 +4398,7 @@ class EditorArea(QWidget):
     file_saved = pyqtSignal(str)    # 任一窗格保存文件（转发）
     ai_completion_toggled = pyqtSignal(bool)  # 任一窗格切换 AI 补全（转发给主窗口）
     word_wrap_toggled = pyqtSignal(bool)  # 右键菜单切换自动换行（转发给主窗口落盘）
+    auto_save_toggled = pyqtSignal(bool)  # 右键菜单切换自动保存（转发给主窗口落盘）
 
     def __init__(self, theme: dict = None, parent=None):
         super().__init__(parent)
@@ -4374,6 +4411,8 @@ class EditorArea(QWidget):
         self._ai_completion_enabled: bool = False
         # 自动换行开关（全局一致）；新建窗格继承它
         self._word_wrap_enabled: bool = False
+        # 失焦自动保存开关（全局一致，默认开）；由主窗口按配置覆盖
+        self._auto_save_enabled: bool = True
 
         self._layout = QVBoxLayout(self)
         self._layout.setContentsMargins(0, 0, 0, 0)
@@ -4421,6 +4460,32 @@ class EditorArea(QWidget):
     def is_word_wrap_enabled(self) -> bool:
         """当前自动换行状态（供右键菜单显示勾选态）。"""
         return self._word_wrap_enabled
+
+    def set_auto_save_enabled(self, enabled: bool):
+        """设置失焦自动保存开关（全局一致）。"""
+        self._auto_save_enabled = bool(enabled)
+
+    def is_auto_save_enabled(self) -> bool:
+        """当前自动保存状态（供右键菜单显示勾选态）。"""
+        return self._auto_save_enabled
+
+    def auto_save_all_dirty(self) -> int:
+        """把所有有未保存改动的窗格静默存盘，返回实际保存的窗格数。
+
+        由主窗口在「焦点离开编辑器」「窗口失活」时调用；关闭时不需要——
+        那里已有明确的保存/丢弃询问流程。
+        """
+        if not self._auto_save_enabled:
+            return 0
+        saved = 0
+        for p in list(self._panes):
+            try:
+                if p.auto_save_if_dirty():
+                    saved += 1
+            except RuntimeError:
+                # 窗格在遍历期间被销毁（分屏关闭等）：跳过即可
+                logger.debug("auto_save_all_dirty: pane gone", exc_info=True)
+        return saved
 
     def _apply_point_size_to_pane(self, pane: 'FileEditorWidget', point_size: int):
         pane.set_editor_point_size(point_size)

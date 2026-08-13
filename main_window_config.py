@@ -54,6 +54,7 @@ class ConfigMixin:
         self.default_llm_config = 0  # 默认 LLM 配置索引
         self._ai_completion_enabled = False  # AI 行内补全开关（默认关闭）
         self._editor_word_wrap = False  # 编辑器自动换行开关（默认关闭）
+        self._editor_auto_save = True   # 编辑器失焦自动保存（默认开启）
         self._saved_window_geometry = None  # 窗口位置和大小 [x, y, w, h]
         self._saved_window_maximized = False  # 窗口是否最大化
         self._saved_explorer_panel_visible = False  # Explorer 面板可见性
@@ -145,6 +146,7 @@ class ConfigMixin:
                 # 加载 AI 行内补全开关
                 self._ai_completion_enabled = config.get('ai_completion_enabled', False)
                 self._editor_word_wrap = config.get('editor_word_wrap', False)
+                self._editor_auto_save = config.get('editor_auto_save', True)
                 # 加载完成提示音（绿点点亮时播放；'' = 静音）
                 self._notify_sound = config.get('notify_sound', 'Submarine')
                 # 加载终端 scrollback 上限（进程级，影响之后新建的终端）
@@ -396,6 +398,7 @@ class ConfigMixin:
                 'spring_mode_enabled': getattr(self, '_spring_mode_enabled', False),  # 保存弹簧模式偏好
                 'ai_completion_enabled': getattr(self, '_ai_completion_enabled', False),  # 保存 AI 行内补全开关
                 'editor_word_wrap': getattr(self, '_editor_word_wrap', False),  # 保存编辑器自动换行开关
+                'editor_auto_save': getattr(self, '_editor_auto_save', True),  # 保存编辑器失焦自动保存开关
                 'notify_sound': getattr(self, '_notify_sound', 'Submarine'),  # 保存完成提示音
                 'terminal_scrollback': TerminalWidget.SCROLLBACK_LINES,  # 保存终端 scrollback 上限
                 'parse_on_reader_thread': TerminalWidget.PARSE_ON_READER_THREAD,  # 保存"解析放后台线程"开关（旧键 parse_off_gui_thread 已废弃）

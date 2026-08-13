@@ -698,6 +698,12 @@ TRANSLATIONS = {
     "editor.split_h_tooltip": {"zh": "左右分屏 ⌘\\（并排查看另一个文件）", "en": "Split editor right ⌘\\ (view another file side by side)"},
     "editor.split_v_tooltip": {"zh": "上下分屏 ⌘⇧\\（堆叠查看另一个文件）", "en": "Split editor down ⌘⇧\\ (view another file stacked)"},
     "editor.word_wrap_menu": {"zh": "自动换行", "en": "Word Wrap"},
+    "editor.auto_save_menu": {"zh": "自动保存", "en": "Auto Save"},
+    "editor.auto_save_tooltip": {
+        "zh": "离开编辑器（切到终端 / 切换文件 / 切换窗口）时自动保存已修改的文件",
+        "en": "Save modified files automatically when leaving the editor "
+              "(switching to the terminal, another file, or another window)",
+    },
     "editor.split_h_menu": {"zh": "Split  ⌘\\", "en": "Split  ⌘\\"},
     "editor.split_v_menu": {"zh": "V-Split  ⌘⇧\\", "en": "V-Split  ⌘⇧\\"},
     "editor.close_split_menu": {"zh": "Close Split", "en": "Close Split"},

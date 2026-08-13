@@ -493,6 +493,12 @@ class MainWindow(ThemeMixin, ToolbarMixin, ConfigMixin, ExplorerPanelMixin,
                 except Exception:
                     logger.debug("changeEvent: suppressed exception", exc_info=True)
             else:
+                # 切走前把编辑器的未保存改动落盘。焦点留在窗口内部时
+                # focusChanged 不会触发，切到别的应用只走这条路径。
+                if getattr(self, '_editor_auto_save', False):
+                    area = getattr(self, 'editor_area', None)
+                    if area is not None and not sip.isdeleted(area):
+                        area.auto_save_all_dirty()
                 # 窗口失活时暂停日志刷新定时器（减少后台开销）
                 if hasattr(self, '_log_timer') and self._log_timer:
                     self._log_timer.stop()
@@ -962,6 +968,8 @@ class MainWindow(ThemeMixin, ToolbarMixin, ConfigMixin, ExplorerPanelMixin,
         _app = QApplication.instance()
         if _app is not None:
             _app.focusChanged.connect(self._on_focus_changed_for_spring)
+            # 同一信号驱动编辑器失焦自动保存（切到终端/其它文件/其它窗口）
+            _app.focusChanged.connect(self._auto_save_editors_on_leave)
 
         # 日志面板默认隐藏
         self.log_panel_visible = False
@@ -3074,6 +3082,53 @@ class MainWindow(ThemeMixin, ToolbarMixin, ConfigMixin, ExplorerPanelMixin,
     def _toggle_word_wrap(self):
         """Alt+Z：翻转全局自动换行（走与右键菜单相同的落盘/广播路径）。"""
         self._on_word_wrap_toggled(not getattr(self, '_editor_word_wrap', False))
+
+    def _on_auto_save_toggled(self, enabled: bool):
+        """切换编辑器失焦自动保存：应用到本窗口、广播、落盘。
+
+        刚打开时立刻存一次当前的未保存改动——用户此刻的意图就是"别再让我忘"，
+        等下一次失焦才生效会显得没反应。
+        """
+        enabled = bool(enabled)
+        self._editor_auto_save = enabled
+        if hasattr(self, 'editor_area') and self.editor_area is not None:
+            self.editor_area.set_auto_save_enabled(enabled)
+            if enabled:
+                self.editor_area.auto_save_all_dirty()
+        self._broadcast_auto_save_state()
+        self._save_config()
+
+    def _broadcast_auto_save_state(self):
+        """把自动保存开关同步到所有 MainWindow 窗口（含其编辑器），
+        避免多窗口下旧窗口退出时把 editor_auto_save 覆盖回旧值。"""
+        enabled = self._editor_auto_save
+        app = QApplication.instance()
+        if not app:
+            return
+        for widget in app.topLevelWidgets():
+            if widget is self or not isinstance(widget, MainWindow):
+                continue
+            widget._editor_auto_save = enabled
+            if hasattr(widget, 'editor_area') and widget.editor_area is not None:
+                widget.editor_area.set_auto_save_enabled(enabled)
+
+    def _auto_save_editors_on_leave(self, old, new):
+        """焦点离开编辑器区域时自动保存（QApplication.focusChanged 驱动）。
+
+        只在「从编辑器内部移到编辑器外部」这一次跳变时保存：编辑器内部的
+        焦点流转（编辑区↔查找框↔窗格间）不触发，避免高频写盘/上传。
+        """
+        if not getattr(self, '_editor_auto_save', False):
+            return
+        area = getattr(self, 'editor_area', None)
+        if area is None or sip.isdeleted(area):
+            return
+
+        def _inside(w):
+            return w is not None and (w is area or area.isAncestorOf(w))
+
+        if _inside(old) and not _inside(new):
+            area.auto_save_all_dirty()
 
     def _on_spring_mode_toggled(self, state):
         """弹簧模式开关（Explorer 与 Remote 两处复选框共用，保持同步）。"""

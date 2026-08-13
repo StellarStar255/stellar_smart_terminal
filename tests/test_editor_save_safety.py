@@ -7,6 +7,7 @@ import sys
 import tempfile
 import time
 import unittest
+import unittest.mock
 
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
@@ -56,6 +57,13 @@ class _Base(unittest.TestCase):
         self.assertTrue(area.open_file_in_active(p))
         self._areas.append(area)
         return area, area.active_pane, p
+
+    def _make_disk_newer(self, pane, p, content):
+        """模拟「文件在磁盘上被别人改新了」：写入新内容并把 mtime 推到未来。"""
+        with open(p, "w") as f:
+            f.write(content)
+        future = time.time() + 10
+        os.utime(p, (future, future))
 
 
 class TestAtomicSave(_Base):
@@ -172,12 +180,6 @@ class TestQuitSaveGuard(_Base):
 class TestSaveConflict(_Base):
     """#3：保存前若磁盘已被改新（其它窗格/外部），先征求用户，默认不覆盖。"""
 
-    def _make_disk_newer(self, pane, p, content):
-        with open(p, "w") as f:
-            f.write(content)
-        future = time.time() + 10
-        os.utime(p, (future, future))
-
     def test_conflict_no_aborts_and_preserves_disk(self):
         from PyQt6.QtWidgets import QMessageBox
         area, pane, p = self._area_with_file("v1\n")
@@ -209,6 +211,98 @@ class TestSaveConflict(_Base):
             QMessageBox.question = orig
         with open(p) as f:
             self.assertEqual(f.read(), "force mine\n")
+
+
+class TestAutoSaveOnLeave(_Base):
+    """失焦自动保存：静默落盘，且绝不弹任何对话框。
+
+    自动保存发生在用户切走的瞬间，此时弹模态框比不保存更糟——所有需要
+    提问/报错的分支都必须放弃保存、保持脏状态，留给手动保存处理。
+    """
+
+    def _no_dialogs(self):
+        """上下文：把 QMessageBox 的问答/警告换成会让测试失败的哨兵。"""
+        from PyQt6.QtWidgets import QMessageBox
+
+        seen = []
+        orig_q, orig_w = QMessageBox.question, QMessageBox.warning
+        QMessageBox.question = staticmethod(
+            lambda *a, **k: (seen.append('question'),
+                             QMessageBox.StandardButton.No)[1])
+        QMessageBox.warning = staticmethod(
+            lambda *a, **k: seen.append('warning'))
+
+        class _Ctx:
+            def __enter__(_s):
+                return seen
+
+            def __exit__(_s, *exc):
+                QMessageBox.question = orig_q
+                QMessageBox.warning = orig_w
+                return False
+        return _Ctx()
+
+    def test_dirty_file_saved_silently(self):
+        area, pane, p = self._area_with_file("v1\n")
+        pane.editor.setPlainText("edited\n")
+        with self._no_dialogs() as seen:
+            self.assertTrue(area.auto_save_all_dirty() == 1)
+        self.assertFalse(seen, f"自动保存不应弹对话框: {seen}")
+        with open(p) as f:
+            self.assertEqual(f.read(), "edited\n")
+        self.assertFalse(pane.is_modified())
+
+    def test_clean_file_is_noop(self):
+        area, pane, p = self._area_with_file("v1\n")
+        before = os.path.getmtime(p)
+        self.assertEqual(area.auto_save_all_dirty(), 0)
+        self.assertEqual(os.path.getmtime(p), before)
+
+    def test_conflict_skipped_without_prompt(self):
+        """磁盘副本更新时静默跳过：不弹框，也不覆盖别人的改动。"""
+        area, pane, p = self._area_with_file("v1\n")
+        pane.editor.setPlainText("my local edit\n")
+        self._make_disk_newer(pane, p, "external wrote this\n")
+        with self._no_dialogs() as seen:
+            self.assertEqual(area.auto_save_all_dirty(), 0)
+        self.assertFalse(seen, f"冲突时自动保存不应弹对话框: {seen}")
+        with open(p) as f:
+            self.assertEqual(f.read(), "external wrote this\n")
+        self.assertTrue(pane.is_modified(), "跳过保存后应保持脏状态")
+
+    def test_write_failure_does_not_warn(self):
+        area, pane, p = self._area_with_file("v1\n")
+        pane.editor.setPlainText("edited\n")
+        with self._no_dialogs() as seen:
+            with unittest.mock.patch.object(
+                    pane, '_atomic_write_bytes',
+                    side_effect=OSError("read-only fs")):
+                self.assertEqual(area.auto_save_all_dirty(), 0)
+        self.assertFalse(seen, f"写失败时自动保存不应弹警告: {seen}")
+        self.assertTrue(pane.is_modified())
+
+    def test_disabled_switch_blocks_auto_save(self):
+        area, pane, p = self._area_with_file("v1\n")
+        pane.editor.setPlainText("edited\n")
+        area.set_auto_save_enabled(False)
+        self.assertEqual(area.auto_save_all_dirty(), 0)
+        with open(p) as f:
+            self.assertEqual(f.read(), "v1\n")   # 关掉后不写盘
+        area.set_auto_save_enabled(True)
+        self.assertEqual(area.auto_save_all_dirty(), 1)
+
+    def test_untitled_buffer_never_opens_save_dialog(self):
+        """未命名缓冲区：save_file 会退化成「另存为」文件选择框，必须跳过。"""
+        from file_editor import EditorArea
+        area = EditorArea(theme={})
+        self._areas.append(area)
+        pane = area.active_pane
+        pane.editor.setPlainText("scratch\n")
+        called = []
+        with unittest.mock.patch.object(
+                pane, 'save_file_as', side_effect=lambda: called.append(1)):
+            self.assertEqual(area.auto_save_all_dirty(), 0)
+        self.assertFalse(called, "未命名文件不应触发另存为对话框")
 
 
 class TestExternalChangeAfterSave(_Base):

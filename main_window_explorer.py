@@ -180,10 +180,13 @@ class ExplorerPanelMixin:
         self.editor_area.active_changed.connect(self._on_active_pane_changed)
         self.editor_area.ai_completion_toggled.connect(self._on_ai_completion_toggled)
         self.editor_area.word_wrap_toggled.connect(self._on_word_wrap_toggled)
+        self.editor_area.auto_save_toggled.connect(self._on_auto_save_toggled)
         # 应用已记忆的 AI 补全开关到编辑器
         self.editor_area.set_ai_completion_enabled(getattr(self, '_ai_completion_enabled', False))
         # 应用已记忆的自动换行开关到编辑器
         self.editor_area.set_word_wrap_enabled(getattr(self, '_editor_word_wrap', False))
+        # 应用已记忆的失焦自动保存开关到编辑器
+        self.editor_area.set_auto_save_enabled(getattr(self, '_editor_auto_save', True))
         self.editor_area.hide()  # 默认隐藏
         self.explorer_splitter.addWidget(self.editor_area)
 
