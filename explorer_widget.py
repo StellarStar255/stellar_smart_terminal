@@ -2072,6 +2072,16 @@ class ExplorerPanel(QWidget):
             # 此时 progress 也已 deleteLater'd → 任何访问都会段错误
             try:
                 if sip.isdeleted(progress):
+                    # 面板在传输中被销毁：abort 会话让 pending futures 快速
+                    # 失败，否则调用方紧接着的 fut.result() 会在 GUI 线程上
+                    # 无限期阻塞（与 remote_explorer_widget 同一处理）
+                    for s in (abort_sessions or []):
+                        if s is not None:
+                            try:
+                                s.abort()
+                            except Exception:
+                                logger.debug("abort on progress deletion failed",
+                                             exc_info=True)
                     timer.stop()
                     loop.quit()
                     return

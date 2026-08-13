@@ -32,6 +32,54 @@ from utils import get_data_dir
 
 logger = get_logger(__name__)
 
+# --- 取进程 cwd 的原生实现（不 fork） ---
+# 旧实现只有 `lsof -a -d cwd -p <pid>`：每次约 27ms，且在 GUI 线程同步调用
+# （切标签页/分屏/粘贴图片都会触发）。更糟的是 cwd 落在挂死的网络挂载点上时
+# lsof 会一路顶到 2s 超时——多标签场景下表现为「别的终端也跟着卡住」。
+# 原生接口约 0.2ms 且不会阻塞：Linux 读 /proc，macOS 走 libproc。
+# lsof 仅作为两者都失败时的兜底。
+_PROC_PIDVNODEPATHINFO = 9      # <sys/proc_info.h>
+_VNODE_PATH_OFFSET = 152        # offsetof(struct vnode_info_path, vip_path)
+_PROC_VNODEPATHINFO_SIZE = 2352  # sizeof(struct proc_vnodepathinfo)
+_libproc = None                 # 懒加载；None=未尝试，False=不可用
+
+
+def _cwd_via_native(pid: int) -> Optional[str]:
+    """取指定进程的当前工作目录，不创建子进程。失败返回 None。"""
+    if sys.platform.startswith('linux'):
+        try:
+            return os.readlink(f'/proc/{pid}/cwd')
+        except OSError:
+            return None
+    if sys.platform != 'darwin':
+        return None
+    global _libproc
+    if _libproc is None:
+        try:
+            import ctypes
+            import ctypes.util
+            _libproc = ctypes.CDLL(ctypes.util.find_library('c'), use_errno=True)
+        except Exception:
+            logger.debug("libproc unavailable", exc_info=True)
+            _libproc = False
+    if not _libproc:
+        return None
+    try:
+        import ctypes
+        buf = ctypes.create_string_buffer(_PROC_VNODEPATHINFO_SIZE)
+        n = _libproc.proc_pidinfo(pid, _PROC_PIDVNODEPATHINFO,
+                                  ctypes.c_uint64(0), buf,
+                                  _PROC_VNODEPATHINFO_SIZE)
+        if n != _PROC_VNODEPATHINFO_SIZE:
+            return None
+        raw = buf.raw[_VNODE_PATH_OFFSET:]
+        path = raw.split(b'\0', 1)[0].decode('utf-8', 'replace')
+        return path or None
+    except Exception:
+        logger.debug("proc_pidinfo failed", exc_info=True)
+        return None
+
+
 # 复制拼接时用于识别「新的结构行」（列表项/有序列表/标题/引用）。
 # 这类行即使上一行被填满，也不应被并入上一行，必须保留换行。
 _LIST_MARKER_RE = re.compile(r'^(?:[-*+•‣◦·]|\d{1,3}[.)]|[A-Za-z][.)]|#{1,6}|>)\s')
@@ -3516,12 +3564,16 @@ class TerminalWidget(TerminalRenderMixin, QWidget):
         if self._backend is None or not self._backend.is_running:
             return None
 
-        # 在 Unix/macOS 上尝试使用 lsof 获取子进程的当前工作目录
+        # 在 Unix/macOS 上获取子进程的当前工作目录
         if sys.platform != 'win32':
             try:
                 # 获取后端的进程 ID（仅 Unix 后端支持）
                 child_pid = getattr(self._backend, '_child_pid', None)
                 if child_pid:
+                    # 优先原生接口：不 fork、约 0.2ms、不会被挂死的挂载点拖住
+                    native = _cwd_via_native(child_pid)
+                    if native and os.path.isdir(native):
+                        return native
                     import subprocess
                     result = subprocess.run(
                         ['lsof', '-a', '-d', 'cwd', '-p', str(child_pid), '-Fn'],

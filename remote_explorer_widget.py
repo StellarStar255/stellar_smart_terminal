@@ -3104,7 +3104,13 @@ class RemoteExplorerPanel(QWidget):
                 sizes=[total], live=live, abort_sessions=[sess])
             return
 
+        # 必须走 _wait_future_with_progress：裸 fut.result() 会在 GUI 线程上
+        # 无限期阻塞（断线重连、SFTP 卡死），且此刻连进度框都还没弹，用户
+        # 连「取消」都点不到 —— 整窗连同所有终端标签一起冻死。
         fut = sess.submit(sess.mkdir, remote_dir)
+        self._wait_future_with_progress(
+            [fut], t("remote.pasting_progress", dst=remote_dir),
+            tolerate_errors=True, abort_sessions=[sess])
         try:
             fut.result()
         except Exception as e:

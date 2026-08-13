@@ -2590,9 +2590,36 @@ class MainWindow(ThemeMixin, ToolbarMixin, ConfigMixin, ExplorerPanelMixin,
         # 直接关闭当前标签页
         self._close_current_tab()
 
+    def _any_terminal_running(self) -> bool:
+        """窗口内是否还有终端在运行（跨全部标签页与分屏）。"""
+        for terminals in getattr(self, 'tab_terminals', {}).values():
+            for term in terminals:
+                try:
+                    if isinstance(term, TerminalWidget) and sip.isdeleted(term):
+                        continue        # 控件已析构，视为未运行
+                    if term.is_running():
+                        return True
+                except RuntimeError:
+                    continue
+        return False
+
     def _on_session_ended(self):
-        """会话结束回调"""
+        """会话结束回调。
+
+        录制会话是**窗口级共享**的（所有标签页/分屏的输出都进同一个
+        session）。因此只有当窗口里再没有终端在跑时才真正结束它——否则
+        一个标签的 SSH 掉线就会把整窗停录：其它标签仍在正常工作，输出却
+        不再进历史/导出（add_output 抛 "No active session"），状态栏还
+        误报「已停止」，自动保存也被关掉。
+        """
         session_id = self.current_session.session_id if self.current_session else None
+
+        if self._any_terminal_running():
+            # 只提示该进程已退出，保留窗口会话与自动保存
+            if session_id:
+                self.statusbar.showMessage(
+                    t("status.process_exited", session_id=session_id))
+            return
 
         if self.current_session:
             self.session_manager.end_session()

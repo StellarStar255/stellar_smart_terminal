@@ -50,8 +50,22 @@ CONNECT_TIMEOUT = 15           # 单次 TCP/SSH 握手超时（秒）
 # 操作快速失败 → future 完成 → UI 解冻、并可走自动重连。取值要远大于活跃传输里
 # 相邻数据块的间隔（活跃传输每隔几毫秒就有数据，永远不会误触发），只在真正断流时命中。
 SFTP_OP_TIMEOUT = 20
+# 打开 SFTP 通道（子系统握手 + 版本协商）的整体超时。paramiko 这一段没有
+# 任何超时可设，只能由 _open_sftp_bounded 从外部兜底，见该方法注释。
+SFTP_OPEN_TIMEOUT = 20
 RECONNECT_MAX_ATTEMPTS = 3     # 自动重连最多尝试次数
 RECONNECT_BACKOFF_BASE = 1.0   # 指数退避基数（秒）：1s → 2s → 4s
+# 重连失败后的冷却期：连接确实断了时，排队中的每个操作都各自跑一轮完整
+# 重连（3 次尝试、最坏数十秒），N 个排队操作 = N 倍等待，表现为「一个远程
+# 操作挂了，整个面板长时间没反应」。冷却期内直接快速失败，只让第一个操作
+# 承担重连成本，后面的立刻返回错误。
+RECONNECT_COOLDOWN = 20.0
+
+# 终端里跑的 ssh CLI 的应用层保活（build_ssh_terminal_command 注入）。
+# 30s × 3 次未响应 ≈ 90s 判定链路已死并退出：足以扛过短暂抖动、睡眠唤醒，
+# 又不会让用户对着一个永远卡死的标签页干等。
+SSH_ALIVE_INTERVAL = 30
+SSH_ALIVE_COUNT_MAX = 3
 
 # 这些异常通常意味着底层连接断了（而非业务错误）。注意 OSError 也可能是
 # SFTP 状态错误（FileNotFoundError/PermissionError 等），所以判定时还要
@@ -69,13 +83,13 @@ def _auto_reconnect(method):
     def wrapper(self: "SSHSession", *args, **kwargs):
         # 上一次重连失败后连接已被拆掉：先试着把连接重新建起来
         if self._sftp is None and self._was_connected:
-            self._reconnect()
+            self._reconnect_or_fail_fast()
         try:
             return method(self, *args, **kwargs)
         except _RECONNECTABLE_ERRORS as exc:
             if not self._should_reconnect(exc):
                 raise
-            self._reconnect()
+            self._reconnect_or_fail_fast()
             return method(self, *args, **kwargs)
     return wrapper
 
@@ -420,6 +434,11 @@ def build_ssh_terminal_command(host_config: "HostConfig",
     - ${SHELL:-/bin/bash} 兜底远端未设置 $SHELL；整条远程命令经单引号传递，
       本地 shell 不展开；
     - 代价：显式远程命令会跳过 motd/lastlog 一类登录横幅。
+
+    另外注入 ServerAlive* 保活（用户未自行配置时）：ssh 默认不发应用层
+    保活，NAT/防火墙静默回收空闲连接、或笔记本睡眠唤醒后链路已死时，
+    客户端察觉不到，表现为标签页永久卡死、敲什么都没反应且无法退出。
+    有了保活，链路真死会在约 90 秒内以「Connection closed」正常收场。
     """
     import shlex
     from terminal_backend import remote_env_export_prefix
@@ -427,6 +446,13 @@ def build_ssh_terminal_command(host_config: "HostConfig",
     alias = host_config.alias
     is_config_alias = "@" not in alias and ":" not in alias
     ssh_args = ["ssh"]
+    # 命令行 -o 优先级高于 ssh_config，因此只在用户没写过时才注入，
+    # 不覆盖用户对具体主机的显式调优（raw 的键由 paramiko 归一为小写）
+    raw = {str(k).lower() for k in (host_config.raw or {})}
+    for opt, val in (("ServerAliveInterval", SSH_ALIVE_INTERVAL),
+                     ("ServerAliveCountMax", SSH_ALIVE_COUNT_MAX)):
+        if opt.lower() not in raw:
+            ssh_args.extend(["-o", f"{opt}={val}"])
     if is_config_alias:
         # ssh CLI 自动应用 ~/.ssh/config（含 ProxyJump/IdentityFile 等）
         ssh_args.append(alias)
@@ -532,6 +558,9 @@ class SSHSession(QObject):
         self._cache_lock = threading.Lock()
         # 远端是否有 tar（目录上传快路径的探测结果，按会话缓存）
         self._remote_has_tar: Optional[bool] = None
+        # 上次重连失败的时刻（monotonic）；冷却期内的操作快速失败，
+        # 见 _reconnect_or_fail_fast
+        self._last_reconnect_failure: Optional[float] = None
 
     # --- lifecycle ---
 
@@ -557,6 +586,54 @@ class SSHSession(QObject):
         self._passphrase_provider = passphrase_provider
         self._establish()
 
+    def _open_sftp_bounded(self, client: paramiko.SSHClient) -> paramiko.SFTPClient:
+        """打开 SFTP 通道，带整体超时。
+
+        paramiko 的 open_sftp() 内部 invoke_subsystem 走 Channel._wait_for_event()，
+        那个等待**没有超时**：服务器 TCP 与认证都通、却迟迟不响应 sftp 子系统
+        请求时（远端磁盘满 / sshd fork 失败 / 中间设备半开连接），调用线程会
+        永久卡住——而它是本会话唯一的 worker，于是排队中的所有远程操作、以及
+        任何在 GUI 线程上等待这些操作的代码一并冻住。
+
+        这里把打开动作放到临时线程里跑并设截止时间；超时就关掉 transport
+        （卡住的等待会立刻抛错退出，线程随即回收），保证 _establish 一定
+        有界返回。通道读超时在返回前设好，后续 normalize/listdir 等即受
+        SFTP_OP_TIMEOUT 保护。
+        """
+        result: dict = {}
+
+        def _work():
+            try:
+                sftp = client.open_sftp()
+                chan = sftp.get_channel()
+                if chan is not None:
+                    chan.settimeout(SFTP_OP_TIMEOUT)
+                result['sftp'] = sftp
+            except Exception as e:      # noqa: BLE001 — 原样回传给调用线程
+                result['exc'] = e
+
+        th = threading.Thread(
+            target=_work, daemon=True,
+            name=f"sftp-open-{self.host_config.alias}")
+        th.start()
+        th.join(timeout=SFTP_OPEN_TIMEOUT)
+        if th.is_alive():
+            try:
+                transport = client.get_transport()
+                if transport is not None:
+                    transport.close()   # 让卡住的 _wait_for_event 抛错退出
+            except Exception:
+                logger.debug("_open_sftp_bounded: transport close failed",
+                             exc_info=True)
+            raise paramiko.SSHException(
+                f"SFTP subsystem did not respond within {SFTP_OPEN_TIMEOUT}s")
+        if 'exc' in result:
+            raise result['exc']
+        sftp = result.get('sftp')
+        if sftp is None:
+            raise paramiko.SSHException("failed to open SFTP channel")
+        return sftp
+
     def _establish(self):
         """真正建立连接：先按 ProxyJump 链路连跳板，再连目标，最后开 SFTP。
 
@@ -570,18 +647,10 @@ class SSHSession(QObject):
             self._close_clients(jump_clients)
             raise
         try:
-            sftp = client.open_sftp()
+            sftp = self._open_sftp_bounded(client)
         except Exception:
             self._close_clients([client] + jump_clients)
             raise
-        # 给 SFTP 数据通道设读超时：网络切换/断流时 recv 不再无限期阻塞，
-        # 而是抛 socket.timeout，让操作快速失败、future 完成、UI 解冻。
-        try:
-            chan = sftp.get_channel()
-            if chan is not None:
-                chan.settimeout(SFTP_OP_TIMEOUT)
-        except Exception:
-            logger.debug("_establish: suppressed exception", exc_info=True)
         try:
             home = sftp.normalize(".")
         except Exception:
@@ -805,13 +874,26 @@ class SSHSession(QObject):
                 logger.debug("_close_clients: suppressed exception", exc_info=True)
 
     def disconnect(self):
-        """关闭连接（在 UI 线程调用安全）"""
+        """关闭连接（在 UI 线程调用安全，且不阻塞）。
+
+        以前是 `submit(_do_disconnect).result(timeout=5)`：清理任务被排到单
+        worker 队列末尾，只要前面还有在跑的传输/递归搜索就轮不到执行，于是
+        必然等满 5 秒——GUI 硬冻 5s，超时后清理还没做，socket 反而泄漏。
+        改为直接走 abort()：它绕开 executor 关 transport/socket，瞬间返回，
+        同时让卡在 recv 上的 worker 立即抛错退出，是更彻底的清理。
+        """
+        self._was_connected = False   # 阻止 abort 之后的自动重连
         try:
-            self._executor.submit(self._do_disconnect).result(timeout=5)
+            self.abort()
         except Exception as e:
-            # 关闭失败（如超时）不阻断流程，但记一行便于排查连接泄漏
             logger.debug("disconnect cleanup failed for %s: %s",
                          self.host_config.alias, e)
+        # abort 已关掉所有 transport/client，这里只丢引用即可；不能再走
+        # _teardown_connection 的 sftp.close()/client.close()——那是可能
+        # 阻塞的调用，而本方法承诺在 UI 线程瞬时返回。
+        self._sftp = None
+        self._client = None
+        self._jump_clients = []
         self._executor.shutdown(wait=False)
         self.disconnected.emit()
 
@@ -881,6 +963,28 @@ class SSHSession(QObject):
         if isinstance(exc, (paramiko.SSHException, EOFError)):
             return True
         return not self.is_alive()
+
+    def _reconnect_or_fail_fast(self):
+        """重连入口：刚失败过就直接快速失败，不再重复承担重连成本。
+
+        断线时会话的单 worker 队列里往往积着几十上百个操作（目录粘贴一次
+        submit 几百个 upload）。若每个都各自跑一轮完整重连（3 次尝试、最坏
+        数十秒），总时长就是 N 倍——用户看到的是「一个远程操作挂了以后，
+        整个面板长时间毫无反应」。这里加一层冷却：只有第一个操作真正尝试
+        重连，冷却期内的后续操作立刻抛错，让批量任务快速排空并把错误呈现
+        给用户。冷却期过后允许再试一次，网络恢复后不需要用户手动重连。
+        """
+        last = self._last_reconnect_failure
+        if last is not None and time.monotonic() - last < RECONNECT_COOLDOWN:
+            raise RuntimeError(
+                f"{t('ssh.reconnect_failed')} ({self.host_config.alias})")
+        try:
+            self._reconnect()
+        except Exception:
+            self._last_reconnect_failure = time.monotonic()
+            raise
+        else:
+            self._last_reconnect_failure = None
 
     def _reconnect(self):
         """自动重连：指数退避，最多 RECONNECT_MAX_ATTEMPTS 次。
