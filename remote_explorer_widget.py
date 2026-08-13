@@ -51,6 +51,11 @@ _ROLE_LOADED = Qt.ItemDataRole.UserRole + 1
 # 刷新/重新请求过，旧结果直接丢弃（防竞态串台）
 _ROLE_REQ_GEN = Qt.ItemDataRole.UserRole + 2
 
+# 传输进度条按字节推进时的刻度（千分比）：总字节已知时用它做 QProgressDialog
+# 的最大值，条子才会随字节平滑推进；否则刻度只能是「完成的任务数」，
+# 单任务传输（整目录 tar 流 / 单个大文件）会全程停在 0 直到结束才跳满。
+_BYTE_BAR_SCALE = 1000
+
 
 class _TransferRateTracker:
     """传输测速：滑动窗口（最近 ~2s 的 (时刻, 累计字节) 采样）算瞬时速率，
@@ -3221,7 +3226,12 @@ class RemoteExplorerPanel(QWidget):
         # 有可中断的会话时给一个「取消」按钮：点了就 abort 这些会话，直接关 socket，
         # 让卡在 recv 上的传输立刻失败、对话框随即关闭，避免网络切换时一直卡在传输框里。
         cancel_text = t("remote.cancel_transfer") if abort_sessions else None
-        progress = QProgressDialog(label, cancel_text, 0, len(futures), self)
+        total_bytes = sum(s or 0 for s in sizes) if sizes else 0
+        # 进度条刻度：知道总字节时按字节走（千分比），否则退化为「完成的任务数」。
+        # 按任务数在单任务传输（tar 整目录快路径、单个大文件）时永远是 0/1 ——
+        # 条子空着直到传完瞬间跳满，看不出任何进度。
+        bar_max = _BYTE_BAR_SCALE if total_bytes > 0 else len(futures)
+        progress = QProgressDialog(label, cancel_text, 0, bar_max, self)
         progress.setWindowTitle(t("remote.title"))
         # 非模态：大文件粘贴/传输期间应用可继续正常使用（后台传输），
         # 进度框只悬浮展示进度。等待仍走下面的局部事件循环，传输间的
@@ -3240,7 +3250,6 @@ class RemoteExplorerPanel(QWidget):
                             logger.debug(f"[RemoteExplorerPanel] session abort failed: {e}")
             progress.canceled.connect(_on_cancel)
         done = {"n": 0, "errors": [], "bytes": 0}
-        total_bytes = sum(s or 0 for s in sizes) if sizes else 0
         tracker = _TransferRateTracker() if total_bytes > 0 else None
         # 进度文案节流（与 subtitle 路径的 350ms 节流一致）：QTimer 80ms
         # 一跳只更新进度条数值，label setText 限到 ~3Hz，避免布局抖动
@@ -3285,8 +3294,12 @@ class RemoteExplorerPanel(QWidget):
                     timer.stop()
                     loop.quit()
                     return
-                progress.setValue(done["n"])
                 cur_bytes = done["bytes"] + (live["bytes"] if live else 0)
+                if total_bytes > 0:
+                    progress.setValue(min(_BYTE_BAR_SCALE,
+                                          cur_bytes * _BYTE_BAR_SCALE // total_bytes))
+                else:
+                    progress.setValue(done["n"])
                 now = time.monotonic()
                 if (tracker is not None and cur_bytes < total_bytes
                         and now - label_ts["t"] >= 0.35):
@@ -3310,7 +3323,7 @@ class RemoteExplorerPanel(QWidget):
         loop.exec()
         try:
             if not sip.isdeleted(progress):
-                progress.setValue(len(futures))
+                progress.setValue(bar_max)   # 收尾拉满（关闭对话框）
         except RuntimeError:
             pass
         if done["errors"] and not tolerate_errors:
@@ -3839,10 +3852,6 @@ class RemoteExplorerPanel(QWidget):
         sess = self._session
         total = len(local_paths)
         base_label = t("remote.uploading_to", dst=target_dir)
-        progress = QProgressDialog(base_label, "Cancel", 0, total, self)
-        progress.setWindowTitle(t("remote.title"))
-        progress.setMinimumDuration(300)
-        progress.setValue(0)
 
         # 让 progress 通过信号在主线程里更新
         done_counter = {"n": 0, "errors": [], "bytes": 0}
@@ -3854,6 +3863,13 @@ class RemoteExplorerPanel(QWidget):
                 size_by_path[lp] = 0
         total_bytes = sum(size_by_path.values())
         tracker = _TransferRateTracker() if total_bytes > 0 else None
+        # 进度条按字节推进（总字节已知时），否则退化为完成的文件数 —— 拖入
+        # 单个大文件时按文件数会全程停在 0/1，看不出进度
+        bar_max = _BYTE_BAR_SCALE if total_bytes > 0 else total
+        progress = QProgressDialog(base_label, "Cancel", 0, bar_max, self)
+        progress.setWindowTitle(t("remote.title"))
+        progress.setMinimumDuration(300)
+        progress.setValue(0)
         # upload_with_progress 的字节级回调（worker 线程）写这个共享计数：
         # 当前文件已传字节。单 worker 串行执行，所有文件共用一个计数即可。
         live = {"bytes": 0}
@@ -3891,8 +3907,12 @@ class RemoteExplorerPanel(QWidget):
                     timer.stop()
                     loop.quit()
                     return
-                progress.setValue(done_counter["n"])
                 cur_bytes = done_counter["bytes"] + live["bytes"]
+                if total_bytes > 0:
+                    progress.setValue(min(_BYTE_BAR_SCALE,
+                                          cur_bytes * _BYTE_BAR_SCALE // total_bytes))
+                else:
+                    progress.setValue(done_counter["n"])
                 now = time.monotonic()
                 if (tracker is not None and cur_bytes < total_bytes
                         and now - label_ts["t"] >= 0.35):
@@ -3920,7 +3940,7 @@ class RemoteExplorerPanel(QWidget):
             return
         try:
             if not sip.isdeleted(progress):
-                progress.setValue(total)
+                progress.setValue(bar_max)   # 收尾拉满（关闭对话框）
         except RuntimeError:
             pass
 

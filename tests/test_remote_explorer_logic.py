@@ -331,6 +331,57 @@ class TestUploadPathMapping(_Base):
         self.assertEqual(tar_call[2], 2 + 3)  # total_bytes = 文件字节和
 
 
+class TestProgressBarBytes(_Base):
+    """进度条按字节推进的回归测试。
+
+    历史 bug：进度条刻度是「已完成的 future 数」，单任务传输（整目录 tar
+    流、单个大文件）永远是 0/1 —— 文字里字节数在涨，条子却全程空着，
+    传完瞬间才跳满。
+    """
+
+    def _run_with_live_bytes(self, panel, sizes):
+        """跑一次 _wait_future_with_progress，中途采样进度条的值。"""
+        from PyQt6.QtCore import QTimer
+        from PyQt6.QtWidgets import QProgressDialog
+
+        fut = Future()
+        live = {"bytes": 0}
+        sampled = {}
+
+        def feed():
+            live["bytes"] = 50           # 100 字节总量的一半
+
+        def sample_and_finish():
+            dlgs = panel.findChildren(QProgressDialog)
+            if dlgs:
+                sampled["value"] = dlgs[0].value()
+                sampled["max"] = dlgs[0].maximum()
+            fut.set_result(None)
+
+        QTimer.singleShot(60, feed)
+        QTimer.singleShot(260, sample_and_finish)   # 中间至少跑过一次 tick
+        panel._wait_future_with_progress([fut], "x", sizes=sizes, live=live)
+        return sampled
+
+    def test_bar_advances_with_bytes_on_single_transfer(self):
+        p = self._panel()
+        sampled = self._run_with_live_bytes(p, sizes=[100])
+        self.assertTrue(sampled, "未采样到进度对话框")
+        # 传了一半 → 进度条应在中点附近，而不是停在 0
+        self.assertGreater(sampled["max"], 1,
+                           "总字节已知时刻度不应是「任务数」")
+        ratio = sampled["value"] / sampled["max"]
+        self.assertAlmostEqual(ratio, 0.5, delta=0.05,
+                               msg=f"进度条未随字节推进: {sampled}")
+
+    def test_bar_falls_back_to_task_count_without_sizes(self):
+        """总字节未知（无 sizes）时退化为按任务数计数，不应崩。"""
+        p = self._panel()
+        sampled = self._run_with_live_bytes(p, sizes=None)
+        self.assertEqual(sampled.get("max"), 1)
+        self.assertEqual(sampled.get("value"), 0)   # 唯一任务尚未完成
+
+
 class TestUploadDirTarStream(_Base):
     """SSHSession.upload_dir_tar 的流正确性（假 channel，不碰网络）。"""
 
