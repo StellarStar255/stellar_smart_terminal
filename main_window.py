@@ -2304,6 +2304,8 @@ class MainWindow(ThemeMixin, ToolbarMixin, ConfigMixin, ExplorerPanelMixin,
             # 重排；若该侧已展开则内部提前返回，不产生多余动画。
             if isinstance(obj, TerminalWidget):
                 self._spring_to_side_on_click('terminal')
+                # 再在终端内部的分屏里把被点的那个窗格展宽
+                self._spring_expand_inner(obj)
         elif event.type() == QEvent.Type.KeyPress:
             # 用户在点亮绿点的来源终端中按键 → 视为已响应该交互提示，清除绿点。
             # （来自其他终端/Git 面板的提醒不受影响，仍靠切窗口/切 tab 清除）
@@ -3311,6 +3313,9 @@ class MainWindow(ThemeMixin, ToolbarMixin, ConfigMixin, ExplorerPanelMixin,
 
     def _on_focus_changed_for_spring(self, old, new):
         """焦点在编辑器与终端之间切换时，自动展宽被点击的一侧。"""
+        # 内层分屏的展宽只看窗格自身实际宽度，不受编辑器↔终端那道门控影响：
+        # 窗口整体够宽、但某个分屏窗格仍然很窄时，点它照样应该弹开。
+        self._spring_expand_inner(new)
         # 先按当前合计宽度刷新门控：窗口本来就很宽 / 没经历过 resize 时，门控可能仍停在
         # 旧值，这里确保「点编辑器」前门控是新鲜的（够宽则此处即触发失效+恢复均衡）。
         self._update_spring_width_gate()
@@ -3406,6 +3411,103 @@ class MainWindow(ThemeMixin, ToolbarMixin, ConfigMixin, ExplorerPanelMixin,
                 self.main_splitter.setSizes(new_sizes)
             finally:
                 self._applying_spring = False
+
+    def _spring_expand_inner(self, widget):
+        """在 widget 所在的每一层「横向 splitter」里把它这一支展宽。
+
+        补齐旧实现只在编辑器↔终端之间弹的不足：终端内部（以及编辑器内部）
+        的分屏窗格同样生效——点哪个窄窗格，哪个就变宽，方便直接使用。
+
+        判据是该分支的**实际宽度**（不是按合计宽度÷列数估算的单列宽度）：
+        窄于 SPRING_PANE_ENABLE 才弹，已经够宽就不动。因此反复点同一个窗格
+        不会抖动（第二次点时它已经宽了），点另一个窄窗格才会把焦点让过去。
+
+        main_splitter 那一层不在此处理：左侧栏（Explorer/Git）与编辑器、终端
+        同属该 splitter，不能参与重分配，仍由 _apply_spring 走专门逻辑。
+        """
+        if not getattr(self, '_spring_mode_enabled', False):
+            return
+        main_sp = getattr(self, 'main_splitter', None)
+        node = widget
+        parent = node.parentWidget() if node is not None else None
+        while parent is not None and node is not self:
+            if (isinstance(parent, QSplitter) and parent is not main_sp
+                    and parent.orientation() == Qt.Orientation.Horizontal):
+                self._spring_expand_child(parent, node)
+            node = parent
+            parent = parent.parentWidget()
+
+    def _spring_expand_child(self, splitter, child):
+        """把 splitter 中 child 这一支展宽，其余各支收窄（仅在 child 偏窄时）。"""
+        idx = splitter.indexOf(child)
+        if idx < 0:
+            return
+        sizes = splitter.sizes()
+        # 隐藏的窗格不参与分配，否则会把宽度分给看不见的东西
+        parts = [i for i in range(min(splitter.count(), len(sizes)))
+                 if splitter.widget(i) is not None
+                 and not splitter.widget(i).isHidden()]
+        if idx not in parts or len(parts) < 2:
+            return
+        combined = sum(sizes[i] for i in parts)
+        if combined <= 0 or sizes[idx] >= self.SPRING_PANE_ENABLE:
+            return      # 已经够宽 → 不打扰，避免点一次抖一次
+        n_inactive = len(parts) - 1
+        each = max(self.SPRING_INACTIVE_MIN,
+                   int(combined * self.SPRING_INACTIVE_RATIO / n_inactive))
+        if combined - each * n_inactive < each * 2:
+            # 合计太窄时最小宽度地板会反噬（各支被压得几乎等宽，点了看不出
+            # 变化）——改纯比例分配，保证被点的一支明显更宽
+            each = max(1, int(combined * self.SPRING_INACTIVE_RATIO / n_inactive))
+        new_sizes = list(sizes)
+        for i in parts:
+            new_sizes[i] = each
+        new_sizes[idx] = combined - each * n_inactive
+        if new_sizes != sizes:
+            self._animate_inner_splitter(splitter, new_sizes)
+
+    def _animate_inner_splitter(self, splitter, target_sizes, duration=170):
+        """平滑过渡内层 splitter 到目标尺寸。
+
+        动画对象挂在 splitter 自身上（而非 self._spring_anim）：内层与
+        main_splitter 的弹簧可能同时进行，共用一个引用会互相打断。
+        """
+        start = splitter.sizes()
+        if len(start) != len(target_sizes):
+            splitter.setSizes(target_sizes)
+            return
+        prev = getattr(splitter, '_spring_anim', None)
+        if prev is not None:
+            prev.stop()
+        terms = [t for t in splitter.findChildren(TerminalWidget)
+                 if hasattr(t, 'set_fast_resize')]
+        for t in terms:
+            t.set_fast_resize(True)   # 动画期间只缩放旧缓存，避免逐帧重建整屏
+
+        anim = QVariantAnimation(self)
+        anim.setStartValue(0.0)
+        anim.setEndValue(1.0)
+        anim.setDuration(duration)
+        anim.setEasingCurve(QEasingCurve.Type.OutCubic)
+
+        def _on_val(f):
+            if sip.isdeleted(splitter):
+                return
+            splitter.setSizes(
+                [int(round(s + (e - s) * f)) for s, e in zip(start, target_sizes)])
+
+        def _on_done():
+            if not sip.isdeleted(splitter):
+                splitter.setSizes(target_sizes)
+                splitter._spring_anim = None
+            for t in terms:
+                if not sip.isdeleted(t):
+                    t.set_fast_resize(False)   # 按最终尺寸重建一次，文本恢复清晰
+
+        anim.valueChanged.connect(_on_val)
+        anim.finished.connect(_on_done)
+        splitter._spring_anim = anim
+        anim.start()
 
     def _reconcile_spring_after_layout_change(self):
         """侧栏 Git/Explorer 切换会把 editor/终端重排回默认比例（重新 dock 编辑器

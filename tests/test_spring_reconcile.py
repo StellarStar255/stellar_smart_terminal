@@ -148,5 +148,138 @@ class TestSpringReconcile(unittest.TestCase):
             f"窄窗口下被点侧应占 ~70%: editor={ed}, terminal={tm}")
 
 
+class TestSpringInnerPanes(unittest.TestCase):
+    """分屏窗格级弹簧：点哪个窄窗格，哪个就变宽。
+
+    旧实现只在「编辑器 ↔ 终端区」之间弹，终端内部 split 出来的多个窗格
+    互相之间不会弹——多分几屏后每个都很窄，点了也没反应。
+    现在判据改为窗格的**实际宽度**：窄于 SPRING_PANE_ENABLE 才弹，
+    已经够宽就不动（所以重复点同一个不会抖）。
+    """
+
+    @classmethod
+    def setUpClass(cls):
+        cls.app = QApplication.instance() or QApplication([])
+        global main_window
+        import main_window
+        cls.w = main_window.MainWindow()
+        cls.w.resize(1600, 900)
+        cls.w.show()
+        cls.app.processEvents()
+
+    @classmethod
+    def tearDownClass(cls):
+        from PyQt6.QtCore import QEvent
+        cls.w.close()
+        cls.w.deleteLater()
+        del cls.w
+        for _ in range(5):
+            cls.app.sendPostedEvents(None, QEvent.Type.DeferredDelete)
+            cls.app.processEvents()
+
+    def setUp(self):
+        self.w._spring_mode_enabled = True
+        self._splitters = []
+
+    def tearDown(self):
+        for sp in self._splitters:
+            sp.deleteLater()
+        self.app.processEvents()
+
+    def _hsplit(self, sizes):
+        """造一个横向 splitter，按 sizes 分配等量的占位窗格。"""
+        from PyQt6.QtCore import Qt
+        from PyQt6.QtWidgets import QSplitter, QWidget
+        sp = QSplitter(Qt.Orientation.Horizontal)
+        panes = []
+        for _ in sizes:
+            p = QWidget()
+            sp.addWidget(p)
+            panes.append(p)
+        sp.resize(sum(sizes), 600)
+        sp.show()
+        sp.setSizes(list(sizes))
+        self.app.processEvents()
+        self._splitters.append(sp)
+        return sp, panes
+
+    def _settle(self, sp):
+        """快进内层弹簧动画到终点。"""
+        anim = getattr(sp, '_spring_anim', None)
+        if anim is not None:
+            anim.setCurrentTime(anim.duration())
+        self.app.processEvents()
+
+    def test_clicked_narrow_pane_expands(self):
+        sp, panes = self._hsplit([400, 400, 400])
+        self.w._spring_expand_child(sp, panes[1])
+        self._settle(sp)
+        s = sp.sizes()
+        self.assertGreater(s[1], s[0], f"被点窗格应最宽: {s}")
+        self.assertGreater(s[1], s[2], f"被点窗格应最宽: {s}")
+
+    def test_clicking_already_wide_pane_is_noop(self):
+        """已经够宽就不动——否则每点一次都重排，视觉上是抖动。"""
+        sp, panes = self._hsplit([1200, 200])
+        before = sp.sizes()
+        self.w._spring_expand_child(sp, panes[0])
+        self._settle(sp)
+        self.assertEqual(sp.sizes(), before)
+
+    def test_focus_moves_expansion_to_other_pane(self):
+        sp, panes = self._hsplit([400, 400, 400])
+        self.w._spring_expand_child(sp, panes[1])
+        self._settle(sp)
+        self.w._spring_expand_child(sp, panes[2])
+        self._settle(sp)
+        s = sp.sizes()
+        self.assertGreater(s[2], s[0], f"应换成第三个最宽: {s}")
+        self.assertGreater(s[2], s[1], f"应换成第三个最宽: {s}")
+
+    def test_narrow_total_width_still_visibly_springs(self):
+        """整体很窄时，最小宽度地板会把两侧压得几乎等宽 —— 必须退化为纯比例。"""
+        sp, panes = self._hsplit([250, 250])
+        self.w._spring_expand_child(sp, panes[0])
+        self._settle(sp)
+        s = sp.sizes()
+        self.assertGreater(s[0], s[1] * 2, f"窄窗口下被点侧应明显更宽: {s}")
+
+    def test_disabled_spring_does_nothing(self):
+        self.w._spring_mode_enabled = False
+        sp, panes = self._hsplit([400, 400])
+        before = sp.sizes()
+        self.w._spring_expand_inner(panes[0])
+        self.app.processEvents()
+        self.assertEqual(sp.sizes(), before)
+
+    def test_hidden_pane_excluded_from_allocation(self):
+        """隐藏窗格不该分到宽度。"""
+        sp, panes = self._hsplit([400, 400, 400])
+        panes[2].hide()
+        self.app.processEvents()
+        self.w._spring_expand_child(sp, panes[0])
+        self._settle(sp)
+        s = sp.sizes()
+        self.assertGreater(s[0], s[1], f"被点窗格应更宽: {s}")
+
+    def test_vertical_splitter_untouched(self):
+        """纵向分屏不参与横向弹簧（上下排列没有变窄的问题）。"""
+        from PyQt6.QtCore import Qt
+        from PyQt6.QtWidgets import QSplitter, QWidget
+        sp = QSplitter(Qt.Orientation.Vertical)
+        a, b = QWidget(), QWidget()
+        sp.addWidget(a)
+        sp.addWidget(b)
+        sp.resize(800, 600)
+        sp.show()
+        sp.setSizes([300, 300])
+        self.app.processEvents()
+        self._splitters.append(sp)
+        before = sp.sizes()
+        self.w._spring_expand_inner(a)
+        self.app.processEvents()
+        self.assertEqual(sp.sizes(), before)
+
+
 if __name__ == '__main__':
     unittest.main()
