@@ -129,6 +129,29 @@ class TestAsyncReflow(AsyncReflowBase):
             w._rebuild_cache = orig
         w.deleteLater()
 
+    def test_alt_screen_resize_goes_async(self):
+        """备用屏幕（tmux/vim）期间 resize 也走异步。
+
+        陷阱：_get_history_count() 在备用屏幕返回 0（那是给滚动条/压力点
+        用的语义），但 resize 在备用屏幕仍会全量 reflow 被保存的主屏+历史
+        （恰是 O(历史) 的贵路径）。预测行数必须用真实历史长度，否则 tmux
+        里 resize 永远漏回同步路径照样冻结。
+        """
+        w = self._widget()
+        w.stream.feed("\x1b[?1049h")  # 进入备用屏幕
+        self.assertTrue(w.screen._in_alt_screen)
+        self.assertEqual(w._get_history_count(), 0)  # 语义不变（滚动条用）
+        w._reflow_ms_per_line = 1.0
+
+        w.resize(700, 500)
+        w._update_terminal_size()
+        went_async = w._reflow_inflight
+        self._wait_reflow_done(w)
+        self.assertTrue(went_async)
+        w.stream.feed("\x1b[?1049l")  # 退出备用屏幕
+        self.assertFalse(w.screen._in_alt_screen)
+        w.deleteLater()
+
     def test_env_forces_sync(self):
         """STELLAR_SYNC_REFLOW=1（映射为类开关）时永远同步"""
         from terminal_widget import TerminalWidget

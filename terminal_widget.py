@@ -1054,7 +1054,9 @@ class TerminalWidget(TerminalRenderMixin, QWidget):
                 # 缩小后的"提示符归顶"整理延迟到 reflow 收尾（同步/异步共用）
                 self._pending_shrink_rows = True
 
-            reflow_lines = self._get_history_count() + old_rows  # 参与 reflow 的行数（粗略）
+            # 参与 reflow 的行数（粗略）。用真实历史长度而非 _get_history_count：
+            # 备用屏幕(tmux/vim)期间 resize 同样会 reflow 被保存的主屏+历史
+            reflow_lines = self._raw_history_count() + old_rows
             logger.debug(f"[Terminal] Size: {old_cols}x{old_rows} -> {new_cols}x{new_rows} (widget: {self.width()}x{self.height()}, char_w: {self.char_width:.1f})")
 
             if self._reflow_inflight:
@@ -1156,7 +1158,7 @@ class TerminalWidget(TerminalRenderMixin, QWidget):
         self._reflow_inflight = False
         if (self.screen.lines, self.screen.columns) != (self.term_rows, self.term_cols):
             # worker 执行期间用户又改了尺寸 → 续跑（保持贴图模式，不闪烁）
-            self._start_async_reflow(self._get_history_count() + self.screen.lines)
+            self._start_async_reflow(self._raw_history_count() + self.screen.lines)
             return
         self._reflow_scaling = False
         self._finish_reflow(reflow_lines, reflow_ms)
@@ -1856,6 +1858,18 @@ class TerminalWidget(TerminalRenderMixin, QWidget):
         with self._screen_lock:
             if self.screen._in_alt_screen:
                 return 0
+            history = self._screen_history
+            return len(history.top) if history else 0
+
+    def _raw_history_count(self) -> int:
+        """真实历史行数——不做备用屏幕掩蔽。
+
+        _get_history_count() 在备用屏幕返回 0 是显示语义（滚动条/压力点
+        不显示主屏历史）；但 resize 在备用屏幕仍会全量 reflow 被保存的
+        主屏+历史，预测 reflow 工作量必须用这个真实值，否则 tmux/vim 里
+        resize 会被误判为"便宜"而漏回同步路径。
+        """
+        with self._screen_lock:
             history = self._screen_history
             return len(history.top) if history else 0
 
