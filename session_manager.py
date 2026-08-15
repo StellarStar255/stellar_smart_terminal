@@ -107,6 +107,8 @@ class Session:
     working_directory: str = ""
     # 单调递增的修订号，任何内容变更都会 +1，供 auto_save 跳过无变化的保存
     revision: int = field(default=0, compare=False)
+    # 是否发生过总量滚动截断（最旧条目被丢弃）
+    truncated: bool = False
 
     def to_dict(self) -> dict:
         return {
@@ -115,6 +117,7 @@ class Session:
             'end_time': self.end_time,
             'command': self.command,
             'working_directory': self.working_directory,
+            'truncated': self.truncated,
             'entries': [e.to_dict() for e in self.entries]
         }
 
@@ -127,6 +130,7 @@ class Session:
             end_time=data.get('end_time'),
             command=data.get('command', ''),
             working_directory=data.get('working_directory', ''),
+            truncated=bool(data.get('truncated', False)),
             entries=entries
         )
 
@@ -140,6 +144,11 @@ class Session:
 
 class SessionManager:
     """会话管理器"""
+
+    # 单个会话的内容总量上限（字符数）。没有上限时长会话（跑一整天 Claude）
+    # 的内存占用和每 30s 全量重写的 auto_save 开销都随总输出线性增长。
+    # 超限后从最旧条目开始整条丢弃（条目内部另有 10MB 滚动截断兜底）。
+    MAX_SESSION_CHARS = 50 * 1024 * 1024
 
     def __init__(self):
         self.sessions_dir = get_sessions_dir()
@@ -186,7 +195,26 @@ class SessionManager:
         )
         self.current_session.entries.append(entry)
         self.current_session.revision += 1
+        self._enforce_total_cap()
         return entry
+
+    def _enforce_total_cap(self):
+        """会话总量超过 MAX_SESSION_CHARS 时，从最旧条目开始滚动丢弃。
+
+        至少保留最后一个条目（其自身有条目级 10MB 滚动截断兜底）。
+        revision 由调用方（add_input/add_output）已递增，这里不重复加。
+        """
+        session = self.current_session
+        if session is None:
+            return
+        entries = session.entries
+        total = sum(e.content_length for e in entries)
+        if total <= self.MAX_SESSION_CHARS:
+            return
+        while len(entries) > 1 and total > self.MAX_SESSION_CHARS:
+            removed = entries.pop(0)
+            total -= removed.content_length
+            session.truncated = True
 
     def add_output(self, content: str) -> SessionEntry:
         """添加输出记录 - 合并连续的输出（优化：延迟文件路径提取）"""
@@ -203,6 +231,7 @@ class SessionManager:
             last_entry.append_content(content)
             self.current_session.revision += 1
             # 性能优化：合并时不更新时间戳，减少函数调用
+            self._enforce_total_cap()
             return last_entry
 
         # 否则创建新条目（不提取文件路径）
@@ -214,6 +243,7 @@ class SessionManager:
         )
         self.current_session.entries.append(entry)
         self.current_session.revision += 1
+        self._enforce_total_cap()
         return entry
 
     def end_session(self) -> Optional[Session]:
@@ -266,7 +296,11 @@ class SessionManager:
             )
             try:
                 with open(fd, 'w', encoding='utf-8') as f:
-                    json.dump(data, f, ensure_ascii=False, indent=2)
+                    # 紧凑格式（无 indent）：json 走 C 编码器，序列化比
+                    # indent=2 的纯 Python 编码器快 3~5 倍。大会话每 30s
+                    # 全量重写，这里的差距直接决定后台线程的 GIL 占用。
+                    json.dump(data, f, ensure_ascii=False,
+                              separators=(',', ':'))
                 Path(tmp_path).replace(file_path)
             except BaseException:
                 Path(tmp_path).unlink(missing_ok=True)
@@ -274,7 +308,8 @@ class SessionManager:
         except OSError:
             # Fallback to direct write if temp file fails
             with open(file_path, 'w', encoding='utf-8') as f:
-                json.dump(data, f, ensure_ascii=False, indent=2)
+                json.dump(data, f, ensure_ascii=False,
+                          separators=(',', ':'))
         return file_path
 
     def load_session(self, session_id: str) -> Optional[Session]:

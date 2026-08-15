@@ -192,10 +192,12 @@ class TerminalRenderMixin:
         # cache pixmap 是按 size*DPR 创建的物理像素 pixmap；与 widget logical size
         # 比较时要乘 DPR 才一致。
         dpr = self.devicePixelRatioF()
-        # 快速 resize 模式（弹簧/动画期间）：只要有可用的旧缓存，就直接缩放贴图，
-        # 跳过每帧整屏重建，避免卡顿。无缓存时退回正常重建路径。
+        # 快速 resize 模式（弹簧/动画期间）或后台 reflow 在途：只要有可用的
+        # 旧缓存，就直接贴旧图，跳过整屏重建。reflow 在途时重建会卡在
+        # _screen_lock 上（worker 正持锁 mutate 屏幕/历史，可达一两百 ms），
+        # 贴旧帧让 GUI 全程不冻结。无缓存时退回正常重建路径（会短暂等锁）。
         fast_scale = (
-            self._fast_resize
+            (self._fast_resize or self._reflow_scaling)
             and self._cache_pixmap is not None
             and not self._cache_pixmap.isNull()
         )

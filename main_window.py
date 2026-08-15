@@ -1677,15 +1677,14 @@ class MainWindow(ThemeMixin, ToolbarMixin, ConfigMixin, ExplorerPanelMixin,
         # GUI 字体大小：0 = Auto（跟随系统默认字号），>0 = 固定大小
         gui_font_size = self._gui_font_size
 
-        # 1. 所有终端 (默认12pt, 范围8-32) — 始终跟随全局缩放
+        # 1. 所有终端 (默认12pt, 范围8-32) — 始终跟随全局缩放。
+        #    apply_font_size：字号立即生效，O(历史) 的网格 reflow 走 150ms
+        #    防抖——连按 Cmd+± 时每个终端只在停手后 reflow 一次，不再每按
+        #    一次就对所有分屏同步串行 reflow（满历史时曾达秒级冻结）。
         for terminals in self.tab_terminals.values():
             for term in terminals:
                 target_size = max(8, min(32, 12 + delta))
-                if term.term_font.pointSize() != target_size:
-                    term.term_font.setPointSize(target_size)
-                    term._calculate_char_size()
-                    term._update_terminal_size()
-                    term.update()
+                term.apply_font_size(target_size)
 
         # 2. 全局 GUI 字体（工具栏、标签栏、状态栏等）——只由 GUI Font 控制，
         #    与 Cmd+± 的缩放偏移无关：

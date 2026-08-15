@@ -342,11 +342,24 @@ class TerminalWidget(TerminalRenderMixin, QWidget):
     _output_activity = pyqtSignal(int)  # 一批输出已处理（参数=字节数）：在 GUI 线程重置空闲计时器
     _history_grew = pyqtSignal(int)  # feed 新增历史行数：读取线程 marshal 回 GUI 线程做回滚位置补偿
     scrollback_pressure_changed = pyqtSignal(int)  # 回滚历史"卡顿压力"等级变化（0 无 / 1 琥珀 / 2 红）
+    _reflow_finished = pyqtSignal(int, float)  # 后台 reflow 完成（行数, 毫秒）：worker 线程 marshal 回 GUI 收尾
 
     # scrollback 压力：用"预测 reflow 耗时 = 历史行数 × 实测每行毫秒"判定，超阈值才提示，
     # 因此内容窄 / 机器快时即使顶到上限也不会误亮（避免按行数比例造成的常驻红点）。
     _SCROLLBACK_AMBER_MS = 80    # 预测 reflow ≥ 80ms → 琥珀（开始有感）
     _SCROLLBACK_RED_MS = 200     # 预测 reflow ≥ 200ms → 红（明显卡，建议清空）
+
+    # 大历史 reflow 移出 GUI 线程：预测耗时 ≥ 阈值时提交到共享后台线程
+    # （与 feed 用同一把 _screen_lock 互斥），期间 paintEvent 沿用旧缓存
+    # 贴图不阻塞；完成后经 _reflow_finished 信号回 GUI 线程收尾。
+    # 低于阈值保持原同步路径（几 ms 内完成，语义不变、测试友好）。
+    # 共享单 worker 还顺带把"全局缩放对多个分屏各来一次 reflow"串行到
+    # 后台排队执行，GUI 线程全程不冻结。
+    # STELLAR_SYNC_REFLOW=1 → 强制全部同步（排障回退开关）。
+    _ASYNC_REFLOW_MIN_MS = 30.0
+    _ASYNC_REFLOW_ENABLED = os.environ.get('STELLAR_SYNC_REFLOW', '0') != '1'
+    _reflow_executor = None            # 全类共享的单线程 executor（懒创建）
+    _reflow_executor_lock = threading.Lock()
 
     # 是否在后端读取线程上直接解析（feed），而不是 marshal 到 GUI 线程。
     # 默认 True（2026-07 起）：多个终端的 pyte 解析在各自读取线程并行，
@@ -486,6 +499,11 @@ class TerminalWidget(TerminalRenderMixin, QWidget):
         # scrollback 压力指示：实测每行 reflow 毫秒（首次 resize 前用保守默认），
         # 与当前严重度等级。预测耗时 = 历史行数 × _reflow_ms_per_line。
         self._reflow_ms_per_line = 0.04
+        # 异步 reflow 状态（详见类属性 _ASYNC_REFLOW_* 的注释）
+        self._reflow_inflight = False   # 后台 worker 是否在跑（GUI 线程独占读写）
+        self._reflow_scaling = False    # paintEvent 是否走"旧缓存贴图"模式
+        self._pending_shrink_rows = False  # 行数变小待处理（收尾时提示符归顶）
+        self._reflow_finished.connect(self._on_reflow_finished)
         self._scrollback_level = 0
         self._scrollback_dot_btn = None  # 右上角"清空 scrollback"指示点（懒创建）
         self._scrollback_dot_shown_level = 0  # 指示点当前已渲染的等级（避免每帧重设样式）
@@ -1032,45 +1050,116 @@ class TerminalWidget(TerminalRenderMixin, QWidget):
             old_cols, old_rows = self.term_cols, self.term_rows
             self.term_cols = new_cols
             self.term_rows = new_rows
+            if new_rows < old_rows:
+                # 缩小后的"提示符归顶"整理延迟到 reflow 收尾（同步/异步共用）
+                self._pending_shrink_rows = True
 
+            reflow_lines = self._get_history_count() + old_rows  # 参与 reflow 的行数（粗略）
+            logger.debug(f"[Terminal] Size: {old_cols}x{old_rows} -> {new_cols}x{new_rows} (widget: {self.width()}x{self.height()}, char_w: {self.char_width:.1f})")
+
+            if self._reflow_inflight:
+                # 后台 reflow 在途：目标尺寸（term_cols/rows）已更新，worker
+                # 完成后发现 screen 尺寸仍不匹配会自动续跑到最新目标
+                return
+            predicted_ms = reflow_lines * self._reflow_ms_per_line
+            if self._ASYNC_REFLOW_ENABLED and predicted_ms >= self._ASYNC_REFLOW_MIN_MS:
+                self._start_async_reflow(reflow_lines)
+                return
+
+            # 同步路径（小缓冲，几 ms 内完成）
             # 重新创建screen（HistoryScreen的resize参数顺序是lines, columns）
             # reflow 整屏 mutate（重建行对象/历史），与跨线程读取者互斥
             with self._screen_lock:
-                reflow_lines = self._get_history_count() + old_rows  # 参与 reflow 的行数（粗略）
                 _t0 = time.perf_counter()
                 self.screen.resize(self.term_rows, self.term_cols)
                 reflow_ms = (time.perf_counter() - _t0) * 1000.0
-            # 用本次实测校准"每行毫秒"（EMA）；样本够大才更新，避免小缓冲噪声
-            if reflow_lines >= 300 and reflow_ms > 0:
-                per = reflow_ms / reflow_lines
-                self._reflow_ms_per_line = 0.6 * self._reflow_ms_per_line + 0.4 * per
-            self._update_scrollback_level()
+            self._finish_reflow(reflow_lines, reflow_ms)
 
-            # reflow 重建了行对象、改变了历史长度：
-            # - 渲染快照失配 → epoch 自增，保证下次走整屏重绘（增量重绘按
-            #   _last_render_state 比对，行对象内容变化不会反映在 screen.dirty 里）
-            # - 全历史搜索缓存按 id(line) 钉住旧行对象，全部失效，主动清空
-            # - 回滚浏览位置 clamp 到新历史范围
-            self._render_epoch += 1
-            self._search_line_cache.clear()
-            if self.scroll_offset > 0:
-                self.scroll_offset = min(self.scroll_offset, self._get_history_count())
+    def _finish_reflow(self, reflow_lines: int, reflow_ms: float):
+        """reflow 完成后的 GUI 线程收尾（同步路径与异步 worker 共用）。"""
+        # 用本次实测校准"每行毫秒"（EMA）；样本够大才更新，避免小缓冲噪声
+        if reflow_lines >= 300 and reflow_ms > 0:
+            per = reflow_ms / reflow_lines
+            self._reflow_ms_per_line = 0.6 * self._reflow_ms_per_line + 0.4 * per
+        self._update_scrollback_level()
 
-            # 缩小后若光标停在空闲提示符上、上方却残留一堆空行（常见于 claude-code 等
-            # 退出后清屏但把光标留在低处的情形），把这些空行去掉，让提示符回到顶部。
-            if new_rows < old_rows:
-                self._reflow_idle_prompt_to_top()
+        # reflow 重建了行对象、改变了历史长度：
+        # - 渲染快照失配 → epoch 自增，保证下次走整屏重绘（增量重绘按
+        #   _last_render_state 比对，行对象内容变化不会反映在 screen.dirty 里）
+        # - 全历史搜索缓存按 id(line) 钉住旧行对象，全部失效，主动清空
+        # - 回滚浏览位置 clamp 到新历史范围
+        self._render_epoch += 1
+        self._search_line_cache.clear()
+        if self.scroll_offset > 0:
+            self.scroll_offset = min(self.scroll_offset, self._get_history_count())
 
-            # 更新PTY大小（子进程会收到 SIGWINCH，可能会发送完整重绘）
-            self._update_pty_size()
+        # 缩小后若光标停在空闲提示符上、上方却残留一堆空行（常见于 claude-code 等
+        # 退出后清屏但把光标留在低处的情形），把这些空行去掉，让提示符回到顶部。
+        if self._pending_shrink_rows:
+            self._pending_shrink_rows = False
+            self._reflow_idle_prompt_to_top()
 
-            # 不主动 erase 可见 buffer：让 pyte 自然处理（保留旧内容直到子进程重写）。
-            # 这样即使子进程不响应 SIGWINCH（如 bash 在提示符空闲、进程已退出等），
-            # 也不会出现空白终端。少数 TUI 应用使用 CUF 增量重绘可能短暂出现"重影"，
-            # 但这种情况极少且很快被新重绘覆盖，远好于内容完全消失。
+        # 更新PTY大小（子进程会收到 SIGWINCH，可能会发送完整重绘）
+        self._update_pty_size()
 
-            self._invalidate_render_cache()
-            logger.debug(f"[Terminal] Size: {old_cols}x{old_rows} -> {new_cols}x{new_rows} (widget: {self.width()}x{self.height()}, char_w: {self.char_width:.1f})")
+        # 不主动 erase 可见 buffer：让 pyte 自然处理（保留旧内容直到子进程重写）。
+        # 这样即使子进程不响应 SIGWINCH（如 bash 在提示符空闲、进程已退出等），
+        # 也不会出现空白终端。少数 TUI 应用使用 CUF 增量重绘可能短暂出现"重影"，
+        # 但这种情况极少且很快被新重绘覆盖，远好于内容完全消失。
+
+        self._invalidate_render_cache()
+
+    @classmethod
+    def _get_reflow_executor(cls):
+        """全类共享的 reflow 单线程 executor（懒创建）。
+
+        单 worker：多个终端（如全局缩放时的各分屏）的 reflow 串行排队，
+        避免并发 reflow 争抢 CPU；每个任务各自持有目标 widget 的
+        _screen_lock，互不干扰。"""
+        with cls._reflow_executor_lock:
+            if cls._reflow_executor is None:
+                from concurrent.futures import ThreadPoolExecutor
+                cls._reflow_executor = ThreadPoolExecutor(
+                    max_workers=1, thread_name_prefix='reflow')
+            return cls._reflow_executor
+
+    def _start_async_reflow(self, reflow_lines: int):
+        """把 screen.resize 提交到后台线程；期间 paintEvent 走旧缓存贴图。"""
+        self._reflow_inflight = True
+        self._reflow_scaling = True
+        TerminalWidget._get_reflow_executor().submit(
+            self._reflow_worker, reflow_lines)
+
+    def _reflow_worker(self, reflow_lines: int):
+        """后台线程：持 _screen_lock 执行 reflow（与读取线程 feed 互斥）。
+
+        目标尺寸在锁内读 term_rows/term_cols（GUI 线程可能已更新到更新的
+        目标——直接 reflow 到最新值，减少续跑轮次）。"""
+        reflow_ms = 0.0
+        try:
+            with self._screen_lock:
+                rows, cols = self.term_rows, self.term_cols
+                if (self.screen.lines, self.screen.columns) != (rows, cols):
+                    _t0 = time.perf_counter()
+                    self.screen.resize(rows, cols)
+                    reflow_ms = (time.perf_counter() - _t0) * 1000.0
+        except Exception:
+            logger.exception("[Terminal] async reflow failed")
+        finally:
+            try:
+                self._reflow_finished.emit(reflow_lines, reflow_ms)
+            except RuntimeError:
+                pass  # widget 已销毁（C++ 对象没了），静默丢弃
+
+    def _on_reflow_finished(self, reflow_lines: int, reflow_ms: float):
+        """GUI 线程：后台 reflow 完成。尺寸已过期则续跑，否则收尾。"""
+        self._reflow_inflight = False
+        if (self.screen.lines, self.screen.columns) != (self.term_rows, self.term_cols):
+            # worker 执行期间用户又改了尺寸 → 续跑（保持贴图模式，不闪烁）
+            self._start_async_reflow(self._get_history_count() + self.screen.lines)
+            return
+        self._reflow_scaling = False
+        self._finish_reflow(reflow_lines, reflow_ms)
 
     def _reflow_idle_prompt_to_top(self):
         """缩小终端后，若光标处于空闲提示符（其下方没有任何内容），但上方残留若干空行，
@@ -1199,7 +1288,10 @@ class TerminalWidget(TerminalRenderMixin, QWidget):
             self._invalidate_render_cache()
 
     def flush_resize(self):
-        """立即处理待定的 resize，跳过防抖定时器"""
+        """立即处理待定的 resize，跳过防抖定时器。
+
+        注意：大历史时网格重算内部仍可能转入后台线程（异步 reflow），
+        本方法只保证"立刻开始"，不保证返回时 screen 已收敛。"""
         self._resize_timer.stop()
         if self._resize_pending:
             self._resize_pending = False
@@ -4312,19 +4404,30 @@ if (hasFileURL) {{
         """放大字体"""
         current_size = self.term_font.pointSize()
         if current_size < 32:
-            self.term_font.setPointSize(current_size + 1)
-            self._calculate_char_size()
-            self._update_terminal_size()
-            self._invalidate_render_cache()
+            self.apply_font_size(current_size + 1)
 
     def _zoom_out(self):
         """缩小字体"""
         current_size = self.term_font.pointSize()
         if current_size > 8:
-            self.term_font.setPointSize(current_size - 1)
-            self._calculate_char_size()
-            self._update_terminal_size()
-            self._invalidate_render_cache()
+            self.apply_font_size(current_size - 1)
+
+    def apply_font_size(self, point_size: int):
+        """设置终端字号：字体度量与重绘立即生效，网格重算走 resize 防抖。
+
+        网格重算（_update_terminal_size）在满历史时是一次 O(历史) 的全量
+        reflow（真实内容实测 100~200ms），以前每按一次 Cmd+± 就同步执行一次，
+        多分屏下还会对每个终端串行来一遍。改为复用 150ms 的 resize 防抖：
+        连按只在停手后 reflow 一次。防抖窗口内文本按新字号、旧网格渲染，
+        右/下缘可能短暂溢出或留白，150ms 后收敛。
+        """
+        if self.term_font.pointSize() == point_size:
+            return
+        self.term_font.setPointSize(point_size)
+        self._calculate_char_size()
+        self._resize_pending = True
+        self._resize_timer.start(150)
+        self._invalidate_render_cache()
 
     # ==================== 双击选词、三击选行 ====================
 
