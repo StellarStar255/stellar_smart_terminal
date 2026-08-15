@@ -1911,6 +1911,9 @@ class FileEditorWidget(QWidget):
         self.theme = theme or {}
         self._current_file = None
         self._original_content = ""  # 保存原始内容用于比较
+        # 正在装载文件：此期间 _original_content 已指向新文件、而缓冲区尚未填好，
+        # 任何自动保存都必须让路（否则会把空/旧内容写进新文件）。见 open_file。
+        self._loading = False
         self._highlighter = None
         self._in_image_mode = False  # 当前显示的是否是图片预览
         self._image_pixmap: QPixmap | None = None  # 原始未缩放的 QPixmap
@@ -2726,19 +2729,28 @@ class FileEditorWidget(QWidget):
         self._image_pixmap = None
         self._stack.setCurrentIndex(0)
 
-        # 加载文件内容
-        self._current_file = file_path
-        self._file_encoding = encoding
-        self._original_content = content  # 保存原始内容用于比较
-        # 崩溃恢复：存在更新的自动保存备份 → 询问是否恢复（恢复后为「已修改」态）
-        restored = self._maybe_restore_autosave(file_path, content)
-        if restored is not None:
-            self.editor.setPlainText(restored)
-            self._last_autosave_hash = hashlib.sha1(
-                restored.encode('utf-8')).hexdigest()
-        else:
-            self.editor.setPlainText(content)
-            self._last_autosave_hash = None
+        # 加载文件内容。
+        # 关键：整段置于 _loading 保护下。此前 _current_file / _original_content
+        # 已指向新文件、而 editor 还留着旧内容（新窗格则为空）时，中间的
+        # _maybe_restore_autosave 会弹模态对话框 —— 对话框带来的焦点变化触发
+        # 失焦自动保存，看到「基准=新文件内容，缓冲区=空」判定为已修改，
+        # 直接把空内容写进刚打开的文件，造成数据丢失（实测可复现）。
+        self._loading = True
+        try:
+            self._current_file = file_path
+            self._file_encoding = encoding
+            self._original_content = content  # 保存原始内容用于比较
+            # 崩溃恢复：存在更新的自动保存备份 → 询问是否恢复（恢复后为「已修改」态）
+            restored = self._maybe_restore_autosave(file_path, content)
+            if restored is not None:
+                self.editor.setPlainText(restored)
+                self._last_autosave_hash = hashlib.sha1(
+                    restored.encode('utf-8')).hexdigest()
+            else:
+                self.editor.setPlainText(content)
+                self._last_autosave_hash = None
+        finally:
+            self._loading = False
         # 启动周期性自动保存（崩溃恢复）
         self._autosave_timer.start()
 
@@ -3905,6 +3917,21 @@ class FileEditorWidget(QWidget):
         try:
             content = self.editor.toPlainText()
 
+            # 兜底红线：自动保存绝不把非空文件清空。
+            # 「缓冲区空、磁盘非空」几乎总是程序状态错乱（装载中途、窗格复用、
+            # 控件已析构等），而不是用户意图；真要清空文件，手动 Cmd+S 仍然可以。
+            # 这条与 _loading 守卫互为冗余——数据丢失不可逆，宁可多一道。
+            if silent and not content:
+                try:
+                    if (os.path.isfile(self._current_file)
+                            and os.path.getsize(self._current_file) > 0):
+                        logger.warning(
+                            "auto-save refused: buffer empty but %s is not",
+                            self._current_file)
+                        return False
+                except OSError:
+                    logger.debug("auto-save empty check failed", exc_info=True)
+
             # 保存前冲突检测：文件自我们上次读取后在磁盘上变新（其它窗格保存过、
             # 或外部程序写过，而 watcher 还没来得及提示），直接覆盖会悄悄丢掉那些
             # 改动 → 先征求用户，默认「否」。这是 watcher 提示之外的最后一道防线。
@@ -3966,6 +3993,9 @@ class FileEditorWidget(QWidget):
         远程文件同样适用——保存会照常发出 file_saved，由主窗口转成 SFTP 上传。
         """
         if not self._current_file or self._in_image_mode or not self.is_modified():
+            return False
+        if getattr(self, '_loading', False):
+            # 正在装载文件：缓冲区还没填好，此刻保存会把空/旧内容写进新文件
             return False
         return self.save_file(silent=True)
 

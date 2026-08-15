@@ -305,6 +305,96 @@ class TestAutoSaveOnLeave(_Base):
         self.assertFalse(called, "未命名文件不应触发另存为对话框")
 
 
+class TestAutoSaveNeverWipes(_Base):
+    """数据丢失回归：自动保存绝不能把非空文件清空。
+
+    真实事故：open_file 里 `_current_file` / `_original_content` 已指向新文件、
+    而缓冲区还没填内容时，中途的 _maybe_restore_autosave 会弹模态对话框；
+    对话框带来的焦点变化触发失焦自动保存，它看到「基准=新文件内容，
+    缓冲区=空」判定为已修改，把空内容写进刚打开的文件 → 整个文件被清空。
+    """
+
+    def test_loading_window_does_not_wipe_file(self):
+        """模拟装载中途（基准已换、缓冲区未填）触发自动保存。"""
+        from file_editor import EditorArea
+        area, pane, p = self._area_with_file("REAL CONTENT\n")
+        # 手工制造装载中途状态
+        pane._loading = True
+        pane.editor.setPlainText("")
+        try:
+            self.assertEqual(area.auto_save_all_dirty(), 0)
+        finally:
+            pane._loading = False
+        with open(p) as f:
+            self.assertEqual(f.read(), "REAL CONTENT\n", "文件被自动保存清空了")
+
+    def test_empty_buffer_never_overwrites_nonempty_file(self):
+        """兜底红线：即便没有 _loading 标记，空缓冲区也不得清空非空文件。"""
+        area, pane, p = self._area_with_file("REAL CONTENT\n")
+        pane.editor.setPlainText("")          # 缓冲区空，磁盘非空
+        self.assertTrue(pane.is_modified())
+        self.assertFalse(pane.auto_save_if_dirty(),
+                         "自动保存应拒绝把非空文件清空")
+        with open(p) as f:
+            self.assertEqual(f.read(), "REAL CONTENT\n")
+
+    def test_manual_save_can_still_empty_a_file(self):
+        """手动保存仍应允许清空文件——这条红线只针对自动保存。"""
+        area, pane, p = self._area_with_file("REAL CONTENT\n")
+        pane.editor.setPlainText("")
+        self.assertTrue(pane.save_file())     # 非 silent
+        with open(p) as f:
+            self.assertEqual(f.read(), "")
+
+    def test_auto_save_during_open_file_dialog_is_blocked(self):
+        """端到端：open_file 中途弹对话框时触发自动保存，文件必须完好。"""
+        area, pane, p = self._area_with_file("ORIGINAL\n")
+        other = os.path.join(os.path.dirname(p), "second.py")
+        with open(other, "w") as f:
+            f.write("SECOND FILE\n")
+
+        seen = {}
+
+        def _during(fp, disk):
+            # _maybe_restore_autosave 会弹模态对话框；此刻缓冲区尚未填好，
+            # 装载标记必须已经立起，否则焦点变化触发的自动保存会写坏文件
+            seen['loading'] = pane._loading
+            seen['buffer'] = pane.editor.toPlainText()
+            seen['baseline'] = pane._original_content
+            seen['saved'] = area.auto_save_all_dirty()
+            return None
+        pane._maybe_restore_autosave = _during
+
+        self.assertTrue(area.open_file_in_active(other))
+        # 前置：确实处在「基准已换、缓冲区还是旧内容」的危险窗口
+        self.assertEqual(seen['baseline'], "SECOND FILE\n")
+        self.assertNotEqual(seen['buffer'], seen['baseline'],
+                            "前置失败：未处于装载中途状态")
+        self.assertTrue(seen['loading'],
+                        "装载中途必须置 _loading，否则自动保存会写坏文件")
+        self.assertEqual(seen['saved'], 0,
+                         "装载期间不应有任何窗格被自动保存")
+        with open(other) as f:
+            self.assertEqual(f.read(), "SECOND FILE\n", "新打开的文件被写坏了")
+        self.assertEqual(pane.editor.toPlainText(), "SECOND FILE\n")
+
+    def test_normal_auto_save_still_works(self):
+        """红线不能误伤正常场景：有内容的改动仍要正常落盘。"""
+        area, pane, p = self._area_with_file("v1\n")
+        pane.editor.setPlainText("v2 edited\n")
+        self.assertTrue(pane.auto_save_if_dirty())
+        with open(p) as f:
+            self.assertEqual(f.read(), "v2 edited\n")
+
+    def test_empty_file_stays_saveable(self):
+        """磁盘本来就是空文件时，自动保存不受红线影响。"""
+        area, pane, p = self._area_with_file("")
+        pane.editor.setPlainText("now has content\n")
+        self.assertTrue(pane.auto_save_if_dirty())
+        with open(p) as f:
+            self.assertEqual(f.read(), "now has content\n")
+
+
 class TestExternalChangeAfterSave(_Base):
     """#4：自己的保存靠字节指纹识别（不再用时间窗），保存后短时间内真实的外部
     改动不再被吞掉。"""
