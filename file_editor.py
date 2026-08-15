@@ -1037,6 +1037,22 @@ class CodeEditor(QPlainTextEdit):
         # 之前就被 Qt 焦点遍历机制吃掉，导致 Shift+Tab 反缩进失效。
         return False
 
+    def insertFromMimeData(self, source):
+        """粘贴归一化：U+2028/U+2029/\\r 一律替换为真实换行 \\n。
+
+        含 U+2028（行分隔符）的剪贴板文本会把多个视觉行挤进同一个 block，
+        引发与 Shift+Return 相同的按块高亮/行号错位问题（见 keyPressEvent
+        的回车注释），且保存后 shell/python 不认它是换行。
+        """
+        if source is not None and source.hasText():
+            text = source.text()
+            if ('\u2028' in text or '\u2029' in text or '\r' in text):
+                text = (text.replace('\r\n', '\n').replace('\r', '\n')
+                            .replace('\u2028', '\n').replace('\u2029', '\n'))
+                self.textCursor().insertText(text)
+                return
+        super().insertFromMimeData(source)
+
     def line_number_area_paint_event(self, event):
         painter = QPainter(self._line_number_area)
         painter.fillRect(event.rect(), self._line_number_bg)
@@ -1161,11 +1177,15 @@ class CodeEditor(QPlainTextEdit):
                 cursor.insertText(self.INDENT_UNIT)
             return
 
-        # Enter / Return：继承上一行缩进；Python 在 `:` 结尾时多加一级
-        # 仅在无任何修饰键时介入；Shift+Enter 等保持原生行为
+        # Enter / Return：继承上一行缩进；Python 在 `:` 结尾时多加一级。
+        # Shift+Enter 一并按普通回车处理：QPlainTextEdit 原生 Shift+Return 会
+        # 插入 U+2028 软换行——两个视觉行挤进同一个 block，语法高亮按块着色
+        # （`## 注释` 后的命令整行被染成注释色）、行号与当前行高亮全部错位，
+        # 保存后 U+2028 原样进文件而 bash/python 不认它是换行。代码编辑器里
+        # 软换行没有正当用途，统一插入真实换行（见 tests/test_editor_soft_linebreak.py）。
         if key in (Qt.Key.Key_Return, Qt.Key.Key_Enter) and not (
             mods & (Qt.KeyboardModifier.ControlModifier | Qt.KeyboardModifier.MetaModifier
-                    | Qt.KeyboardModifier.AltModifier | Qt.KeyboardModifier.ShiftModifier)
+                    | Qt.KeyboardModifier.AltModifier)
         ):
             self._insert_newline_with_indent()
             return
@@ -1659,7 +1679,7 @@ class _SearchBar(QFrame):
         if cursor.hasSelection():
             sel = cursor.selectedText()
             # Qt 用 U+2029 段落分隔符表示换行，过滤多行选中
-            if ' ' not in sel and 0 < len(sel) <= 200:
+            if '\u2029' not in sel and 0 < len(sel) <= 200:
                 seed = sel
         self.show()
         if with_replace:
