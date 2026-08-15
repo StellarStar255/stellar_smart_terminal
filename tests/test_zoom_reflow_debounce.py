@@ -35,17 +35,25 @@ class TestZoomDebounce(unittest.TestCase):
         old_cols = w.screen.columns
         old_size = w.term_font.pointSize()
 
+        # 连放大 3 级（12→15pt）：单级在 Windows 的整数像素度量下
+        # char_width 可能不变（12pt 与 13pt 同宽），列数断言会平台相关；
+        # 3 级放大在任何平台都足以撑大 char_width
+        w._zoom_in()
+        w._zoom_in()
         w._zoom_in()
 
-        self.assertEqual(w.term_font.pointSize(), old_size + 1)
+        self.assertEqual(w.term_font.pointSize(), old_size + 3)
         # 网格重算被防抖挂起：screen 尚未按新字号 reflow
         self.assertEqual(w.screen.columns, old_cols)
         self.assertTrue(w._resize_pending)
         self.assertTrue(w._resize_timer.isActive())
 
-        # 防抖 flush 后网格按新字号收敛（字号变大 → 列数变少）
+        # 防抖 flush 后网格按新字号收敛：列数变少，且与度量公式一致
         w.flush_resize()
+        self.assertFalse(w._resize_pending)
         self.assertLess(w.term_cols, old_cols)
+        expected_cols = max(20, int((w.width() - w.PADDING * 2) / w.char_width))
+        self.assertEqual(w.term_cols, expected_cols)
         w.deleteLater()
 
     def test_rapid_zoom_single_reflow(self):
