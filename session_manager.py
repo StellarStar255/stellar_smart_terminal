@@ -181,12 +181,21 @@ class SessionManager:
         self.current_session = session
         return session
 
+    # 超过此长度的输入不在录入时提取文件路径（会话结束时统一补）。
+    # 回车提交走 GUI 线程同步路径：贴一大段 base64 给 Claude 时，扫描整段
+    # 的开销直接变成肉眼可见的卡顿，而这种内容里本来也没有真实路径。
+    _INLINE_PATH_SCAN_MAX = 4096
+
     def add_input(self, content: str) -> SessionEntry:
         """添加输入记录"""
         if not self.current_session:
             raise RuntimeError("No active session")
 
-        files = list(extract_file_paths(content))
+        # 与 add_output 同策略：大块内容延迟到 end_session 统一提取路径
+        if len(content) <= self._INLINE_PATH_SCAN_MAX:
+            files = list(extract_file_paths(content))
+        else:
+            files = []
         entry = SessionEntry(
             type='input',
             content=content,
@@ -253,10 +262,10 @@ class SessionManager:
 
         self.current_session.end_time = format_timestamp()
 
-        # 延迟处理：在会话结束时提取输出中的文件路径
+        # 延迟处理：会话结束时统一补齐未提取的文件路径
+        # （输出条目一律延迟；输入条目仅超长的那些延迟，见 _INLINE_PATH_SCAN_MAX）
         for entry in self.current_session.entries:
-            if entry.type == 'output' and not entry.files:
-                # 只对输出条目提取文件路径
+            if not entry.files:
                 entry.files = list(extract_file_paths(entry.content))
 
         self.save_session(self.current_session)

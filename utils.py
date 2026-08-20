@@ -42,13 +42,26 @@ def name_matches_tokens(name: str, tokens: list) -> bool:
     low = name.lower()
     return all(tok in low for tok in tokens)
 
-# 预编译文件路径匹配正则表达式
-_ext_pattern = '|'.join(ext[1:] for ext in ALL_EXTENSIONS)
+# 预编译文件路径匹配正则表达式。
+# 扩展名按长度降序排列：正则的 | 是最左优先（不是最长优先），'js' 排在
+# 'json' 前面时 report.json 只会匹配出 report.js。长的先试即可。
+_ext_pattern = '|'.join(
+    ext[1:] for ext in sorted(ALL_EXTENSIONS, key=len, reverse=True))
+# 扩展名后必须是路径结束（非单词字符且非点），避免 a.js 命中 a.json 的前缀
+_ext_group = r'\.(?:' + _ext_pattern + r')(?![\w.])'
 # Unix absolute paths: /home/user/file.py
-_RE_UNIX_ABS_PATH = re.compile(r'(/[^\s:*?"<>|\r\n]+\.(?:' + _ext_pattern + r'))', re.IGNORECASE)
+# 逐段匹配（段内不含 '/'）而非 `[^\s]+`：后者能吃掉 '/'，在长的无空格文本
+# （典型是贴进来的 base64）里每个 '/' 都要回溯整段剩余内容，退化成 O(n²)
+# ——实测 160KB 输入耗时 585ms 且一个路径都匹配不到。逐段写法让每段的
+# 匹配范围被 '/' 天然切断，复杂度回到线性（见 tests/test_extract_paths_perf.py）。
+_RE_UNIX_ABS_PATH = re.compile(
+    r'((?:/[^/\s:*?"<>|\r\n]+)+' + _ext_group + r')', re.IGNORECASE)
 # Windows absolute paths: C:\Users\file.py or D:/path/file.py
-_RE_WIN_ABS_PATH = re.compile(r'([A-Za-z]:[\\\/][^\s:*?"<>|\r\n]*\.(?:' + _ext_pattern + r'))', re.IGNORECASE)
-_RE_REL_PATH = re.compile(r'(?:^|[\s(])([./]?[\w\-./\\]+\.(?:' + _ext_pattern + r'))', re.IGNORECASE)
+_RE_WIN_ABS_PATH = re.compile(
+    r'([A-Za-z]:(?:[\\/][^\\/\s:*?"<>|\r\n]*)+' + _ext_group + r')',
+    re.IGNORECASE)
+_RE_REL_PATH = re.compile(
+    r'(?:^|[\s(])([./]?[\w\-./\\]+' + _ext_group + r')', re.IGNORECASE)
 
 
 def get_project_root() -> Path:
