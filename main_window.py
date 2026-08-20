@@ -2284,17 +2284,58 @@ class MainWindow(ThemeMixin, ToolbarMixin, ConfigMixin, ExplorerPanelMixin,
             terminal.term_font.setPointSize(target_size)
             terminal._calculate_char_size()
 
-        # 安装事件过滤器来监听焦点变化
-        terminal.installEventFilter(self)
+        # 安装事件过滤器来监听焦点变化（并登记归属窗口）
+        self._adopt_terminal(terminal)
 
         return terminal
+
+    def _adopt_terminal(self, terminal):
+        """把 terminal 的归属转移到本窗口：摘掉原窗口的事件过滤器，装上自己的。
+
+        必须摘除旧的：事件过滤器不会随 setParent 自动解绑。标签页被拖到别的
+        窗口后若旧窗口的过滤器还在，该终端每次获得焦点都会同时把**旧窗口**的
+        active_terminal 设成一个已经不属于它的终端；旧窗口后续的关闭分屏会
+        因此关错终端、分屏会误判成整页重组（见
+        tests/test_cross_window_active_terminal.py）。
+        """
+        old = getattr(terminal, '_owner_window', None)
+        if old is not None and old is not self:
+            try:
+                terminal.removeEventFilter(old)
+            except RuntimeError:
+                pass  # 旧窗口的 C++ 对象已销毁，过滤器随之失效
+            if getattr(old, 'active_terminal', None) is terminal:
+                old.active_terminal = None
+        terminal._owner_window = self
+        terminal.installEventFilter(self)
+
+    def _owns_terminal(self, terminal) -> bool:
+        """terminal 是否归本窗口所有（跨窗口串台的统一判据）。"""
+        return (terminal is not None
+                and getattr(terminal, '_owner_window', None) is self)
+
+    def _current_active_terminal(self):
+        """本窗口可信的活动终端；串台（属于别的窗口）时返回 None。"""
+        term = self.active_terminal
+        if term is None:
+            return None
+        if not self._owns_terminal(term):
+            self.active_terminal = None
+            return None
+        try:
+            term.isVisible()   # 探测 C++ 对象是否还活着
+        except RuntimeError:
+            self.active_terminal = None
+            return None
+        return term
 
     def eventFilter(self, obj, event):
         """事件过滤器 - 监听终端焦点变化"""
         # 处理终端焦点变化
         if event.type() == QEvent.Type.FocusIn:
-            # 检查是否是终端控件
-            if isinstance(obj, TerminalWidget):
+            # 检查是否是终端控件。只认归本窗口所有的终端：过滤器万一有残留
+            # （旧窗口未摘除），也不会把别窗口的终端记成自己的活动终端。
+            if isinstance(obj, TerminalWidget) and self._owns_terminal(obj):
                 self.active_terminal = obj
         elif event.type() == QEvent.Type.MouseButtonPress:
             # 点击终端时「确定性」触发弹簧。focusChanged 在终端已持有键盘焦点时

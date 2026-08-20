@@ -108,7 +108,9 @@ class TabSplitMixin:
                 terminal.attention_requested.connect(lambda t=terminal: self._on_terminal_attention(t))
                 terminal.interaction_requested.connect(lambda t=terminal: self._on_terminal_interaction(t))
                 terminal.scrollback_pressure_changed.connect(lambda lv, t=terminal: self._on_scrollback_pressure(t))
-                terminal.installEventFilter(self)
+                # 归属转移：务必走 _adopt_terminal（内部会摘掉原窗口的事件
+                # 过滤器），否则原窗口的 active_terminal 会被本窗口的终端污染
+                self._adopt_terminal(terminal)
 
                 # 重新设置快速命令提供者，指向当前窗口的预设
                 terminal.quick_commands_provider = lambda: self.presets
@@ -191,6 +193,33 @@ class TabSplitMixin:
         if index < self.tab_widget.count():
             self._close_tab(index)
 
+    def _target_terminal_in_tab(self, terminals, fallback_first=True):
+        """本页里「当前选中」的终端：分屏/关闭分屏的作用对象。
+
+        解析顺序（越靠前越可信）：
+        1. 真正持有键盘焦点的那个终端 —— 用户眼里的「当前」就是它；
+        2. 经归属校验的 active_terminal（`_current_active_terminal`）；
+        3. 本页第一个终端 —— 仅在 fallback_first 时启用。
+
+        不直接用 self.active_terminal：它由 FocusIn 事件过滤器更新，多窗口下
+        曾被别的窗口的终端污染（见 tests/test_cross_window_active_terminal.py），
+        用户表现为「分屏分裂了错误的窗格」「之前的终端被关掉了」。
+
+        fallback_first=False 用于**销毁性**操作（关闭分屏）：宁可什么都不做
+        也不能挑一个终端顶包——关错终端不可撤销。
+        """
+        if not terminals:
+            return None
+        focused = QApplication.focusWidget()
+        while focused is not None:
+            if focused in terminals:
+                return focused
+            focused = focused.parent()
+        active = self._current_active_terminal()
+        if active in terminals:
+            return active
+        return terminals[0] if fallback_first else None
+
     def _styled_splitter(self, orientation):
         """创建一个带统一手柄样式的 QSplitter"""
         splitter = QSplitter(orientation)
@@ -234,7 +263,18 @@ class TabSplitMixin:
         或整个高（水平分屏）。会更新 tab_splitters[idx] 指向新的外层 splitter，
         以保持 “标签页页面控件 == tab_splitters[idx]” 的不变式（detach / 重建映射依赖它）。
         """
-        old_page = self.tab_splitters.get(idx)
+        # 以 tab_widget 里的**真实页面**为准，而不是 tab_splitters[idx]。
+        # 二者一旦不同步（跨窗口接管、重排后未及时重建映射），原实现会
+        # removeTab 掉真实页面却把另一个页面插回来 —— 真实页面连同它的终端
+        # 从界面上彻底消失，用户看到的就是「分屏把之前的终端关掉了」。
+        actual_page = self.tab_widget.widget(idx)
+        old_page = actual_page if actual_page is not None else self.tab_splitters.get(idx)
+        if old_page is None:
+            return None
+        if self.tab_splitters.get(idx) is not old_page:
+            logger.warning(
+                "[Tabs] tab_splitters[%s] 与真实页面不一致，已按真实页面修正", idx)
+            self.tab_splitters[idx] = old_page
         outer = self._styled_splitter(orientation)
         title = self.tab_widget.tabText(idx)
         was_current = self.tab_widget.currentIndex() == idx
@@ -273,18 +313,25 @@ class TabSplitMixin:
         if not splitter:
             return
 
-        # 获取当前活动终端的工作目录，回退到标签页的工作目录，再回退到窗口级别的工作目录
+        terminals = self.tab_terminals.get(idx, [])
+
+        # 目标窗格先定下来：新分屏的工作目录要继承**它**的 cwd。
+        # 用未校验的 active_terminal 会在多窗口串台时继承到别的窗口的目录。
+        target = self._target_terminal_in_tab(terminals)
+
         current_cwd = None
-        if self.active_terminal and self.active_terminal.is_running():
-            current_cwd = self.active_terminal.get_cwd()
+        if target is not None and target.is_running():
+            current_cwd = target.get_cwd()
         if not current_cwd:
             current_cwd = self.tab_cwds.get(idx, self._window_cwd)
 
-        terminals = self.tab_terminals.get(idx, [])
         new_terminal = self._create_terminal()
 
-        # 没有有效活动终端时，也按整页分屏处理
-        split_whole = whole_tab or not self.active_terminal or self.active_terminal not in terminals
+        # 目标窗格：以真正持有焦点的终端为准（见 _target_terminal_in_tab）。
+        # 不能直接信 self.active_terminal —— 多窗口下它可能被别的窗口的终端
+        # 污染，那会导致「分裂了错误的窗格」，甚至误判成整页重组把真实页面
+        # removeTab 掉（表现为「之前的终端被关掉了」）。
+        split_whole = whole_tab or target is None
 
         if split_whole:
             # 对整个标签页左右分屏：新终端成为贯穿整高的一列
@@ -299,14 +346,14 @@ class TabSplitMixin:
                 self._wrap_tab_page(idx, Qt.Orientation.Horizontal, new_terminal)
         else:
             # 只分裂当前活动终端所在的小窗口
-            parent_widget = self.active_terminal.parent()
+            parent_widget = target.parent()
             if not isinstance(parent_widget, QSplitter):
                 self.statusbar.showMessage(t("msg.cannot_find_container"), 3000)
                 new_terminal.deleteLater()
                 return
 
             parent_splitter = parent_widget
-            terminal_index = parent_splitter.indexOf(self.active_terminal)
+            terminal_index = parent_splitter.indexOf(target)
 
             if parent_splitter.orientation() == Qt.Orientation.Horizontal:
                 # 父级已是水平方向：直接在活动终端右侧插入，把原终端的空间一分为二
@@ -321,7 +368,7 @@ class TabSplitMixin:
             else:
                 # 父级是垂直方向：把原终端包裹进一个新的水平 splitter
                 parent_sizes = parent_splitter.sizes()
-                original_terminal = self.active_terminal
+                original_terminal = target
                 horizontal_splitter = self._styled_splitter(Qt.Orientation.Horizontal)
                 horizontal_splitter.addWidget(original_terminal)
                 horizontal_splitter.addWidget(new_terminal)
@@ -362,16 +409,23 @@ class TabSplitMixin:
         terminals = self.tab_terminals.get(idx, [])
 
         # 获取当前终端的工作目录，回退到标签页的工作目录，再回退到窗口级别的工作目录
+        # 目标窗格先定下来：新分屏的工作目录要继承**它**的 cwd。
+        # 用未校验的 active_terminal 会在多窗口串台时继承到别的窗口的目录。
+        target = self._target_terminal_in_tab(terminals)
+
         current_cwd = None
-        if self.active_terminal and self.active_terminal.is_running():
-            current_cwd = self.active_terminal.get_cwd()
+        if target is not None and target.is_running():
+            current_cwd = target.get_cwd()
         if not current_cwd:
             current_cwd = self.tab_cwds.get(idx, self._window_cwd)
 
         new_terminal = self._create_terminal()
 
-        # 没有有效活动终端时，也按整页分屏处理
-        split_whole = whole_tab or not self.active_terminal or self.active_terminal not in terminals
+        # 目标窗格：以真正持有焦点的终端为准（见 _target_terminal_in_tab）。
+        # 不能直接信 self.active_terminal —— 多窗口下它可能被别的窗口的终端
+        # 污染，那会导致「分裂了错误的窗格」，甚至误判成整页重组把真实页面
+        # removeTab 掉（表现为「之前的终端被关掉了」）。
+        split_whole = whole_tab or target is None
 
         if split_whole:
             # 对整个标签页上下分屏：新终端成为贯穿整宽的一行
@@ -386,14 +440,14 @@ class TabSplitMixin:
                 self._wrap_tab_page(idx, Qt.Orientation.Vertical, new_terminal)
         else:
             # 只分裂当前活动终端所在的小窗口
-            parent_widget = self.active_terminal.parent()
+            parent_widget = target.parent()
             if not isinstance(parent_widget, QSplitter):
                 self.statusbar.showMessage(t("msg.cannot_find_container"), 3000)
                 new_terminal.deleteLater()
                 return
 
             parent_splitter = parent_widget
-            terminal_index = parent_splitter.indexOf(self.active_terminal)
+            terminal_index = parent_splitter.indexOf(target)
             parent_sizes = parent_splitter.sizes()
 
             if parent_splitter.orientation() == Qt.Orientation.Vertical:
@@ -407,7 +461,7 @@ class TabSplitMixin:
                     parent_splitter.setSizes(new_sizes)
             else:
                 # 父级是水平方向：把原终端包裹进一个新的垂直 splitter
-                original_terminal = self.active_terminal
+                original_terminal = target
                 vertical_splitter = self._styled_splitter(Qt.Orientation.Vertical)
                 vertical_splitter.addWidget(original_terminal)
                 vertical_splitter.addWidget(new_terminal)
@@ -478,11 +532,14 @@ class TabSplitMixin:
             self.statusbar.showMessage(t("msg.cannot_close_only_terminal"), 3000)
             return
 
-        # 找到当前活动的终端
-        terminal_to_close = self.active_terminal
+        # 找到当前活动的终端。绝不拿 terminals[-1] 顶包：活动终端不在本页
+        # （典型是多窗口下的串台，或焦点在编辑器/文件树里）时那等于随机关掉
+        # 一个别的终端——用户报告的「分屏把之前的终端关掉了」正是这条路径。
+        terminal_to_close = self._target_terminal_in_tab(
+            terminals, fallback_first=False)
         if terminal_to_close not in terminals:
-            # 如果活动终端不在当前标签页，关闭最后一个
-            terminal_to_close = terminals[-1]
+            self.statusbar.showMessage(t("msg.cannot_close_only_terminal"), 3000)
+            return
 
         # 记录被关闭终端所在的父 splitter 及其尺寸（只在这个局部范围内重新分配空间）
         parent = terminal_to_close.parent()
