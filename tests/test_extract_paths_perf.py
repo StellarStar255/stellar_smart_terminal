@@ -22,24 +22,27 @@ from utils import extract_file_paths
 
 
 class TestExtractPathsPerformance(unittest.TestCase):
-    def test_enter_with_large_base64_is_fast(self):
-        """回车提交一大段 base64：GUI 线程侧（add_input）必须几乎零耗时
+    def test_enter_with_large_base64_does_not_scan(self):
+        """回车提交一大段 base64：GUI 线程侧不得扫描整段内容
 
         这是用户实际路径：终端里粘贴 base64 后回车 → input_recorded 同步
         直连 → SessionManager.add_input。修复前这里会同步扫描整段文本
-        （80KB 约 170ms，且二次增长），现在超长输入延迟到会话结束再提取。
+        （80KB 约 170ms 且二次增长），现在超长输入延迟到会话结束再提取。
+
+        断言「没有调用扫描函数」而不是「耗时小于 N 毫秒」：绝对墙钟阈值和
+        机器速度绑定，CI runner 比开发机慢 2~3 倍就会崩红（本项目已因此吃过
+        一次残缺 release）。行为断言在任何机器上都成立。
         """
+        from unittest.mock import patch
         from session_manager import SessionManager
         sm = SessionManager()
         sm.sessions_dir = Path(tempfile.mkdtemp())
         try:
             sm.create_session('claude')
             blob = base64.b64encode(os.urandom(60000)).decode()
-            t0 = time.perf_counter()
-            sm.add_input(blob)
-            elapsed_ms = (time.perf_counter() - t0) * 1000
-            self.assertLess(elapsed_ms, 20.0,
-                            f"add_input 在 80KB base64 上耗时 {elapsed_ms:.1f}ms")
+            with patch('session_manager.extract_file_paths') as scan:
+                sm.add_input(blob)
+            scan.assert_not_called()
         finally:
             sm._save_executor.shutdown(wait=False)
 
@@ -72,14 +75,20 @@ class TestExtractPathsPerformance(unittest.TestCase):
         finally:
             sm._save_executor.shutdown(wait=False)
 
-    def test_long_base64_regex_is_fast(self):
-        """正则本身（会话结束时仍会跑一次）不应二次退化"""
-        blob = base64.b64encode(os.urandom(60000)).decode()
-        t0 = time.perf_counter()
-        extract_file_paths(blob, validate_exists=False)
-        elapsed_ms = (time.perf_counter() - t0) * 1000
-        self.assertLess(elapsed_ms, 120.0,
-                        f"extract_file_paths 在 80KB base64 上耗时 {elapsed_ms:.1f}ms")
+    def test_short_input_scans_inline(self):
+        """普通短输入仍在录入时立即扫描（行为不变，与上面的跳过形成对照）"""
+        from unittest.mock import patch
+        from session_manager import SessionManager
+        sm = SessionManager()
+        sm.sessions_dir = Path(tempfile.mkdtemp())
+        try:
+            sm.create_session('claude')
+            with patch('session_manager.extract_file_paths',
+                       return_value=set()) as scan:
+                sm.add_input('ls -la')
+            scan.assert_called_once()
+        finally:
+            sm._save_executor.shutdown(wait=False)
 
     def test_scaling_is_not_quadratic(self):
         """规模 ×4，耗时不应涨到 8 倍以上（二次方判据）
