@@ -101,13 +101,23 @@ class TestExtractPathsPerformance(unittest.TestCase):
         """
         blob = base64.b64encode(os.urandom(180000)).decode()
 
-        def timed(n, repeat=5):
+        def timed(n, repeat=3):
+            """单次调用耗时。自适应批量：修复后一次扫描不到 1ms，直接测单次
+            会被调度噪声淹没（噪声比信号还大，比例随机化 → flaky）。这里把
+            批量放大到每次测量至少 20ms 再摊平，慢实现下 iters 自然停在 1。"""
             s = blob[:n]
             best = float('inf')
             for _ in range(repeat):
-                t0 = time.perf_counter()
-                extract_file_paths(s, validate_exists=False)
-                best = min(best, time.perf_counter() - t0)
+                iters = 1
+                while True:
+                    t0 = time.perf_counter()
+                    for _ in range(iters):
+                        extract_file_paths(s, validate_exists=False)
+                    dt = time.perf_counter() - t0
+                    if dt >= 0.02 or iters >= 4096:
+                        break
+                    iters *= 4
+                best = min(best, dt / iters)
             return best
 
         t_small = timed(40000)

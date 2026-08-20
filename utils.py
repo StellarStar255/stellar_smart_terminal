@@ -42,26 +42,36 @@ def name_matches_tokens(name: str, tokens: list) -> bool:
     low = name.lower()
     return all(tok in low for tok in tokens)
 
-# 预编译文件路径匹配正则表达式。
-# 扩展名按长度降序排列：正则的 | 是最左优先（不是最长优先），'js' 排在
-# 'json' 前面时 report.json 只会匹配出 report.js。长的先试即可。
+# 文件路径提取：锚点 + 片段扫描，**不使用可回溯的路径体正则**。
+#
+# 历史教训：早先写成 `(/[^\s:*?"<>|\r\n]+\.(?:ext))` 这类「路径体 + 扩展名」的
+# 正则，路径体能吃掉分隔符，于是每个候选起点都要把后面整段文本回溯一遍。
+# 终端里贴一段 base64（超长、无空格）就是最坏输入：160KB 实测 585ms，而且
+# 一个路径都匹配不到。把字符类改成不含 '/' 只是把复杂度从「字符数的平方」
+# 降到「斜杠数的平方」——本机看着好了，CI 上 160KB 仍是 40KB 的 9 倍。
+#
+# 现在的做法全程线性、无回溯：
+#   1. 按「停止符」把文本切成最长片段（路径不可能跨越空白/引号等）——一次扫描；
+#   2. 只在扩展名锚点处展开：锚点正则本身没有可回溯的量词；
+#   3. 每个锚点向左取到所在片段起点（O(1)，片段边界已知），再按 Unix/
+#      Windows/相对三种形态裁剪，全是字符串切片。
+# 语义与旧正则逐条对齐，见 tests/test_utils.py 与 tests/test_extract_paths_perf.py。
+
+# 扩展名按长度降序：正则的 | 是最左优先而非最长优先，'js' 排在 'json' 前面
+# 会把 report.json 截成 report.js。后随 (?![\w.]) 确保扩展名是整体结尾。
 _ext_pattern = '|'.join(
     ext[1:] for ext in sorted(ALL_EXTENSIONS, key=len, reverse=True))
-# 扩展名后必须是路径结束（非单词字符且非点），避免 a.js 命中 a.json 的前缀
-_ext_group = r'\.(?:' + _ext_pattern + r')(?![\w.])'
-# Unix absolute paths: /home/user/file.py
-# 逐段匹配（段内不含 '/'）而非 `[^\s]+`：后者能吃掉 '/'，在长的无空格文本
-# （典型是贴进来的 base64）里每个 '/' 都要回溯整段剩余内容，退化成 O(n²)
-# ——实测 160KB 输入耗时 585ms 且一个路径都匹配不到。逐段写法让每段的
-# 匹配范围被 '/' 天然切断，复杂度回到线性（见 tests/test_extract_paths_perf.py）。
-_RE_UNIX_ABS_PATH = re.compile(
-    r'((?:/[^/\s:*?"<>|\r\n]+)+' + _ext_group + r')', re.IGNORECASE)
-# Windows absolute paths: C:\Users\file.py or D:/path/file.py
-_RE_WIN_ABS_PATH = re.compile(
-    r'([A-Za-z]:(?:[\\/][^\\/\s:*?"<>|\r\n]*)+' + _ext_group + r')',
-    re.IGNORECASE)
-_RE_REL_PATH = re.compile(
-    r'(?:^|[\s(])([./]?[\w\-./\\]+' + _ext_group + r')', re.IGNORECASE)
+_RE_EXT_ANCHOR = re.compile(
+    r'\.(?:' + _ext_pattern + r')(?![\w.])', re.IGNORECASE)
+# 路径体不可能包含这些字符（':' 单列：Windows 盘符要靠它定位）
+_RE_PATH_RUN = re.compile(r'[^\s:*?"<>|]+')
+# 相对路径体允许的字符（与旧 _RE_REL_PATH 的字符类一致）
+_REL_CHARS = set(
+    'abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789_-./\\')
+# 相对路径必须紧跟在行首/空白/左括号之后（与旧正则的 (?:^|[\s(]) 一致）
+_REL_BOUNDARY = set(' \t\r\n\f\v(')
+# 单条路径的长度上限：向左展开最多回溯这么多字符，保证每个锚点的处理是 O(1)
+_MAX_PATH_LEN = 2048
 
 
 def get_project_root() -> Path:
@@ -146,6 +156,59 @@ def generate_session_id() -> str:
     return sid
 
 
+def _scan_path_candidates(text: str) -> Set[str]:
+    """线性扫描出路径候选（不验证存在性）。实现说明见 _RE_EXT_ANCHOR 处的注释。
+
+    对每个扩展名锚点，向左取到所在片段的起点，再按三种形态裁剪：
+      · Unix 绝对：片段内第一个 '/' 起（'/' 与扩展名之间至少要有一个字符）；
+      · Windows 绝对：片段前紧邻 "<字母>:" 且片段以 / 或 \\ 开头；
+      · 相对：片段尾部由 [\\w\\-./\\\\] 组成的最长部分，且其前边界是
+        行首/空白/左括号。
+    三者可同时命中同一锚点（与旧正则并集的行为一致）。
+    """
+    out = set()
+    if not text:
+        return out
+
+    runs = list(_RE_PATH_RUN.finditer(text))
+    if not runs:
+        return out
+
+    run_idx = 0
+    n_runs = len(runs)
+    for anchor in _RE_EXT_ANCHOR.finditer(text):
+        dot = anchor.start()
+        end = anchor.end()
+        # 锚点所在的片段（两者都按位置递增，指针只前进不回退 → 整体线性）
+        while run_idx < n_runs and runs[run_idx].end() <= dot:
+            run_idx += 1
+        if run_idx >= n_runs:
+            break
+        run = runs[run_idx]
+        if run.start() > dot:
+            continue  # 锚点落在停止符上（理论上不会发生）
+        start = max(run.start(), dot - _MAX_PATH_LEN)
+
+        # --- Unix 绝对路径 ---
+        slash = text.find('/', start, dot)
+        if slash != -1 and slash + 1 < dot:
+            out.add(text[slash:end])
+
+        # --- Windows 绝对路径（片段前面是 "C:"，片段以分隔符开头）---
+        if (start >= 2 and text[start - 1] == ':' and text[start - 2].isalpha()
+                and text[start] in '\\/'):
+            out.add(text[start - 2:end])
+
+        # --- 相对路径 ---
+        j = dot
+        while j > start and text[j - 1] in _REL_CHARS:
+            j -= 1
+        if j < dot and (j == 0 or text[j - 1] in _REL_BOUNDARY):
+            out.add(text[j:end])
+
+    return out
+
+
 def extract_file_paths(text: str, validate_exists: bool = True) -> Set[str]:
     """从文本中提取文件路径
 
@@ -156,14 +219,7 @@ def extract_file_paths(text: str, validate_exists: bool = True) -> Set[str]:
     Returns:
         匹配到的文件路径集合
     """
-    paths = set()
-
-    # 使用预编译的正则表达式匹配路径（Unix + Windows 绝对路径）
-    paths.update(_RE_UNIX_ABS_PATH.findall(text))
-    paths.update(_RE_WIN_ABS_PATH.findall(text))
-
-    rel_matches = _RE_REL_PATH.findall(text)
-    paths.update(rel_matches)
+    paths = _scan_path_candidates(text)
 
     # 如果不需要验证存在性，直接返回
     if not validate_exists:
