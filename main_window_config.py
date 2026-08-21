@@ -212,6 +212,9 @@ class ConfigMixin:
                 nav_list_h = config.get('nav_list_height', None)
                 if isinstance(nav_list_h, int) and nav_list_h > 0:
                     self._saved_nav_list_height = nav_list_h
+                # 侧栏高度联动开关（全局记忆）
+                _mw.MainWindow._sidebar_height_sync = bool(
+                    config.get('sidebar_height_sync', False))
         except Exception:
             self.presets = []
 
@@ -420,6 +423,7 @@ class ConfigMixin:
                 'git_commit_height': getattr(self, '_saved_git_commit_height', None),
                 'git_body_splitter_sizes': getattr(self, '_saved_git_body_sizes', None),
                 'nav_list_height': getattr(self, '_saved_nav_list_height', None),
+                'sidebar_height_sync': _mw.MainWindow._sidebar_height_sync,
             }
             # 保存窗口导航面板设置
             nav = _mw.MainWindow._global_window_navigator

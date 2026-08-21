@@ -807,7 +807,8 @@ class ThemeMixin:
             }}
         """
         for _name in ('image_prefix_checkbox', 'image_local_checkbox',
-                      'window_nav_checkbox', 'icon_tint_checkbox'):
+                      'window_nav_checkbox', 'icon_tint_checkbox',
+                      'sidebar_sync_checkbox'):
             _cb = getattr(self, _name, None)
             if _cb is not None:
                 _cb.setStyleSheet(_checkbox_qss)

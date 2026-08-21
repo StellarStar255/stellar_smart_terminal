@@ -32,7 +32,7 @@ from PyQt6.QtWidgets import (
     QTextEdit, QFrame, QDialog, QLineEdit, QListWidget,
     QListWidgetItem, QTabWidget,
     QApplication, QInputDialog, QMenu, QSizePolicy,
-    QStackedWidget
+    QStackedWidget, QCheckBox
 )
 from PyQt6 import sip  # 用于检查 C++ 对象是否已被删除
 from PyQt6.QtCore import Qt, QTimer, QEvent, QPoint, QRect, QObject, QVariantAnimation, QEasingCurve
@@ -141,6 +141,12 @@ class MainWindow(ThemeMixin, ToolbarMixin, ConfigMixin, ExplorerPanelMixin,
     # 在一个窗口里拖动调宽，其它已打开窗口下次展开侧边栏时也用这个宽度，
     # 减轻窗口间切换的认知负担。通过 _saved_left_panel_width 属性读写。
     _shared_left_panel_width = None
+
+    # 侧栏高度联动（侧栏底部 checkbox，全局记忆）：开启后拖动任一窗口
+    # 侧栏里「导航列表 / 文件面板」之间的分隔条，其它窗口同步跟随，
+    # 免去逐个窗口重复拖拽。_shared_nav_list_height 为联动确立的共享高度。
+    _sidebar_height_sync = False
+    _shared_nav_list_height = None
 
     # QApplication 全局 stylesheet 原值快照（进程级共享，仅初始化一次）
     _original_app_stylesheet = None
@@ -854,8 +860,13 @@ class MainWindow(ThemeMixin, ToolbarMixin, ConfigMixin, ExplorerPanelMixin,
         self.nav_panel = WindowNavigatorPanel(embedded=True)
         _nav_layout.addWidget(self.nav_panel)
         self.left_panel_layout.addWidget(self.nav_panel_container)
-        # 恢复上次拖拽记忆的导航列表高度
-        if isinstance(getattr(self, '_saved_nav_list_height', None), int):
+        # 恢复导航列表高度：联动开启且已有共享值时优先对齐其它窗口，
+        # 否则用本窗口上次拖拽记忆的高度
+        if (MainWindow._sidebar_height_sync
+                and isinstance(MainWindow._shared_nav_list_height, int)):
+            self._saved_nav_list_height = self.nav_panel.set_embedded_list_height(
+                MainWindow._shared_nav_list_height)
+        elif isinstance(getattr(self, '_saved_nav_list_height', None), int):
             self.nav_panel.set_embedded_list_height(self._saved_nav_list_height)
         # 导航面板底部的可拖拽手柄：上下拖动改变列表高度并记住
         self.nav_resize_handle = _NavResizeHandle(
@@ -886,6 +897,28 @@ class MainWindow(ThemeMixin, ToolbarMixin, ConfigMixin, ExplorerPanelMixin,
         self.left_panel_layout.addWidget(self.remote_panel_container)
         self.remote_panel_container.hide()
         self.remote_panel_visible = False
+
+        # 侧栏底部：跨窗口高度联动开关。只随嵌入式导航条（即那根可拖的
+        # 分隔条）一起显示/隐藏，见 _sync_embedded_nav。
+        self.sidebar_sync_row = QWidget()
+        _sync_layout = QHBoxLayout(self.sidebar_sync_row)
+        _sync_layout.setContentsMargins(10, 2, 8, 4)
+        _sync_layout.setSpacing(0)
+        self.sidebar_sync_checkbox = QCheckBox(t("sidebar.sync_heights"))
+        self.sidebar_sync_checkbox.setToolTip(t("sidebar.sync_heights_tooltip"))
+        self.sidebar_sync_checkbox.setChecked(MainWindow._sidebar_height_sync)
+        self.sidebar_sync_checkbox.stateChanged.connect(self._on_sidebar_sync_toggled)
+        _sync_layout.addWidget(self.sidebar_sync_checkbox)
+        _sync_layout.addStretch()
+        self.left_panel_layout.addWidget(self.sidebar_sync_row)
+        self.sidebar_sync_row.hide()
+        # 拖拽中的联动广播节流：与左侧栏宽度联动同理，拖动流里只挂起最新值，
+        # 80ms 一批推给其它窗口，避免逐像素触发全部窗口重排
+        self._nav_height_broadcast_pending = None
+        self._nav_height_broadcast_timer = QTimer(self)
+        self._nav_height_broadcast_timer.setSingleShot(True)
+        self._nav_height_broadcast_timer.setInterval(80)
+        self._nav_height_broadcast_timer.timeout.connect(self._broadcast_nav_list_height)
 
         self.main_splitter.addWidget(self.left_panel_container)
         # 左侧栏不允许被拖拽折叠到 0：往左拖到极限时停在最小宽度而不是「啪」地消失，
@@ -4832,6 +4865,63 @@ class MainWindow(ThemeMixin, ToolbarMixin, ConfigMixin, ExplorerPanelMixin,
         max_h = max(120, self.left_panel_container.height() - 200)
         new_h = min(cur + delta, max_h)
         self._saved_nav_list_height = self.nav_panel.set_embedded_list_height(new_h)
+        # 高度联动开启时把新高度（节流）推给其它窗口
+        if MainWindow._sidebar_height_sync:
+            MainWindow._shared_nav_list_height = self._saved_nav_list_height
+            self._nav_height_broadcast_pending = self._saved_nav_list_height
+            if not self._nav_height_broadcast_timer.isActive():
+                self._nav_height_broadcast_timer.start()
+
+    def _on_sidebar_sync_toggled(self, state):
+        """侧栏底部「联动高度」勾选框：全局开关 + 立即以本窗口当前布局对齐所有窗口。"""
+        enabled = (state == Qt.CheckState.Checked.value)
+        MainWindow._sidebar_height_sync = enabled
+        MainWindow._set_sidebar_sync_checkboxes(enabled)
+        if enabled and hasattr(self, 'nav_panel'):
+            h = self.nav_panel.embedded_list_height()
+            if isinstance(h, int) and h > 0:
+                MainWindow._shared_nav_list_height = h
+                self._nav_height_broadcast_pending = h
+                self._broadcast_nav_list_height()
+        self._save_config()  # 记忆开关状态，下次启动恢复
+
+    @staticmethod
+    def _set_sidebar_sync_checkboxes(enabled: bool):
+        """把「联动高度」勾选框状态同步到所有窗口（不触发各自的 toggled 逻辑）。"""
+        app = QApplication.instance()
+        for w in (app.topLevelWidgets() if app else []):
+            if not isinstance(w, MainWindow) or sip.isdeleted(w):
+                continue
+            cb = getattr(w, 'sidebar_sync_checkbox', None)
+            if cb is not None:
+                cb.blockSignals(True)
+                cb.setChecked(enabled)
+                cb.blockSignals(False)
+
+    def _broadcast_nav_list_height(self):
+        """把挂起的导航列表高度应用到其它所有窗口。
+
+        setFixedHeight 对隐藏窗口几乎零成本（不触发重绘），所以不区分
+        可见性，统一应用，省去激活时的兜底对齐。"""
+        h = self._nav_height_broadcast_pending
+        self._nav_height_broadcast_pending = None
+        if not isinstance(h, int) or h <= 0:
+            return
+        app = QApplication.instance()
+        if app is None:
+            return
+        for w in app.topLevelWidgets():
+            if w is self or not isinstance(w, MainWindow) or sip.isdeleted(w):
+                continue
+            w._apply_shared_nav_list_height(h)
+
+    def _apply_shared_nav_list_height(self, h: int):
+        """收到其它窗口联动过来的导航列表高度：对齐并更新本窗口的落盘记忆。"""
+        if not hasattr(self, 'nav_panel'):
+            return
+        if self.nav_panel.embedded_list_height() == h:
+            return
+        self._saved_nav_list_height = self.nav_panel.set_embedded_list_height(h)
 
     def _sync_embedded_nav(self):
         """内嵌模式下让导航条「只与 Explorer/Git/Remote 同时出现，不单独出现」。
@@ -4853,6 +4943,9 @@ class MainWindow(ThemeMixin, ToolbarMixin, ConfigMixin, ExplorerPanelMixin,
         self.nav_panel_container.setVisible(show)
         if hasattr(self, 'nav_resize_handle'):
             self.nav_resize_handle.setVisible(show)
+        # 「联动高度」开关只在分隔条存在（导航条内嵌显示）时才有意义
+        if hasattr(self, 'sidebar_sync_row'):
+            self.sidebar_sync_row.setVisible(show)
         if show:
             try:
                 self.nav_panel._force_refresh()

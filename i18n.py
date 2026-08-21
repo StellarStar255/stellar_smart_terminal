@@ -208,6 +208,8 @@ TRANSLATIONS = {
     "window.settings_btn": {"zh": "⚙ 设置", "en": "⚙ Settings"},
     "window.settings_tooltip": {"zh": "排序方式、刷新等不常用选项", "en": "Sort order, refresh and other infrequent options"},
     "window.sort_menu_label": {"zh": "排序方式", "en": "Sort by"},
+    "sidebar.sync_heights": {"zh": "各窗口联动高度", "en": "Sync heights across windows"},
+    "sidebar.sync_heights_tooltip": {"zh": "勾选后：拖动侧栏里「窗口列表 / 文件面板」之间的分隔条时，其它窗口的侧栏高度同步跟随，不必逐个窗口重复拖拽。选择会自动记住。", "en": "When checked, dragging the divider between the window list and the file panel applies the same height to every window, so you don't have to drag it in each window. Remembered automatically."},
     "window.embed_checkbox": {"zh": "嵌入到侧栏", "en": "Embed in sidebar"},
     "window.embed_checkbox_tooltip": {"zh": "勾选：把导航嵌入到每个窗口左侧栏（与 Explorer/Git/Remote 一起出现）；取消：改回独立浮动窗口。选择会自动记住。", "en": "Checked: dock the navigator into each window's left panel (shown together with Explorer/Git/Remote). Unchecked: detach as a floating window. Remembered automatically."},
     "window.search_placeholder": {"zh": "搜索...", "en": "Search..."},
