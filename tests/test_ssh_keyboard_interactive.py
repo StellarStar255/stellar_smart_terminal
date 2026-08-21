@@ -31,6 +31,11 @@ class _FakeTransport:
     def is_active(self):
         return True
 
+    def auth_none(self, username):
+        # 零凭据探测：默认模拟「publickey 可用」的普通服务器
+        raise paramiko.BadAuthenticationType(
+            "none not allowed", ["publickey", "keyboard-interactive"])
+
     def auth_interactive(self, username, handler, submethods=""):
         self.auth_username = username
         answers = handler("login", "", [("Password: ", False)])
@@ -247,10 +252,11 @@ class TestTwoFactorAndRecovery(unittest.TestCase):
         prompts_seen = []
         sess._interactive_provider = (
             lambda alias, prompt, echo: prompts_seen.append(prompt) or "123456")
+        probe = _FakeClient(_DeadTransport())   # 探测连接也被掐 → 探测放弃
         dead = _FakeClient(_DeadTransport())
         fresh_transport = _OtpOnlyTransport()
         fresh = _CleanClient(fresh_transport)
-        clients = [dead, fresh]
+        clients = [probe, dead, fresh]
         import ssh_session
         with mock.patch.object(ssh_session.paramiko, 'SSHClient',
                                lambda: clients.pop(0)):
@@ -289,9 +295,10 @@ class TestTwoFactorAndRecovery(unittest.TestCase):
         prompts_seen = []
         sess._interactive_provider = (
             lambda alias, prompt, echo: prompts_seen.append(prompt) or "123456")
+        probe = _FakeClient(_FakeTransport())  # 探测：publickey 可用 → 走原有流程
         dying = _FakeClient(_DieOnInteractiveTransport())
         fresh = _CleanClient(_OtpOnlyTransport())
-        clients = [dying, fresh]
+        clients = [probe, dying, fresh]
         import ssh_session
         with mock.patch.object(ssh_session.paramiko, 'SSHClient',
                                lambda: clients.pop(0)):
@@ -302,6 +309,98 @@ class TestTwoFactorAndRecovery(unittest.TestCase):
             sess._auth_secrets['otp-host'].get('auth_flow'),
             'clean_interactive',
             "成功路径应被记住，下次直接复现")
+
+    def test_probe_kbd_only_bastion_skips_key_spray_entirely(self):
+        """核心场景（agibot 堡垒机）：服务器只收 keyboard-interactive。
+        零凭据探测发现 publickey 根本不被允许 → 一把 key 都不试，直接在
+        探测连接上弹 OTP 框——MaxAuthTries 一次都不消耗，无从被掐线。"""
+
+        class _KbdOnlyTransport(_OtpOnlyTransport):
+            def auth_none(self, username):
+                raise paramiko.BadAuthenticationType(
+                    "none not allowed", ["keyboard-interactive"])
+
+        sess, host = _make_session()
+        prompts_seen = []
+        sess._interactive_provider = (
+            lambda alias, prompt, echo: prompts_seen.append(prompt) or "123456")
+        transport = _KbdOnlyTransport()
+        client = _FakeClient(transport)
+        import ssh_session
+        with mock.patch.object(ssh_session.paramiko, 'SSHClient',
+                               lambda: client):
+            result = sess._connect_client(host)
+        self.assertIs(result, client)
+        self.assertEqual(prompts_seen, ["[OTP Code]:"])
+        # 只有探测这一次 connect（零凭据），没有任何 key 尝试
+        self.assertEqual(len(client.connect_calls), 1)
+        self.assertFalse(client.connect_calls[0]['allow_agent'])
+        self.assertFalse(client.connect_calls[0]['look_for_keys'])
+        self.assertNotIn('key_filename', client.connect_calls[0])
+        self.assertEqual(sess._auth_secrets['otp-host'].get('auth_flow'),
+                         'clean_interactive')
+        self.assertEqual(transport.keepalive, 30)
+
+    def test_probe_password_only_host_prompts_password_directly(self):
+        """服务器只收 password：同样跳过 key 尝试，在探测连接上直接密码认证。"""
+
+        class _PwdOnlyTransport(_FakeTransport):
+            def __init__(self):
+                super().__init__()
+                self.pw_attempt = None
+
+            def auth_none(self, username):
+                raise paramiko.BadAuthenticationType(
+                    "none not allowed", ["password"])
+
+            def auth_password(self, username, password):
+                self.pw_attempt = (username, password)
+                if password != 'pw':
+                    raise paramiko.AuthenticationException("bad password")
+                return []
+
+        sess, host = _make_session()
+        sess._interactive_provider = lambda alias, prompt, echo: self.fail(
+            "password-only 主机不应发起交互认证")
+        sess._password_provider = lambda label: 'pw'
+        transport = _PwdOnlyTransport()
+        client = _FakeClient(transport)
+        import ssh_session
+        with mock.patch.object(ssh_session.paramiko, 'SSHClient',
+                               lambda: client):
+            result = sess._connect_client(host)
+        self.assertIs(result, client)
+        self.assertEqual(len(client.connect_calls), 1)
+        self.assertEqual(transport.pw_attempt, ('u', 'pw'))
+        self.assertEqual(sess._auth_secrets['otp-host'].get('password'), 'pw')
+
+    def test_probe_failure_falls_back_to_normal_flow(self):
+        """探测连接建立失败（网络抖动等）→ 原有全量流程照常运行。"""
+
+        class _BrokenProbeClient(_FakeClient):
+            def connect(self, **kwargs):
+                self.connect_calls.append(kwargs)
+                raise OSError("network glitch")
+
+        class _AgentOkClient(_FakeClient):
+            def connect(self, **kwargs):
+                self.connect_calls.append(kwargs)
+                return  # agent 认证直接成功
+
+        sess, host = _make_session()
+        sess._interactive_provider = lambda alias, prompt, echo: "123456"
+        broken = _BrokenProbeClient(_FakeTransport())
+        ok = _AgentOkClient(_FakeTransport())
+        clients = [broken, ok]
+        import ssh_session
+        with mock.patch.object(ssh_session.paramiko, 'SSHClient',
+                               lambda: clients.pop(0)):
+            result = sess._connect_client(host)
+        self.assertIs(result, ok)
+        self.assertTrue(ok.connect_calls[0]['allow_agent'],
+                        "回落流程应保留 agent 认证能力")
+        self.assertEqual(sess._auth_secrets['otp-host'].get('auth_flow'),
+                         'default')
 
     def test_cached_clean_flow_replays_directly(self):
         """上次经干净连接 + 交互认证连上的主机：本次 connect 直接禁掉

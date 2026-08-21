@@ -701,6 +701,54 @@ class SSHSession(QObject):
         host key 策略、认证回退（agent/key → passphrase → password）对目标机
         和跳板机一视同仁；成功用过的密码/口令按 alias 缓存，供自动重连复用。
         """
+        cached = self._auth_secrets.get(cfg.alias, {})
+
+        # 首次连接（本会话无任何认证记忆）且为直连时：先零凭据探测服务器
+        # 允许的认证方式。keyboard-interactive 专用的堡垒机（MFA/OTP）根本
+        # 不收 publickey——agent 多 key 逐个尝试对它纯属浪费，还会打满
+        # MaxAuthTries 被掐线（"transport shut down or saw EOF"），之后立即
+        # 重连还可能触发对端限速。探测到这类主机就直接在探测连接上完成
+        # 交互/密码认证，一次配额都不消耗在无用的密钥上。
+        if (sock is None and not cached
+                and (self._interactive_provider is not None
+                     or self._password_provider is not None)):
+            probed = self._probe_auth_methods(cfg)
+            if probed is not None:
+                p_client, p_transport, allowed, p_policy = probed
+                done_client: Optional[paramiko.SSHClient] = None
+                if allowed is None:
+                    done_client = p_client  # auth_none 直接通过（免认证服务器）
+                elif "publickey" not in allowed:
+                    logger.info(
+                        "[SSH] %s: server allows %s (no publickey), skipping "
+                        "key attempts entirely", cfg.alias, allowed)
+                    if "keyboard-interactive" in allowed:
+                        done_client = self._auth_keyboard_interactive(
+                            p_client, cfg, None)
+                    if (done_client is None and "password" in allowed
+                            and self._password_provider is not None):
+                        pwd = self._password_provider(cfg.alias)
+                        if pwd is not None:
+                            p_transport.auth_password(
+                                cfg.user or getpass.getuser(), pwd)
+                            self._auth_secrets.setdefault(
+                                cfg.alias, {})["password"] = pwd
+                            done_client = p_client
+                if done_client is not None:
+                    self._auth_secrets.setdefault(cfg.alias, {}).setdefault(
+                        "auth_flow", "clean_interactive")
+                    self._persist_new_host_key(done_client, p_policy)
+                    dt = done_client.get_transport()
+                    if dt is not None:
+                        dt.set_keepalive(KEEPALIVE_INTERVAL)
+                    return done_client
+                # 探测连接用不上（publickey 可用 / 交互走不通）→ 原有流程
+                try:
+                    p_client.close()
+                except Exception:
+                    logger.debug("_connect_client: probe close failed",
+                                 exc_info=True)
+
         client = paramiko.SSHClient()
         client.load_system_host_keys()
         # 持久化 TOFU：加载用户 known_hosts，使「已知主机密钥变更」能被 paramiko 在
@@ -745,7 +793,6 @@ class SSHSession(QObject):
             connect_kwargs["key_filename"] = cfg.identity_file
 
         # 重连时优先复用上次成功的密码/口令，避免后台重连再次弹框
-        cached = self._auth_secrets.get(cfg.alias, {})
         if cached.get("passphrase") is not None:
             connect_kwargs["passphrase"] = cached["passphrase"]
         if cached.get("password") is not None:
@@ -814,6 +861,11 @@ class SSHSession(QObject):
                 client.save_host_keys(known_hosts)
             except Exception:
                 logger.debug("_connect_client: suppressed exception", exc_info=True)
+
+        # 记住成功路径（未被交互路径标记过的记为 default），会话内重连时
+        # 不再重复零凭据探测
+        self._auth_secrets.setdefault(cfg.alias, {}).setdefault(
+            "auth_flow", "default")
 
         # keep-alive：定期发 transport 层心跳，防止 NAT/防火墙把空闲连接掐掉
         transport = client.get_transport()
@@ -938,7 +990,11 @@ class SSHSession(QObject):
                     _close_own()
                     reopened = self._reopen_clean_client(cfg)
                     if reopened is None:
-                        raise exc
+                        # 带上阶段信息：对端可能在多次失败后短时限速/拉黑
+                        raise paramiko.AuthenticationException(
+                            f"{exc} [retry over a clean connection also failed "
+                            f"to reach the server — it may be rate-limiting "
+                            f"this client after too many auth attempts]")
                     client, transport, already_authed = reopened
                     own_client = True
                     attempted_clean = True
@@ -957,6 +1013,93 @@ class SSHSession(QObject):
             secrets["auth_flow"] = "clean_interactive"
         return client
 
+    def _new_kh_client(self) -> tuple[paramiko.SSHClient, "_PersistOnFirstUsePolicy"]:
+        """新建带 known_hosts / TOFU 策略的 SSHClient（探测与干净重连共用）。"""
+        client = paramiko.SSHClient()
+        client.load_system_host_keys()
+        known_hosts = os.path.expanduser("~/.ssh/known_hosts")
+        try:
+            if os.path.isfile(known_hosts):
+                client.load_host_keys(known_hosts)
+        except Exception:
+            # 首次连接已发过降级提示，这里静默降级即可
+            logger.debug("_new_kh_client: load_host_keys failed", exc_info=True)
+        policy = _PersistOnFirstUsePolicy()
+        client.set_missing_host_key_policy(policy)
+        return client, policy
+
+    @staticmethod
+    def _persist_new_host_key(client: paramiko.SSHClient,
+                              policy: "_PersistOnFirstUsePolicy"):
+        """首次接受的未知主机 key 写回 known_hosts（同 _connect_client 尾部）。"""
+        if not policy.added:
+            return
+        try:
+            known_hosts = os.path.expanduser("~/.ssh/known_hosts")
+            os.makedirs(os.path.dirname(known_hosts), exist_ok=True)
+            client.save_host_keys(known_hosts)
+        except Exception:
+            logger.debug("_persist_new_host_key: save failed", exc_info=True)
+
+    def _probe_auth_methods(
+            self, cfg: HostConfig
+    ) -> Optional[tuple[paramiko.SSHClient, paramiko.Transport,
+                        Optional[list], "_PersistOnFirstUsePolicy"]]:
+        """零凭据探测：建一条连接（含主机密钥校验）问服务器允许的认证方式。
+
+        auth_none 不消耗服务器的认证尝试配额（OpenSSH 的 MaxAuthTries 不计
+        "none"），却能拿到 allowed types——键盘交互式堡垒机（MFA/OTP）根本
+        不收 publickey，探测到这种主机就完全跳过密钥尝试，直接交互认证。
+
+        返回 (client, transport, allowed, policy)：allowed 为 None 表示
+        auth_none 直接成功（免认证服务器，连接已可用）；其余情况连接保持
+        打开（未认证），由调用方复用或关闭。探测不成立（网络失败等）返回
+        None，调用方回落原有流程。主机密钥变更（疑似 MITM）原样上抛。
+        """
+        client, policy = self._new_kh_client()
+        kwargs: dict[str, Any] = {
+            "hostname": cfg.hostname,
+            "port": cfg.port,
+            "timeout": CONNECT_TIMEOUT,
+            "allow_agent": False,
+            "look_for_keys": False,
+            "compress": True,
+            "transport_factory": _NoStdinTransport,
+        }
+        if cfg.user:
+            kwargs["username"] = cfg.user
+        try:
+            client.connect(**kwargs)
+            # 理论上到不了这里（零凭据必抛）；真到了就当免认证连接用
+            transport = client.get_transport()
+            if transport is not None and transport.is_active():
+                return client, transport, None, policy
+        except paramiko.BadHostKeyException:
+            try:
+                client.close()
+            except Exception:
+                logger.debug("_probe_auth_methods: close failed", exc_info=True)
+            raise
+        except paramiko.SSHException:
+            # 预期失败（No authentication methods available）→ transport 活着
+            transport = client.get_transport()
+            if transport is not None and transport.is_active():
+                try:
+                    transport.auth_none(cfg.user or getpass.getuser())
+                    return client, transport, None, policy  # 免认证直接通过
+                except paramiko.BadAuthenticationType as e:
+                    return client, transport, list(e.allowed_types), policy
+                except Exception:
+                    logger.debug("_probe_auth_methods: auth_none failed",
+                                 exc_info=True)
+        except Exception:
+            logger.debug("_probe_auth_methods: connect failed", exc_info=True)
+        try:
+            client.close()
+        except Exception:
+            logger.debug("_probe_auth_methods: close failed", exc_info=True)
+        return None
+
     def _reopen_clean_client(
             self, cfg: HostConfig
     ) -> Optional[tuple[paramiko.SSHClient, paramiko.Transport, bool]]:
@@ -971,17 +1114,7 @@ class SSHSession(QObject):
         返回 (client, transport, already_authed)；already_authed=True 表示
         单 IdentityFile 已直接认证通过。连不上或 transport 未存活返回 None。
         """
-        client = paramiko.SSHClient()
-        client.load_system_host_keys()
-        known_hosts = os.path.expanduser("~/.ssh/known_hosts")
-        try:
-            if os.path.isfile(known_hosts):
-                client.load_host_keys(known_hosts)
-        except Exception:
-            # 首次连接已发过降级提示，这里静默降级即可
-            logger.debug("_reopen_clean_client: load_host_keys failed",
-                         exc_info=True)
-        client.set_missing_host_key_policy(_PersistOnFirstUsePolicy())
+        client, _policy = self._new_kh_client()
         kwargs: dict[str, Any] = {
             "hostname": cfg.hostname,
             "port": cfg.port,
