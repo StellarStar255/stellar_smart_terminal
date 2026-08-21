@@ -137,28 +137,40 @@ class MainWindow(ThemeMixin, ToolbarMixin, ConfigMixin, ExplorerPanelMixin,
     # 导航面板停靠方式：'embed'=嵌入每个窗口左侧栏（默认）；'float'=独立浮动窗口
     _navigator_dock_mode = 'embed'
 
-    # 左侧栏宽度（进程级共享）：只要打开侧边栏，所有窗口共用同一宽度，
-    # 在一个窗口里拖动调宽，其它已打开窗口下次展开侧边栏时也用这个宽度，
-    # 减轻窗口间切换的认知负担。通过 _saved_left_panel_width 属性读写。
-    _shared_left_panel_width = None
+    # 左侧栏宽度（按屏幕分桶，进程级共享）：同一块屏幕上的窗口共用同一宽度，
+    # 在一个窗口里拖动调宽，同屏的其它窗口也用这个宽度，减轻窗口间切换的
+    # 认知负担；分散在不同显示器上的窗口尺寸语境不同（分辨率/缩放各异），
+    # 互不联动、各记各的。None 键存磁盘播种的兜底值，屏幕还没有自己的值时
+    # 用它。通过 _saved_left_panel_width 属性读写（自动按本窗口所在屏分桶）。
+    _left_width_by_screen = {}
 
     # 侧栏高度联动（侧栏底部 checkbox，全局记忆）：开启后拖动任一窗口
-    # 侧栏里「导航列表 / 文件面板」之间的分隔条，其它窗口同步跟随，
-    # 免去逐个窗口重复拖拽。_shared_nav_list_height 为联动确立的共享高度。
+    # 侧栏里「导航列表 / 文件面板」之间的分隔条，同一屏幕上的其它窗口
+    # 同步跟随，免去逐个窗口重复拖拽；跨屏窗口不联动。按屏幕分桶同上。
     _sidebar_height_sync = False
-    _shared_nav_list_height = None
+    _nav_height_by_screen = {}
 
     # QApplication 全局 stylesheet 原值快照（进程级共享，仅初始化一次）
     _original_app_stylesheet = None
 
+    def _screen_key(self):
+        """联动分桶用的屏幕标识（QScreen.name()）；拿不到屏幕时归入 None
+        （与磁盘播种值同桶）。跨窗口联动只发生在同一 key 的窗口之间。"""
+        try:
+            s = self.screen()
+            return s.name() if s is not None else None
+        except Exception:
+            return None
+
     @property
     def _saved_left_panel_width(self):
-        """左侧栏记忆宽度：所有窗口共用同一份（进程级），见 _shared_left_panel_width。"""
-        return MainWindow._shared_left_panel_width
+        """左侧栏记忆宽度：同屏窗口共用一份，见 _left_width_by_screen。"""
+        d = MainWindow._left_width_by_screen
+        return d.get(self._screen_key(), d.get(None))
 
     @_saved_left_panel_width.setter
     def _saved_left_panel_width(self, value):
-        MainWindow._shared_left_panel_width = value
+        MainWindow._left_width_by_screen[self._screen_key()] = value
 
     def __init__(self, initial_tab_data=None, window_title=None):
         """初始化主窗口
@@ -490,8 +502,10 @@ class MainWindow(ThemeMixin, ToolbarMixin, ConfigMixin, ExplorerPanelMixin,
                 # 修正启动时因窗口尚未到最终尺寸、setSizes 被当成比例缩放而导致各
                 # 窗口左侧栏宽度不一致的问题（无需用户先手动拖一次才联动）。
                 # 仅在确有偏差(>2px)时应用，避免稳态下无谓跳动。
+                # 共享宽度按屏幕分桶（属性读取自动取本窗口所在屏的值），
+                # 挪到别的显示器上的窗口不会被这里拉回其它屏的宽度。
                 try:
-                    sw = MainWindow._shared_left_panel_width
+                    sw = self._saved_left_panel_width
                     if isinstance(sw, int) and sw > 0 and hasattr(self, 'main_splitter'):
                         sizes = self.main_splitter.sizes()
                         if sizes and sizes[0] > 0 and abs(sizes[0] - sw) > 2:
@@ -860,12 +874,12 @@ class MainWindow(ThemeMixin, ToolbarMixin, ConfigMixin, ExplorerPanelMixin,
         self.nav_panel = WindowNavigatorPanel(embedded=True)
         _nav_layout.addWidget(self.nav_panel)
         self.left_panel_layout.addWidget(self.nav_panel_container)
-        # 恢复导航列表高度：联动开启且已有共享值时优先对齐其它窗口，
+        # 恢复导航列表高度：联动开启且本屏已有共享值时优先对齐同屏窗口，
         # 否则用本窗口上次拖拽记忆的高度
-        if (MainWindow._sidebar_height_sync
-                and isinstance(MainWindow._shared_nav_list_height, int)):
+        _shared_nav_h = MainWindow._nav_height_by_screen.get(self._screen_key())
+        if MainWindow._sidebar_height_sync and isinstance(_shared_nav_h, int):
             self._saved_nav_list_height = self.nav_panel.set_embedded_list_height(
-                MainWindow._shared_nav_list_height)
+                _shared_nav_h)
         elif isinstance(getattr(self, '_saved_nav_list_height', None), int):
             self.nav_panel.set_embedded_list_height(self._saved_nav_list_height)
         # 导航面板底部的可拖拽手柄：上下拖动改变列表高度并记住
@@ -2968,7 +2982,7 @@ class MainWindow(ThemeMixin, ToolbarMixin, ConfigMixin, ExplorerPanelMixin,
         """
         if not isinstance(width, int) or width <= 0:
             return
-        changed = (MainWindow._shared_left_panel_width != width)
+        changed = (self._saved_left_panel_width != width)
         self._saved_left_panel_width = width
         if changed and not getattr(self, '_applying_shared_left_width', False):
             # 拖拽期间不实时联动：所有窗口共用同一个 GUI 线程，周期性让其它
@@ -2981,12 +2995,15 @@ class MainWindow(ThemeMixin, ToolbarMixin, ConfigMixin, ExplorerPanelMixin,
                 self._left_width_broadcast_timer.start()
 
     def _broadcast_left_panel_width(self, width):
-        """把左侧栏宽度实时应用到其它所有已打开窗口。"""
+        """把左侧栏宽度实时应用到其它所有已打开窗口（仅限同一屏幕）。"""
         app = QApplication.instance()
         if app is None:
             return
         for w in app.topLevelWidgets():
             if w is self or not isinstance(w, MainWindow) or sip.isdeleted(w):
+                continue
+            # 分散在不同显示器上的窗口不联动：尺寸语境不同，强行对齐没有意义
+            if w._screen_key() != self._screen_key():
                 continue
             # 看不见的窗口不值得为同步付整窗重排的代价；
             # 恢复/激活时 changeEvent 里有按共享宽度对齐的兜底
@@ -3031,20 +3048,20 @@ class MainWindow(ThemeMixin, ToolbarMixin, ConfigMixin, ExplorerPanelMixin,
         )
         if not left_visible:
             return
-        shared = MainWindow._shared_left_panel_width
+        shared = self._saved_left_panel_width  # 本屏共享值，或磁盘播种的兜底
         if isinstance(shared, int) and shared > 0:
-            # 采用其它窗口已确立的共享宽度
+            # 采用本屏其它窗口已确立的共享宽度
             self._applying_shared_left_width = True
             try:
                 self._update_splitter_sizes()
             finally:
                 self._applying_shared_left_width = False
         else:
-            # 本窗口作为种子：确立共享宽度并强制广播
+            # 本窗口作为种子：确立本屏共享宽度并强制广播（广播只达同屏窗口）
             sizes = self.main_splitter.sizes()
             left_width = sizes[0] if sizes else 0
             if left_width > 0:
-                MainWindow._shared_left_panel_width = left_width
+                self._saved_left_panel_width = left_width
                 self._broadcast_left_panel_width(left_width)
 
 
@@ -4865,9 +4882,10 @@ class MainWindow(ThemeMixin, ToolbarMixin, ConfigMixin, ExplorerPanelMixin,
         max_h = max(120, self.left_panel_container.height() - 200)
         new_h = min(cur + delta, max_h)
         self._saved_nav_list_height = self.nav_panel.set_embedded_list_height(new_h)
-        # 高度联动开启时把新高度（节流）推给其它窗口
+        # 高度联动开启时把新高度（节流）推给同屏的其它窗口
         if MainWindow._sidebar_height_sync:
-            MainWindow._shared_nav_list_height = self._saved_nav_list_height
+            MainWindow._nav_height_by_screen[self._screen_key()] = \
+                self._saved_nav_list_height
             self._nav_height_broadcast_pending = self._saved_nav_list_height
             if not self._nav_height_broadcast_timer.isActive():
                 self._nav_height_broadcast_timer.start()
@@ -4880,7 +4898,7 @@ class MainWindow(ThemeMixin, ToolbarMixin, ConfigMixin, ExplorerPanelMixin,
         if enabled and hasattr(self, 'nav_panel'):
             h = self.nav_panel.embedded_list_height()
             if isinstance(h, int) and h > 0:
-                MainWindow._shared_nav_list_height = h
+                MainWindow._nav_height_by_screen[self._screen_key()] = h
                 self._nav_height_broadcast_pending = h
                 self._broadcast_nav_list_height()
         self._save_config()  # 记忆开关状态，下次启动恢复
@@ -4899,10 +4917,11 @@ class MainWindow(ThemeMixin, ToolbarMixin, ConfigMixin, ExplorerPanelMixin,
                 cb.blockSignals(False)
 
     def _broadcast_nav_list_height(self):
-        """把挂起的导航列表高度应用到其它所有窗口。
+        """把挂起的导航列表高度应用到同屏的其它窗口。
 
-        setFixedHeight 对隐藏窗口几乎零成本（不触发重绘），所以不区分
-        可见性，统一应用，省去激活时的兜底对齐。"""
+        跨屏窗口不联动（尺寸语境不同）。setFixedHeight 对隐藏窗口几乎零
+        成本（不触发重绘），所以同屏窗口不区分可见性统一应用，省去激活时
+        的兜底对齐。"""
         h = self._nav_height_broadcast_pending
         self._nav_height_broadcast_pending = None
         if not isinstance(h, int) or h <= 0:
@@ -4912,6 +4931,8 @@ class MainWindow(ThemeMixin, ToolbarMixin, ConfigMixin, ExplorerPanelMixin,
             return
         for w in app.topLevelWidgets():
             if w is self or not isinstance(w, MainWindow) or sip.isdeleted(w):
+                continue
+            if w._screen_key() != self._screen_key():
                 continue
             w._apply_shared_nav_list_height(h)
 

@@ -1,7 +1,7 @@
 """MainWindow 的配置读写混入（从 main_window.py 拆出）。
 
 主配置的加载/构建/保存、LLM 配置查询、本地命令与本地配置目录。纯方法
-搬迁，行为不变；对进程级共享类属性 _shared_left_panel_width /
+搬迁，行为不变；对进程级共享类属性 _left_width_by_screen /
 _navigator_dock_mode / _global_window_navigator 的读写走延迟引用
 _mw.MainWindow（见下方 import 注释），落在真正的 MainWindow 类上。
 """
@@ -71,10 +71,9 @@ class ConfigMixin:
         self._applying_spring = False      # setSizes 期间置位，避免污染记忆尺寸
         self._spring_anim = None           # 进行中的尺寸过渡动画（持引用防 GC）
         self._saved_remote_internal_sizes = None  # remote_splitter 2 项尺寸（上下分屏）
-        # 左侧栏宽度是进程级共享的（见 _shared_left_panel_width）：新窗口初始化时
-        # 不要把已打开窗口设过的宽度清成 None，仅在还没有任何窗口设过时才置默认。
-        if _mw.MainWindow._shared_left_panel_width is None:
-            self._saved_left_panel_width = None  # 仅左面板可见时的宽度（无编辑器场景）
+        # 左侧栏宽度是进程级共享的（按屏幕分桶，见 _left_width_by_screen）：
+        # 「没有值」用桶里缺项表示，新窗口初始化时不写入任何桶——
+        # 写 None 进本屏的桶会把磁盘播种的兜底值也挡掉。
         self._saved_git_commit_height = None  # Git 面板提交区高度（拖拽记忆，兼容旧版）
         self._saved_git_body_sizes = None     # Git 面板 body splitter 各栏尺寸（拖拽记忆）
         self._saved_nav_list_height = None    # 内嵌导航列表高度（拖拽记忆）
@@ -197,12 +196,13 @@ class ConfigMixin:
                 remote_internal = config.get('remote_internal_splitter_sizes', None)
                 if isinstance(remote_internal, list) and len(remote_internal) == 2 and all(isinstance(s, int) and s >= 0 for s in remote_internal):
                     self._saved_remote_internal_sizes = remote_internal
-                # 左侧栏宽度是进程级共享的：只让第一个窗口从磁盘播种，之后开的
-                # 窗口沿用已有的实时共享值，避免用磁盘上的旧值覆盖别的窗口刚拖出的新宽度。
+                # 左侧栏宽度按屏幕分桶共享：磁盘值只播种一次，写进 None 兜底桶
+                # （启动时窗口还没定屏，写实屏桶会张冠李戴），之后开的窗口沿用
+                # 已有的实时共享值，避免用磁盘旧值覆盖别的窗口刚拖出的新宽度。
                 left_width = config.get('left_panel_width', None)
                 if (isinstance(left_width, int) and left_width > 0
-                        and _mw.MainWindow._shared_left_panel_width is None):
-                    self._saved_left_panel_width = left_width
+                        and None not in _mw.MainWindow._left_width_by_screen):
+                    _mw.MainWindow._left_width_by_screen[None] = left_width
                 git_commit_h = config.get('git_commit_height', None)
                 if isinstance(git_commit_h, int) and git_commit_h > 0:
                     self._saved_git_commit_height = git_commit_h

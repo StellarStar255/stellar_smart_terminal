@@ -831,9 +831,10 @@ class TabSplitMixin:
                 new_window.show()
 
         def _fix_left_width():
-            """左侧栏宽度对齐到共享值（偏差 >2px 才动，避免抖动）"""
+            """左侧栏宽度对齐到共享值（偏差 >2px 才动，避免抖动）。
+            共享值按屏幕分桶，属性读取自动取新窗口所在屏的值。"""
             try:
-                sw = _mw.MainWindow._shared_left_panel_width
+                sw = new_window._saved_left_panel_width
                 if isinstance(sw, int) and sw > 0 and hasattr(new_window, 'main_splitter'):
                     sizes = new_window.main_splitter.sizes()
                     if sizes and sizes[0] > 0 and abs(sizes[0] - sw) > 2:
