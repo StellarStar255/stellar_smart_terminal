@@ -99,6 +99,67 @@ class TestWindowNavigatorExtraction(unittest.TestCase):
                 self.app.sendPostedEvents(None, QEvent.Type.DeferredDelete)
                 self.app.processEvents()
 
+    def test_embedded_highlight_pinned_to_owner(self):
+        """内嵌导航列表的高亮永远标识宿主窗口自己，不跟随全局活动窗口。
+
+        回归：此前窗口激活时 changeEvent 把活动窗口 select_window 广播给所有
+        面板，导致每个窗口内嵌列表都高亮「别的窗口」——在自己窗口里高亮别人
+        没有意义。浮动面板（无钉死）保持跟随活动窗口的原行为。
+        """
+        import main_window
+        from PyQt6.QtCore import Qt
+        from window_navigator import WindowNavigatorPanel
+
+        def current_wid(nav):
+            item = nav.window_list.currentItem()
+            return item.data(Qt.ItemDataRole.UserRole) if item else None
+
+        windows = []
+        floating = None
+        try:
+            for title in ('PIN_T1', 'PIN_T2'):
+                w = main_window.MainWindow()
+                w.setWindowTitle(title)
+                w.show()
+                windows.append(w)
+            self.app.processEvents()
+            a, b = windows
+
+            for w in (a, b):
+                w.nav_panel._force_refresh()
+            self.assertEqual(current_wid(a.nav_panel), id(a),
+                             "A 的内嵌列表应高亮 A 自己")
+            self.assertEqual(current_wid(b.nav_panel), id(b),
+                             "B 的内嵌列表应高亮 B 自己")
+
+            # 模拟窗口激活广播（changeEvent 对所有面板 select_window(active)）
+            for w in (a, b):
+                w.nav_panel.select_window(b)
+            self.assertEqual(current_wid(a.nav_panel), id(a),
+                             "B 激活后 A 的内嵌列表仍应高亮 A 自己")
+            self.assertEqual(current_wid(b.nav_panel), id(b))
+
+            # 刷新重建后钉住不丢
+            a.nav_panel._force_refresh()
+            self.assertEqual(current_wid(a.nav_panel), id(a))
+
+            # 浮动面板（无钉死）保持跟随活动窗口
+            floating = WindowNavigatorPanel()
+            floating._refresh_window_list()
+            floating.select_window(b)
+            self.assertEqual(current_wid(floating), id(b),
+                             "浮动面板应跟随被激活的窗口")
+        finally:
+            from PyQt6.QtCore import QEvent
+            if floating is not None:
+                floating.deleteLater()
+            for w in windows:
+                w.close()
+                w.deleteLater()
+            for _ in range(5):
+                self.app.sendPostedEvents(None, QEvent.Type.DeferredDelete)
+                self.app.processEvents()
+
     def test_dock_mode_static_roundtrip(self):
         import main_window
         MW = main_window.MainWindow

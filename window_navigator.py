@@ -87,10 +87,14 @@ class WindowNavigatorPanel(QWidget):
     window_switch_requested = pyqtSignal(object)  # 请求切换到某个窗口
     panel_closed = pyqtSignal()  # 面板关闭信号
 
-    def __init__(self, parent=None, embedded=False):
+    def __init__(self, parent=None, embedded=False, pin_to=None):
         # embedded=True：作为普通子控件嵌入到窗口左侧栏（无独立窗口标志、无标题栏）；
         # embedded=False：原来的浮动置顶小窗口。
+        # pin_to：高亮钉死在指定窗口上（内嵌面板传宿主窗口）——列表高亮永远标识
+        # 「本面板属于哪个窗口」，不跟随全局活动窗口；浮动面板不传，保持跟随。
         self._embedded = embedded
+        import weakref as _weakref_pin
+        self._pinned_ref = _weakref_pin.ref(pin_to) if pin_to is not None else None
         if embedded:
             super().__init__(parent)
         else:
@@ -740,8 +744,12 @@ class WindowNavigatorPanel(QWidget):
 
         self.window_list.blockSignals(False)
 
-        # 恢复之前选中（活动）窗口的高亮，找不到时回退到第一项
+        # 恢复之前选中（活动）窗口的高亮，找不到时回退到第一项；
+        # 钉死模式（内嵌面板）永远高亮宿主窗口自己
         if self.window_list.count() > 0:
+            pinned = self._pinned_window()
+            if pinned is not None:
+                prev_id = id(pinned)
             target_row = 0
             if prev_id is not None:
                 for i in range(self.window_list.count()):
@@ -1044,6 +1052,10 @@ class WindowNavigatorPanel(QWidget):
             except RuntimeError:
                 # 窗口已被删除，刷新列表
                 self._refresh_window_list()
+        # 钉死模式：点击/双击切走后把高亮吸回宿主窗口自己
+        # （点击本身会把 QListWidget 的 currentRow 挪到被点的行）
+        if self._pinned_window() is not None:
+            self.select_window(None)  # select_window 会重定向到钉死窗口
 
     def showEvent(self, event):
         """显示时刷新列表"""
@@ -1115,11 +1127,25 @@ class WindowNavigatorPanel(QWidget):
         self.panel_closed.emit()
         super().closeEvent(event)
 
+    def _pinned_window(self):
+        """高亮钉死的窗口（内嵌面板的宿主）；未钉死或已销毁时返回 None。"""
+        if self._pinned_ref is None:
+            return None
+        w = self._pinned_ref()
+        if w is None or sip.isdeleted(w):
+            return None
+        return w
+
     def select_window(self, window):
         """选中指定的窗口项
 
         当某个窗口被激活时调用此方法，更新列表的选中状态。
+        钉死模式下忽略传入目标，永远高亮宿主窗口自己——在 A 窗口的列表里
+        高亮别的窗口没有意义，高亮应标识「本列表属于谁」。
         """
+        pinned = self._pinned_window()
+        if pinned is not None:
+            window = pinned
         target_id = id(window) if window is not None else None
         if target_id is None:
             return

@@ -871,7 +871,8 @@ class MainWindow(ThemeMixin, ToolbarMixin, ConfigMixin, ExplorerPanelMixin,
         _nav_layout = QVBoxLayout(self.nav_panel_container)
         _nav_layout.setContentsMargins(0, 0, 0, 0)
         _nav_layout.setSpacing(0)
-        self.nav_panel = WindowNavigatorPanel(embedded=True)
+        # pin_to=self：内嵌列表的高亮永远标识本窗口自己，不跟随全局活动窗口
+        self.nav_panel = WindowNavigatorPanel(embedded=True, pin_to=self)
         _nav_layout.addWidget(self.nav_panel)
         self.left_panel_layout.addWidget(self.nav_panel_container)
         # 恢复导航列表高度：联动开启且本屏已有共享值时优先对齐同屏窗口，
