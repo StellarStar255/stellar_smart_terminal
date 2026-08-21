@@ -262,6 +262,92 @@ class TestTwoFactorAndRecovery(unittest.TestCase):
         self.assertFalse(fresh.connect_calls[0]['look_for_keys'])
         self.assertEqual(fresh_transport.keepalive, 30)
 
+    def test_transport_dies_mid_interactive_retries_clean(self):
+        """MaxAuthTries 被首轮多 key 尝试打满：交互认证一发出去服务器就掐线
+        （"transport shut down or saw EOF"）→ 应重开干净连接完整重试，
+        并记住 clean_interactive 路径供下次直接复现。"""
+
+        class _DieOnInteractiveTransport(_FakeTransport):
+            def __init__(self):
+                super().__init__()
+                self._alive = True
+
+            def is_active(self):
+                return self._alive
+
+            def auth_interactive(self, username, handler, submethods=""):
+                self._alive = False
+                raise paramiko.AuthenticationException(
+                    "Authentication failed: transport shut down or saw EOF")
+
+        class _CleanClient(_FakeClient):
+            def connect(self, **kwargs):
+                self.connect_calls.append(kwargs)
+                raise paramiko.SSHException("No authentication methods available")
+
+        sess, host = _make_session()
+        prompts_seen = []
+        sess._interactive_provider = (
+            lambda alias, prompt, echo: prompts_seen.append(prompt) or "123456")
+        dying = _FakeClient(_DieOnInteractiveTransport())
+        fresh = _CleanClient(_OtpOnlyTransport())
+        clients = [dying, fresh]
+        import ssh_session
+        with mock.patch.object(ssh_session.paramiko, 'SSHClient',
+                               lambda: clients.pop(0)):
+            client = sess._connect_client(host)
+        self.assertIs(client, fresh, "应在干净连接上重试并成功")
+        self.assertEqual(prompts_seen, ["[OTP Code]:"])
+        self.assertEqual(
+            sess._auth_secrets['otp-host'].get('auth_flow'),
+            'clean_interactive',
+            "成功路径应被记住，下次直接复现")
+
+    def test_cached_clean_flow_replays_directly(self):
+        """上次经干净连接 + 交互认证连上的主机：本次 connect 直接禁掉
+        agent/自动扫 key（不再消耗 MaxAuthTries），一条连接直达 OTP。"""
+
+        class _NoMethodsClient(_FakeClient):
+            def connect(self, **kwargs):
+                self.connect_calls.append(kwargs)
+                raise paramiko.SSHException("No authentication methods available")
+
+        sess, host = _make_session()
+        sess._auth_secrets['otp-host'] = {'auth_flow': 'clean_interactive'}
+        sess._interactive_provider = lambda alias, prompt, echo: "123456"
+        constructed = []
+
+        def _factory():
+            c = _NoMethodsClient(_OtpOnlyTransport())
+            constructed.append(c)
+            return c
+
+        import ssh_session
+        with mock.patch.object(ssh_session.paramiko, 'SSHClient', _factory):
+            client = sess._connect_client(host)
+        self.assertEqual(len(constructed), 1, "复现路径不应重开第二条连接")
+        self.assertIs(client, constructed[0])
+        self.assertFalse(constructed[0].connect_calls[0]['allow_agent'])
+        self.assertFalse(constructed[0].connect_calls[0]['look_for_keys'])
+
+    def test_bad_host_key_never_degrades_to_interactive(self):
+        """主机密钥变更（疑似 MITM）绝不能降级去做交互认证。"""
+
+        class _BadKeyClient(_FakeClient):
+            def connect(self, **kwargs):
+                self.connect_calls.append(kwargs)
+                raise paramiko.BadHostKeyException(
+                    'example.com', mock.Mock(), mock.Mock())
+
+        sess, host = _make_session()
+        sess._interactive_provider = lambda alias, prompt, echo: self.fail(
+            "MITM 嫌疑下不应发起交互认证")
+        import ssh_session
+        with mock.patch.object(ssh_session.paramiko, 'SSHClient',
+                               lambda: _BadKeyClient(_FakeTransport())):
+            with self.assertRaises(paramiko.BadHostKeyException):
+                sess._connect_client(host)
+
     def test_dead_transport_in_jump_chain_falls_back(self):
         """跳板链内层（sock 一次性）transport 死了无法重连 → 老老实实
         回落单密码逻辑，不额外重开连接。"""

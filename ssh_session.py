@@ -752,6 +752,12 @@ class SSHSession(QObject):
             connect_kwargs["password"] = cached["password"]
             connect_kwargs["allow_agent"] = False
             connect_kwargs["look_for_keys"] = False
+        if cached.get("auth_flow") == "clean_interactive":
+            # 上次是「干净连接 + 交互认证」连上的（MFA 堡垒机）：直接复现该
+            # 路径——agent 多 key 逐个尝试会把这类主机的 MaxAuthTries 打满
+            # 导致掐线，绕一圈才回到交互认证，纯浪费还容易失败。
+            connect_kwargs["allow_agent"] = False
+            connect_kwargs["look_for_keys"] = False
 
         try:
             try:
@@ -765,6 +771,9 @@ class SSHSession(QObject):
                 connect_kwargs["passphrase"] = phrase
                 client.connect(**connect_kwargs)
                 self._auth_secrets.setdefault(cfg.alias, {})["passphrase"] = phrase
+            except paramiko.BadHostKeyException:
+                # 主机密钥变更（疑似 MITM）：绝不降级到交互认证，原样拦截
+                raise
             except paramiko.AuthenticationException:
                 # 先试 keyboard-interactive：OTP/2FA 主机（验证码多步提示，
                 # 含 key 部分成功后的第二因子）只有这条路能过；纯密码主机若
@@ -783,6 +792,14 @@ class SSHSession(QObject):
                     connect_kwargs["look_for_keys"] = False
                     client.connect(**connect_kwargs)
                     self._auth_secrets.setdefault(cfg.alias, {})["password"] = pwd
+            except paramiko.SSHException:
+                # 如「No authentication methods available」（clean_interactive
+                # 复现路径下没有可自动尝试的凭据）：transport 已建好且存活时
+                # 直接走交互认证；走不通（返回 None）则原样抛出
+                kbd_client = self._auth_keyboard_interactive(client, cfg, sock)
+                if kbd_client is None:
+                    raise
+                client = kbd_client
         except Exception:
             try:
                 client.close()
@@ -880,32 +897,64 @@ class SSHSession(QObject):
                 answers.append(ans)
             return answers
 
-        try:
-            transport.auth_interactive(username, handler)
-        except paramiko.BadAuthenticationType as e:
-            # 服务器不收 keyboard-interactive → 回落单密码
-            logger.info(
-                "[SSH] %s: keyboard-interactive not accepted (allowed: %s)",
-                cfg.alias, getattr(e, "allowed_types", "?"))
+        def _close_own():
             if own_client:
                 try:
                     client.close()
                 except Exception:
                     logger.debug("kbd-interactive: close failed", exc_info=True)
-            return None
-        except Exception:
-            if own_client:
+
+        attempted_clean = own_client  # 已经在干净连接上就不再重开第二次
+        while True:
+            try:
+                transport.auth_interactive(username, handler)
+                break
+            except paramiko.BadAuthenticationType as e:
+                # 服务器不收 keyboard-interactive → 回落单密码
+                logger.info(
+                    "[SSH] %s: keyboard-interactive not accepted (allowed: %s)",
+                    cfg.alias, getattr(e, "allowed_types", "?"))
+                _close_own()
+                return None
+            except Exception as exc:
+                if state["cancelled"]:
+                    # handler 里的取消异常经 transport 线程转手后类型可能变，统一收口
+                    _close_own()
+                    raise paramiko.AuthenticationException(
+                        "authentication cancelled by user")
                 try:
-                    client.close()
+                    transport_dead = not transport.is_active()
                 except Exception:
-                    logger.debug("kbd-interactive: close failed", exc_info=True)
-            if state["cancelled"]:
-                # handler 里的取消异常经 transport 线程转手后类型可能变，统一收口
-                raise paramiko.AuthenticationException(
-                    "authentication cancelled by user")
-            raise
+                    transport_dead = True
+                if transport_dead and not attempted_clean and sock is None:
+                    # 首次 connect 的多 key 尝试已把 MaxAuthTries 消耗殆尽，
+                    # 我们的交互请求成了压死连接的最后一根稻草（表现为
+                    # "transport shut down or saw EOF"）。重开一条干净连接
+                    # （认证次数压到最低）把交互认证完整走一遍。
+                    logger.info(
+                        "[SSH] %s: transport died during keyboard-interactive "
+                        "(%s), retrying over a clean connection",
+                        cfg.alias, exc)
+                    _close_own()
+                    reopened = self._reopen_clean_client(cfg)
+                    if reopened is None:
+                        raise exc
+                    client, transport, already_authed = reopened
+                    own_client = True
+                    attempted_clean = True
+                    if already_authed:
+                        return client
+                    # 新一轮认证：允许缓存密码重新自动作答
+                    state["cached_password_used"] = False
+                    continue
+                _close_own()
+                raise
         if state["password_candidate"] is not None:
             secrets["password"] = state["password_candidate"]
+        if own_client:
+            # 经由干净连接完成交互认证：记住这条路径，下次直接复现，
+            # 不再让 agent 多 key 先把 MaxAuthTries 打满
+            secrets["auth_flow"] = "clean_interactive"
         return client
 
     def _reopen_clean_client(
