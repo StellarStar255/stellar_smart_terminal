@@ -785,6 +785,8 @@ TRANSLATIONS = {
     "remote.connect_failed_msg": {"zh": "无法连接到 {host}:\n{error}", "en": "Could not connect to {host}:\n{error}"},
     "remote.password_prompt": {"zh": "{host} 的密码:", "en": "Password for {host}:"},
     "remote.password_title": {"zh": "需要密码", "en": "Password Required"},
+    "remote.interactive_title": {"zh": "需要验证", "en": "Verification Required"},
+    "remote.interactive_prompt": {"zh": "{host}: {prompt}", "en": "{host}: {prompt}"},
     "remote.disconnect": {"zh": "断开连接", "en": "Disconnect"},
     "remote.hosts_view": {"zh": "主机列表 / 连接其它主机", "en": "Host list / connect another"},
     "remote.refresh": {"zh": "刷新", "en": "Refresh"},

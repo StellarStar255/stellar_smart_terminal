@@ -35,6 +35,7 @@ import remote_bookmarks
 from ssh_session import (
     HostConfig, RemoteEntry, SSHSession, parse_ssh_config, append_ssh_config_host,
     rename_ssh_config_host, remove_ssh_config_host, update_ssh_config_host,
+    looks_like_password_prompt,
 )
 from git_widget import _make_git_tool_icon  # 复用统一风格的矢量线条图标
 from utils import parse_search_tokens, name_matches_tokens
@@ -839,6 +840,7 @@ class RemoteExplorerPanel(QWidget):
         self._refresh_root_signal.connect(self._populate_tree_root)
         self._refresh_subtree_signal.connect(self._reload_subtree)
         self._password_prompt_signal.connect(self._on_password_prompt)
+        self._interactive_prompt_signal.connect(self._on_interactive_prompt)
         self._search_result_signal.connect(self._on_search_results)
 
         # 搜索输入防抖：停止输入 300ms 后才发起递归搜索
@@ -1491,6 +1493,7 @@ class RemoteExplorerPanel(QWidget):
         sess.connect_async(
             password_provider=self._prompt_password,
             passphrase_provider=self._prompt_password,
+            interactive_provider=self._prompt_interactive,
         )
         self._session = sess
 
@@ -1527,6 +1530,38 @@ class RemoteExplorerPanel(QWidget):
         # 供同一主机的 SSH 终端 tab 一次性自动回填。
         if ok and text:
             self._cached_passwords[label] = text
+
+    _interactive_prompt_signal = pyqtSignal(str, str, bool)  # alias, 服务器提示, echo
+
+    def _prompt_interactive(self, alias: str, prompt: str, echo: bool) -> Optional[str]:
+        # keyboard-interactive（OTP/2FA）的逐步提示；跨线程模式同 _prompt_password
+        result_holder: dict = {'done': False, 'value': None}
+        self._pending_interactive_request = result_holder
+        try:
+            self._interactive_prompt_signal.emit(alias, prompt, echo)
+        except Exception as e:
+            logger.warning(f"[RemoteExplorerPanel] interactive prompt emit failed: {e}")
+            return None
+        while not result_holder['done']:
+            time.sleep(0.05)
+        return result_holder['value']
+
+    def _on_interactive_prompt(self, alias: str, prompt: str, echo: bool):
+        holder = getattr(self, '_pending_interactive_request', None)
+        if holder is None:
+            return
+        # 展示服务器原始提示（Password: / Verification code: …），echo 决定明暗文
+        text, ok = QInputDialog.getText(
+            self, t("remote.interactive_title"),
+            t("remote.interactive_prompt", host=alias, prompt=prompt),
+            QLineEdit.EchoMode.Normal if echo else QLineEdit.EchoMode.Password,
+        )
+        holder['value'] = text if ok else None
+        holder['done'] = True
+        # 只有密码类回答按 alias 缓存（供 SSH 终端 tab 自动回填）；
+        # OTP 验证码是一次性的，绝不缓存
+        if ok and text and looks_like_password_prompt(prompt):
+            self._cached_passwords[alias] = text
 
     def get_cached_password(self, alias: str) -> Optional[str]:
         """返回某主机此前在「Password Required」里输入过的密码（无则 None）。

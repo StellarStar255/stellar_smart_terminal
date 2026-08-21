@@ -11,8 +11,10 @@ Design notes:
   UI doesn't have to know about ssh_config quirks.
 """
 import functools
+import getpass
 import os
 import posixpath
+import re
 import shlex
 import stat
 import tarfile
@@ -71,6 +73,15 @@ SSH_ALIVE_COUNT_MAX = 3
 # SFTP 状态错误（FileNotFoundError/PermissionError 等），所以判定时还要
 # 结合 transport.is_active()，见 SSHSession._should_reconnect。
 _RECONNECTABLE_ERRORS = (paramiko.SSHException, EOFError, OSError)
+
+# keyboard-interactive 提示里「在要登录密码」的判定（区别于 OTP/验证码）。
+# 密码类回答可以缓存复用（自动重连、SSH 终端 tab 回填）；验证码是一次性的，
+# 缓存了也没用，还有泄漏面。
+_PASSWORD_PROMPT_RE = re.compile(r"password|passphrase|密码|口令", re.IGNORECASE)
+
+
+def looks_like_password_prompt(prompt: str) -> bool:
+    return bool(_PASSWORD_PROMPT_RE.search(prompt))
 
 
 def _auto_reconnect(method):
@@ -549,6 +560,8 @@ class SSHSession(QObject):
         # 重连时优先复用缓存，避免在后台重连流程里再次弹框
         self._password_provider: Optional[Callable[[str], Optional[str]]] = None
         self._passphrase_provider: Optional[Callable[[str], Optional[str]]] = None
+        # keyboard-interactive（OTP/2FA）提示回调：(alias, prompt, echo) -> 回答
+        self._interactive_provider: Optional[Callable[[str, str, bool], Optional[str]]] = None
         self._auth_secrets: dict[str, dict[str, str]] = {}
         self._home: Optional[str] = None
         self._host_key_degraded = False  # known_hosts 加载失败 → MITM 拦截降级
@@ -568,9 +581,11 @@ class SSHSession(QObject):
         return self._sftp is not None
 
     def connect_async(self, password_provider: Optional[Callable[[str], Optional[str]]] = None,
-                      passphrase_provider: Optional[Callable[[str], Optional[str]]] = None) -> Future:
+                      passphrase_provider: Optional[Callable[[str], Optional[str]]] = None,
+                      interactive_provider: Optional[Callable[[str, str, bool], Optional[str]]] = None) -> Future:
         """异步连接。完成后发射 connected / connect_failed 信号"""
-        fut = self._executor.submit(self._do_connect, password_provider, passphrase_provider)
+        fut = self._executor.submit(self._do_connect, password_provider,
+                                    passphrase_provider, interactive_provider)
         def _on_done(f: Future):
             try:
                 f.result()
@@ -580,10 +595,12 @@ class SSHSession(QObject):
         fut.add_done_callback(_on_done)
         return fut
 
-    def _do_connect(self, password_provider, passphrase_provider):
+    def _do_connect(self, password_provider, passphrase_provider,
+                    interactive_provider=None):
         # 记住认证 provider，自动重连时复用同一套认证逻辑
         self._password_provider = password_provider
         self._passphrase_provider = passphrase_provider
+        self._interactive_provider = interactive_provider
         self._establish()
 
     def _open_sftp_bounded(self, client: paramiko.SSHClient) -> paramiko.SFTPClient:
@@ -731,16 +748,20 @@ class SSHSession(QObject):
                 client.connect(**connect_kwargs)
                 self._auth_secrets.setdefault(cfg.alias, {})["passphrase"] = phrase
             except paramiko.AuthenticationException:
-                if not self._password_provider:
-                    raise
-                pwd = self._password_provider(cfg.alias)
-                if pwd is None:
-                    raise
-                connect_kwargs["password"] = pwd
-                connect_kwargs["allow_agent"] = False
-                connect_kwargs["look_for_keys"] = False
-                client.connect(**connect_kwargs)
-                self._auth_secrets.setdefault(cfg.alias, {})["password"] = pwd
+                # 先在同一条 transport 上试 keyboard-interactive：OTP/2FA 主机
+                # （密码 + 验证码多步提示）只有这条路能过；纯密码主机若开着
+                # PAM 交互式认证也能走通。服务器不支持时再回落单密码。
+                if not self._auth_keyboard_interactive(client, cfg):
+                    if not self._password_provider:
+                        raise
+                    pwd = self._password_provider(cfg.alias)
+                    if pwd is None:
+                        raise
+                    connect_kwargs["password"] = pwd
+                    connect_kwargs["allow_agent"] = False
+                    connect_kwargs["look_for_keys"] = False
+                    client.connect(**connect_kwargs)
+                    self._auth_secrets.setdefault(cfg.alias, {})["password"] = pwd
         except Exception:
             try:
                 client.close()
@@ -761,6 +782,73 @@ class SSHSession(QObject):
         if transport is not None:
             transport.set_keepalive(KEEPALIVE_INTERVAL)
         return client
+
+    def _auth_keyboard_interactive(self, client: paramiko.SSHClient,
+                                   cfg: HostConfig) -> bool:
+        """在已失败的连接上补试 keyboard-interactive 认证（OTP/2FA 主机的唯一通路）。
+
+        SSH 协议允许同一 transport 上多次认证尝试，所以 client.connect() 抛
+        AuthenticationException 之后 transport 通常还活着，可以直接续认证。
+        服务器的每步提示（Password: / Verification code: …）转给 interactive
+        provider 在 UI 弹框；密码类回答按 alias 缓存，自动重连时自动作答、
+        只把一次性的验证码留给用户重输。
+
+        返回 True = 认证成功；False = 走不了这条路（transport 已关 / 没有
+        provider / 服务器不支持 keyboard-interactive），调用方回落单密码逻辑。
+        认证被用户取消或回答被服务器拒绝时直接抛 AuthenticationException。
+        """
+        transport = client.get_transport()
+        if transport is None or not transport.is_active():
+            return False
+        if self._interactive_provider is None and self._password_provider is None:
+            return False
+        username = cfg.user or getpass.getuser()
+        secrets = self._auth_secrets.setdefault(cfg.alias, {})
+        # cached_password_used：本次认证是否已经消费过密码（缓存自动作答或用户
+        # 刚输入）。既防止错误的缓存密码被反复自动作答打满 MaxAuthTries，也让
+        # 服务器再次要密码时能落回用户弹框。
+        state = {"cached_password_used": False, "cancelled": False,
+                 "password_candidate": None}
+
+        def _ask(prompt: str, echo: bool) -> Optional[str]:
+            if self._interactive_provider is not None:
+                return self._interactive_provider(cfg.alias, prompt, echo)
+            return self._password_provider(f"{cfg.alias} {prompt}")
+
+        def handler(title, instructions, prompts):
+            answers = []
+            for prompt_text, echo in prompts:
+                text = str(prompt_text).strip()
+                if (looks_like_password_prompt(text)
+                        and not state["cached_password_used"]
+                        and secrets.get("password") is not None):
+                    state["cached_password_used"] = True
+                    answers.append(secrets["password"])
+                    continue
+                ans = _ask(text, bool(echo))
+                if ans is None:
+                    state["cancelled"] = True
+                    raise paramiko.AuthenticationException(
+                        "authentication cancelled by user")
+                if looks_like_password_prompt(text):
+                    state["cached_password_used"] = True
+                    state["password_candidate"] = ans
+                answers.append(ans)
+            return answers
+
+        try:
+            transport.auth_interactive(username, handler)
+        except paramiko.BadAuthenticationType:
+            return False  # 服务器不收 keyboard-interactive → 回落单密码
+        except Exception:
+            if state["cancelled"]:
+                # handler 里的取消异常经 transport 线程转手后类型可能变，统一收口
+                raise paramiko.AuthenticationException(
+                    "authentication cancelled by user")
+            raise
+        if state["password_candidate"] is not None:
+            secrets["password"] = state["password_candidate"]
+        return True
 
     # --- ProxyJump ---
 
