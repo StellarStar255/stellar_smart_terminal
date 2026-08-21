@@ -533,6 +533,22 @@ class _PersistOnFirstUsePolicy(paramiko.MissingHostKeyPolicy):
         self.added = True
 
 
+class _NoStdinTransport(paramiko.Transport):
+    """禁用 stdin 交互的 Transport。
+
+    2FA 主机（publickey 部分成功后还要验证码）且未传 password 时，
+    SSHClient._auth 会退到 auth_interactive_dumb——它用 stdin 的 input()
+    问验证码：打包 GUI 应用里 stdin 是 /dev/null 直接 EOFError，终端启动
+    则永远卡住。这里改成抛 AuthenticationException，让 connect 以普通认证
+    失败返回；partial-auth 状态仍保留在本 transport 上，随后由
+    SSHSession._auth_keyboard_interactive 用 GUI 回调把验证码问完。
+    """
+
+    def auth_interactive_dumb(self, username, handler=None, submethods=""):
+        raise paramiko.AuthenticationException(
+            "keyboard-interactive prompt requires GUI (no stdin)")
+
+
 class SSHSession(QObject):
     """单台主机的 SSH/SFTP 会话
 
@@ -718,6 +734,8 @@ class SSHSession(QObject):
             "allow_agent": True,
             "look_for_keys": True,
             "compress": True,
+            # 2FA 时 paramiko 内部的 stdin 交互换成可控失败，见 _NoStdinTransport
+            "transport_factory": _NoStdinTransport,
         }
         if sock is not None:
             connect_kwargs["sock"] = sock
@@ -748,10 +766,13 @@ class SSHSession(QObject):
                 client.connect(**connect_kwargs)
                 self._auth_secrets.setdefault(cfg.alias, {})["passphrase"] = phrase
             except paramiko.AuthenticationException:
-                # 先在同一条 transport 上试 keyboard-interactive：OTP/2FA 主机
-                # （密码 + 验证码多步提示）只有这条路能过；纯密码主机若开着
-                # PAM 交互式认证也能走通。服务器不支持时再回落单密码。
-                if not self._auth_keyboard_interactive(client, cfg):
+                # 先试 keyboard-interactive：OTP/2FA 主机（验证码多步提示，
+                # 含 key 部分成功后的第二因子）只有这条路能过；纯密码主机若
+                # 开着 PAM 交互式认证也能走通。走不通再回落单密码。
+                kbd_client = self._auth_keyboard_interactive(client, cfg, sock)
+                if kbd_client is not None:
+                    client = kbd_client  # 可能是原连接续认证，也可能是重开的干净连接
+                else:
                     if not self._password_provider:
                         raise
                     pwd = self._password_provider(cfg.alias)
@@ -783,25 +804,48 @@ class SSHSession(QObject):
             transport.set_keepalive(KEEPALIVE_INTERVAL)
         return client
 
-    def _auth_keyboard_interactive(self, client: paramiko.SSHClient,
-                                   cfg: HostConfig) -> bool:
-        """在已失败的连接上补试 keyboard-interactive 认证（OTP/2FA 主机的唯一通路）。
+    def _auth_keyboard_interactive(
+            self, client: paramiko.SSHClient, cfg: HostConfig,
+            sock: Optional[Any] = None) -> Optional[paramiko.SSHClient]:
+        """在认证失败后补试 keyboard-interactive（OTP/2FA 主机的唯一通路）。
 
-        SSH 协议允许同一 transport 上多次认证尝试，所以 client.connect() 抛
-        AuthenticationException 之后 transport 通常还活着，可以直接续认证。
+        三种入口场景：
+        - transport 还活着（普通认证失败，或 2FA 下 key 部分成功后被
+          _NoStdinTransport 拦下）：直接在原 transport 上续认证——SSH 协议
+          允许同一连接多次尝试，partial-auth 状态也保留，服务器只会再要验证码；
+        - transport 已被服务器掐死（agent 多 key 连试触发 Too many
+          authentication failures 等）且为直连主机：重开一条「干净」连接
+          （不自动尝试 agent/其它 key，只带显式 IdentityFile）再走交互认证；
+        - 跳板链内层（sock 一次性，无法原地重连）：放弃，由调用方回落。
+
         服务器的每步提示（Password: / Verification code: …）转给 interactive
         provider 在 UI 弹框；密码类回答按 alias 缓存，自动重连时自动作答、
         只把一次性的验证码留给用户重输。
 
-        返回 True = 认证成功；False = 走不了这条路（transport 已关 / 没有
-        provider / 服务器不支持 keyboard-interactive），调用方回落单密码逻辑。
-        认证被用户取消或回答被服务器拒绝时直接抛 AuthenticationException。
+        返回已认证的 client（原 client 或重开的新连接）；返回 None 表示走
+        不了这条路，调用方回落单密码逻辑。用户取消或回答被服务器拒绝时
+        直接抛 AuthenticationException。
         """
+        if self._interactive_provider is None and self._password_provider is None:
+            return None
+        own_client = False
         transport = client.get_transport()
         if transport is None or not transport.is_active():
-            return False
-        if self._interactive_provider is None and self._password_provider is None:
-            return False
+            if sock is not None:
+                logger.info(
+                    "[SSH] %s: transport dead after auth failure inside jump "
+                    "chain, cannot retry keyboard-interactive", cfg.alias)
+                return None
+            logger.info(
+                "[SSH] %s: transport dead after auth failure, reopening a "
+                "clean connection for keyboard-interactive", cfg.alias)
+            reopened = self._reopen_clean_client(cfg)
+            if reopened is None:
+                return None
+            client, transport, already_authed = reopened
+            own_client = True
+            if already_authed:
+                return client  # 单 IdentityFile 直接认证通过（无需第二因子）
         username = cfg.user or getpass.getuser()
         secrets = self._auth_secrets.setdefault(cfg.alias, {})
         # cached_password_used：本次认证是否已经消费过密码（缓存自动作答或用户
@@ -838,9 +882,23 @@ class SSHSession(QObject):
 
         try:
             transport.auth_interactive(username, handler)
-        except paramiko.BadAuthenticationType:
-            return False  # 服务器不收 keyboard-interactive → 回落单密码
+        except paramiko.BadAuthenticationType as e:
+            # 服务器不收 keyboard-interactive → 回落单密码
+            logger.info(
+                "[SSH] %s: keyboard-interactive not accepted (allowed: %s)",
+                cfg.alias, getattr(e, "allowed_types", "?"))
+            if own_client:
+                try:
+                    client.close()
+                except Exception:
+                    logger.debug("kbd-interactive: close failed", exc_info=True)
+            return None
         except Exception:
+            if own_client:
+                try:
+                    client.close()
+                except Exception:
+                    logger.debug("kbd-interactive: close failed", exc_info=True)
             if state["cancelled"]:
                 # handler 里的取消异常经 transport 线程转手后类型可能变，统一收口
                 raise paramiko.AuthenticationException(
@@ -848,7 +906,64 @@ class SSHSession(QObject):
             raise
         if state["password_candidate"] is not None:
             secrets["password"] = state["password_candidate"]
-        return True
+        return client
+
+    def _reopen_clean_client(
+            self, cfg: HostConfig
+    ) -> Optional[tuple[paramiko.SSHClient, paramiko.Transport, bool]]:
+        """重开一条「干净」连接供交互认证。
+
+        agent 里 key 多时，首次 connect 会把它们挨个试一遍，某些服务器
+        （MaxAuthTries 小的堡垒机）会以 Too many authentication failures
+        直接掐线——此时原 transport 已死，交互认证无处续。这里禁掉 agent
+        与自动扫 key（只保留显式 IdentityFile），把认证次数压到最低，让
+        keyboard-interactive 有机会开场。
+
+        返回 (client, transport, already_authed)；already_authed=True 表示
+        单 IdentityFile 已直接认证通过。连不上或 transport 未存活返回 None。
+        """
+        client = paramiko.SSHClient()
+        client.load_system_host_keys()
+        known_hosts = os.path.expanduser("~/.ssh/known_hosts")
+        try:
+            if os.path.isfile(known_hosts):
+                client.load_host_keys(known_hosts)
+        except Exception:
+            # 首次连接已发过降级提示，这里静默降级即可
+            logger.debug("_reopen_clean_client: load_host_keys failed",
+                         exc_info=True)
+        client.set_missing_host_key_policy(_PersistOnFirstUsePolicy())
+        kwargs: dict[str, Any] = {
+            "hostname": cfg.hostname,
+            "port": cfg.port,
+            "timeout": CONNECT_TIMEOUT,
+            "allow_agent": False,
+            "look_for_keys": False,
+            "compress": True,
+            "transport_factory": _NoStdinTransport,
+        }
+        if cfg.user:
+            kwargs["username"] = cfg.user
+        if cfg.identity_file and os.path.isfile(cfg.identity_file):
+            kwargs["key_filename"] = cfg.identity_file
+        try:
+            client.connect(**kwargs)
+            transport = client.get_transport()
+            if transport is not None:
+                return client, transport, True
+        except paramiko.SSHException:
+            # 意料中的失败（无认证方法 / key 被拒 / 2FA 被 _NoStdinTransport
+            # 拦下）——只要 transport 活着就能继续交互认证
+            transport = client.get_transport()
+            if transport is not None and transport.is_active():
+                return client, transport, False
+        except Exception:
+            logger.debug("_reopen_clean_client: connect failed", exc_info=True)
+        try:
+            client.close()
+        except Exception:
+            logger.debug("_reopen_clean_client: close failed", exc_info=True)
+        return None
 
     # --- ProxyJump ---
 

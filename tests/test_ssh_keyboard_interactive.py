@@ -165,5 +165,129 @@ class TestKeyboardInteractiveAuth(unittest.TestCase):
             self._connect_with(sess, host, _FakeClient(_FakeTransport()))
 
 
+class _OtpOnlyTransport(_FakeTransport):
+    """2FA 场景：publickey 部分成功后服务器只再要一步验证码。"""
+
+    def auth_interactive(self, username, handler, submethods=""):
+        self.auth_username = username
+        answers = handler("MFA", "Please Enter MFA Code.",
+                          [("[OTP Code]:", True)])
+        if answers != [self.otp]:
+            raise paramiko.AuthenticationException("bad verification code")
+        return []
+
+
+class TestTwoFactorAndRecovery(unittest.TestCase):
+    """2FA（key 部分成功）与「认证尝试过多被掐线」两条真实故障路径。"""
+
+    @classmethod
+    def setUpClass(cls):
+        os.environ.setdefault('QT_QPA_PLATFORM', 'offscreen')
+        from PyQt6.QtWidgets import QApplication
+        cls.app = QApplication.instance() or QApplication([])
+
+    def test_no_stdin_transport_blocks_dumb_interactive(self):
+        """paramiko 2FA 内部回退的 auth_interactive_dumb 用 stdin input() 问
+        验证码（GUI 下 EOFError/卡死）——必须被替换成可控的认证失败。"""
+        from ssh_session import _NoStdinTransport
+        with self.assertRaises(paramiko.AuthenticationException):
+            _NoStdinTransport.auth_interactive_dumb(
+                object.__new__(_NoStdinTransport), 'u')
+
+    def test_connect_kwargs_use_no_stdin_transport_factory(self):
+        """_connect_client 的首次 connect 必须带 transport_factory，
+        否则 2FA 主机会掉进 paramiko 的 stdin 交互。"""
+        from ssh_session import _NoStdinTransport
+        sess, host = _make_session()
+        sess._interactive_provider = lambda alias, prompt, echo: "123456"
+        client = _FakeClient(_OtpOnlyTransport())
+        import ssh_session
+        with mock.patch.object(ssh_session.paramiko, 'SSHClient',
+                               lambda: client):
+            sess._connect_client(host)
+        self.assertIs(client.connect_calls[0].get('transport_factory'),
+                      _NoStdinTransport)
+
+    def test_two_factor_prompts_only_otp(self):
+        """key 部分成功后（transport 存活、partial 状态保留）：只弹一次
+        验证码框即连接成功——终端 ssh 的体验。"""
+        sess, host = _make_session()
+        prompts_seen = []
+
+        def provider(alias, prompt, echo):
+            prompts_seen.append((prompt, echo))
+            return "123456"
+
+        sess._interactive_provider = provider
+        transport = _OtpOnlyTransport()
+        import ssh_session
+        with mock.patch.object(ssh_session.paramiko, 'SSHClient',
+                               lambda: _FakeClient(transport)):
+            client = sess._connect_client(host)
+        self.assertIsNotNone(client)
+        self.assertEqual(prompts_seen, [("[OTP Code]:", True)],
+                         "2FA 只应弹验证码框，不应弹密码框")
+        self.assertEqual(transport.keepalive, 30)
+
+    def test_dead_transport_reopens_clean_connection(self):
+        """服务器在多 key 尝试后掐线（transport 已死）→ 重开一条禁 agent/
+        禁扫 key 的干净连接走交互认证，而不是退回密码框。"""
+
+        class _DeadTransport(_FakeTransport):
+            def is_active(self):
+                return False
+
+        class _CleanClient(_FakeClient):
+            def connect(self, **kwargs):
+                self.connect_calls.append(kwargs)
+                # 干净连接：无可用认证方法，transport 保持存活
+                raise paramiko.SSHException("No authentication methods available")
+
+        sess, host = _make_session()
+        prompts_seen = []
+        sess._interactive_provider = (
+            lambda alias, prompt, echo: prompts_seen.append(prompt) or "123456")
+        dead = _FakeClient(_DeadTransport())
+        fresh_transport = _OtpOnlyTransport()
+        fresh = _CleanClient(fresh_transport)
+        clients = [dead, fresh]
+        import ssh_session
+        with mock.patch.object(ssh_session.paramiko, 'SSHClient',
+                               lambda: clients.pop(0)):
+            client = sess._connect_client(host)
+        self.assertIs(client, fresh, "应返回重开的干净连接")
+        self.assertEqual(prompts_seen, ["[OTP Code]:"])
+        # 干净连接不得再自动尝试 agent / 扫 key（避免再次触发掐线）
+        self.assertFalse(fresh.connect_calls[0]['allow_agent'])
+        self.assertFalse(fresh.connect_calls[0]['look_for_keys'])
+        self.assertEqual(fresh_transport.keepalive, 30)
+
+    def test_dead_transport_in_jump_chain_falls_back(self):
+        """跳板链内层（sock 一次性）transport 死了无法重连 → 老老实实
+        回落单密码逻辑，不额外重开连接。"""
+
+        class _DeadTransport(_FakeTransport):
+            def is_active(self):
+                return False
+
+        class _PasswordClient(_FakeClient):
+            def connect(self, **kwargs):
+                self.connect_calls.append(kwargs)
+                if kwargs.get('password') == 'pw':
+                    return
+                raise paramiko.AuthenticationException("auth failed")
+
+        sess, host = _make_session()
+        sess._interactive_provider = lambda alias, prompt, echo: self.fail(
+            "跳板内层不应走交互重连")
+        sess._password_provider = lambda label: 'pw'
+        client = _PasswordClient(_DeadTransport())
+        import ssh_session
+        with mock.patch.object(ssh_session.paramiko, 'SSHClient',
+                               lambda: client):
+            sess._connect_client(host, sock=object())
+        self.assertEqual(client.connect_calls[-1].get('password'), 'pw')
+
+
 if __name__ == '__main__':
     unittest.main()
