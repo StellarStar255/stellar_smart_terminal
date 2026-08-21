@@ -160,6 +160,91 @@ class TestWindowNavigatorExtraction(unittest.TestCase):
                 self.app.sendPostedEvents(None, QEvent.Type.DeferredDelete)
                 self.app.processEvents()
 
+    def test_embedded_list_filters_to_own_screen(self):
+        """多显示器：钉死的内嵌列表只显示与宿主同屏的窗口（编号保持全局
+        稳定）；浮动面板不过滤，保留跨屏跳转入口；窗口挪屏后列表跟着变。"""
+        import main_window
+        from PyQt6.QtCore import Qt
+        from window_navigator import WindowNavigatorPanel
+
+        def listed_ids(nav):
+            return {nav.window_list.item(i).data(Qt.ItemDataRole.UserRole)
+                    for i in range(nav.window_list.count())}
+
+        windows = []
+        floating = None
+        try:
+            for title in ('SCR_T1', 'SCR_T2'):
+                w = main_window.MainWindow()
+                w.setWindowTitle(title)
+                w.show()
+                windows.append(w)
+            self.app.processEvents()
+            a, b = windows
+            a._screen_key = lambda: 'screen-1'
+            b._screen_key = lambda: 'screen-2'
+
+            a.nav_panel._force_refresh()
+            b.nav_panel._force_refresh()
+            self.assertEqual(listed_ids(a.nav_panel), {id(a)},
+                             "A 的内嵌列表只应显示同屏（screen-1）的窗口")
+            self.assertEqual(listed_ids(b.nav_panel), {id(b)},
+                             "B 的内嵌列表只应显示同屏（screen-2）的窗口")
+            # 编号保持全局稳定：B 全局序号为 2，即使本屏只有它一个
+            self.assertTrue(
+                b.nav_panel.window_list.item(0).text().startswith('2.'),
+                f"B 应保留全局序号 2: {b.nav_panel.window_list.item(0).text()}")
+
+            # 浮动面板不过滤（跨屏跳转入口）
+            floating = WindowNavigatorPanel()
+            floating._refresh_window_list()
+            self.assertTrue({id(a), id(b)}.issubset(listed_ids(floating)),
+                            "浮动面板应列出所有屏幕的窗口")
+
+            # B 挪回 screen-1 → A 的列表出现 B
+            b._screen_key = lambda: 'screen-1'
+            a.nav_panel._force_refresh()
+            self.assertEqual(listed_ids(a.nav_panel), {id(a), id(b)},
+                             "窗口挪屏后同屏列表应把它收进来")
+        finally:
+            from PyQt6.QtCore import QEvent
+            if floating is not None:
+                floating.deleteLater()
+            for w in windows:
+                w.close()
+                w.deleteLater()
+            for _ in range(5):
+                self.app.sendPostedEvents(None, QEvent.Type.DeferredDelete)
+                self.app.processEvents()
+
+    def test_cross_screen_move_broadcasts_refresh(self):
+        """窗口被拖到另一块显示器（screen key 变化）时应立即广播刷新，
+        不等 30 秒兜底轮询。"""
+        import main_window
+        from unittest import mock
+        w = None
+        try:
+            w = main_window.MainWindow()
+            w.show()
+            self.app.processEvents()
+            # 先动一次，确保 _nav_screen_key_seen 已初始化（首次落位不广播）
+            w.move(w.x() + 5, w.y())
+            self.app.processEvents()
+            with mock.patch.object(main_window.MainWindow,
+                                   '_broadcast_navigator_refresh') as m:
+                w._screen_key = lambda: 'another-display'
+                w.move(w.x() + 7, w.y())
+                self.app.processEvents()
+                m.assert_called()
+        finally:
+            from PyQt6.QtCore import QEvent
+            if w is not None:
+                w.close()
+                w.deleteLater()
+            for _ in range(5):
+                self.app.sendPostedEvents(None, QEvent.Type.DeferredDelete)
+                self.app.processEvents()
+
     def test_dock_mode_static_roundtrip(self):
         import main_window
         MW = main_window.MainWindow

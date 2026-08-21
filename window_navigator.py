@@ -44,6 +44,15 @@ _FALLBACK_THEME = {
 }
 
 
+def _window_screen_key(w):
+    """窗口所在屏幕的标识（同 MainWindow._screen_key 分桶）；
+    构造中/已销毁等取不到时归 None。"""
+    try:
+        return w._screen_key()
+    except Exception:
+        return None
+
+
 class NoHighlightDelegate(QStyledItemDelegate):
     """自定义 delegate，禁用默认的选中高亮，使用 item 的背景色"""
 
@@ -342,13 +351,18 @@ class WindowNavigatorPanel(QWidget):
         return window
 
     def _save_manual_order(self):
-        """保存当前列表顺序"""
-        self._manual_order = []
+        """保存当前列表顺序。
+
+        钉死的内嵌面板只显示本屏窗口——列表里看不到的（异屏）窗口不能被
+        挤出全局手动顺序：可见项按新顺序排前，其余 id 保持原相对顺序接后。"""
+        visible = []
         for i in range(self.window_list.count()):
             item = self.window_list.item(i)
             wid = item.data(Qt.ItemDataRole.UserRole) if item else None
             if isinstance(wid, int):
-                self._manual_order.append(wid)
+                visible.append(wid)
+        rest = [wid for wid in self._manual_order if wid not in visible]
+        self._manual_order = visible + rest
 
     def _toggle_compact_mode(self, state):
         """切换简洁显示模式（所有窗口的导航面板共用此设置）"""
@@ -507,9 +521,10 @@ class WindowNavigatorPanel(QWidget):
                 self._refresh_window_list()
                 return
 
-        # 检查窗口标题或颜色是否变化
+        # 检查窗口标题/颜色/所在屏幕是否变化
         try:
-            current_info = [(w.windowTitle(), w.get_window_color()) for w in current_windows]
+            current_info = [(w.windowTitle(), w.get_window_color(),
+                             _window_screen_key(w)) for w in current_windows]
         except Exception:
             # 窗口在遍历过程中被删除
             self._refresh_window_list()
@@ -691,9 +706,12 @@ class WindowNavigatorPanel(QWidget):
             self._last_window_info = []
             return
 
-        # 检查是否有变化（标题或颜色）
+        # 检查是否有变化（标题/颜色/提醒/所在屏幕——窗口跨屏挪动也要重建，
+        # 因为钉死的内嵌面板只显示本屏窗口）
         try:
-            current_info = [(w.windowTitle(), w.get_window_color(), bool(getattr(w, '_nav_attention', False))) for w in windows]
+            current_info = [(w.windowTitle(), w.get_window_color(),
+                             bool(getattr(w, '_nav_attention', False)),
+                             _window_screen_key(w)) for w in windows]
         except Exception:
             # 窗口在遍历过程中被删除，重新刷新
             self._last_window_info = []
@@ -715,12 +733,20 @@ class WindowNavigatorPanel(QWidget):
 
         # 更新列表
         self.window_list.clear()
+        # 钉死的内嵌面板只显示与宿主同屏的窗口：分散在不同显示器时，各屏的
+        # 列表只关心本屏的工作区（跨屏跳转用浮动导航面板）。编号仍按全局
+        # 顺序生成，同一窗口在每块屏上的序号一致。
+        pinned = self._pinned_window()
+        pin_key = _window_screen_key(pinned) if pinned is not None else None
         # 重建 id → weakref 映射；旧的失效项会自然淘汰
         import weakref as _weakref
         new_refs: dict = {}
         for idx, window in enumerate(windows, 1):
             try:
                 if sip.isdeleted(window):
+                    continue
+                if (pinned is not None and window is not pinned
+                        and _window_screen_key(window) != pin_key):
                     continue
                 title = window.windowTitle()
                 # 简洁模式：提取文件夹名

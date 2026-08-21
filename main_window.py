@@ -470,6 +470,21 @@ class MainWindow(ThemeMixin, ToolbarMixin, ConfigMixin, ExplorerPanelMixin,
         # 立即刷新窗口导航（新窗口建立时）—— 广播到浮动与所有内嵌面板
         MainWindow._broadcast_navigator_refresh()
 
+    def moveEvent(self, event):
+        """跨屏拖动检测：窗口挪到另一块显示器时，各窗口内嵌导航列表
+        （只列本屏窗口）需要立即重建，不等兜底轮询。"""
+        super().moveEvent(event)
+        try:
+            key = self._screen_key()
+        except Exception:
+            return
+        if key != getattr(self, '_nav_screen_key_seen', '__unset__'):
+            first = not hasattr(self, '_nav_screen_key_seen')
+            self._nav_screen_key_seen = key
+            # 首次落位不广播：启动阶段窗口逐个就位，避免无谓的批量刷新
+            if not first:
+                MainWindow._broadcast_navigator_refresh()
+
     def changeEvent(self, event):
         """窗口状态变化事件 - 优化窗口切换时的性能"""
         super().changeEvent(event)
