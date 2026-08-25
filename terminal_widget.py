@@ -2939,6 +2939,13 @@ class TerminalWidget(TerminalRenderMixin, QWidget):
             }
         """)
 
+        # 重命名/清除分屏标签（放在最上方，方便快速改名）
+        rename_split_action = QAction(t("ctx.rename_split"), self)
+        rename_split_action.triggered.connect(self.rename_split_requested.emit)
+        menu.addAction(rename_split_action)
+
+        menu.addSeparator()
+
         # 复制选中内容
         # 注意：不设置 setShortcut，因为 Ctrl+C 需要发送到终端进程
         # 复制功能通过 Cmd+C (macOS) 或在 keyPressEvent 中用 QKeySequence.StandardKey.Copy 处理
@@ -3105,11 +3112,6 @@ class TerminalWidget(TerminalRenderMixin, QWidget):
         move_up_action = QAction(t("ctx.move_split_up"), self)
         move_up_action.triggered.connect(self.move_split_up_requested.emit)
         menu.addAction(move_up_action)
-
-        # 重命名/清除分屏标签
-        rename_split_action = QAction(t("ctx.rename_split"), self)
-        rename_split_action.triggered.connect(self.rename_split_requested.emit)
-        menu.addAction(rename_split_action)
 
         menu.exec(event.globalPos())
 
