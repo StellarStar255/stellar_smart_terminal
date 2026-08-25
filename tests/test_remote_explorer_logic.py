@@ -482,5 +482,73 @@ class TestSortPersistence(_Base):
         self.assertEqual(p2.get_sort(), ("size", True))
 
 
+class TestClipboardPasteBatch(_Base):
+    """多文件粘贴上传必须合并为一个整体进度，而不是一个文件弹一个进度框。
+
+    用户报告：远程一次粘贴多个文件时逐个显示进度。修复后普通文件在冲突
+    解析完成后攒成一批、单次 _wait_future_with_progress（带 sizes 总量）。
+    """
+
+    def _paste_files(self, n_files):
+        """粘贴 n 个本地文件到假会话，返回 (带 sizes 的进度调用列表, 会话)。"""
+        import remote_explorer_widget as rew
+        p = self._panel()
+        sess = _FakeSession()
+        p._session = sess
+        p._current_path = "/dst"
+
+        src_dir = Path(tempfile.mkdtemp())
+        paths = []
+        for i in range(n_files):
+            f = src_dir / f"f{i}.bin"
+            f.write_bytes(b"x" * (i + 1))
+            paths.append(("local", str(f)))
+
+        progress_calls = []
+        orig_wait = p._wait_future_with_progress
+
+        def spy_wait(futures, label, tolerate_errors=False, sizes=None,
+                     live=None, abort_sessions=None):
+            if sizes is not None:
+                progress_calls.append((list(futures), list(sizes)))
+                return  # futures 已即刻完成，无需真跑事件循环
+            return orig_wait(futures, label, tolerate_errors=tolerate_errors,
+                             sizes=sizes, live=live,
+                             abort_sessions=abort_sessions)
+
+        p._wait_future_with_progress = spy_wait
+        p._populate_tree_root = lambda: None
+        p._refresh_subtree_by_path = lambda path: None
+
+        orig_items = rew.explorer_clipboard.effective_items
+        rew.explorer_clipboard.effective_items = lambda: paths
+        try:
+            p._clipboard_paste_into("/dst")
+        finally:
+            rew.explorer_clipboard.effective_items = orig_items
+        return progress_calls, sess
+
+    def test_multi_file_paste_shows_single_overall_progress(self):
+        progress_calls, sess = self._paste_files(3)
+
+        uploads = [a for n, a in sess.calls if n == "upload_with_progress"]
+        self.assertEqual(len(uploads), 3)
+        self.assertEqual({a[1] for a in uploads},
+                         {"/dst/f0.bin", "/dst/f1.bin", "/dst/f2.bin"})
+        # 核心断言：只有一个带总量的进度框，覆盖全部 3 个文件的字节数
+        self.assertEqual(len(progress_calls), 1,
+                         "多文件粘贴应合并为一个整体进度，而不是逐文件弹框")
+        futures, sizes = progress_calls[0]
+        self.assertEqual(len(futures), 3)
+        self.assertEqual(sorted(sizes), [1, 2, 3])
+
+    def test_single_file_paste_still_shows_progress(self):
+        progress_calls, sess = self._paste_files(1)
+        self.assertEqual(len(progress_calls), 1)
+        futures, sizes = progress_calls[0]
+        self.assertEqual(len(futures), 1)
+        self.assertEqual(sizes, [1])
+
+
 if __name__ == "__main__":
     unittest.main()

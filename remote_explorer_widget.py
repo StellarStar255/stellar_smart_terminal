@@ -2975,6 +2975,11 @@ class RemoteExplorerPanel(QWidget):
         def remote_name_exists(name: str) -> bool:
             return name in existing
 
+        # 本地 → 远端的普通文件先攒成一批，冲突全部解析完后一次性提交，
+        # 共用一个整体字节进度框（多文件粘贴不再一个文件弹一个进度）。
+        # 目录仍走 _upload_local_dir：tar 快路径本身就是单一整体进度。
+        pending_files: list[tuple[str, str]] = []  # (本地 src, 远端 dst)
+
         for it in items:
             if cancel_all:
                 break
@@ -3002,17 +3007,7 @@ class RemoteExplorerPanel(QWidget):
                     if os.path.isdir(src) and not os.path.islink(src):
                         self._upload_local_dir(sess, src, dst)
                     else:
-                        try:
-                            nbytes = os.path.getsize(src)
-                        except OSError:
-                            nbytes = 0
-                        live = {"bytes": 0}
-                        fut = sess.submit(sess.upload_with_progress, src, dst,
-                                          self._make_live_progress_cb(live))
-                        self._wait_future_with_progress([fut], t("remote.pasting_progress",
-                                                                 dst=target_dir),
-                                                        sizes=[nbytes], live=live,
-                                                        abort_sessions=[sess])
+                        pending_files.append((src, dst))
                     existing.add(name)
 
                 elif kind == "remote":
@@ -3050,6 +3045,27 @@ class RemoteExplorerPanel(QWidget):
                     errors.append(f"Unknown clipboard item: {it!r}")
             except Exception as e:
                 errors.append(f"{it}: {e}")
+
+        # 批量上传攒下的本地文件：单 worker 线程串行执行，所有文件共用一个
+        # live 字节计数，进度框显示「已完成文件累计 + 当前文件已传字节」
+        if pending_files:
+            futures = []
+            sizes = []
+            live = {"bytes": 0}
+            live_cb = self._make_live_progress_cb(live)
+            for src, dst in pending_files:
+                try:
+                    sizes.append(os.path.getsize(src))
+                except OSError:
+                    sizes.append(0)
+                futures.append(sess.submit(sess.upload_with_progress,
+                                           src, dst, live_cb))
+            try:
+                self._wait_future_with_progress(
+                    futures, t("remote.pasting_progress", dst=target_dir),
+                    sizes=sizes, live=live, abort_sessions=[sess])
+            except Exception as e:
+                errors.append(str(e))
 
         if errors:
             QMessageBox.warning(self, t("remote.op_failed_title"), "\n".join(errors))
