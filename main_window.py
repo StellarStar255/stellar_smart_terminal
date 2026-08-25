@@ -4757,31 +4757,49 @@ class MainWindow(ThemeMixin, ToolbarMixin, ConfigMixin, ExplorerPanelMixin,
         msg_box.setText(text)
         msg_box.setIcon(icon)
         msg_box.setStandardButtons(buttons)
-        msg_box.setStyleSheet("""
-            QMessageBox {
+        # 勾选框要配浅色底专用样式：app 级规则是深色主题配色（深蓝方块），
+        # 放在这个强制浅色的消息框里非常突兀
+        from utils import checkbox_checkmark_url
+        check_url = checkbox_checkmark_url()
+        check_image = f"image: url({check_url});" if check_url else ""
+        msg_box.setStyleSheet(f"""
+            QMessageBox {{
                 background-color: #f0f0f0;
-            }
-            QMessageBox QLabel {
+            }}
+            QMessageBox QLabel {{
                 color: #333333;
                 font-size: 14px;
-            }
-            QMessageBox QCheckBox {
+            }}
+            QMessageBox QCheckBox {{
                 color: #333333;
-            }
-            QMessageBox QPushButton {
+                spacing: 6px;
+            }}
+            QMessageBox QCheckBox::indicator {{
+                width: 16px; height: 16px;
+                border: 1px solid #b6b6bd; border-radius: 4px;
+                background-color: #ffffff;
+            }}
+            QMessageBox QCheckBox::indicator:hover {{
+                border-color: #667eea;
+            }}
+            QMessageBox QCheckBox::indicator:checked {{
+                border-color: #667eea; background-color: #667eea;
+                {check_image}
+            }}
+            QMessageBox QPushButton {{
                 background-color: #e0e0e0;
                 color: #333333;
                 border: 1px solid #999999;
                 padding: 5px 15px;
                 border-radius: 3px;
                 min-width: 60px;
-            }
-            QMessageBox QPushButton:hover {
+            }}
+            QMessageBox QPushButton:hover {{
                 background-color: #d0d0d0;
-            }
-            QMessageBox QPushButton:pressed {
+            }}
+            QMessageBox QPushButton:pressed {{
                 background-color: #c0c0c0;
-            }
+            }}
         """)
         return msg_box
 
