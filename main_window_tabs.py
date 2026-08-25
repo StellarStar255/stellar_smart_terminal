@@ -680,6 +680,12 @@ class TabSplitMixin:
             index: 要关闭的标签页索引
             auto_create_new: 如果关闭后没有标签页了，是否自动创建新的
         """
+        # 杀终端前先校验索引映射：映射错位时 tab_terminals[index] 是**别的
+        # 标签页**的终端列表，直接 cleanup 会把后面标签的 shell 杀掉、
+        # 再被打上「已停止」标记——用户表现为「关掉前面的标签后，
+        # 后面的标签命名/内容全错位」。
+        self._synced_tab_splitter(index)
+
         # 先停止 OpenAI API 服务器（如果有）
         if self.openai_server_manager.is_running(index):
             self.openai_server_manager.stop_server(index)

@@ -183,5 +183,96 @@ class TestTabReorderSplit(unittest.TestCase):
                          "关闭分屏没有关掉当前页的终端")
 
 
+class TestTabCloseAfterReorder(unittest.TestCase):
+    """关闭前排标签时，后排标签的命名与终端不得错位。
+
+    用户报告：关掉前面的 terminal 后，后面的 terminal 的命名会往前跳,
+    最后完全错位。根因同分屏串页：映射错位时 _close_tab 会按
+    tab_terminals[index] 把**别的标签页**的终端 cleanup 杀掉，那个标签
+    随后被标「已停止」、名字被改、内容已死。
+    """
+
+    @classmethod
+    def setUpClass(cls):
+        cls.app = QApplication.instance() or QApplication([])
+        import main_window
+        cls.win = main_window.MainWindow()
+
+    @classmethod
+    def tearDownClass(cls):
+        cls.win.close()
+        cls.win.deleteLater()
+        del cls.win
+        for _ in range(5):
+            cls.app.sendPostedEvents(None, QEvent.Type.DeferredDelete)
+            cls.app.processEvents()
+
+    def _ensure_tabs(self, n):
+        while self.win.tab_widget.count() < n:
+            self.win._add_new_tab()
+
+    def test_close_front_tab_after_reorder_keeps_names_and_terminals(self):
+        """拖动重排后关掉第一个标签：其余标签名字跟着自己的页面走，终端不被误杀"""
+        win = self.win
+        self._ensure_tabs(3)
+        from terminal_widget import TerminalWidget
+
+        win.tab_widget.tabBar().moveTab(0, win.tab_widget.count() - 1)
+
+        # 记录「页面 → 标签名/终端」的对应关系（以真实页面为锚点）
+        page_names = {}
+        page_terms = {}
+        for i in range(win.tab_widget.count()):
+            page = win.tab_widget.widget(i)
+            page_names[page] = win.tab_widget.tabText(i)
+            page_terms[page] = set(page.findChildren(TerminalWidget))
+        closing_page = win.tab_widget.widget(0)
+
+        cleaned = []
+        with patch.object(TerminalWidget, 'cleanup',
+                          lambda t_self: cleaned.append(t_self)):
+            win._close_tab(0)
+        self.app.processEvents()
+
+        # 只允许清理被关闭页面自己的终端
+        self.assertTrue(set(cleaned) <= page_terms[closing_page],
+                        "关闭前排标签时把别的标签页的终端 cleanup 掉了")
+        # 其余标签的名字必须仍跟着自己的页面
+        for i in range(win.tab_widget.count()):
+            page = win.tab_widget.widget(i)
+            if page in page_names:
+                self.assertEqual(win.tab_widget.tabText(i), page_names[page],
+                                 "关闭前排标签后，后排标签的命名发生了错位")
+
+    def test_close_tab_with_corrupted_mapping_kills_only_own_terminals(self):
+        """映射被污染（模拟历史上重排未重建）时，_close_tab 兜底修正后再动手"""
+        win = self.win
+        self._ensure_tabs(3)
+        from terminal_widget import TerminalWidget
+
+        # 人为把 0/1 两页的映射互换，模拟「重排后未重建」的错位状态
+        for d in (win.tab_splitters, win.tab_terminals):
+            d[0], d[1] = d[1], d[0]
+
+        page0 = win.tab_widget.widget(0)
+        own_terms = set(page0.findChildren(TerminalWidget))
+        other_terms = {
+            t for i in range(1, win.tab_widget.count())
+            for t in win.tab_widget.widget(i).findChildren(TerminalWidget)}
+
+        cleaned = []
+        with patch.object(TerminalWidget, 'cleanup',
+                          lambda t_self: cleaned.append(t_self)):
+            win._close_tab(0)
+        self.app.processEvents()
+
+        self.assertTrue(set(cleaned) <= own_terms,
+                        "映射错位时关闭标签杀掉了别的标签页的终端")
+        self.assertFalse(set(cleaned) & other_terms)
+        # 收尾：映射应与真实页面一致
+        for i in range(win.tab_widget.count()):
+            self.assertIs(win.tab_splitters.get(i), win.tab_widget.widget(i))
+
+
 if __name__ == '__main__':
     unittest.main()
