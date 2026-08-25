@@ -35,7 +35,8 @@ from PyQt6.QtWidgets import (
     QStackedWidget, QCheckBox
 )
 from PyQt6 import sip  # 用于检查 C++ 对象是否已被删除
-from PyQt6.QtCore import Qt, QTimer, QEvent, QPoint, QRect, QObject, QVariantAnimation, QEasingCurve
+from PyQt6.QtCore import (Qt, QTimer, QEvent, QPoint, QRect, QObject,
+                          QVariantAnimation, QEasingCurve, QAbstractAnimation)
 from PyQt6.QtGui import QAction, QIcon, QColor, QPixmap, QPainter, QKeySequence
 
 from terminal_widget import TerminalWidget
@@ -70,6 +71,26 @@ from dialogs import (
     DirectoryHistoryDialog, ShortcutSettingsDialog,
     ShortcutCheatSheetDialog,
 )
+
+
+class _SpringPressWatcher(QObject):
+    """应用级鼠标按下探针：spring 动画进行中若再次按下鼠标，立刻冻结动画。
+
+    只监听 MouseButtonPress 并转调宿主窗口的 _pause_spring_anims_for_press,
+    绝不消费事件。没有进行中的动画时该调用是 O(1) 空操作，不影响任何交互。
+    """
+
+    def __init__(self, win):
+        super().__init__(win)
+        self._win = win
+
+    def eventFilter(self, obj, event):
+        if event.type() == QEvent.Type.MouseButtonPress:
+            try:
+                self._win._pause_spring_anims_for_press()
+            except RuntimeError:
+                pass  # 宿主窗口已销毁，探针随 parent 一起被回收前的空窗
+        return False
 
 
 class MainWindow(ThemeMixin, ToolbarMixin, ConfigMixin, ExplorerPanelMixin,
@@ -1037,6 +1058,10 @@ class MainWindow(ThemeMixin, ToolbarMixin, ConfigMixin, ExplorerPanelMixin,
             _app.focusChanged.connect(self._on_focus_changed_for_spring)
             # 同一信号驱动编辑器失焦自动保存（切到终端/其它文件/其它窗口）
             _app.focusChanged.connect(self._auto_save_editors_on_leave)
+            # spring 动画期间的任何鼠标按下 → 立刻冻结动画（防止窗格在
+            # 指针下移动被文本控件当成拖选），松开+静默后续播
+            self._spring_press_watcher = _SpringPressWatcher(self)
+            _app.installEventFilter(self._spring_press_watcher)
 
         # 日志面板默认隐藏
         self.log_panel_visible = False
@@ -3485,13 +3510,18 @@ class MainWindow(ThemeMixin, ToolbarMixin, ConfigMixin, ExplorerPanelMixin,
             return
         self._apply_spring(side)
 
+    # 松开鼠标后需持续无按键这么久，挂起的 spring 重排/被暂停的动画才继续。
+    # 覆盖双击、连点、点完马上去拖选的场景：这期间布局必须纹丝不动。
+    _SPRING_QUIET_MS = 180
+
     def _defer_spring_while_mouse_down(self, slot_name, fn) -> bool:
-        """鼠标按住期间挂起 spring 重排，松开后再执行；返回是否已挂起。
+        """鼠标按住期间挂起 spring 重排，松开并安静 _SPRING_QUIET_MS 后执行。
 
         按下瞬间就重排会让窗格在指针下方移动/文本换行，文本控件把这段
-        相对位移当成拖拽——表现为「点一下就自己选中了一片内容」。挂起到
-        松开后执行则完全避开：正常拖拽选择也不受影响（重排发生在松开后，
-        已做的选择按文本位置保留）。同一槽位后到的请求覆盖先到的。
+        相对位移当成拖拽——表现为「点一下就自己选中了一片内容」，误选后
+        接着输入还会误改内容。挂起到松开+静默后执行则完全避开；正常拖拽
+        选择不受影响（重排发生在其后，已做的选择按文本位置保留）。
+        同一槽位后到的请求覆盖先到的。返回是否已挂起。
         """
         if QApplication.mouseButtons() == Qt.MouseButton.NoButton:
             return False
@@ -3499,26 +3529,86 @@ class MainWindow(ThemeMixin, ToolbarMixin, ConfigMixin, ExplorerPanelMixin,
         if pending is None:
             pending = self._pending_spring_reflows = {}
         pending[slot_name] = fn
+        self._start_spring_release_timer()
+        return True
+
+    def _start_spring_release_timer(self):
         timer = getattr(self, '_spring_release_timer', None)
         if timer is None:
             timer = QTimer(self)
             timer.setInterval(30)
-
-            def _run_pending():
-                if QApplication.mouseButtons() != Qt.MouseButton.NoButton:
-                    return
-                timer.stop()
-                jobs = list(self._pending_spring_reflows.values())
-                self._pending_spring_reflows.clear()
-                for job in jobs:
-                    try:
-                        job()
-                    except RuntimeError:
-                        pass  # 目标控件在等待期间被销毁
-            timer.timeout.connect(_run_pending)
+            timer.timeout.connect(self._spring_release_tick)
             self._spring_release_timer = timer
+        self._spring_quiet_since = None
         timer.start()
-        return True
+
+    def _spring_release_tick(self):
+        """轮询等待「无按键且安静满 _SPRING_QUIET_MS」，然后续播被暂停的
+        动画并执行挂起的重排。任何一次再按下都会重置静默计时。"""
+        if QApplication.mouseButtons() != Qt.MouseButton.NoButton:
+            self._spring_quiet_since = None
+            return
+        now = time.monotonic()
+        if getattr(self, '_spring_quiet_since', None) is None:
+            self._spring_quiet_since = now
+            return
+        if (now - self._spring_quiet_since) * 1000 < self._SPRING_QUIET_MS:
+            return
+        self._spring_release_timer.stop()
+        self._spring_quiet_since = None
+        # 先续播被按下暂停的动画（布局继续走向原目标）
+        paused = getattr(self, '_spring_paused_anims', None) or []
+        for anim in list(paused):
+            try:
+                if anim.state() == QAbstractAnimation.State.Paused:
+                    anim.resume()
+            except RuntimeError:
+                pass  # 动画对象已销毁
+        if paused:
+            paused.clear()
+        # 再执行挂起的重排（后到的意图已覆盖先到的）
+        pending = getattr(self, '_pending_spring_reflows', None) or {}
+        jobs = list(pending.values())
+        pending.clear()
+        for job in jobs:
+            try:
+                job()
+            except RuntimeError:
+                pass  # 目标控件在等待期间被销毁
+
+    def _register_spring_anim(self, anim):
+        """登记进行中的 spring 动画，供「按下即冻结」查询。"""
+        reg = getattr(self, '_live_spring_anims', None)
+        if reg is None:
+            reg = self._live_spring_anims = set()
+        reg.add(anim)
+        anim.finished.connect(lambda a=anim: reg.discard(a))
+
+    def _pause_spring_anims_for_press(self):
+        """鼠标按下瞬间冻结所有进行中的 spring 动画。
+
+        v1.17.6 把重排挪到松开后执行，但松开后动画播放的 170ms 里如果紧接
+        着再次按下（双击/连点/点完马上拖选），窗格仍在指针下移动——文本
+        控件照样把位移当成拖选。这里让任何按下都立刻暂停动画：按住期间
+        布局静止，松开并安静 _SPRING_QUIET_MS 后由 _spring_release_tick 续播。
+        """
+        reg = getattr(self, '_live_spring_anims', None)
+        if not reg:
+            return
+        paused = getattr(self, '_spring_paused_anims', None)
+        if paused is None:
+            paused = self._spring_paused_anims = []
+        froze_any = False
+        for anim in list(reg):
+            try:
+                if anim.state() == QAbstractAnimation.State.Running:
+                    anim.pause()
+                    paused.append(anim)
+                    froze_any = True
+            except RuntimeError:
+                reg.discard(anim)
+        if froze_any:
+            self._start_spring_release_timer()
 
     def _apply_spring(self, target, animate=True):
         """把 main_splitter 中编辑器/终端的合计宽度按弹簧比例分配给指定一侧。"""
@@ -3680,6 +3770,7 @@ class MainWindow(ThemeMixin, ToolbarMixin, ConfigMixin, ExplorerPanelMixin,
 
         anim.valueChanged.connect(_on_val)
         anim.finished.connect(_on_done)
+        self._register_spring_anim(anim)
         splitter._spring_anim = anim
         anim.start()
 
@@ -3760,6 +3851,7 @@ class MainWindow(ThemeMixin, ToolbarMixin, ConfigMixin, ExplorerPanelMixin,
 
         anim.valueChanged.connect(_on_val)
         anim.finished.connect(_on_done)
+        self._register_spring_anim(anim)
         self._spring_anim = anim
         anim.start()
 

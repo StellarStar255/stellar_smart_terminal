@@ -449,6 +449,47 @@ class TestSpringDeferWhileMouseDown(unittest.TestCase):
         ed, tm = self._sizes()
         self.assertGreater(ed, tm, "松开鼠标后挂起的 spring 重排未执行")
 
+    def test_press_during_animation_freezes_then_resumes(self):
+        """v1.17.6 残余场景：松开后动画播放期间再次按下（双击/连点/点完即拖选），
+        窗格仍在指针下移动 → 依旧误选。修复：任何按下立刻冻结动画，
+        松开并安静 _SPRING_QUIET_MS 后续播至原目标。"""
+        w = self.w
+        self._hold_mouse(False)
+        w._apply_spring('terminal', animate=False)
+        ed0, _ = self._sizes()
+
+        # 无按键 → 展开编辑器的动画立即开始播放
+        w._apply_spring('editor', animate=True)
+        deadline = time.monotonic() + 1.0
+        while time.monotonic() < deadline:
+            self.app.processEvents()
+            if self._sizes()[0] != ed0:
+                break
+            time.sleep(0.01)
+        self.assertIsNotNone(w._spring_anim, "前置失败：动画应在进行中")
+
+        # 动画中按下鼠标 → 布局立刻冻结
+        self._hold_mouse(True)
+        w._pause_spring_anims_for_press()
+        frozen = self._sizes()
+        for _ in range(8):
+            self.app.processEvents()
+            time.sleep(0.02)
+        self.assertEqual(self._sizes(), frozen,
+                         "按下后 spring 动画应立刻冻结（否则拖选仍会被带偏）")
+
+        # 松开并安静 → 动画续播至完成
+        self._hold_mouse(False)
+        deadline = time.monotonic() + 3.0
+        while time.monotonic() < deadline:
+            self.app.processEvents()
+            ed, tm = self._sizes()
+            if ed > tm and w._spring_anim is None:
+                break
+            time.sleep(0.02)
+        ed, tm = self._sizes()
+        self.assertGreater(ed, tm, "松开鼠标后动画应续播至原目标")
+
     def test_latest_request_wins_within_one_hold(self):
         w = self.w
         self._hold_mouse(False)
