@@ -24,6 +24,29 @@ os.environ.setdefault('QT_QPA_PLATFORM', 'offscreen')
 from PyQt6.QtWidgets import QApplication, QMessageBox
 
 
+def _shutdown_panes(panes, app):
+    """销毁窗格前先停掉文件监视与各类定时器，再彻底消化 DeferredDelete。
+
+    否则 tearDown 随后删除临时目录时，QFileSystemWatcher 会在半销毁的
+    窗格上触发 _handle_external_change（内含模态弹窗）——CI 上表现为
+    Windows 堆损坏崩溃 / 各平台测试进程挂死（v1.17.7 首次打 tag 实翻）。
+    """
+    from PyQt6.QtCore import QEvent
+    for pane in panes:
+        try:
+            pane._stop_watching()
+            pane._autosave_timer.stop()
+            timer = getattr(pane, '_external_change_timer', None)
+            if timer is not None:
+                timer.stop()
+            pane.deleteLater()
+        except RuntimeError:
+            pass  # 窗格已被销毁
+    for _ in range(5):
+        app.sendPostedEvents(None, QEvent.Type.DeferredDelete)
+        app.processEvents()
+
+
 class _Base(unittest.TestCase):
     @classmethod
     def setUpClass(cls):
@@ -40,8 +63,7 @@ class _Base(unittest.TestCase):
         Path(self.b).write_text('content-b', encoding='utf-8')
 
     def tearDown(self):
-        self.pane.deleteLater()
-        self.app.processEvents()
+        _shutdown_panes([self.pane], self.app)
         self._tmp.cleanup()
 
     def _paths(self):
@@ -172,6 +194,7 @@ class TestEditorAreaWithTabs(unittest.TestCase):
         Path(self.b).write_text('bb', encoding='utf-8')
 
     def tearDown(self):
+        _shutdown_panes(list(self.area.panes), self.app)
         self.area.deleteLater()
         self.app.processEvents()
         self._tmp.cleanup()
