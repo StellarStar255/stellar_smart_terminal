@@ -17,6 +17,7 @@ focusChanged，弹簧无法自愈——表现为「切回来点编辑框反而�
 """
 import os
 import sys
+import time
 import unittest
 
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
@@ -361,6 +362,110 @@ class TestSpringInnerPanes(unittest.TestCase):
         self.w._spring_expand_inner(a)
         self.app.processEvents()
         self.assertEqual(sp.sizes(), before)
+
+
+class TestSpringDeferWhileMouseDown(unittest.TestCase):
+    """鼠标按住期间不得触发 spring 重排（松开后再执行）。
+
+    用户报告：spring 弹开的瞬间容易「自己选上内容」——按下鼠标的同时窗格
+    在指针下方移动/文本换行，文本控件把这段相对位移当成拖拽选择。修复为
+    按住期间挂起重排、松开后执行。
+    """
+
+    @classmethod
+    def setUpClass(cls):
+        cls.app = QApplication.instance() or QApplication([])
+        import main_window as mw
+        cls.mw = mw
+        cls.w = mw.MainWindow()
+        cls.w.resize(1400, 900)
+        cls.w.show()
+        cls.app.processEvents()
+
+    @classmethod
+    def tearDownClass(cls):
+        from PyQt6.QtCore import QEvent
+        cls.w.close()
+        cls.w.deleteLater()
+        del cls.w
+        for _ in range(5):
+            cls.app.sendPostedEvents(None, QEvent.Type.DeferredDelete)
+            cls.app.processEvents()
+
+    def setUp(self):
+        w = self.w
+        w._explorer_split_horizontal = True
+        if not (w.explorer_panel_visible or w.git_panel_visible
+                or getattr(w, 'remote_panel_visible', False)):
+            w.left_panel_container.show()
+        w._place_editor_in_main_splitter()
+        w.editor_area.show()
+        w._spring_mode_enabled = True
+        w._spring_width_gate = True
+        self.app.processEvents()
+        self.assertTrue(w._spring_applicable(),
+                        "前置失败：弹簧应处于可生效状态")
+        self._orig_buttons = QApplication.mouseButtons
+
+    def tearDown(self):
+        QApplication.mouseButtons = self._orig_buttons
+
+    def _hold_mouse(self, held: bool):
+        from PyQt6.QtCore import Qt
+        btn = Qt.MouseButton.LeftButton if held else Qt.MouseButton.NoButton
+        QApplication.mouseButtons = staticmethod(lambda: btn)
+
+    def _sizes(self):
+        w = self.w
+        sizes = w.main_splitter.sizes()
+        ed = sizes[w.main_splitter.indexOf(w.editor_area)]
+        tm = sizes[w.main_splitter.indexOf(w._main_content_stack)]
+        return ed, tm
+
+    def test_no_reflow_while_button_held_then_runs_on_release(self):
+        w = self.w
+        # 起始：终端侧展开，编辑器窄
+        self._hold_mouse(False)
+        w._apply_spring('terminal', animate=False)
+        ed0, tm0 = self._sizes()
+        self.assertGreater(tm0, ed0, "前置失败：终端应先被弹宽")
+
+        # 鼠标按住期间请求展开编辑器 → 布局必须纹丝不动
+        self._hold_mouse(True)
+        w._apply_spring('editor', animate=False)
+        self.app.processEvents()
+        self.assertEqual(self._sizes(), (ed0, tm0),
+                         "鼠标按住期间发生了 spring 重排（会造成误选内容）")
+
+        # 松开后：挂起的重排应自动执行
+        self._hold_mouse(False)
+        deadline = time.monotonic() + 2.0
+        while time.monotonic() < deadline:
+            self.app.processEvents()
+            ed, tm = self._sizes()
+            if ed > tm:
+                break
+            time.sleep(0.02)
+        ed, tm = self._sizes()
+        self.assertGreater(ed, tm, "松开鼠标后挂起的 spring 重排未执行")
+
+    def test_latest_request_wins_within_one_hold(self):
+        w = self.w
+        self._hold_mouse(False)
+        w._apply_spring('terminal', animate=False)
+
+        self._hold_mouse(True)
+        w._apply_spring('editor', animate=False)
+        w._apply_spring('terminal', animate=False)   # 后到的意图覆盖先到的
+        self._hold_mouse(False)
+        deadline = time.monotonic() + 2.0
+        while time.monotonic() < deadline:
+            self.app.processEvents()
+            if not getattr(w, '_pending_spring_reflows', None):
+                break
+            time.sleep(0.02)
+        ed, tm = self._sizes()
+        self.assertGreater(tm, ed, "同一次按住内应只执行最后一次请求")
 
 
 if __name__ == '__main__':

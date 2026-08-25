@@ -3485,8 +3485,46 @@ class MainWindow(ThemeMixin, ToolbarMixin, ConfigMixin, ExplorerPanelMixin,
             return
         self._apply_spring(side)
 
+    def _defer_spring_while_mouse_down(self, slot_name, fn) -> bool:
+        """鼠标按住期间挂起 spring 重排，松开后再执行；返回是否已挂起。
+
+        按下瞬间就重排会让窗格在指针下方移动/文本换行，文本控件把这段
+        相对位移当成拖拽——表现为「点一下就自己选中了一片内容」。挂起到
+        松开后执行则完全避开：正常拖拽选择也不受影响（重排发生在松开后，
+        已做的选择按文本位置保留）。同一槽位后到的请求覆盖先到的。
+        """
+        if QApplication.mouseButtons() == Qt.MouseButton.NoButton:
+            return False
+        pending = getattr(self, '_pending_spring_reflows', None)
+        if pending is None:
+            pending = self._pending_spring_reflows = {}
+        pending[slot_name] = fn
+        timer = getattr(self, '_spring_release_timer', None)
+        if timer is None:
+            timer = QTimer(self)
+            timer.setInterval(30)
+
+            def _run_pending():
+                if QApplication.mouseButtons() != Qt.MouseButton.NoButton:
+                    return
+                timer.stop()
+                jobs = list(self._pending_spring_reflows.values())
+                self._pending_spring_reflows.clear()
+                for job in jobs:
+                    try:
+                        job()
+                    except RuntimeError:
+                        pass  # 目标控件在等待期间被销毁
+            timer.timeout.connect(_run_pending)
+            self._spring_release_timer = timer
+        timer.start()
+        return True
+
     def _apply_spring(self, target, animate=True):
         """把 main_splitter 中编辑器/终端的合计宽度按弹簧比例分配给指定一侧。"""
+        if self._defer_spring_while_mouse_down(
+                'main', lambda: self._apply_spring(target, animate)):
+            return
         if not self._spring_applicable():
             return
         sizes = self.main_splitter.sizes()
@@ -3538,6 +3576,9 @@ class MainWindow(ThemeMixin, ToolbarMixin, ConfigMixin, ExplorerPanelMixin,
         编辑器↔终端仍由 _apply_spring 走专门逻辑。
         """
         if not getattr(self, '_spring_mode_enabled', False):
+            return
+        if self._defer_spring_while_mouse_down(
+                'inner', lambda: self._spring_expand_inner(widget)):
             return
         node = widget
         parent = node.parentWidget() if node is not None else None
