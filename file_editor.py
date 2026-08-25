@@ -14,7 +14,7 @@ from PyQt6.QtWidgets import (
     QWidget, QVBoxLayout, QHBoxLayout, QPlainTextEdit,
     QPushButton, QLabel, QFrame, QMessageBox,
     QSplitter, QLineEdit, QTextEdit, QTextBrowser, QStackedWidget, QScrollArea,
-    QSizePolicy, QMenu, QFileDialog, QApplication,
+    QSizePolicy, QMenu, QFileDialog, QApplication, QTabBar,
 )
 from PyQt6.QtCore import (
     Qt, pyqtSignal, QRect, QSize, QFileSystemWatcher, QTimer, QEvent, QUrl,
@@ -1913,6 +1913,50 @@ class _SearchBar(QFrame):
             self.input.setStyleSheet("")
 
 
+class _PaneTabBar(QTabBar):
+    """编辑窗格内的文件标签条（与终端标签同型的轻量版）。
+
+    每个标签的 tabData 存该文件的绝对路径——路径以 tabData 为唯一事实来源，
+    拖动重排时 Qt 会让 tabData 跟着标签走，天然不会错位（终端侧曾因平行
+    列表与索引脱节踩过「串页」的坑，这里从设计上避开）。
+    """
+
+    def __init__(self, parent=None):
+        super().__init__(parent)
+        self.setExpanding(False)
+        self.setDrawBase(False)
+        self.setMovable(True)
+        self.setUsesScrollButtons(True)
+        self.setElideMode(Qt.TextElideMode.ElideMiddle)
+
+    def install_close_button(self, idx: int):
+        """给第 idx 个标签装自定义 × 按钮。
+
+        不用 setTabsClosable：Fusion/QSS 组合下内置关闭按钮不受
+        `::close-button { image }` 控制、渲染不出图标。自定义按钮点击时
+        按 sender 现场解析索引（标签可拖动重排，闭包捕获的索引会过期）。
+        """
+        btn = QPushButton("×", self)
+        btn.setFixedSize(16, 16)
+        btn.clicked.connect(lambda _=False, b=btn: self._emit_close_for(b))
+        self.setTabButton(idx, QTabBar.ButtonPosition.RightSide, btn)
+
+    def _emit_close_for(self, btn):
+        for i in range(self.count()):
+            if self.tabButton(i, QTabBar.ButtonPosition.RightSide) is btn:
+                self.tabCloseRequested.emit(i)
+                return
+
+    def mouseReleaseEvent(self, event):
+        # 中键点击关闭标签（与终端/浏览器一致的肌肉记忆）
+        if event.button() == Qt.MouseButton.MiddleButton:
+            idx = self.tabAt(event.pos())
+            if idx >= 0:
+                self.tabCloseRequested.emit(idx)
+                return
+        super().mouseReleaseEvent(event)
+
+
 class FileEditorWidget(QWidget):
     """文件编辑器组件"""
 
@@ -2060,6 +2104,17 @@ class FileEditorWidget(QWidget):
         header_layout.addWidget(self.close_btn)
 
         layout.addWidget(self.header)
+
+        # 窗格内文件标签条：同一窗格里打开的文件各占一个标签（VS Code 编辑器组
+        # 模式，与分屏正交组合）。仅 ≥2 个文件时显示——单文件时界面与原来
+        # 完全一致，不多占一行。切换/关闭标签复用 open_file/_close_editor
+        # 的既有机制（脏缓冲提示、视图状态记忆、崩溃恢复备份都天然生效）。
+        self._tab_guard = False   # 程序性改动 currentIndex 时屏蔽 currentChanged
+        self.tab_bar = _PaneTabBar()
+        self.tab_bar.setVisible(False)
+        self.tab_bar.currentChanged.connect(self._on_file_tab_changed)
+        self.tab_bar.tabCloseRequested.connect(self._on_file_tab_close_requested)
+        layout.addWidget(self.tab_bar)
 
         # 编辑器
         self.editor = CodeEditor()
@@ -2464,6 +2519,43 @@ class FileEditorWidget(QWidget):
             }}
         """)
 
+        # 窗格内文件标签条：与终端标签同风格（当前标签 accent 底边高亮）。
+        # 关闭按钮是自定义 QPushButton（见 _PaneTabBar.install_close_button），
+        # 样式跟着本条 QSS 走。
+        self.tab_bar.setStyleSheet(f"""
+            QTabBar {{
+                background-color: {bg_medium};
+                border-bottom: 1px solid {border};
+            }}
+            QTabBar::tab {{
+                background-color: {bg_medium};
+                color: {text_dim};
+                border: none;
+                border-bottom: 2px solid transparent;
+                padding: 3px 8px;
+                margin: 0;
+            }}
+            QTabBar::tab:selected {{
+                color: {text};
+                border-bottom: 2px solid {accent};
+            }}
+            QTabBar::tab:hover {{
+                color: {text};
+            }}
+            QTabBar QPushButton {{
+                background: transparent;
+                color: {text_dim};
+                border: none;
+                border-radius: 8px;
+                font-size: 12px;
+                padding: 0;
+            }}
+            QTabBar QPushButton:hover {{
+                background-color: {border};
+                color: {text};
+            }}
+        """)
+
         # 分屏按钮：透明底，hover 时显示 accent —— 与关闭按钮风格一致
         split_btn_style = f"""
             QPushButton {{
@@ -2800,7 +2892,78 @@ class FileEditorWidget(QWidget):
         # 开始监听外部变更
         self._start_watching(file_path)
 
+        # 登记/选中本文件的窗格内标签
+        self._sync_tab_for_current_file()
+
         return True
+
+    # ---------- 窗格内文件标签 ----------
+
+    def _tab_paths(self) -> list:
+        """当前标签条上的文件路径列表（tabData 为唯一事实来源）。"""
+        return [self.tab_bar.tabData(i) for i in range(self.tab_bar.count())]
+
+    def _refresh_tab_strip_visibility(self):
+        self.tab_bar.setVisible(self.tab_bar.count() >= 2)
+
+    def _sync_tab_for_current_file(self):
+        """open_file 成功后登记/选中当前文件的标签（幂等，重复打开不加重）。"""
+        path = self._current_file
+        if not path:
+            return
+        self._tab_guard = True
+        try:
+            paths = self._tab_paths()
+            if path in paths:
+                idx = paths.index(path)
+            else:
+                idx = self.tab_bar.addTab(os.path.basename(path))
+                self.tab_bar.setTabData(idx, path)
+                self.tab_bar.install_close_button(idx)
+            self.tab_bar.setTabToolTip(idx, path)
+            self.tab_bar.setCurrentIndex(idx)
+        finally:
+            self._tab_guard = False
+        self._refresh_tab_strip_visibility()
+
+    def _remove_tab_by_path(self, path: str):
+        paths = self._tab_paths()
+        if path in paths:
+            self._tab_guard = True
+            try:
+                self.tab_bar.removeTab(paths.index(path))
+            finally:
+                self._tab_guard = False
+            self._refresh_tab_strip_visibility()
+
+    def _on_file_tab_changed(self, idx: int):
+        """用户点了另一个文件标签 → 经 open_file 装载（含脏缓冲提示等全套机制）。"""
+        if self._tab_guard or idx < 0:
+            return
+        path = self.tab_bar.tabData(idx)
+        if not path or path == self._current_file:
+            return
+        if not self.open_file(path):
+            # 打开失败 / 用户取消 → 选回原文件的标签；文件已消失则顺手摘掉死标签
+            self._tab_guard = True
+            try:
+                paths = self._tab_paths()
+                if self._current_file in paths:
+                    self.tab_bar.setCurrentIndex(paths.index(self._current_file))
+            finally:
+                self._tab_guard = False
+            if path and not os.path.isfile(path):
+                self._remove_tab_by_path(path)
+
+    def _on_file_tab_close_requested(self, idx: int):
+        path = self.tab_bar.tabData(idx)
+        if path == self._current_file:
+            # 关当前文件：与 × 按钮/Cmd+W 同路径（含未保存提示、切到邻座）
+            self._close_editor()
+            return
+        # 非当前标签没有内存态（只有当前文件可能有未保存改动），直接摘掉
+        if path:
+            self._remove_tab_by_path(path)
 
     def _set_md_support(self, supported: bool):
         """标记当前文件是否支持 Markdown 预览，并同步按钮可见性。"""
@@ -3757,6 +3920,8 @@ class FileEditorWidget(QWidget):
         self._update_title()
         # 图片模式也跟踪：被外部覆盖时可以重新加载
         self._start_watching(file_path)
+        # 图片同样进窗格内标签（只读，无脏状态）
+        self._sync_tab_for_current_file()
         return True
 
     def _apply_image_to_label(self):
@@ -4032,8 +4197,20 @@ class FileEditorWidget(QWidget):
         if not file_path:
             return False
 
+        old_path = self._current_file
         self._current_file = file_path
-        return self.save_file()
+        ok = self.save_file()
+        if ok:
+            # 另存为改变了路径：把当前标签改指新路径（标题/tooltip 一并更新）
+            paths = self._tab_paths()
+            if old_path in paths:
+                idx = paths.index(old_path)
+                self.tab_bar.setTabData(idx, file_path)
+                self.tab_bar.setTabText(idx, os.path.basename(file_path))
+                self.tab_bar.setTabToolTip(idx, file_path)
+            else:
+                self._sync_tab_for_current_file()
+        return ok
 
     def _on_text_changed(self):
         """文本变化时更新标题"""
@@ -4407,6 +4584,39 @@ class FileEditorWidget(QWidget):
         self._last_autosave_hash = None
 
         self._stop_watching()
+
+        # 多标签：只关当前文件的标签，切到邻座标签，窗格保留
+        cur = self._current_file
+        paths = self._tab_paths()
+        if cur in paths and len(paths) > 1:
+            closed_idx = paths.index(cur)
+            self._remove_tab_by_path(cur)
+            # 先清空当前状态再装载邻座：脏判定已在上方处理过（保存/丢弃），
+            # 留着旧基准会让 open_file 再弹一次提示
+            self._current_file = None
+            self._original_content = ""
+            self.editor.blockSignals(True)
+            self.editor.clear()
+            self.editor.blockSignals(False)
+            neighbor_idx = min(closed_idx, self.tab_bar.count() - 1)
+            neighbor = self.tab_bar.tabData(neighbor_idx)
+            self._tab_guard = True
+            try:
+                self.tab_bar.setCurrentIndex(neighbor_idx)
+            finally:
+                self._tab_guard = False
+            if neighbor:
+                self.open_file(neighbor)
+            return
+
+        # 最后一个标签：走原有清空窗格路径
+        self._tab_guard = True
+        try:
+            while self.tab_bar.count():
+                self.tab_bar.removeTab(0)
+        finally:
+            self._tab_guard = False
+        self._refresh_tab_strip_visibility()
         self._current_file = None
         self._file_encoding = "utf-8"
         self._original_content = ""

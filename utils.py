@@ -467,7 +467,6 @@ def checkbox_checkmark_url() -> str:
         _checkmark_url_cache = str(p).replace('\\', '/')
     return _checkmark_url_cache
 
-
 def app_icon_path() -> Path:
     """运行时 app 图标的源图路径（窗口图标 / Dock / 主题 Tint 上色共用）。
 
