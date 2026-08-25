@@ -753,6 +753,10 @@ class MainWindow(ThemeMixin, ToolbarMixin, ConfigMixin, ExplorerPanelMixin,
 
         self.tab_widget.setTabsClosable(False)  # 禁用内置关闭按钮，使用自定义
         self.tab_widget.setMovable(True)
+        # 拖动标签重排时 QTabWidget 只同步自己内部的页面顺序；tab_splitters /
+        # tab_terminals / tab_cwds 这些按索引存的映射必须跟着重建，否则分屏、
+        # 关闭分屏会作用到**别的标签页**的终端上（分屏「串页」）。
+        self.detachable_tab_bar.tabMoved.connect(self._on_tab_moved)
         # 不用 documentMode：它让标签栏走 macOS 原生外观绘制（NSAppearance），
         # 空白区颜色无视 QSS/QPalette（conda 版 Qt 连 colorScheme 都只能改成
         # 原生浅灰而非主题色）。关掉后标签栏完全由下面的 QSS 控制；

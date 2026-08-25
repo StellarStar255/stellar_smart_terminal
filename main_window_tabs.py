@@ -193,6 +193,31 @@ class TabSplitMixin:
         if index < self.tab_widget.count():
             self._close_tab(index)
 
+    def _on_tab_moved(self, _from_idx, _to_idx):
+        """拖动标签重排后重建索引映射。
+
+        QTabWidget 收到 tabMoved 会先同步内部页面顺序（本槽在其后执行），
+        但 tab_splitters/tab_terminals/tab_cwds 这些按旧索引存的字典不会
+        自动跟随；不重建的话，分屏会回退到错位列表的 terminals[0]——
+        用户表现为「在最后一个标签分屏，新终端跑到前面的标签里去了」。
+        """
+        self._rebuild_tab_mappings()
+        self._checkpoint_workspace()
+
+    def _synced_tab_splitter(self, idx):
+        """取第 idx 页的 splitter，先以 tab_widget 里的真实页面校验映射。
+
+        任何遗漏 _rebuild_tab_mappings 的路径（历史上：拖动标签重排没接
+        tabMoved）都会让按索引存的映射整体错位；这里兜底修正，保证
+        分屏/关闭分屏永远作用在当前页自己的终端上。
+        """
+        page = self.tab_widget.widget(idx)
+        if page is not None and self.tab_splitters.get(idx) is not page:
+            logger.warning(
+                "[Tabs] tab_splitters[%s] 与真实页面不一致，已重建映射", idx)
+            self._rebuild_tab_mappings()
+        return self.tab_splitters.get(idx)
+
     def _target_terminal_in_tab(self, terminals, fallback_first=True):
         """本页里「当前选中」的终端：分屏/关闭分屏的作用对象。
 
@@ -309,7 +334,7 @@ class TabSplitMixin:
         if idx < 0:
             return
 
-        splitter = self.tab_splitters.get(idx)
+        splitter = self._synced_tab_splitter(idx)
         if not splitter:
             return
 
@@ -402,7 +427,7 @@ class TabSplitMixin:
         if idx < 0:
             return
 
-        splitter = self.tab_splitters.get(idx)
+        splitter = self._synced_tab_splitter(idx)
         if not splitter:
             return
 
@@ -526,6 +551,8 @@ class TabSplitMixin:
         if idx < 0:
             return
 
+        # 先校验索引映射（错位时 terminals 会是别的标签页的列表 → 关错终端）
+        self._synced_tab_splitter(idx)
         terminals = self.tab_terminals.get(idx, [])
         if len(terminals) <= 1:
             # 只有一个终端时不能关闭，提示用户
@@ -583,7 +610,7 @@ class TabSplitMixin:
         if idx < 0:
             return
 
-        splitter = self.tab_splitters.get(idx)
+        splitter = self._synced_tab_splitter(idx)
         if not splitter:
             return
 
