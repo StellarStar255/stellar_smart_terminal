@@ -4263,43 +4263,32 @@ class MainWindow(ThemeMixin, ToolbarMixin, ConfigMixin, ExplorerPanelMixin,
                 logger.exception("failed to restore tabs from snapshot")
 
     def _restore_tabs_from_snapshot(self, tabs, current_idx):
-        """按快照恢复标签页：首个复用现有空白标签，其余逐个新建。
-
-        只恢复结构（独立工作目录 + 自定义标签名），不自动启动会话——
-        避免重启后未经确认就批量拉起 claude/ssh。
+        """重启后**不再重建多标签**：会话无法恢复，成排的空标签没有用
+        （用户点名去掉，2026-08-25）。只把「重启前正在看的那个标签」的
+        目录/自定义名套到现有的单个标签上，保住工作上下文；也不自动
+        启动会话——避免重启后未经确认就批量拉起 claude/ssh。
         """
-        first = tabs[0] if tabs else {}
-        cwd0 = first.get('cwd') or ''
-        if cwd0 and os.path.isdir(cwd0):
-            self.tab_cwds[0] = cwd0
-            terms = self.tab_terminals.get(0, [])
-            if terms and not terms[0].has_started():
-                terms[0].set_working_dir(cwd0)
-        name0 = first.get('name') or ''
-        if name0:
-            page0 = self.tab_widget.widget(0)
-            if page0 is not None:
-                page0._custom_tab_name = name0
-            self.tab_widget.setTabText(0, name0)
-        for tab in tabs[1:]:
-            if not isinstance(tab, dict):
-                continue
-            cwd = tab.get('cwd') or ''
-            cwd = cwd if cwd and os.path.isdir(cwd) else None
-            name = tab.get('name') or ''
-            idx = self._add_new_tab(tab_name=(name or None), tab_cwd=cwd)
-            page = self.tab_widget.widget(idx)
-            if name and page is not None:
-                page._custom_tab_name = name
-            elif cwd:
-                # 无自定义名时用目录名做标题，比「终端 N」可辨识
-                self.tab_widget.setTabText(idx, os.path.basename(cwd))
+        if not tabs:
+            return
         try:
             cur = int(current_idx)
         except (TypeError, ValueError):
             cur = 0
-        self.tab_widget.setCurrentIndex(
-            max(0, min(cur, self.tab_widget.count() - 1)))
+        entry = tabs[cur] if 0 <= cur < len(tabs) else tabs[0]
+        if not isinstance(entry, dict):
+            return
+        cwd = entry.get('cwd') or ''
+        if cwd and os.path.isdir(cwd):
+            self.tab_cwds[0] = cwd
+            terms = self.tab_terminals.get(0, [])
+            if terms and not terms[0].has_started():
+                terms[0].set_working_dir(cwd)
+        name = entry.get('name') or ''
+        if name:
+            page0 = self.tab_widget.widget(0)
+            if page0 is not None:
+                page0._custom_tab_name = name
+            self.tab_widget.setTabText(0, name)
 
     def _current_sidebar_panel(self):
         """当前打开的侧边栏面板名（explorer/git/remote 互斥），全关则 None。"""

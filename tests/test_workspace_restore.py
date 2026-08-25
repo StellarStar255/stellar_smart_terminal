@@ -87,9 +87,13 @@ class TestWorkspaceRestore(unittest.TestCase):
         finally:
             w._close_tab(idx, auto_create_new=False)
 
-    def test_restore_applies_tabs(self):
+    def test_restore_applies_current_tab_only(self):
+        """重启后不再重建多标签（会话无法恢复，空标签没用——用户点名去掉）。
+
+        只把「重启前正在看的那个标签」的目录/自定义名套到现有单标签上。
+        """
         w = self.w
-        os.makedirs(Path(self._tmp.name) / 'proj2')
+        os.makedirs(Path(self._tmp.name) / 'proj2', exist_ok=True)
         self._write_cfg({'workspace_snapshot': {
             'ts': time.time(),
             'windows': [{
@@ -107,19 +111,41 @@ class TestWorkspaceRestore(unittest.TestCase):
         try:
             main_window.MainWindow.restore_workspace_on_start(w)
             self.app.processEvents()
-            self.assertEqual(w.tab_widget.count(), 3)
-            self.assertEqual(w.tab_widget.currentIndex(), 1)
-            self.assertEqual(w.tab_cwds.get(1), str(Path(self._tmp.name) / 'proj2'))
-            self.assertEqual(w.tab_widget.tabText(1), '第二个')
-            # 目录失效的标签仍创建，但不带失效 cwd
-            self.assertNotEqual(w.tab_cwds.get(2), '/nonexistent/xyz')
+            # 不重建多标签：只剩启动时的那一个
+            self.assertEqual(w.tab_widget.count(), 1,
+                             "重启后不应重建成排的空标签")
+            # 但重启前正在看的标签的目录/自定义名要套到现有标签上
+            self.assertEqual(w.tab_cwds.get(0), str(Path(self._tmp.name) / 'proj2'))
+            self.assertEqual(w.tab_widget.tabText(0), '第二个')
             # 会话不自动启动
             for terms in w.tab_terminals.values():
                 for term in terms:
                     self.assertFalse(term.is_running())
         finally:
+            page0 = w.tab_widget.widget(0)
+            if page0 is not None:
+                page0._custom_tab_name = None
             while w.tab_widget.count() > 1:
                 w._close_tab(w.tab_widget.count() - 1, auto_create_new=False)
+
+    def test_restore_skips_invalid_current_cwd(self):
+        """当前标签目录已失效时不套用失效 cwd，也不崩溃。"""
+        w = self.w
+        self._write_cfg({'workspace_snapshot': {
+            'ts': time.time(),
+            'windows': [{
+                'cwd': self._tmp.name,
+                'geometry': [60, 80, 1360, 820],
+                'maximized': False,
+                'tabs': [{'cwd': '/nonexistent/xyz', 'name': ''}],
+                'current_tab': 0,
+            }],
+        }})
+        main_window.MainWindow.restore_workspace_on_start(w)
+        self.app.processEvents()
+        self.assertEqual(w.tab_widget.count(), 1)
+        # 失效目录不得被套用（窗口级合法 cwd 照常生效）
+        self.assertNotEqual(w.tab_cwds.get(0), '/nonexistent/xyz')
 
     def test_disabled_or_missing_snapshot_noop(self):
         w = self.w
