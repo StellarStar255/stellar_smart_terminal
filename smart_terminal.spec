@@ -124,8 +124,8 @@ if sys.platform == "darwin":
         info_plist={
             "CFBundleName": APP_DISPLAY_NAME,
             "CFBundleDisplayName": APP_DISPLAY_NAME,
-            "CFBundleShortVersionString": "1.17.5",
-            "CFBundleVersion": "1.17.5",
+            "CFBundleShortVersionString": "1.17.6",
+            "CFBundleVersion": "1.17.6",
             "NSHighResolutionCapable": True,
             "NSRequiresAquaSystemAppearance": False,
             # 终端应用需要的权限说明（访问用户文件等由系统按需弹窗）。
