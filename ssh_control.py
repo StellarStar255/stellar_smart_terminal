@@ -334,6 +334,126 @@ def master_exit(cfg: HostConfig) -> bool:
         return False
 
 
+# ---------- 端口转发（挂在已有主连接上） ----------
+# `ssh -O forward/cancel` 是对**已经建好的主连接**下指令，不重新认证 ——
+# 这是要动态码的堡垒机唯一可行的路子（想临时开个端口转发，总不能再输一次码）。
+
+_FWD_HOST_RE = re.compile(r"^[A-Za-z0-9._-]+$")
+FORWARD_TYPES = ("L", "R", "D")
+
+
+def _fwd_port(value) -> str:
+    try:
+        n = int(value)
+    except (TypeError, ValueError):
+        raise ValueError(f"端口不合法: {value}")
+    if not 1 <= n <= 65535:
+        raise ValueError(f"端口要在 1-65535 之间: {value}")
+    return str(n)
+
+
+def _fwd_host(value, default: str) -> str:
+    v = str(value or default or "").strip()
+    if not _FWD_HOST_RE.match(v):
+        raise ValueError(f"主机名/地址不合法: {v}")
+    return v
+
+
+def forward_args(spec: dict) -> list:
+    """把一条转发规则转成 ssh 参数（-L/-R/-D）。规则不合法直接抛 ValueError。"""
+    kind = str(spec.get("type") or "L").upper()
+    if kind not in FORWARD_TYPES:
+        raise ValueError(f"未知的转发类型: {kind}")
+    bind = f'{_fwd_host(spec.get("bind_host"), "127.0.0.1")}:{_fwd_port(spec.get("bind_port"))}'
+    if kind == "D":
+        return ["-D", bind]
+    dest = f'{_fwd_host(spec.get("dest_host"), "127.0.0.1")}:{_fwd_port(spec.get("dest_port"))}'
+    return [("-R" if kind == "R" else "-L"), f"{bind}:{dest}"]
+
+
+def forward_label(spec: dict) -> str:
+    """一条转发的人话描述（UI 与日志共用）。"""
+    bind = f'{spec.get("bind_host") or "127.0.0.1"}:{spec.get("bind_port")}'
+    kind = str(spec.get("type") or "L").upper()
+    if kind == "D":
+        return f"SOCKS5 {bind}"
+    dest = f'{spec.get("dest_host") or "127.0.0.1"}:{spec.get("dest_port")}'
+    return (f"远端 {bind} → 本机 {dest}" if kind == "R"
+            else f"本机 {bind} → 远端 {dest}")
+
+
+def local_port_busy(host: str, port) -> bool:
+    """本机端口是否已被占用（-L/-D 是在本机开监听）。
+
+    ssh 端口占用时只会甩一句 "Port forwarding failed"，看不出是谁占的；
+    自己先 bind 一下，能提前给出准确得多的报错。
+    """
+    import socket
+    try:
+        p = int(port)
+    except (TypeError, ValueError):
+        return False
+    s = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+    try:
+        s.bind((host or "127.0.0.1", p))
+        return False
+    except OSError:
+        return True
+    finally:
+        s.close()
+
+
+def who_holds_port(port) -> str:
+    """查谁占着这个端口（lsof）；查不出来返回空串。"""
+    try:
+        proc = subprocess.run(
+            ["lsof", "-nP", f"-iTCP:{int(port)}", "-sTCP:LISTEN"],
+            stdout=subprocess.PIPE, stderr=subprocess.DEVNULL, timeout=5)
+    except Exception:
+        return ""
+    names = []
+    for line in (proc.stdout or b"").decode("utf-8", "replace").split("\n")[1:]:
+        cols = line.split()
+        if len(cols) > 1 and cols[0] and (cols[0], cols[1]) not in names:
+            names.append((cols[0], cols[1]))
+    return "、".join(f"{n}(pid {p})" for n, p in names)
+
+
+def forward_apply(cfg: HostConfig, spec: dict, cancel: bool = False) -> str:
+    """在已有主连接上加/撤一条端口转发。返回 ssh 的输出（通常为空）。
+
+    没有主连接就直接报错——建主连接要动态码，那是 UI 该引导用户去做的事。
+    """
+    if not is_supported():
+        raise RuntimeError("这个平台不支持 ssh 主连接（ControlMaster）")
+    ctl = control_path_for(cfg)
+    if not ctl:
+        raise RuntimeError("ControlPath 建不出来（临时目录路径太长）")
+    args = forward_args(spec)
+    if not cancel and str(spec.get("type") or "L").upper() != "R":
+        # -L/-D 在本机开监听：先自查端口占用，给出比 ssh 有用得多的报错
+        host = spec.get("bind_host") or "127.0.0.1"
+        port = spec.get("bind_port")
+        if local_port_busy(host, port):
+            who = who_holds_port(port)
+            raise RuntimeError(
+                f"本机端口 {port} 已被占用" + (f"：{who}" if who else ""))
+    proc = subprocess.run(
+        ["ssh", "-O", ("cancel" if cancel else "forward"),
+         "-o", f"ControlPath={ctl}", *args, ssh_target(cfg)],
+        stdin=subprocess.DEVNULL, stdout=subprocess.PIPE,
+        stderr=subprocess.PIPE, timeout=15)
+    out = (proc.stdout or b"").decode("utf-8", "replace").strip()
+    if proc.returncode != 0:
+        err = (proc.stderr or b"").decode("utf-8", "replace").strip() or out
+        tail = " · ".join([l for l in err.split("\n") if l.strip()][-2:])
+        if "control socket connect" in err.lower() or "no such file" in err.lower():
+            raise MasterNotRunning("主连接不在了 —— 先做一次 MFA 登录再加转发")
+        raise RuntimeError(tail or f"ssh -O {'cancel' if cancel else 'forward'} "
+                                   f"退出码 {proc.returncode}")
+    return out
+
+
 class ControlMasterSession(QObject):
     """复用系统 ssh 主连接的远程会话。
 
@@ -746,7 +866,9 @@ class ControlMasterSession(QObject):
 
 
 __all__ = [
-    "ControlMasterSession", "MasterNotRunning", "control_path_for",
-    "is_supported", "mfa_login", "master_alive", "master_exit",
-    "master_socket_exists", "parse_ls_output", "ssh_target",
+    "ControlMasterSession", "MasterNotRunning", "FORWARD_TYPES",
+    "control_path_for", "forward_apply", "forward_args", "forward_label",
+    "is_supported", "local_port_busy", "mfa_login", "master_alive",
+    "master_exit", "master_socket_exists", "parse_ls_output", "ssh_target",
+    "who_holds_port",
 ]

@@ -619,6 +619,290 @@ class TestBastionTerminalWiring(unittest.TestCase):
 
 
 @_POSIX_ONLY
+class TestPortForwarding(unittest.TestCase):
+    """转发挂在**已有主连接**上（ssh -O forward）——要动态码的主机唯一的活路。"""
+
+    def test_local_remote_and_socks_arg_shapes(self):
+        self.assertEqual(
+            ssh_control.forward_args({'type': 'L', 'bind_port': 8888,
+                                      'dest_host': '10.0.0.9', 'dest_port': 80}),
+            ['-L', '127.0.0.1:8888:10.0.0.9:80'])
+        self.assertEqual(
+            ssh_control.forward_args({'type': 'R', 'bind_host': '0.0.0.0',
+                                      'bind_port': 9000, 'dest_port': 3000}),
+            ['-R', '0.0.0.0:9000:127.0.0.1:3000'])
+        self.assertEqual(
+            ssh_control.forward_args({'type': 'D', 'bind_port': 1080}),
+            ['-D', '127.0.0.1:1080'])
+
+    def test_bad_specs_are_rejected_before_reaching_ssh(self):
+        for spec in ({'type': 'L', 'bind_port': 0, 'dest_port': 80},
+                     {'type': 'L', 'bind_port': 70000, 'dest_port': 80},
+                     {'type': 'L', 'bind_port': 'abc', 'dest_port': 80},
+                     {'type': 'L', 'bind_port': 22, 'dest_port': 80,
+                      'dest_host': 'evil host; rm -rf /'},
+                     {'type': 'X', 'bind_port': 22}):
+            with self.assertRaises(ValueError, msg=spec):
+                ssh_control.forward_args(spec)
+
+    def test_labels_read_like_a_human_wrote_them(self):
+        self.assertEqual(
+            ssh_control.forward_label({'type': 'L', 'bind_port': 8888,
+                                       'dest_host': '10.0.0.9', 'dest_port': 80}),
+            '本机 127.0.0.1:8888 → 远端 10.0.0.9:80')
+        self.assertEqual(
+            ssh_control.forward_label({'type': 'D', 'bind_port': 1080}),
+            'SOCKS5 127.0.0.1:1080')
+
+    def test_apply_targets_the_existing_master(self):
+        seen = {}
+
+        def _fake_run(args, **kwargs):
+            seen['args'] = args
+            return subprocess.CompletedProcess(args, 0, b'', b'')
+
+        h = _host()
+        with mock.patch.object(ssh_control.subprocess, 'run', _fake_run), \
+                mock.patch.object(ssh_control, 'local_port_busy', lambda *a: False):
+            ssh_control.forward_apply(h, {'type': 'L', 'bind_port': 8888,
+                                          'dest_port': 80})
+        args = seen['args']
+        self.assertEqual(args[:3], ['ssh', '-O', 'forward'])
+        self.assertIn(f'ControlPath={ssh_control.control_path_for(h)}', args)
+        self.assertIn('-L', args)
+        self.assertEqual(args[-1], 'bastion')
+
+    def test_cancel_uses_the_cancel_verb(self):
+        seen = {}
+
+        def _fake_run(args, **kwargs):
+            seen['args'] = args
+            return subprocess.CompletedProcess(args, 0, b'', b'')
+
+        with mock.patch.object(ssh_control.subprocess, 'run', _fake_run):
+            ssh_control.forward_apply(_host(), {'type': 'D', 'bind_port': 1080},
+                                      cancel=True)
+        self.assertEqual(seen['args'][:3], ['ssh', '-O', 'cancel'])
+
+    def test_busy_local_port_is_caught_before_ssh_runs(self):
+        """ssh 只会说 "Port forwarding failed"；我们要说清是谁占了。"""
+        import socket
+        srv = socket.socket()
+        srv.bind(('127.0.0.1', 0))
+        srv.listen(1)
+        port = srv.getsockname()[1]
+        try:
+            self.assertTrue(ssh_control.local_port_busy('127.0.0.1', port))
+            with mock.patch.object(ssh_control.subprocess, 'run') as run:
+                with self.assertRaises(RuntimeError) as cm:
+                    ssh_control.forward_apply(
+                        _host(), {'type': 'L', 'bind_port': port, 'dest_port': 80})
+            # 允许查 lsof（就是为了说清谁占了），但绝不能真去 ssh 试
+            spawned = [c.args[0][0] for c in run.call_args_list if c.args]
+            self.assertNotIn('ssh', spawned, spawned)
+            self.assertIn(str(port), str(cm.exception))
+        finally:
+            srv.close()
+        # 端口放开后不再报占用
+        self.assertFalse(ssh_control.local_port_busy('127.0.0.1', port))
+
+    def test_remote_forwards_skip_the_local_port_check(self):
+        """-R 是在**远端**开监听，本机端口占用与它无关。"""
+        import socket
+        srv = socket.socket()
+        srv.bind(('127.0.0.1', 0))
+        srv.listen(1)
+        port = srv.getsockname()[1]
+        try:
+            with mock.patch.object(ssh_control.subprocess, 'run',
+                                   lambda args, **kw: subprocess.CompletedProcess(
+                                       args, 0, b'', b'')):
+                ssh_control.forward_apply(_host(), {'type': 'R',
+                                                    'bind_port': port,
+                                                    'dest_port': 3000})
+        finally:
+            srv.close()
+
+    def test_dead_master_says_to_log_in_again(self):
+        def _fail(args, **kwargs):
+            return subprocess.CompletedProcess(
+                args, 255, b'',
+                b'Control socket connect(/tmp/stellar-ssh/c-x): No such file or directory')
+
+        with mock.patch.object(ssh_control.subprocess, 'run', _fail), \
+                mock.patch.object(ssh_control, 'local_port_busy', lambda *a: False):
+            with self.assertRaises(ssh_control.MasterNotRunning):
+                ssh_control.forward_apply(_host(), {'type': 'L', 'bind_port': 8888,
+                                                    'dest_port': 80})
+
+
+@_POSIX_ONLY
+class TestForwardRulesInPanel(unittest.TestCase):
+    """规则的持久化与「连上自动挂」。"""
+
+    @classmethod
+    def setUpClass(cls):
+        os.environ.setdefault('QT_QPA_PLATFORM', 'offscreen')
+        from PyQt6.QtWidgets import QApplication
+        cls.app = QApplication.instance() or QApplication([])
+
+    def setUp(self):
+        import app_config
+        from pathlib import Path
+        self._tmp = tempfile.mkdtemp(prefix='fwd-cfg-')
+        self._orig = app_config.get_config_path
+        app_config.get_config_path = lambda: Path(self._tmp) / 'cfg.json'
+
+    def tearDown(self):
+        import app_config
+        app_config.get_config_path = self._orig
+
+    def _panel(self):
+        from remote_explorer_widget import RemoteExplorerPanel
+        return RemoteExplorerPanel(theme={})
+
+    def test_rules_persist_per_host(self):
+        panel = self._panel()
+        rules = [{'type': 'L', 'bind_host': '127.0.0.1', 'bind_port': 8888,
+                  'dest_host': '127.0.0.1', 'dest_port': 8888, 'auto': True}]
+        panel._save_forwards('bastion', rules)
+        self.assertEqual(self._panel()._load_forwards('bastion'), rules)
+        self.assertEqual(self._panel()._load_forwards('other'), [])
+        panel._save_forwards('bastion', [])
+        self.assertEqual(self._panel()._load_forwards('bastion'), [])
+
+    def test_only_auto_rules_come_up_on_connect(self):
+        panel = self._panel()
+        panel._save_forwards('bastion', [
+            {'type': 'L', 'bind_port': 8888, 'dest_port': 8888, 'auto': True},
+            {'type': 'L', 'bind_port': 9999, 'dest_port': 9999, 'auto': False},
+        ])
+        applied = []
+        with mock.patch('ssh_control.is_supported', lambda: True), \
+                mock.patch('ssh_control.forward_apply',
+                           lambda h, spec, cancel=False: applied.append(spec)):
+            panel._auto_apply_forwards(_host())
+        self.assertEqual([s['bind_port'] for s in applied], [8888])
+
+    def test_a_failing_forward_only_warns(self):
+        """端口被占不该把整个连接流程带崩。"""
+        panel = self._panel()
+        panel._save_forwards('bastion', [
+            {'type': 'L', 'bind_port': 8888, 'dest_port': 8888, 'auto': True}])
+        errors = []
+        panel.error_occurred.connect(lambda m: errors.append(m))
+
+        def _boom(h, spec, cancel=False):
+            raise RuntimeError('本机端口 8888 已被占用：node(pid 42)')
+
+        with mock.patch('ssh_control.is_supported', lambda: True), \
+                mock.patch('ssh_control.forward_apply', _boom):
+            panel._auto_apply_forwards(_host())
+        self.assertEqual(len(errors), 1)
+        self.assertIn('8888', errors[0])
+
+    def test_already_applied_rules_are_not_reapplied(self):
+        panel = self._panel()
+        spec = {'type': 'L', 'bind_port': 8888, 'dest_port': 8888, 'auto': True}
+        panel._save_forwards('bastion', [spec])
+        calls = []
+        with mock.patch('ssh_control.is_supported', lambda: True), \
+                mock.patch('ssh_control.forward_apply',
+                           lambda h, s, cancel=False: calls.append(s)):
+            panel._auto_apply_forwards(_host())
+            panel._auto_apply_forwards(_host())     # 第二次连接/重连
+        self.assertEqual(len(calls), 1)
+
+
+@_POSIX_ONLY
+class TestForwardsDialog(unittest.TestCase):
+    @classmethod
+    def setUpClass(cls):
+        os.environ.setdefault('QT_QPA_PLATFORM', 'offscreen')
+        from PyQt6.QtWidgets import QApplication
+        cls.app = QApplication.instance() or QApplication([])
+
+    def _dlg(self, rules=None, **kw):
+        from remote_explorer_widget import _ForwardsDialog
+        return _ForwardsDialog(None, alias='bastion', rules=rules or [],
+                               apply_cb=lambda s: None, cancel_cb=lambda s: None,
+                               **kw)
+
+    def test_add_rule_from_the_form(self):
+        d = self._dlg()
+        d._bind_port.setText('8888')
+        d._dest_port.setText('80')
+        d._dest_host.setText('10.0.0.9')
+        d._on_add()
+        self.assertEqual(len(d.rules()), 1)
+        self.assertEqual(d.rules()[0]['dest_host'], '10.0.0.9')
+        d.deleteLater()
+
+    def test_invalid_rule_is_refused(self):
+        from remote_explorer_widget import QMessageBox
+        d = self._dlg()
+        d._bind_port.setText('70000')
+        with mock.patch.object(QMessageBox, 'warning'):
+            d._on_add()
+        self.assertEqual(d.rules(), [])
+        d.deleteLater()
+
+    def test_duplicate_listen_endpoint_is_refused(self):
+        from remote_explorer_widget import QMessageBox
+        d = self._dlg([{'type': 'L', 'bind_host': '127.0.0.1', 'bind_port': '8888',
+                        'dest_host': '127.0.0.1', 'dest_port': '80'}])
+        d._bind_port.setText('8888')
+        d._dest_port.setText('99')
+        with mock.patch.object(QMessageBox, 'warning') as warn:
+            d._on_add()
+        warn.assert_called_once()
+        self.assertEqual(len(d.rules()), 1)
+        d.deleteLater()
+
+    def test_start_marks_the_rule_active(self):
+        d = self._dlg([{'type': 'L', 'bind_port': '8888', 'dest_port': '80'}])
+        d._list.setCurrentRow(0)
+        d._apply_selected(False)
+        self.assertEqual(len(d.active_keys()), 1)
+        self.assertTrue(d._list.item(0).text().startswith('●'))
+        d._apply_selected(True)
+        self.assertEqual(d.active_keys(), set())
+        self.assertTrue(d._list.item(0).text().startswith('○'))
+        d.deleteLater()
+
+    def test_failed_start_does_not_mark_it_active(self):
+        from remote_explorer_widget import _ForwardsDialog, QMessageBox
+        d = _ForwardsDialog(
+            None, alias='bastion',
+            rules=[{'type': 'L', 'bind_port': '8888', 'dest_port': '80'}],
+            apply_cb=mock.Mock(side_effect=RuntimeError('端口被占')),
+            cancel_cb=lambda s: None)
+        d._list.setCurrentRow(0)
+        with mock.patch.object(QMessageBox, 'warning') as warn:
+            d._apply_selected(False)
+        warn.assert_called_once()
+        self.assertEqual(d.active_keys(), set())
+        d.deleteLater()
+
+    def test_socks_rule_hides_the_destination_fields(self):
+        d = self._dlg()
+        d._type.setCurrentIndex(2)          # SOCKS -D
+        self.assertFalse(d._dest_port.isEnabled())
+        d._bind_port.setText('1080')
+        d._on_add()
+        self.assertEqual(d.rules()[0]['type'], 'D')
+        d.deleteLater()
+
+    def test_auto_flag_round_trip(self):
+        d = self._dlg([{'type': 'L', 'bind_port': '8888', 'dest_port': '80'}])
+        d._list.setCurrentRow(0)
+        d._auto_check.setChecked(True)
+        self.assertTrue(d.rules()[0]['auto'])
+        self.assertIn('自动', d._list.item(0).text())
+        d.deleteLater()
+
+
+@_POSIX_ONLY
 class TestLsParsing(unittest.TestCase):
     """ls 输出解析是这个后端最容易悄悄错的地方（错了就是文件名被截断）。"""
 

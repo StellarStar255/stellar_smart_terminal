@@ -792,6 +792,42 @@ TRANSLATIONS = {
     # --- MFA / 动态码登录 ---
     "remote.mfa_login_menu": {"zh": "🔑 MFA 登录…", "en": "🔑 MFA Login…"},
     "remote.mfa_forget": {"zh": "不再按 MFA 方式登录", "en": "Stop using MFA login"},
+    # --- 端口转发（挂在 ssh 主连接上） ---
+    "remote.fwd_menu": {"zh": "🔀 端口转发…", "en": "🔀 Port Forwarding…"},
+    "remote.fwd_title": {"zh": "🔀 端口转发 — {host}", "en": "🔀 Port Forwarding — {host}"},
+    "remote.fwd_hint": {
+        "zh": "转发挂在这台主机的常驻主连接上，随时加/撤都不用重新认证（要动态码的堡垒机也一样）。"
+              "勾「自动」的规则会在下次连上时自动挂起。",
+        "en": "Forwards attach to this host's persistent master connection, so "
+              "adding or removing one never re-authenticates — even on hosts that "
+              "require a one-time code. Rules marked \"auto\" come up on the next "
+              "connect.",
+    },
+    "remote.fwd_type_local": {"zh": "本地 -L", "en": "Local -L"},
+    "remote.fwd_type_remote": {"zh": "远程 -R", "en": "Remote -R"},
+    "remote.fwd_type_socks": {"zh": "SOCKS -D", "en": "SOCKS -D"},
+    "remote.fwd_port": {"zh": "端口", "en": "port"},
+    "remote.fwd_add": {"zh": "添加", "en": "Add"},
+    "remote.fwd_auto": {"zh": "连上后自动启用这条", "en": "Start this one on connect"},
+    "remote.fwd_auto_short": {"zh": "自动", "en": "auto"},
+    "remote.fwd_start": {"zh": "启用", "en": "Start"},
+    "remote.fwd_stop": {"zh": "停用", "en": "Stop"},
+    "remote.fwd_delete": {"zh": "删除", "en": "Delete"},
+    "remote.fwd_close": {"zh": "完成", "en": "Done"},
+    "remote.fwd_duplicate": {"zh": "已经有一条监听同一地址/端口的规则了。",
+                              "en": "A rule already listens on that address/port."},
+    "remote.fwd_need_master": {
+        "zh": "端口转发要挂在常驻主连接上。请先用「🔑 MFA 登录」连一次这台主机。",
+        "en": "Port forwarding attaches to the persistent master connection — "
+              "log in to this host once (🔑 MFA Login) first.",
+    },
+    "remote.fwd_unsupported": {
+        "zh": "这个平台的 OpenSSH 不支持 ControlMaster 主连接，用不了端口转发。",
+        "en": "This platform's OpenSSH has no ControlMaster support, so port "
+              "forwarding is unavailable.",
+    },
+    "remote.fwd_failed": {"zh": "端口转发失败（{rule}）：{error}",
+                           "en": "Port forward failed ({rule}): {error}"},
     "remote.mfa_drop_master": {
         "zh": "退出主连接（下次需重新输码）",
         "en": "Close master connection (a new code will be needed)",

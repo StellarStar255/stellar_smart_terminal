@@ -433,6 +433,238 @@ class _MfaLoginDialog(QDialog):
         return bool(self._terminal_check and self._terminal_check.isChecked())
 
 
+class _ForwardsDialog(QDialog):
+    """端口转发管理（一台主机多条规则）。
+
+    规则挂在**已有的 ssh 主连接**上（`ssh -O forward`），所以对要动态码的
+    堡垒机也能随时加/撤，不用重新认证。规则按主机别名持久化，勾了「自动」
+    的下次 MFA 登录连上就自动挂。
+
+    列表项 UserRole 存规则 dict；取值用 rules()。
+    """
+
+    def __init__(self, parent=None, *, alias: str, rules: list,
+                 apply_cb=None, cancel_cb=None, active: Optional[set] = None):
+        super().__init__(parent)
+        self._alias = alias
+        self._apply_cb = apply_cb          # (spec) -> None，抛异常表示失败
+        self._cancel_cb = cancel_cb
+        self._active = set(active or ())   # 已生效规则的 key
+        self.setWindowTitle(t("remote.fwd_title", host=alias))
+        self.setModal(True)
+        self.setMinimumWidth(560)
+        self.setStyleSheet("""
+            QDialog { background-color: #1e1e2e; }
+            QLabel#title { color: #eaeaea; font-size: 15px; font-weight: 600; }
+            QLabel#hint { color: #8a8aa0; font-size: 12px; }
+            QLabel#field { color: #b8b8cc; font-size: 12px; }
+            QListWidget {
+                background-color: #2d2d44; color: #eaeaea;
+                border: 1px solid #3d3d5c; border-radius: 6px; padding: 2px;
+            }
+            QListWidget::item { padding: 5px 6px; border-radius: 4px; }
+            QListWidget::item:selected { background-color: #667eea; }
+            QLineEdit, QComboBox {
+                background-color: #2d2d44; color: #eaeaea;
+                border: 1px solid #3d3d5c; border-radius: 6px;
+                padding: 6px 8px; font-size: 13px;
+            }
+            QLineEdit:focus { border: 1px solid #667eea; }
+            QComboBox QAbstractItemView {
+                background-color: #2d2d44; color: #eaeaea;
+                selection-background-color: #667eea; border: 1px solid #3d3d5c;
+            }
+            QPushButton {
+                background-color: #2d2d44; color: #eaeaea;
+                border: 1px solid #3d3d5c; border-radius: 6px;
+                padding: 6px 14px; font-size: 13px;
+            }
+            QPushButton:hover { border: 1px solid #6a5d8a; }
+            QPushButton#ok {
+                background-color: #667eea; border: 1px solid #667eea;
+                color: white; font-weight: 600;
+            }
+            QPushButton#ok:hover { background-color: #764ba2; border: 1px solid #764ba2; }
+        """)
+
+        layout = QVBoxLayout(self)
+        layout.setContentsMargins(20, 18, 20, 16)
+        layout.setSpacing(10)
+
+        title = QLabel(t("remote.fwd_title", host=alias))
+        title.setObjectName("title")
+        layout.addWidget(title)
+        hint = QLabel(t("remote.fwd_hint"))
+        hint.setObjectName("hint")
+        hint.setWordWrap(True)
+        layout.addWidget(hint)
+
+        self._list = QListWidget()
+        self._list.setMinimumHeight(150)
+        layout.addWidget(self._list, 1)
+        for r in rules or []:
+            self._add_item(dict(r))
+
+        # —— 新增一条 ——
+        form = QHBoxLayout()
+        form.setSpacing(6)
+        self._type = QComboBox()
+        for key, label_key in (("L", "remote.fwd_type_local"),
+                               ("R", "remote.fwd_type_remote"),
+                               ("D", "remote.fwd_type_socks")):
+            self._type.addItem(t(label_key), key)
+        self._type.currentIndexChanged.connect(self._sync_dest_enabled)
+        form.addWidget(self._type)
+        self._bind_host = QLineEdit("127.0.0.1")
+        self._bind_host.setFixedWidth(110)
+        form.addWidget(self._bind_host)
+        self._bind_port = QLineEdit()
+        self._bind_port.setPlaceholderText(t("remote.fwd_port"))
+        self._bind_port.setFixedWidth(70)
+        form.addWidget(self._bind_port)
+        self._arrow = QLabel("→")
+        self._arrow.setObjectName("field")
+        form.addWidget(self._arrow)
+        self._dest_host = QLineEdit("127.0.0.1")
+        self._dest_host.setFixedWidth(110)
+        form.addWidget(self._dest_host)
+        self._dest_port = QLineEdit()
+        self._dest_port.setPlaceholderText(t("remote.fwd_port"))
+        self._dest_port.setFixedWidth(70)
+        form.addWidget(self._dest_port)
+        add_btn = QPushButton(t("remote.fwd_add"))
+        add_btn.clicked.connect(self._on_add)
+        form.addWidget(add_btn)
+        layout.addLayout(form)
+
+        # —— 操作 ——
+        row = QHBoxLayout()
+        row.setSpacing(8)
+        self._auto_check = QCheckBox(t("remote.fwd_auto"))
+        self._auto_check.stateChanged.connect(self._on_auto_toggled)
+        row.addWidget(self._auto_check)
+        row.addStretch(1)
+        start_btn = QPushButton(t("remote.fwd_start"))
+        start_btn.clicked.connect(lambda: self._apply_selected(False))
+        row.addWidget(start_btn)
+        stop_btn = QPushButton(t("remote.fwd_stop"))
+        stop_btn.clicked.connect(lambda: self._apply_selected(True))
+        row.addWidget(stop_btn)
+        del_btn = QPushButton(t("remote.fwd_delete"))
+        del_btn.clicked.connect(self._on_delete)
+        row.addWidget(del_btn)
+        close_btn = QPushButton(t("remote.fwd_close"))
+        close_btn.setObjectName("ok")
+        close_btn.setDefault(True)
+        close_btn.clicked.connect(self.accept)
+        row.addWidget(close_btn)
+        layout.addLayout(row)
+
+        self._list.currentItemChanged.connect(self._sync_auto_check)
+        self._sync_dest_enabled()
+        if self._list.count():
+            self._list.setCurrentRow(0)
+
+    # ---- 规则 <-> 列表项 ----
+
+    @staticmethod
+    def rule_key(spec: dict) -> str:
+        """一条规则的身份：类型 + 监听端。撤销/去重都按它。"""
+        return (f'{str(spec.get("type") or "L").upper()}|'
+                f'{spec.get("bind_host") or "127.0.0.1"}|{spec.get("bind_port")}')
+
+    def _add_item(self, spec: dict) -> QListWidgetItem:
+        item = QListWidgetItem(self._item_text(spec))
+        item.setData(_ROLE_ENTRY, spec)
+        self._list.addItem(item)
+        return item
+
+    def _item_text(self, spec: dict) -> str:
+        mark = "●" if self.rule_key(spec) in self._active else "○"
+        auto = " · " + t("remote.fwd_auto_short") if spec.get("auto") else ""
+        return f"{mark} {ssh_control.forward_label(spec)}{auto}"
+
+    def _refresh_item(self, item: QListWidgetItem):
+        item.setText(self._item_text(item.data(_ROLE_ENTRY)))
+
+    def _sync_dest_enabled(self):
+        is_socks = self._type.currentData() == "D"
+        for w in (self._dest_host, self._dest_port, self._arrow):
+            w.setEnabled(not is_socks)
+
+    def _sync_auto_check(self, item=None, _prev=None):
+        item = item or self._list.currentItem()
+        self._auto_check.blockSignals(True)
+        self._auto_check.setChecked(
+            bool(item and (item.data(_ROLE_ENTRY) or {}).get("auto")))
+        self._auto_check.setEnabled(item is not None)
+        self._auto_check.blockSignals(False)
+
+    def _on_auto_toggled(self, state):
+        item = self._list.currentItem()
+        if item is None:
+            return
+        spec = dict(item.data(_ROLE_ENTRY) or {})
+        spec["auto"] = bool(state)
+        item.setData(_ROLE_ENTRY, spec)
+        self._refresh_item(item)
+
+    def _on_add(self):
+        spec = {
+            "type": self._type.currentData(),
+            "bind_host": self._bind_host.text().strip() or "127.0.0.1",
+            "bind_port": self._bind_port.text().strip(),
+            "dest_host": self._dest_host.text().strip() or "127.0.0.1",
+            "dest_port": self._dest_port.text().strip(),
+            "auto": False,
+        }
+        try:
+            ssh_control.forward_args(spec)      # 先校验，别把废规则存进去
+        except ValueError as e:
+            QMessageBox.warning(self, t("remote.fwd_title", host=self._alias), str(e))
+            return
+        key = self.rule_key(spec)
+        for i in range(self._list.count()):
+            if self.rule_key(self._list.item(i).data(_ROLE_ENTRY)) == key:
+                QMessageBox.warning(self, t("remote.fwd_title", host=self._alias),
+                                    t("remote.fwd_duplicate"))
+                return
+        self._list.setCurrentItem(self._add_item(spec))
+        self._bind_port.clear()
+        self._dest_port.clear()
+
+    def _on_delete(self):
+        item = self._list.currentItem()
+        if item is None:
+            return
+        spec = item.data(_ROLE_ENTRY)
+        if self.rule_key(spec) in self._active:
+            self._apply_selected(True)     # 删之前先撤掉，别留个孤儿监听
+        self._list.takeItem(self._list.row(item))
+
+    def _apply_selected(self, cancel: bool):
+        item = self._list.currentItem()
+        if item is None or self._apply_cb is None:
+            return
+        spec = item.data(_ROLE_ENTRY)
+        key = self.rule_key(spec)
+        try:
+            (self._cancel_cb if cancel else self._apply_cb)(spec)
+        except Exception as e:      # noqa: BLE001 — 原样告诉用户
+            QMessageBox.warning(self, t("remote.fwd_title", host=self._alias),
+                                str(e))
+            return
+        self._active.discard(key) if cancel else self._active.add(key)
+        self._refresh_item(item)
+
+    def rules(self) -> list:
+        return [self._list.item(i).data(_ROLE_ENTRY)
+                for i in range(self._list.count())]
+
+    def active_keys(self) -> set:
+        return set(self._active)
+
+
 class _HostAliasDelegate(QStyledItemDelegate):
     """主机列表原地重命名：编辑框只显示/编辑「别名」而非整条 "🖥 alias  target"。
 
@@ -974,6 +1206,9 @@ class RemoteExplorerPanel(QWidget):
         self._pending_mfa: Optional[dict] = None
         # 本次连接是不是「复用已有主连接」的尝试（失败了要转去要新码，不弹错误框）
         self._mfa_reuse_attempt = False
+        # alias -> 已生效的端口转发 key 集合（转发挂在 ssh 主连接上，
+        # 面板重开也还在，所以只作为本进程的显示状态）
+        self._active_forwards: dict[str, set] = {}
         self._mfa_lock = threading.Lock()   # 认证回调在 SSH 工作线程上读它
         # 主连接空闲保持：0 = 不自动断开；>0 时空闲超过该秒数就断开，
         # 下次操作需要重新 MFA 登录（动态码有效期只撑一次认证）
@@ -1522,6 +1757,10 @@ class RemoteExplorerPanel(QWidget):
             # MFA 登录：先收动态码再连，之后所有文件操作复用这条主连接
             mfa_act = menu.addAction(t("remote.mfa_login_menu"))
             mfa_act.triggered.connect(lambda checked=False, h=host: self._mfa_login(h))
+            if ssh_control.is_supported():
+                fwd_act = menu.addAction(t("remote.fwd_menu"))
+                fwd_act.triggered.connect(
+                    lambda checked=False, h=host: self._show_forwards_dialog(h))
             if self._is_mfa_host(host.alias):
                 if (ssh_control.is_supported()
                         and ssh_control.master_socket_exists(host)):
@@ -1867,6 +2106,74 @@ class RemoteExplorerPanel(QWidget):
         app_config.update_config_with(_apply, description='remote-mfa-hosts')
         self._populate_hosts_list()   # 🔑 标记立刻反映到列表上
 
+    # ---- 端口转发（挂在 ssh 主连接上，按主机持久化） ----
+
+    CONFIG_KEY_FORWARDS = 'remote_explorer_forwards'
+
+    def _load_forwards(self, alias: str) -> list:
+        data = app_config.read_config().get(self.CONFIG_KEY_FORWARDS)
+        rules = data.get(alias) if isinstance(data, dict) else None
+        return [dict(r) for r in rules if isinstance(r, dict)] if isinstance(rules, list) else []
+
+    def _save_forwards(self, alias: str, rules: list):
+        if not alias:
+            return
+
+        def _apply(cfg):
+            data = cfg.get(self.CONFIG_KEY_FORWARDS)
+            if not isinstance(data, dict):
+                data = {}
+            if rules:
+                data[alias] = [dict(r) for r in rules]
+            else:
+                data.pop(alias, None)
+            cfg[self.CONFIG_KEY_FORWARDS] = data
+
+        app_config.update_config_with(_apply, description='remote-forwards')
+
+    def _show_forwards_dialog(self, host: HostConfig):
+        """端口转发管理框。规则挂在主连接上，所以先确保主连接在。"""
+        if not ssh_control.is_supported():
+            QMessageBox.information(self, t("remote.fwd_title", host=host.alias),
+                                    t("remote.fwd_unsupported"))
+            return
+        if not ssh_control.master_socket_exists(host):
+            QMessageBox.information(self, t("remote.fwd_title", host=host.alias),
+                                    t("remote.fwd_need_master"))
+            return
+        active = set(self._active_forwards.get(host.alias, ()))
+        dlg = _ForwardsDialog(
+            self, alias=host.alias, rules=self._load_forwards(host.alias),
+            apply_cb=lambda spec: ssh_control.forward_apply(host, spec, cancel=False),
+            cancel_cb=lambda spec: ssh_control.forward_apply(host, spec, cancel=True),
+            active=active,
+        )
+        dlg.exec()
+        self._save_forwards(host.alias, dlg.rules())
+        self._active_forwards[host.alias] = dlg.active_keys()
+
+    def _auto_apply_forwards(self, host: HostConfig):
+        """连上之后自动挂勾了「自动」的转发；失败只提示，不影响连接。"""
+        if not ssh_control.is_supported():
+            return
+        applied = set(self._active_forwards.get(host.alias, ()))
+        for spec in self._load_forwards(host.alias):
+            if not spec.get("auto"):
+                continue
+            key = _ForwardsDialog.rule_key(spec)
+            if key in applied:
+                continue
+            try:
+                ssh_control.forward_apply(host, spec, cancel=False)
+                applied.add(key)
+                logger.info("[RemoteExplorerPanel] port forward up: %s",
+                            ssh_control.forward_label(spec))
+            except Exception as e:      # noqa: BLE001 — 端口被占等，提示即可
+                self.error_occurred.emit(t(
+                    "remote.fwd_failed",
+                    rule=ssh_control.forward_label(spec), error=str(e)))
+        self._active_forwards[host.alias] = applied
+
     # ---- 主连接空闲保持 ----
 
     def _touch_activity(self):
@@ -2043,6 +2350,8 @@ class RemoteExplorerPanel(QWidget):
             self._idle_timer.start()
         else:
             self._idle_timer.stop()
+        # 勾了「自动」的端口转发在这里挂上去（挂在同一条主连接上，不用再认证）
+        self._auto_apply_forwards(sess.host_config)
         # 通知主窗口：可以开一个 SSH 终端 tab 进去。MFA 登录时用户没勾"同时开
         # 终端"就不开——终端是另一条连接，会再要一次动态码。
         if self._mfa_open_terminal:
@@ -2382,10 +2691,15 @@ class RemoteExplorerPanel(QWidget):
             a.triggered.connect(
                 lambda checked=False, d=desc: self.set_sort(self._sort_key, d))
 
-        # 已连接时：把当前目录设为该主机默认启动目录 / 清除
+        # 已连接时：端口转发 + 把当前目录设为该主机默认启动目录 / 清除
         if self._session is not None:
             menu.addSeparator()
             alias = self._session.host_config.alias
+            if ssh_control.is_supported():
+                fwd_act = menu.addAction(t("remote.fwd_menu"))
+                fwd_act.triggered.connect(
+                    lambda checked=False, h=self._session.host_config:
+                    self._show_forwards_dialog(h))
             set_act = menu.addAction(t("remote.set_default_dir"))
             set_act.triggered.connect(self._set_current_as_default_dir)
             current_default = self._get_default_dir(alias)
