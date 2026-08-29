@@ -147,6 +147,78 @@ class TestInteractiveAuthTimeout(unittest.TestCase):
         self.assertFalse(sess.used_otp_auth())
 
 
+class _BastionTransport(_OtpTransport):
+    """JumpServer 式堡垒机：**同时宣告 publickey**，但真正能过的只有交互认证。
+
+    这就是 shanghai-centralrd-13 的形态——只看"有没有 publickey"来决定要不要试
+    密钥，会把 MaxAuthTries 打满被掐线（transport shut down or saw EOF）。
+    """
+
+    def auth_none(self, username):
+        raise paramiko.BadAuthenticationType(
+            "none not allowed",
+            ["publickey", "password", "keyboard-interactive"])
+
+
+class TestPreferInteractive(unittest.TestCase):
+    """MFA 主机绝不试密钥（否则动态码框还没弹，连接就被堡垒机掐了）。"""
+
+    @classmethod
+    def setUpClass(cls):
+        os.environ.setdefault('QT_QPA_PLATFORM', 'offscreen')
+        from PyQt6.QtWidgets import QApplication
+        cls.app = QApplication.instance() or QApplication([])
+
+    def _run(self, prefer: bool, client):
+        sess, host = _make_session()
+        sess._interactive_provider = lambda alias, prompt, echo: "123456"
+        sess._prefer_interactive = prefer
+        import ssh_session
+        with mock.patch.object(ssh_session.paramiko, 'SSHClient',
+                               lambda: client):
+            return sess, sess._connect_client(host)
+
+    def test_mfa_host_skips_keys_even_when_publickey_advertised(self):
+        client = _Client(_BastionTransport())
+        sess, result = self._run(True, client)
+        self.assertIs(result, client)
+        # 只有零凭据探测那一次 connect，且没带 agent / 扫 key
+        self.assertEqual(len(client.connect_calls), 1)
+        self.assertFalse(client.connect_calls[0]['allow_agent'])
+        self.assertFalse(client.connect_calls[0]['look_for_keys'])
+        self.assertTrue(sess.used_otp_auth())
+
+    def test_without_the_flag_publickey_hosts_keep_old_behaviour(self):
+        """普通主机不受影响：仍然照常尝试 agent / 密钥。"""
+        client = _Client(_BastionTransport())
+        _sess, result = self._run(False, client)
+        self.assertIs(result, client)
+        self.assertGreaterEqual(len(client.connect_calls), 2,
+                                "探测之后应仍走原有的完整认证流程")
+        self.assertTrue(client.connect_calls[-1]['allow_agent'])
+
+    def test_probe_failure_still_avoids_key_spray_for_mfa_hosts(self):
+        """探测连接建不起来时的兜底路径也不能去试密钥。"""
+
+        class _NoProbeClient(_Client):
+            def __init__(self, transport):
+                super().__init__(transport)
+                self._first = True
+
+            def connect(self, **kwargs):
+                self.connect_calls.append(kwargs)
+                if self._first:
+                    self._first = False
+                    raise OSError("probe failed")   # 探测阶段网络抖动
+                raise paramiko.SSHException("No authentication methods available")
+
+        client = _NoProbeClient(_BastionTransport())
+        _sess, result = self._run(True, client)
+        self.assertIs(result, client)
+        self.assertFalse(client.connect_calls[-1]['allow_agent'])
+        self.assertFalse(client.connect_calls[-1]['look_for_keys'])
+
+
 class TestReconnectPolicy(unittest.TestCase):
     @classmethod
     def setUpClass(cls):
@@ -399,6 +471,21 @@ class TestMfaHostFlag(_PanelBase):
             panel._connect_to(self._host('plain'))
         m.assert_not_called()
         sess_cls.assert_called_once()
+        # 普通主机不带 prefer_interactive，认证回退链保持原样
+        self.assertFalse(
+            sess_cls.return_value.connect_async.call_args.kwargs[
+                'prefer_interactive'])
+
+    def test_mfa_connect_tells_session_to_skip_key_attempts(self):
+        """带着动态码去连时必须告诉会话「别试密钥」——否则堡垒机先掐线。"""
+        panel = self._panel()
+        answers = {'alias': 'bastion', 'code': '123456', 'code_used': False,
+                   'password': None, 'password_used': False}
+        with mock.patch('remote_explorer_widget.SSHSession') as sess_cls:
+            panel._connect_to(self._host(), mfa_answers=answers)
+        self.assertTrue(
+            sess_cls.return_value.connect_async.call_args.kwargs[
+                'prefer_interactive'])
 
     def test_auth_that_needed_a_code_marks_the_host(self):
         """用户没手工标记过也没关系：认证真要过码就自动记上，下次直接弹框。"""

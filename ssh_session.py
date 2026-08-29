@@ -609,6 +609,11 @@ class SSHSession(QObject):
         self._passphrase_provider: Optional[Callable[[str], Optional[str]]] = None
         # keyboard-interactive（OTP/2FA）提示回调：(alias, prompt, echo) -> 回答
         self._interactive_provider: Optional[Callable[[str, str, bool], Optional[str]]] = None
+        # 「这台主机就是走 keyboard-interactive（MFA/OTP）的」——由 UI 在 MFA 登录
+        # 时置上。JumpServer 这类堡垒机会同时宣告 publickey，但真正能过的只有
+        # 交互认证；不置这个标志的话 agent 里的 key 会被一把把试过去，
+        # MaxAuthTries（通常 3）瞬间打满、服务器直接掐线，动态码框都轮不到弹。
+        self._prefer_interactive = False
         self._auth_secrets: dict[str, dict[str, str]] = {}
         self._home: Optional[str] = None
         self._host_key_degraded = False  # known_hosts 加载失败 → MITM 拦截降级
@@ -638,10 +643,16 @@ class SSHSession(QObject):
 
     def connect_async(self, password_provider: Optional[Callable[[str], Optional[str]]] = None,
                       passphrase_provider: Optional[Callable[[str], Optional[str]]] = None,
-                      interactive_provider: Optional[Callable[[str, str, bool], Optional[str]]] = None) -> Future:
-        """异步连接。完成后发射 connected / connect_failed 信号"""
+                      interactive_provider: Optional[Callable[[str, str, bool], Optional[str]]] = None,
+                      prefer_interactive: bool = False) -> Future:
+        """异步连接。完成后发射 connected / connect_failed 信号
+
+        prefer_interactive=True：已知这台主机靠 keyboard-interactive（MFA/OTP）
+        认证 —— 一把密钥都不试，直接走交互认证，见 _prefer_interactive。
+        """
         fut = self._executor.submit(self._do_connect, password_provider,
-                                    passphrase_provider, interactive_provider)
+                                    passphrase_provider, interactive_provider,
+                                    prefer_interactive)
         def _on_done(f: Future):
             try:
                 f.result()
@@ -652,11 +663,12 @@ class SSHSession(QObject):
         return fut
 
     def _do_connect(self, password_provider, passphrase_provider,
-                    interactive_provider=None):
+                    interactive_provider=None, prefer_interactive=False):
         # 记住认证 provider，自动重连时复用同一套认证逻辑
         self._password_provider = password_provider
         self._passphrase_provider = passphrase_provider
         self._interactive_provider = interactive_provider
+        self._prefer_interactive = bool(prefer_interactive)
         self._establish()
 
     def _open_sftp_bounded(self, client: paramiko.SSHClient) -> paramiko.SFTPClient:
@@ -756,12 +768,18 @@ class SSHSession(QObject):
             if probed is not None:
                 p_client, p_transport, allowed, p_policy = probed
                 done_client: Optional[paramiko.SSHClient] = None
+                # 已知走 MFA 的主机：哪怕服务器同时宣告 publickey 也不试密钥。
+                # JumpServer/堡垒机就是这种——宣告 publickey，但只有交互认证能过，
+                # 试密钥纯粹是在替对端把 MaxAuthTries 消耗光（然后掐线）。
+                kbd_first = (self._prefer_interactive and allowed is not None
+                             and "keyboard-interactive" in allowed)
                 if allowed is None:
                     done_client = p_client  # auth_none 直接通过（免认证服务器）
-                elif "publickey" not in allowed:
+                elif kbd_first or "publickey" not in allowed:
                     logger.info(
-                        "[SSH] %s: server allows %s (no publickey), skipping "
-                        "key attempts entirely", cfg.alias, allowed)
+                        "[SSH] %s: server allows %s (prefer_interactive=%s), "
+                        "skipping key attempts entirely",
+                        cfg.alias, allowed, self._prefer_interactive)
                     if "keyboard-interactive" in allowed:
                         done_client = self._auth_keyboard_interactive(
                             p_client, cfg, None)
@@ -839,10 +857,12 @@ class SSHSession(QObject):
             connect_kwargs["password"] = cached["password"]
             connect_kwargs["allow_agent"] = False
             connect_kwargs["look_for_keys"] = False
-        if cached.get("auth_flow") == "clean_interactive":
-            # 上次是「干净连接 + 交互认证」连上的（MFA 堡垒机）：直接复现该
-            # 路径——agent 多 key 逐个尝试会把这类主机的 MaxAuthTries 打满
-            # 导致掐线，绕一圈才回到交互认证，纯浪费还容易失败。
+        if (cached.get("auth_flow") == "clean_interactive"
+                or self._prefer_interactive):
+            # 上次是「干净连接 + 交互认证」连上的（MFA 堡垒机），或调用方已明说
+            # 这台走交互认证：直接复现该路径——agent 多 key 逐个尝试会把这类主机
+            # 的 MaxAuthTries 打满导致掐线，绕一圈才回到交互认证，纯浪费还容易失败。
+            # （探测连接失败时也会落到这里，所以这条兜底必须有。）
             connect_kwargs["allow_agent"] = False
             connect_kwargs["look_for_keys"] = False
 

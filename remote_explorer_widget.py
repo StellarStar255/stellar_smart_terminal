@@ -1714,6 +1714,11 @@ class RemoteExplorerPanel(QWidget):
             password_provider=self._prompt_password,
             passphrase_provider=self._prompt_password,
             interactive_provider=self._prompt_interactive,
+            # 走 MFA 的主机：一把密钥都别试。堡垒机同时宣告 publickey，但只有
+            # 交互认证能过，试密钥只会把 MaxAuthTries 打满被掐线
+            # （"transport shut down or saw EOF"），码框都轮不到弹。
+            prefer_interactive=(mfa_answers is not None
+                                or self._is_mfa_host(host.alias)),
         )
         self._session = sess
 
