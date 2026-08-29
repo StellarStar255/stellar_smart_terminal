@@ -27,12 +27,21 @@ import ssh_control                                    # noqa: E402
 from ssh_session import HostConfig                    # noqa: E402
 
 
+# 整个后端是 POSIX 能力：ControlMaster 走 unix socket、askpass 是 shell 脚本。
+# Windows 的 OpenSSH 没有 ControlMaster，那边照旧走 paramiko 路径（另有用例
+# 覆盖回落），所以这个文件在 Windows 上整体跳过——不是"没测到"，是"没这条路"。
+_POSIX_ONLY = unittest.skipIf(
+    sys.platform.startswith('win'),
+    'ssh ControlMaster / askpass 是 POSIX 专属，Windows 走 paramiko 路径')
+
+
 def _host(alias='bastion', raw=True):
     return HostConfig(alias=alias, hostname='bastion.example.com',
                       user='u@root@10.0.0.9', port=2222,
                       raw={'hostname': 'bastion.example.com'} if raw else {})
 
 
+@_POSIX_ONLY
 class TestAskpassScript(unittest.TestCase):
     """askpass 是动态码真正被喂进 ssh 的地方——直接用 sh 跑它，别靠脑补。"""
 
@@ -67,6 +76,7 @@ class TestAskpassScript(unittest.TestCase):
         self.assertEqual(self._answer("[OTP Code]:", code='', password='pw'), 'pw')
 
 
+@_POSIX_ONLY
 class TestControlPath(unittest.TestCase):
     def test_stable_and_per_host(self):
         a, b = _host('h1'), _host('h2')
@@ -90,6 +100,7 @@ class TestControlPath(unittest.TestCase):
             self.assertEqual(ssh_control.control_path_for(_host()), '')
 
 
+@_POSIX_ONLY
 class TestSshTarget(unittest.TestCase):
     def test_config_hosts_use_their_alias(self):
         """用别名 = 让 ssh 自己解析 ProxyJump/IdentityFile/User，和终端里一致。"""
@@ -100,6 +111,7 @@ class TestSshTarget(unittest.TestCase):
         self.assertEqual(ssh_control.ssh_target(h), 'u@root@10.0.0.9@bastion.example.com')
 
 
+@_POSIX_ONLY
 class TestMfaLoginArgs(unittest.TestCase):
     def _run_login(self, **kw):
         seen = {}
@@ -171,6 +183,7 @@ class TestMfaLoginArgs(unittest.TestCase):
         self.assertIn('keyboard-interactive', str(cm.exception))
 
 
+@_POSIX_ONLY
 class TestSessionCommands(unittest.TestCase):
     """普通操作必须复用主连接、绝不自己发起交互。"""
 
@@ -303,6 +316,7 @@ class _FakeProc:
         self.killed = True
 
 
+@_POSIX_ONLY
 class TestTransfers(unittest.TestCase):
     """传输走 `ssh + cat`（不是 scp：OpenSSH 9 的 scp 改走 SFTP，引号会进文件名）。"""
 
@@ -392,6 +406,7 @@ class TestTransfers(unittest.TestCase):
         self.assertTrue(proc.killed)
 
 
+@_POSIX_ONLY
 class TestDisconnectReporting(unittest.TestCase):
     @classmethod
     def setUpClass(cls):
@@ -410,6 +425,7 @@ class TestDisconnectReporting(unittest.TestCase):
         self.assertIn('MFA', msg)
 
 
+@_POSIX_ONLY
 class TestTerminalTabReusesMaster(unittest.TestCase):
     """终端标签也搭主连接的车 —— 否则 MFA 主机开个终端就要再输一次码。"""
 
@@ -429,6 +445,7 @@ class TestTerminalTabReusesMaster(unittest.TestCase):
         self.assertNotIn('ControlPath', cmd)
 
 
+@_POSIX_ONLY
 class TestLsParsing(unittest.TestCase):
     """ls 输出解析是这个后端最容易悄悄错的地方（错了就是文件名被截断）。"""
 
