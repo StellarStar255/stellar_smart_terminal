@@ -12,6 +12,7 @@ UI 有两个状态：
 import os
 import posixpath
 import tempfile
+import threading
 import time
 from collections import deque
 from typing import Optional
@@ -21,7 +22,7 @@ from PyQt6.QtWidgets import (
     QListWidget, QListWidgetItem, QTreeWidget, QTreeWidgetItem, QMenu,
     QInputDialog, QMessageBox, QStackedWidget, QFileDialog, QLineEdit,
     QApplication, QSizePolicy, QProgressDialog, QStyledItemDelegate,
-    QAbstractItemView, QDialog,
+    QAbstractItemView, QDialog, QComboBox, QCheckBox,
 )
 from PyQt6.QtCore import Qt, pyqtSignal, QTimer, QMimeData, QUrl, QSize
 from PyQt6.QtGui import (QAction, QActionGroup, QCursor, QDrag, QShortcut,
@@ -251,6 +252,182 @@ class _AddHostDialog(QDialog):
 
     def alias(self) -> str:
         return self._alias_edit.text().strip() if self._alias_edit else ""
+
+
+class _MfaLoginDialog(QDialog):
+    """MFA / 动态码登录对话框（配色沿用 _AddHostDialog）。
+
+    两种用法：
+    - 完整模式（reauth=False）：连接前先把动态码（以及可选的登录密码）收齐，
+      连上后这条 SFTP 主连接一直复用 —— 列目录、上传下载都不再要码。还能选
+      主连接的空闲保持时长，以及要不要顺带开一个 SSH 终端标签（终端是另一条
+      连接，会再要一次码，默认不开）。
+    - 追问模式（reauth=True）：连接过程中服务器又问了一步（换了新码 / 主连接
+      断了要重认证），把服务器的原始提示照原样显示，只收这一个答案。
+
+    取值：code() / password() / keep_secs() / open_terminal()。
+    """
+
+    # (秒, i18n key)；0 = 不自动断开
+    KEEP_CHOICES = (
+        (3600, "remote.mfa_keep_1h"),
+        (4 * 3600, "remote.mfa_keep_4h"),
+        (8 * 3600, "remote.mfa_keep_8h"),
+        (24 * 3600, "remote.mfa_keep_24h"),
+        (0, "remote.mfa_keep_never"),
+    )
+    DEFAULT_KEEP_SECS = 8 * 3600
+
+    def __init__(self, parent=None, *, alias: str, reauth: bool = False,
+                 prompt: Optional[str] = None, echo: bool = True,
+                 keep_secs: Optional[int] = None):
+        super().__init__(parent)
+        self._reauth = reauth
+        self._keep_combo = None
+        self._password_edit = None
+        self._terminal_check = None
+        title = (t("remote.mfa_reauth_title", host=alias) if reauth
+                 else t("remote.mfa_title", host=alias))
+        self.setWindowTitle(title)
+        self.setModal(True)
+        self.setMinimumWidth(420)
+        self.setStyleSheet("""
+            QDialog { background-color: #1e1e2e; }
+            QLabel#title { color: #eaeaea; font-size: 15px; font-weight: 600; }
+            QLabel#hint { color: #8a8aa0; font-size: 12px; }
+            QLabel#field { color: #b8b8cc; font-size: 12px; }
+            QLineEdit {
+                background-color: #2d2d44; color: #eaeaea;
+                border: 1px solid #3d3d5c; border-radius: 6px;
+                padding: 8px 10px; font-size: 13px;
+                selection-background-color: #667eea;
+            }
+            QLineEdit:focus { border: 1px solid #667eea; }
+            QComboBox {
+                background-color: #2d2d44; color: #eaeaea;
+                border: 1px solid #3d3d5c; border-radius: 6px;
+                padding: 6px 10px; font-size: 13px;
+            }
+            QComboBox QAbstractItemView {
+                background-color: #2d2d44; color: #eaeaea;
+                selection-background-color: #667eea;
+                border: 1px solid #3d3d5c;
+            }
+            QCheckBox { color: #b8b8cc; font-size: 12px; spacing: 6px; }
+            QPushButton {
+                background-color: #2d2d44; color: #eaeaea;
+                border: 1px solid #3d3d5c; border-radius: 6px;
+                padding: 7px 18px; font-size: 13px;
+            }
+            QPushButton:hover { border: 1px solid #6a5d8a; }
+            QPushButton#ok {
+                background-color: #667eea; border: 1px solid #667eea;
+                color: white; font-weight: 600;
+            }
+            QPushButton#ok:hover {
+                background-color: #764ba2; border: 1px solid #764ba2;
+            }
+            QPushButton#ok:disabled {
+                background-color: #3a3a52; border: 1px solid #3a3a52; color: #777;
+            }
+        """)
+
+        layout = QVBoxLayout(self)
+        layout.setContentsMargins(20, 18, 20, 16)
+        layout.setSpacing(10)
+
+        title_lbl = QLabel(title)
+        title_lbl.setObjectName("title")
+        layout.addWidget(title_lbl)
+
+        hint_lbl = QLabel(t("remote.mfa_reauth_hint") if reauth
+                          else t("remote.mfa_hint"))
+        hint_lbl.setObjectName("hint")
+        hint_lbl.setWordWrap(True)
+        layout.addWidget(hint_lbl)
+
+        code_lbl = QLabel(prompt if (reauth and prompt) else t("remote.mfa_code_label"))
+        code_lbl.setObjectName("field")
+        code_lbl.setWordWrap(True)
+        layout.addWidget(code_lbl)
+
+        self._code_edit = QLineEdit()
+        self._code_edit.setPlaceholderText(t("remote.mfa_code_placeholder"))
+        # 追问模式按服务器的 echo 标志决定明/暗文；完整模式的动态码明文可见，
+        # 方便用户核对自己有没有抄错位
+        if reauth and not echo:
+            self._code_edit.setEchoMode(QLineEdit.EchoMode.Password)
+        layout.addWidget(self._code_edit)
+
+        if not reauth:
+            pw_lbl = QLabel(t("remote.mfa_password_label"))
+            pw_lbl.setObjectName("field")
+            pw_lbl.setWordWrap(True)
+            layout.addWidget(pw_lbl)
+            self._password_edit = QLineEdit()
+            self._password_edit.setEchoMode(QLineEdit.EchoMode.Password)
+            self._password_edit.setPlaceholderText(
+                t("remote.mfa_password_placeholder"))
+            layout.addWidget(self._password_edit)
+
+            keep_lbl = QLabel(t("remote.mfa_keep_label"))
+            keep_lbl.setObjectName("field")
+            layout.addWidget(keep_lbl)
+            self._keep_combo = QComboBox()
+            want = self.DEFAULT_KEEP_SECS if keep_secs is None else keep_secs
+            for i, (secs, key) in enumerate(self.KEEP_CHOICES):
+                self._keep_combo.addItem(t(key), secs)
+                if secs == want:
+                    self._keep_combo.setCurrentIndex(i)
+            layout.addWidget(self._keep_combo)
+
+            self._terminal_check = QCheckBox(t("remote.mfa_open_terminal"))
+            self._terminal_check.setChecked(False)
+            layout.addWidget(self._terminal_check)
+
+        btn_row = QHBoxLayout()
+        btn_row.setSpacing(8)
+        btn_row.addStretch(1)
+        cancel_btn = QPushButton(t("remote.add_host_cancel"))
+        cancel_btn.clicked.connect(self.reject)
+        btn_row.addWidget(cancel_btn)
+        self._ok_btn = QPushButton(t("remote.mfa_ok"))
+        self._ok_btn.setObjectName("ok")
+        self._ok_btn.setDefault(True)
+        self._ok_btn.setEnabled(False)
+        self._ok_btn.clicked.connect(self.accept)
+        btn_row.addWidget(self._ok_btn)
+        layout.addLayout(btn_row)
+
+        self._code_edit.textChanged.connect(self._sync_ok_state)
+        self._code_edit.returnPressed.connect(self._submit_if_ready)
+        if self._password_edit is not None:
+            self._password_edit.textChanged.connect(self._sync_ok_state)
+            self._password_edit.returnPressed.connect(self._submit_if_ready)
+        self._code_edit.setFocus()
+
+    def _sync_ok_state(self, *_):
+        # 有些堡垒机只问密码不问码，反之亦然 —— 任一格填了就允许提交
+        self._ok_btn.setEnabled(bool(self.code() or self.password()))
+
+    def _submit_if_ready(self):
+        if self._ok_btn.isEnabled():
+            self.accept()
+
+    def code(self) -> str:
+        return self._code_edit.text().strip()
+
+    def password(self) -> str:
+        return self._password_edit.text() if self._password_edit else ""
+
+    def keep_secs(self) -> int:
+        if self._keep_combo is None:
+            return self.DEFAULT_KEEP_SECS
+        val = self._keep_combo.currentData()
+        return int(val) if val is not None else self.DEFAULT_KEEP_SECS
+
+    def open_terminal(self) -> bool:
+        return bool(self._terminal_check and self._terminal_check.isChecked())
 
 
 class _HostAliasDelegate(QStyledItemDelegate):
@@ -788,6 +965,18 @@ class RemoteExplorerPanel(QWidget):
         # 供同一主机的 SSH 终端 tab 自动回填，避免二次输入。只存内存、不落盘、
         # 断开连接即清除。
         self._cached_passwords: dict[str, str] = {}
+        # MFA（一次性动态码）登录：登录框里预先收好的答案，认证回调直接拿它作答，
+        # 不再在认证中途弹框——人在框里翻手机的几十秒足够撞上 SSH 认证超时。
+        # 只在内存里活到本次认证结束，用过即擦，绝不落盘。
+        self._pending_mfa: Optional[dict] = None
+        self._mfa_lock = threading.Lock()   # 认证回调在 SSH 工作线程上读它
+        # 主连接空闲保持：0 = 不自动断开；>0 时空闲超过该秒数就断开，
+        # 下次操作需要重新 MFA 登录（动态码有效期只撑一次认证）
+        self._mfa_keep_secs = 0
+        # 连上后是否照常开 SSH 终端标签。终端是另一条连接，MFA 主机会再要一次
+        # 动态码 —— 只在用户于 MFA 登录框里明确勾选时才开（普通主机不受影响）。
+        self._mfa_open_terminal = True
+        self._last_activity = time.monotonic()
         self._hosts: list[HostConfig] = []
         # 主窗口可用 set_extra_hosts() 注入手工添加的主机
         self._extra_hosts: list[HostConfig] = []
@@ -837,6 +1026,12 @@ class RemoteExplorerPanel(QWidget):
         self._auto_refresh_timer.timeout.connect(self._auto_refresh_tick)
         self._auto_refresh_pending: int = 0  # 本轮还在 in-flight 的 listdir 个数
         self._auto_refresh_fingerprints: dict[str, frozenset] = {}
+        # 主连接空闲看门狗（只对设了保持时长的 MFA 会话生效）：每分钟看一眼，
+        # 空闲超时就主动断开，避免一条已认证的堡垒机连接无限期挂着。
+        self._idle_timer = QTimer(self)
+        self._idle_timer.setInterval(60_000)
+        self._idle_timer.timeout.connect(self._check_idle_timeout)
+
         self._refresh_root_signal.connect(self._populate_tree_root)
         self._refresh_subtree_signal.connect(self._reload_subtree)
         self._password_prompt_signal.connect(self._on_password_prompt)
@@ -1203,9 +1398,12 @@ class RemoteExplorerPanel(QWidget):
             self._empty_hint.show()
         else:
             self._empty_hint.hide()
+            # 一次读出 MFA 主机集合（逐台读配置太亏），🔑 标出"这台要动态码"
+            mfa_hosts = self._load_mfa_hosts()
             for h in self._sorted_hosts(combined):
                 target = f"{h.user + '@' if h.user else ''}{h.hostname}:{h.port}"
-                item = QListWidgetItem(f"🖥  {h.alias}    {target}")
+                icon = "🔑" if h.alias in mfa_hosts else "🖥"
+                item = QListWidgetItem(f"{icon}  {h.alias}    {target}")
                 item.setData(_ROLE_ENTRY, h)
                 # 允许 Enter/F2 原地重命名（编辑框由 _HostAliasDelegate 只显示 alias）
                 item.setFlags(item.flags() | Qt.ItemFlag.ItemIsEditable)
@@ -1316,6 +1514,13 @@ class RemoteExplorerPanel(QWidget):
         if host is not None:
             connect_act = menu.addAction(t("remote.connect"))
             connect_act.triggered.connect(lambda checked=False, h=host: self._connect_to(h))
+            # MFA 登录：先收动态码再连，之后所有文件操作复用这条主连接
+            mfa_act = menu.addAction(t("remote.mfa_login_menu"))
+            mfa_act.triggered.connect(lambda checked=False, h=host: self._mfa_login(h))
+            if self._is_mfa_host(host.alias):
+                forget_act = menu.addAction(t("remote.mfa_forget"))
+                forget_act.triggered.connect(
+                    lambda checked=False, h=host: self._set_mfa_host(h.alias, None))
             new_win_act = menu.addAction(t("remote.connect_in_new_window"))
             new_win_act.triggered.connect(lambda checked=False, h=host: self.open_in_new_window.emit(h))
             menu.addSeparator()
@@ -1478,10 +1683,25 @@ class RemoteExplorerPanel(QWidget):
 
     # ---------- 连接 ----------
 
-    def _connect_to(self, host: HostConfig):
-        if self._session is not None:
-            self._disconnect()
+    def _connect_to(self, host: HostConfig, *, mfa_answers: Optional[dict] = None):
+        """连接主机。
 
+        该主机被记过「需要动态码」而调用方又没带答案时，先弹 MFA 登录框把码收齐
+        再连（_mfa_login 会带着 mfa_answers 回到这里），这样认证回调有现成答案可
+        用，不必在认证中途弹框干等用户翻手机。
+        """
+        if mfa_answers is None and self._is_mfa_host(host.alias):
+            self._mfa_login(host)
+            return
+        if self._session is not None:
+            self._disconnect()   # 注意：会清掉 _pending_mfa，所以答案在它之后再放
+
+        self._pending_mfa = mfa_answers
+        if mfa_answers is None:
+            # 普通连接：恢复默认行为（连上即开 SSH 终端标签、不做空闲断开），
+            # 免得上一次 MFA 登录的选择粘到别的主机上
+            self._mfa_open_terminal = True
+            self._mfa_keep_secs = 0
         self._subtitle_label.setText(t("remote.connecting", host=host.alias))
         self._add_btn.hide()
         self._reload_btn.hide()
@@ -1496,6 +1716,127 @@ class RemoteExplorerPanel(QWidget):
             interactive_provider=self._prompt_interactive,
         )
         self._session = sess
+
+    # ---------- MFA / 动态码登录 ----------
+
+    def _mfa_login(self, host: HostConfig):
+        """弹 MFA 登录框收动态码（+可选密码），然后带着答案去连。
+
+        取消 → 什么都不做（不留半连接状态）。
+        """
+        dlg = _MfaLoginDialog(
+            self, alias=host.alias,
+            keep_secs=self._get_mfa_keep(host.alias),
+        )
+        if dlg.exec() != QDialog.DialogCode.Accepted:
+            return
+        code = dlg.code()
+        password = dlg.password()
+        self._mfa_keep_secs = dlg.keep_secs()
+        self._mfa_open_terminal = dlg.open_terminal()
+        # 密码可以缓存（SSH 终端标签自动回填、重连自动作答）；动态码是一次性的，
+        # 只放在 _pending_mfa 里，用掉即擦，永不进 _cached_passwords、永不落盘。
+        if password:
+            self._cached_passwords[host.alias] = password
+        answers = {
+            'alias': host.alias,
+            'code': code or None,
+            'code_used': False,
+            'password': password or None,
+            'password_used': False,
+        }
+        # 记住这台主机走 MFA（含本次选的保持时长），下次连接直接弹这个框
+        self._set_mfa_host(host.alias, self._mfa_keep_secs)
+        self._touch_activity()
+        self._connect_to(host, mfa_answers=answers)
+
+    def _take_pre_answer(self, alias: str, prompt: str) -> Optional[str]:
+        """从 MFA 登录框预收的答案里取一条来回答服务器的提示（没有则 None）。
+
+        规则：密码类提示吃密码、其它（动态码/验证码）吃动态码；两者都只自动作答
+        一次——服务器再问同一类，说明刚才那个被拒了或还要第二个码，此时必须回到
+        弹框问用户，否则会拿同一个错答案把 MaxAuthTries 打满。
+        """
+        with self._mfa_lock:
+            bundle = self._pending_mfa
+            if not bundle or bundle.get('alias') != alias:
+                return None
+            if looks_like_password_prompt(prompt):
+                if bundle.get('password') and not bundle.get('password_used'):
+                    bundle['password_used'] = True
+                    return bundle['password']
+                return None
+            if bundle.get('code') and not bundle.get('code_used'):
+                bundle['code_used'] = True
+                code = bundle['code']
+                bundle['code'] = None      # 一次性：用完立刻从内存里抹掉
+                return code
+            return None
+
+    def _clear_pending_mfa(self):
+        """认证结束（成功/失败/断开）后擦掉预收答案。"""
+        with self._mfa_lock:
+            self._pending_mfa = None
+
+    # ---- 「该主机需要动态码」标记（按别名持久化；只存标记与保持时长）----
+
+    CONFIG_KEY_MFA_HOSTS = 'remote_explorer_mfa_hosts'
+
+    def _load_mfa_hosts(self) -> dict:
+        hosts = app_config.read_config().get(self.CONFIG_KEY_MFA_HOSTS)
+        return dict(hosts) if isinstance(hosts, dict) else {}
+
+    def _is_mfa_host(self, alias: str) -> bool:
+        return bool(alias) and alias in self._load_mfa_hosts()
+
+    def _get_mfa_keep(self, alias: str) -> Optional[int]:
+        """该主机上次选的主连接保持时长（秒）；没记过返回 None（用默认值）。"""
+        rec = self._load_mfa_hosts().get(alias)
+        if isinstance(rec, dict):
+            val = rec.get('keep')
+            if isinstance(val, int) and val >= 0:
+                return val
+        return None
+
+    def _set_mfa_host(self, alias: str, keep_secs: Optional[int]):
+        """记住/清除「这台主机用 MFA 登录」。keep_secs=None 表示取消标记。"""
+        if not alias:
+            return
+
+        def _apply(cfg):
+            hosts = cfg.get(self.CONFIG_KEY_MFA_HOSTS)
+            if not isinstance(hosts, dict):
+                hosts = {}
+            if keep_secs is None:
+                hosts.pop(alias, None)
+            else:
+                hosts[alias] = {'keep': int(keep_secs)}
+            cfg[self.CONFIG_KEY_MFA_HOSTS] = hosts
+
+        app_config.update_config_with(_apply, description='remote-mfa-hosts')
+        self._populate_hosts_list()   # 🔑 标记立刻反映到列表上
+
+    # ---- 主连接空闲保持 ----
+
+    def _touch_activity(self):
+        """记一次「用户还在用这条连接」。自动刷新轮询不算（否则永远不空闲）。"""
+        self._last_activity = time.monotonic()
+
+    def _check_idle_timeout(self):
+        """空闲看门狗：超过保持时长就断开主连接，提示需要重新 MFA 登录。"""
+        if self._session is None or self._mfa_keep_secs <= 0:
+            return
+        idle = time.monotonic() - self._last_activity
+        if idle < self._mfa_keep_secs:
+            return
+        alias = self._session.host_config.alias
+        logger.info("[RemoteExplorerPanel] MFA session idle %.0fs > %ds, "
+                    "closing master connection to %s",
+                    idle, self._mfa_keep_secs, alias)
+        self._disconnect()
+        self.error_occurred.emit(t(
+            "remote.mfa_idle_disconnected", host=alias,
+            minutes=max(1, self._mfa_keep_secs // 60)))
 
     _password_prompt_signal = pyqtSignal(str)  # 在 UI 线程触发输入框
 
@@ -1535,6 +1876,11 @@ class RemoteExplorerPanel(QWidget):
 
     def _prompt_interactive(self, alias: str, prompt: str, echo: bool) -> Optional[str]:
         # keyboard-interactive（OTP/2FA）的逐步提示；跨线程模式同 _prompt_password
+        # MFA 登录框已经把答案收齐时直接作答，不再弹框——认证等待有硬超时，
+        # 让用户在这一步现翻手机很容易超时失败。
+        pre = self._take_pre_answer(alias, prompt)
+        if pre is not None:
+            return pre
         result_holder: dict = {'done': False, 'value': None}
         self._pending_interactive_request = result_holder
         try:
@@ -1550,12 +1896,19 @@ class RemoteExplorerPanel(QWidget):
         holder = getattr(self, '_pending_interactive_request', None)
         if holder is None:
             return
-        # 展示服务器原始提示（Password: / Verification code: …），echo 决定明暗文
-        text, ok = QInputDialog.getText(
-            self, t("remote.interactive_title"),
-            t("remote.interactive_prompt", host=alias, prompt=prompt),
-            QLineEdit.EchoMode.Normal if echo else QLineEdit.EchoMode.Password,
-        )
+        # 展示服务器原始提示（Password: / Verification code: …），echo 决定明暗文。
+        # 已知走 MFA 的主机用专门的追问框（说清"要一个新码"），其余保持原样。
+        if self._is_mfa_host(alias) or self._pending_mfa is not None:
+            dlg = _MfaLoginDialog(self, alias=alias, reauth=True,
+                                  prompt=prompt, echo=echo)
+            ok = dlg.exec() == QDialog.DialogCode.Accepted
+            text = dlg.code() if ok else ""
+        else:
+            text, ok = QInputDialog.getText(
+                self, t("remote.interactive_title"),
+                t("remote.interactive_prompt", host=alias, prompt=prompt),
+                QLineEdit.EchoMode.Normal if echo else QLineEdit.EchoMode.Password,
+            )
         holder['value'] = text if ok else None
         holder['done'] = True
         # 只有密码类回答按 alias 缓存（供 SSH 终端 tab 自动回填）；
@@ -1597,12 +1950,34 @@ class RemoteExplorerPanel(QWidget):
         # 记住最近连上的 host，供"断线后一键重连"使用
         self._last_connected_host = sess.host_config
         self._last_connected_cwd = self._current_path
-        # 通知主窗口：可以开一个 SSH 终端 tab 进去
-        self.host_connected.emit(sess.host_config)
+        # 认证过程中真的要过一次性动态码 → 记住这台主机走 MFA，下次直接弹
+        # MFA 登录框先收码（用户不必自己去菜单里选）
+        otp_host = False
+        try:
+            otp_host = sess.used_otp_auth()
+        except Exception:
+            logger.debug("_on_session_connected: used_otp_auth failed",
+                         exc_info=True)
+        if otp_host and not self._is_mfa_host(sess.host_config.alias):
+            self._set_mfa_host(sess.host_config.alias,
+                               _MfaLoginDialog.DEFAULT_KEEP_SECS)
+        # 动态码已经用掉，答案不必再留在内存里
+        self._clear_pending_mfa()
+        self._touch_activity()
+        if self._mfa_keep_secs > 0:
+            self._idle_timer.start()
+        else:
+            self._idle_timer.stop()
+        # 通知主窗口：可以开一个 SSH 终端 tab 进去。MFA 登录时用户没勾"同时开
+        # 终端"就不开——终端是另一条连接，会再要一次动态码。
+        if self._mfa_open_terminal:
+            self.host_connected.emit(sess.host_config)
 
     def _on_session_connect_failed(self, sess: SSHSession, msg: str):
         if sess is not self._session:
             return
+        self._clear_pending_mfa()
+        self._idle_timer.stop()
         QMessageBox.warning(
             self, t("remote.connect_failed_title"),
             t("remote.connect_failed_msg", host=sess.host_config.alias, error=msg),
@@ -1626,10 +2001,12 @@ class RemoteExplorerPanel(QWidget):
                 logger.debug(f"[RemoteExplorerPanel] disconnect failed: {e}")
             self._session = None
         self._auto_refresh_timer.stop()
+        self._idle_timer.stop()
         self._auto_refresh_fingerprints.clear()
         self._auto_refresh_pending = 0
-        # 断开即清空内存里的密码缓存，缩短敏感数据驻留时间
+        # 断开即清空内存里的密码缓存与未用完的动态码，缩短敏感数据驻留时间
         self._cached_passwords.clear()
+        self._clear_pending_mfa()
         self._stack.setCurrentWidget(self._hosts_page)
         self._tree.clear()
         self._subtitle_label.setText("")
@@ -1672,6 +2049,7 @@ class RemoteExplorerPanel(QWidget):
             self._search_edit.blockSignals(False)
             self._search_gen += 1
         self._exit_search()
+        self._touch_activity()   # 导航/刷新算用户活动（自动刷新轮询不算）
         # 整树重建 → 旧的自动刷新指纹全部失效，等 _apply_top_level 后重新基线
         self._auto_refresh_fingerprints.clear()
         self._tree.clear()
@@ -2282,6 +2660,7 @@ class RemoteExplorerPanel(QWidget):
             parent_item.setData(0, _ROLE_LOADED, False)
             return
         sess = self._session
+        self._touch_activity()   # 展开目录算用户活动
         # 每次请求给该节点发一个递增的 generation；响应回来时 gen 失配
         # 说明节点其间被刷新/重新请求过，旧结果直接丢弃（防竞态串台）。
         gen = (parent_item.data(0, _ROLE_REQ_GEN) or 0) + 1
@@ -3108,6 +3487,7 @@ class RemoteExplorerPanel(QWidget):
         粘贴/覆盖删除流程里的 stat/listdir/remove 一律走这里，
         禁止直接 fut.result()——网络一慢就是整窗无限期冻结。
         """
+        self._touch_activity()   # 文件操作（stat/listdir/remove/…）算用户活动
         fut = sess.submit(fn, *args)
         self._wait_future_with_progress([fut], label, abort_sessions=[sess])
         return fut.result()
@@ -3351,6 +3731,8 @@ class RemoteExplorerPanel(QWidget):
                     timer.stop()
                     loop.quit()
                     return
+                # 传输进行中一律算活动，别让空闲看门狗掐掉正在传数据的连接
+                self._touch_activity()
                 cur_bytes = done["bytes"] + (live["bytes"] if live else 0)
                 if total_bytes > 0:
                     progress.setValue(min(_BYTE_BAR_SCALE,
@@ -3515,6 +3897,9 @@ class RemoteExplorerPanel(QWidget):
 
     def _on_download_progress(self, remote_path: str, done: int, total: int):
         """节流后的下载进度更新 —— 写到 subtitle 标签上（含速率/剩余时间）"""
+        # 传输本身算活动：几小时的大文件下载期间用户可能一次都不点面板，
+        # 空闲看门狗不能把正在传数据的主连接掐掉
+        self._touch_activity()
         if done < 0:
             # 出错/收尾信号：还原 subtitle
             sess = self._session

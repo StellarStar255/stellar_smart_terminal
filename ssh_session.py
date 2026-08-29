@@ -55,6 +55,13 @@ SFTP_OP_TIMEOUT = 20
 # 打开 SFTP 通道（子系统握手 + 版本协商）的整体超时。paramiko 这一段没有
 # 任何超时可设，只能由 _open_sftp_bounded 从外部兜底，见该方法注释。
 SFTP_OPEN_TIMEOUT = 20
+# keyboard-interactive（MFA/OTP）认证期间放宽的认证超时（秒）。
+# paramiko 的 transport.auth_timeout 默认 30s：auth_interactive 的调用方按这个
+# deadline 等我们的 handler 返回，而 handler 里正弹着框等用户从手机上读动态码 ——
+# 掏手机、开 App、抄 6 位数很容易超过 30s，于是用户刚敲完回车就撞上
+# "Authentication timeout"，看起来像"码永远是错的"。只在我们主动驱动的交互认证
+# 期间放宽（密钥/密码失败仍按默认值快速返回）。
+INTERACTIVE_AUTH_TIMEOUT = 300
 RECONNECT_MAX_ATTEMPTS = 3     # 自动重连最多尝试次数
 RECONNECT_BACKOFF_BASE = 1.0   # 指数退避基数（秒）：1s → 2s → 4s
 # 重连失败后的冷却期：连接确实断了时，排队中的每个操作都各自跑一轮完整
@@ -82,6 +89,30 @@ _PASSWORD_PROMPT_RE = re.compile(r"password|passphrase|密码|口令", re.IGNORE
 
 def looks_like_password_prompt(prompt: str) -> bool:
     return bool(_PASSWORD_PROMPT_RE.search(prompt))
+
+
+def _relax_auth_timeout(transport) -> Optional[float]:
+    """把 transport.auth_timeout 放宽到 INTERACTIVE_AUTH_TIMEOUT，返回原值。
+
+    交互认证要等人在 GUI 里输动态码，远超 paramiko 默认的 30s，见常量注释。
+    """
+    try:
+        prev = getattr(transport, "auth_timeout", None)
+        transport.auth_timeout = INTERACTIVE_AUTH_TIMEOUT
+        return prev
+    except Exception:
+        logger.debug("_relax_auth_timeout: failed", exc_info=True)
+        return None
+
+
+def _restore_auth_timeout(transport, prev: Optional[float]):
+    """恢复 _relax_auth_timeout 改动前的 auth_timeout。"""
+    if prev is None:
+        return
+    try:
+        transport.auth_timeout = prev
+    except Exception:
+        logger.debug("_restore_auth_timeout: failed", exc_info=True)
 
 
 def _auto_reconnect(method):
@@ -596,6 +627,15 @@ class SSHSession(QObject):
     def is_connected(self) -> bool:
         return self._sftp is not None
 
+    def used_otp_auth(self) -> bool:
+        """本会话是否靠人手输入过一次性动态码（MFA/OTP）认证。
+
+        为 True 时：任何重连都必须再找用户要一个新码（旧码作废），所以调用方
+        不该在后台静默重试，UI 也该用"重新 MFA 登录"这种明确的交互去承接。
+        """
+        return bool(self._auth_secrets.get(
+            self.host_config.alias, {}).get("needs_otp"))
+
     def connect_async(self, password_provider: Optional[Callable[[str], Optional[str]]] = None,
                       passphrase_provider: Optional[Callable[[str], Optional[str]]] = None,
                       interactive_provider: Optional[Callable[[str, str, bool], Optional[str]]] = None) -> Future:
@@ -920,8 +960,11 @@ class SSHSession(QObject):
         # cached_password_used：本次认证是否已经消费过密码（缓存自动作答或用户
         # 刚输入）。既防止错误的缓存密码被反复自动作答打满 MaxAuthTries，也让
         # 服务器再次要密码时能落回用户弹框。
+        # asked_otp：本次认证里问过用户「非密码类」的提示（动态码/验证码）。
+        # 它是一次性的，缓存不了 —— 会话断线后重连必须再找人要一次，所以要
+        # 记住这件事（见 used_otp_auth / _reconnect 的单次尝试策略）。
         state = {"cached_password_used": False, "cancelled": False,
-                 "password_candidate": None}
+                 "password_candidate": None, "asked_otp": False}
 
         def _ask(prompt: str, echo: bool) -> Optional[str]:
             if self._interactive_provider is not None:
@@ -946,6 +989,8 @@ class SSHSession(QObject):
                 if looks_like_password_prompt(text):
                     state["cached_password_used"] = True
                     state["password_candidate"] = ans
+                else:
+                    state["asked_otp"] = True
                 answers.append(ans)
             return answers
 
@@ -958,6 +1003,11 @@ class SSHSession(QObject):
 
         attempted_clean = own_client  # 已经在干净连接上就不再重开第二次
         while True:
+            # 放宽认证超时：handler 里要等用户在 GUI 里读手机、敲动态码。
+            # 用局部变量记住"被放宽的那条 transport"——循环里 transport 可能
+            # 被重开的干净连接替换掉，恢复时不能改到新连接头上。
+            auth_transport = transport
+            prev_timeout = _relax_auth_timeout(auth_transport)
             try:
                 transport.auth_interactive(username, handler)
                 break
@@ -1005,8 +1055,14 @@ class SSHSession(QObject):
                     continue
                 _close_own()
                 raise
+            finally:
+                _restore_auth_timeout(auth_transport, prev_timeout)
         if state["password_candidate"] is not None:
             secrets["password"] = state["password_candidate"]
+        if state["asked_otp"]:
+            # 记住"这台机器要人手输一次性动态码"：重连时不能静默重试，
+            # 只能再找用户要一次（见 used_otp_auth / _reconnect）
+            secrets["needs_otp"] = True
         if own_client:
             # 经由干净连接完成交互认证：记住这条路径，下次直接复现，
             # 不再让 agent 多 key 先把 MaxAuthTries 打满
@@ -1382,15 +1438,23 @@ class SSHSession(QObject):
             if self.is_alive():
                 return  # 别的调用已经把连接修好了
             last_exc: Optional[BaseException] = None
-            for attempt in range(RECONNECT_MAX_ATTEMPTS):
+            # MFA/OTP 主机：每次重连都要人手输一个新码，重试 3 次 = 连弹 3 个
+            # 动态码框（第 2、3 个还必然发生在用户已经放弃之后）。只试一次，
+            # 把"要不要再登一次"交还给用户。
+            max_attempts = 1 if self.used_otp_auth() else RECONNECT_MAX_ATTEMPTS
+            for attempt in range(max_attempts):
                 self._teardown_connection()
                 try:
                     self._establish()
                     self.invalidate_cache()  # 断线期间远端可能已变化
                     return
+                except paramiko.AuthenticationException as e:
+                    # 认证被拒 / 用户取消：重试只会再弹一次框、再被拒一次
+                    last_exc = e
+                    break
                 except Exception as e:
                     last_exc = e
-                    if attempt + 1 < RECONNECT_MAX_ATTEMPTS:
+                    if attempt + 1 < max_attempts:
                         time.sleep(RECONNECT_BACKOFF_BASE * (2 ** attempt))
             raise RuntimeError(
                 f"{t('ssh.reconnect_failed')} ({self.host_config.alias}): {last_exc}"

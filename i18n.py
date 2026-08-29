@@ -789,6 +789,53 @@ TRANSLATIONS = {
     "remote.password_title": {"zh": "需要密码", "en": "Password Required"},
     "remote.interactive_title": {"zh": "需要验证", "en": "Verification Required"},
     "remote.interactive_prompt": {"zh": "{host}: {prompt}", "en": "{host}: {prompt}"},
+    # --- MFA / 动态码登录 ---
+    "remote.mfa_login_menu": {"zh": "🔑 MFA 登录…", "en": "🔑 MFA Login…"},
+    "remote.mfa_forget": {"zh": "不再按 MFA 方式登录", "en": "Stop using MFA login"},
+    "remote.mfa_title": {"zh": "🔑 MFA 登录 — {host}", "en": "🔑 MFA Login — {host}"},
+    "remote.mfa_hint": {
+        "zh": "输一次动态码，开一条常驻的主连接；之后列目录、上传下载都复用它，"
+              "动态码的有效期只需撑过这一次认证。主连接空闲超过下面选的时长才断开，"
+              "届时再输一次。",
+        "en": "Enter your one-time code once to open a persistent master "
+              "connection; listing, uploads and downloads all reuse it, so the "
+              "code only has to survive this single authentication. The master "
+              "connection closes after the idle time selected below, then you "
+              "enter a new code.",
+    },
+    "remote.mfa_code_label": {"zh": "动态码 / 验证码", "en": "One-time code"},
+    "remote.mfa_code_placeholder": {"zh": "6 位动态码", "en": "6-digit code"},
+    "remote.mfa_password_label": {
+        "zh": "密码（只有当它先问密码再问码时才填）",
+        "en": "Password (only if the server asks for a password first)",
+    },
+    "remote.mfa_password_placeholder": {"zh": "留空 = 只回动态码",
+                                         "en": "Empty = answer the code only"},
+    "remote.mfa_keep_label": {"zh": "主连接保持（空闲多久后断开）",
+                               "en": "Keep master connection (idle timeout)"},
+    "remote.mfa_keep_1h": {"zh": "1 小时", "en": "1 hour"},
+    "remote.mfa_keep_4h": {"zh": "4 小时", "en": "4 hours"},
+    "remote.mfa_keep_8h": {"zh": "8 小时", "en": "8 hours"},
+    "remote.mfa_keep_24h": {"zh": "24 小时", "en": "24 hours"},
+    "remote.mfa_keep_never": {"zh": "不自动断开", "en": "Never disconnect"},
+    "remote.mfa_open_terminal": {
+        "zh": "同时打开 SSH 终端标签（终端是另一条连接，会再要一次动态码）",
+        "en": "Also open an SSH terminal tab (a separate connection — it will "
+              "ask for another code)",
+    },
+    "remote.mfa_ok": {"zh": "登录", "en": "Log in"},
+    "remote.mfa_reauth_title": {"zh": "🔑 需要动态码 — {host}",
+                                 "en": "🔑 Code Required — {host}"},
+    "remote.mfa_reauth_hint": {
+        "zh": "服务器还要一步验证。下面是它的原始提示——动态码是一次性的，请用最新的一个。",
+        "en": "The server is asking for one more step. Its original prompt is "
+              "shown below — codes are single-use, so use the newest one.",
+    },
+    "remote.mfa_idle_disconnected": {
+        "zh": "{host} 的主连接空闲超过 {minutes} 分钟，已断开。下次操作请重新 MFA 登录。",
+        "en": "Master connection to {host} was idle for over {minutes} minutes "
+              "and has been closed. Log in with MFA again to continue.",
+    },
     "remote.disconnect": {"zh": "断开连接", "en": "Disconnect"},
     "remote.hosts_view": {"zh": "主机列表 / 连接其它主机", "en": "Host list / connect another"},
     "remote.refresh": {"zh": "刷新", "en": "Refresh"},
