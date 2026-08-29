@@ -422,12 +422,35 @@ class TestSpringDeferWhileMouseDown(unittest.TestCase):
         tm = sizes[w.main_splitter.indexOf(w._main_content_stack)]
         return ed, tm
 
+    def _settle(self, timeout=3.0):
+        """等布局真正停下来再取基线。
+
+        setUp 里的 show/place 会触发一次**带动画**的重排；慢机器上它还在跑时
+        就取基线，"按住期间布局不动"的断言会被这段残余动画顶掉（Windows CI
+        实翻：基线 (340,795)，按住期间被动画推到 (398,737)）。这里等到连续
+        三次采样一致且没有在跑的动画为止——断言强度不变，只是基线取得准。
+        """
+        last, stable = None, 0
+        deadline = time.monotonic() + timeout
+        while time.monotonic() < deadline:
+            self.app.processEvents()
+            cur = self._sizes()
+            stable = stable + 1 if cur == last else 0
+            if stable >= 3 and getattr(self.w, '_spring_anim', None) is None:
+                return cur
+            last = cur
+            time.sleep(0.03)
+        return self._sizes()
+
     def test_no_reflow_while_button_held_then_runs_on_release(self):
         w = self.w
         # 起始：终端侧展开，编辑器窄
         self._hold_mouse(False)
+        # 先把 setUp 里 show/place 触发的那次带动画重排等完，再摆基线；
+        # 否则慢机器上基线取在动画中间，后面"按住期间没动"必然失败
+        self._settle()
         w._apply_spring('terminal', animate=False)
-        ed0, tm0 = self._sizes()
+        ed0, tm0 = self._settle()
         self.assertGreater(tm0, ed0, "前置失败：终端应先被弹宽")
 
         # 鼠标按住期间请求展开编辑器 → 布局必须纹丝不动
@@ -455,8 +478,9 @@ class TestSpringDeferWhileMouseDown(unittest.TestCase):
         松开并安静 _SPRING_QUIET_MS 后续播至原目标。"""
         w = self.w
         self._hold_mouse(False)
+        self._settle()
         w._apply_spring('terminal', animate=False)
-        ed0, _ = self._sizes()
+        ed0, _ = self._settle()
 
         # 无按键 → 展开编辑器的动画立即开始播放
         w._apply_spring('editor', animate=True)
