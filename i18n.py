@@ -792,6 +792,10 @@ TRANSLATIONS = {
     # --- MFA / 动态码登录 ---
     "remote.mfa_login_menu": {"zh": "🔑 MFA 登录…", "en": "🔑 MFA Login…"},
     "remote.mfa_forget": {"zh": "不再按 MFA 方式登录", "en": "Stop using MFA login"},
+    "remote.mfa_drop_master": {
+        "zh": "退出主连接（下次需重新输码）",
+        "en": "Close master connection (a new code will be needed)",
+    },
     "remote.mfa_title": {"zh": "🔑 MFA 登录 — {host}", "en": "🔑 MFA Login — {host}"},
     "remote.mfa_hint": {
         "zh": "输一次动态码，开一条常驻的主连接；之后列目录、上传下载都复用它，"
@@ -819,9 +823,9 @@ TRANSLATIONS = {
     "remote.mfa_keep_24h": {"zh": "24 小时", "en": "24 hours"},
     "remote.mfa_keep_never": {"zh": "不自动断开", "en": "Never disconnect"},
     "remote.mfa_open_terminal": {
-        "zh": "同时打开 SSH 终端标签（终端是另一条连接，会再要一次动态码）",
-        "en": "Also open an SSH terminal tab (a separate connection — it will "
-              "ask for another code)",
+        "zh": "同时打开 SSH 终端标签（复用主连接，不用再输一次码）",
+        "en": "Also open an SSH terminal tab (reuses the master connection — "
+              "no second code needed)",
     },
     "remote.mfa_ok": {"zh": "登录", "en": "Log in"},
     "remote.mfa_reauth_title": {"zh": "🔑 需要动态码 — {host}",

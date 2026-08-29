@@ -477,11 +477,13 @@ class TestMfaHostFlag(_PanelBase):
                 'prefer_interactive'])
 
     def test_mfa_connect_tells_session_to_skip_key_attempts(self):
-        """带着动态码去连时必须告诉会话「别试密钥」——否则堡垒机先掐线。"""
+        """回落 paramiko 时（没有 ControlMaster 的平台）必须告诉会话「别试密钥」
+        ——否则堡垒机先把 MaxAuthTries 打满掐线。"""
         panel = self._panel()
         answers = {'alias': 'bastion', 'code': '123456', 'code_used': False,
                    'password': None, 'password_used': False}
-        with mock.patch('remote_explorer_widget.SSHSession') as sess_cls:
+        with mock.patch('ssh_control.is_supported', lambda: False), \
+                mock.patch('remote_explorer_widget.SSHSession') as sess_cls:
             panel._connect_to(self._host(), mfa_answers=answers)
         self.assertTrue(
             sess_cls.return_value.connect_async.call_args.kwargs[
@@ -516,6 +518,99 @@ class TestMfaHostFlag(_PanelBase):
         panel._on_session_connected(sess)
         self.assertIsNone(panel._pending_mfa)
         self.assertNotIn('987654', self._tmp_cfg.read_text(encoding='utf-8'))
+
+
+class TestBackendSelection(_PanelBase):
+    """MFA 主机走系统 ssh 的常驻主连接（paramiko 过不了这类堡垒机）。"""
+
+    def test_mfa_login_uses_the_control_master_backend(self):
+        panel = self._panel()
+        answers = {'alias': 'bastion', 'code': '123456', 'code_used': False,
+                   'password': None, 'password_used': False}
+        with mock.patch('ssh_control.is_supported', lambda: True), \
+                mock.patch('ssh_control.ControlMasterSession') as ctl, \
+                mock.patch('remote_explorer_widget.SSHSession') as para:
+            panel._mfa_keep_secs = 8 * 3600
+            panel._connect_to(self._host(), mfa_answers=answers)
+        para.assert_not_called()
+        ctl.assert_called_once()
+        kwargs = ctl.return_value.connect_async.call_args.kwargs
+        self.assertEqual(kwargs['mfa_code'], '123456')
+        self.assertEqual(kwargs['keep_hours'], 8)
+        # 码交给 ssh 之后面板不再留副本
+        self.assertIsNone(panel._pending_mfa)
+
+    def test_never_expire_passes_zero_hours(self):
+        panel = self._panel()
+        with mock.patch('ssh_control.is_supported', lambda: True), \
+                mock.patch('ssh_control.ControlMasterSession') as ctl:
+            panel._mfa_keep_secs = 0        # 「不自动断开」
+            panel._connect_to(self._host(), mfa_answers={'code': '1'})
+        self.assertEqual(
+            ctl.return_value.connect_async.call_args.kwargs['keep_hours'], 0)
+
+    def test_plain_hosts_still_use_paramiko(self):
+        panel = self._panel()
+        with mock.patch('ssh_control.is_supported', lambda: True), \
+                mock.patch('ssh_control.ControlMasterSession') as ctl, \
+                mock.patch('remote_explorer_widget.SSHSession') as para:
+            panel._connect_to(self._host('plain'))
+        ctl.assert_not_called()
+        para.assert_called_once()
+
+    def test_falls_back_to_paramiko_where_control_master_is_unavailable(self):
+        """Windows 的 OpenSSH 没有 ControlMaster —— 不能整个功能就用不了。"""
+        panel = self._panel()
+        with mock.patch('ssh_control.is_supported', lambda: False), \
+                mock.patch('ssh_control.ControlMasterSession') as ctl, \
+                mock.patch('remote_explorer_widget.SSHSession') as para:
+            panel._connect_to(self._host(), mfa_answers={'code': '1'})
+        ctl.assert_not_called()
+        para.assert_called_once()
+        self.assertTrue(para.return_value.connect_async.call_args
+                        .kwargs['prefer_interactive'])
+
+    def test_live_master_is_reused_without_asking_for_a_code(self):
+        """主连接还在就直接用——这正是"一次动态码撑一整天"的意义。"""
+        panel = self._panel()
+        panel._set_mfa_host('bastion', 8 * 3600)
+        with mock.patch('ssh_control.is_supported', lambda: True), \
+                mock.patch('ssh_control.master_socket_exists', lambda h: True), \
+                mock.patch('ssh_control.ControlMasterSession') as ctl, \
+                mock.patch('remote_explorer_widget._MfaLoginDialog') as dlg:
+            panel._connect_to(self._host())
+        dlg.assert_not_called()
+        ctl.assert_called_once()
+        self.assertEqual(
+            ctl.return_value.connect_async.call_args.kwargs['mfa_code'], '')
+
+    def test_stale_master_falls_back_to_asking_for_a_new_code(self):
+        """套接字是陈的（主连接已过期）→ 不弹错误框，直接要新码。"""
+        panel = self._panel()
+        panel._mfa_reuse_attempt = True
+        sess = _FakeSession()
+        panel._session = sess
+        with mock.patch.object(type(panel), '_mfa_login') as login, \
+                mock.patch('remote_explorer_widget.QMessageBox') as box:
+            panel._on_session_connect_failed(sess, 'master is gone')
+        box.warning.assert_not_called()
+        login.assert_called_once()
+        self.assertFalse(login.call_args.kwargs['allow_reuse'],
+                         '复用已经失败过一次，这次必须真的问用户要码')
+        self.assertIsNone(panel._session)
+
+    def test_idle_timeout_really_closes_the_master(self):
+        """ControlMaster 的 disconnect() 故意留着主连接，空闲到期必须显式关掉，
+        否则「保持时长」形同虚设。"""
+        panel = self._panel()
+        sess = _FakeSession()
+        sess.shutdown_master = mock.Mock(return_value=True)
+        panel._session = sess
+        panel._mfa_keep_secs = 3600
+        panel._last_activity = -10_000.0
+        panel._check_idle_timeout()
+        sess.shutdown_master.assert_called_once()
+        self.assertEqual(sess.disconnect_calls, 1)
 
 
 class TestTerminalTabPolicy(_PanelBase):
@@ -637,7 +732,10 @@ class TestMfaDialog(_PanelBase):
         """走一遍完整登录：答案进 _pending_mfa、主机被标记、保持时长记住。"""
         panel = self._panel()
         _FakeMfaDialog.record(code='123456', password='pw')
-        with mock.patch('remote_explorer_widget._MfaLoginDialog', _FakeMfaDialog), \
+        # 固定走 paramiko 后端：这条用例检的是"答案有没有被收好"，
+        # ControlMaster 后端会把码立刻交给 ssh 并清掉副本（另有用例覆盖）
+        with mock.patch('ssh_control.is_supported', lambda: False), \
+                mock.patch('remote_explorer_widget._MfaLoginDialog', _FakeMfaDialog), \
                 mock.patch('remote_explorer_widget.SSHSession') as sess_cls:
             panel._mfa_login(self._host())
         sess_cls.assert_called_once()
@@ -653,7 +751,8 @@ class TestMfaDialog(_PanelBase):
     def test_cancelled_login_connects_nothing(self):
         panel = self._panel()
         _FakeMfaDialog.record(accepted=False)
-        with mock.patch('remote_explorer_widget._MfaLoginDialog', _FakeMfaDialog), \
+        with mock.patch('ssh_control.is_supported', lambda: False), \
+                mock.patch('remote_explorer_widget._MfaLoginDialog', _FakeMfaDialog), \
                 mock.patch('remote_explorer_widget.SSHSession') as sess_cls:
             panel._mfa_login(self._host())
         sess_cls.assert_not_called()

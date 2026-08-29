@@ -488,6 +488,16 @@ def build_ssh_terminal_command(host_config: "HostConfig",
     alias = host_config.alias
     is_config_alias = "@" not in alias and ":" not in alias
     ssh_args = ["ssh"]
+    # 已经有常驻主连接（MFA 登录建的）就复用它：终端标签直接进去，不再要
+    # 一次动态码。ControlMaster=no = 只搭车、不自己当主。
+    try:
+        import ssh_control
+        if ssh_control.is_supported() and ssh_control.master_socket_exists(host_config):
+            ssh_args.extend(["-o", "ControlMaster=no",
+                             "-o", f"ControlPath={ssh_control.control_path_for(host_config)}"])
+    except Exception:
+        logger.debug("build_ssh_terminal_command: control path probe failed",
+                     exc_info=True)
     # 命令行 -o 优先级高于 ssh_config，因此只在用户没写过时才注入，
     # 不覆盖用户对具体主机的显式调优（raw 的键由 paramiko 归一为小写）
     raw = {str(k).lower() for k in (host_config.raw or {})}

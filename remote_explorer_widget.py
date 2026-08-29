@@ -33,6 +33,7 @@ from i18n import t
 import explorer_clipboard
 import explorer_common
 import remote_bookmarks
+import ssh_control
 from ssh_session import (
     HostConfig, RemoteEntry, SSHSession, parse_ssh_config, append_ssh_config_host,
     rename_ssh_config_host, remove_ssh_config_host, update_ssh_config_host,
@@ -280,7 +281,8 @@ class _MfaLoginDialog(QDialog):
 
     def __init__(self, parent=None, *, alias: str, reauth: bool = False,
                  prompt: Optional[str] = None, echo: bool = True,
-                 keep_secs: Optional[int] = None):
+                 keep_secs: Optional[int] = None,
+                 terminal_default: bool = False):
         super().__init__(parent)
         self._reauth = reauth
         self._keep_combo = None
@@ -382,7 +384,8 @@ class _MfaLoginDialog(QDialog):
             layout.addWidget(self._keep_combo)
 
             self._terminal_check = QCheckBox(t("remote.mfa_open_terminal"))
-            self._terminal_check.setChecked(False)
+            # 能复用主连接时终端不用再输码 → 默认勾上；否则保守地不开
+            self._terminal_check.setChecked(bool(terminal_default))
             layout.addWidget(self._terminal_check)
 
         btn_row = QHBoxLayout()
@@ -969,6 +972,8 @@ class RemoteExplorerPanel(QWidget):
         # 不再在认证中途弹框——人在框里翻手机的几十秒足够撞上 SSH 认证超时。
         # 只在内存里活到本次认证结束，用过即擦，绝不落盘。
         self._pending_mfa: Optional[dict] = None
+        # 本次连接是不是「复用已有主连接」的尝试（失败了要转去要新码，不弹错误框）
+        self._mfa_reuse_attempt = False
         self._mfa_lock = threading.Lock()   # 认证回调在 SSH 工作线程上读它
         # 主连接空闲保持：0 = 不自动断开；>0 时空闲超过该秒数就断开，
         # 下次操作需要重新 MFA 登录（动态码有效期只撑一次认证）
@@ -1518,6 +1523,11 @@ class RemoteExplorerPanel(QWidget):
             mfa_act = menu.addAction(t("remote.mfa_login_menu"))
             mfa_act.triggered.connect(lambda checked=False, h=host: self._mfa_login(h))
             if self._is_mfa_host(host.alias):
+                if (ssh_control.is_supported()
+                        and ssh_control.master_socket_exists(host)):
+                    drop_act = menu.addAction(t("remote.mfa_drop_master"))
+                    drop_act.triggered.connect(
+                        lambda checked=False, h=host: self._drop_master(h))
                 forget_act = menu.addAction(t("remote.mfa_forget"))
                 forget_act.triggered.connect(
                     lambda checked=False, h=host: self._set_mfa_host(h.alias, None))
@@ -1706,6 +1716,28 @@ class RemoteExplorerPanel(QWidget):
         self._add_btn.hide()
         self._reload_btn.hide()
 
+        mfa = (mfa_answers is not None or self._is_mfa_host(host.alias))
+        if mfa and ssh_control.is_supported():
+            # 堡垒机（MFA/动态码）走系统 ssh 的常驻主连接：认证完全交给
+            # OpenSSH ——它吃 ~/.ssh/config（ProxyJump/IdentityFile/别名），
+            # 用户终端里能连上的这里就能连上；动态码只在建主连接时用一次，
+            # 之后所有文件操作复用那条已认证连接，零交互。
+            sess = ssh_control.ControlMasterSession(host, parent=self)
+            sess.connected.connect(lambda: self._on_session_connected(sess))
+            sess.connect_failed.connect(
+                lambda msg: self._on_session_connect_failed(sess, msg))
+            answers = mfa_answers or {}
+            sess.connect_async(
+                mfa_code=answers.get('code') or "",
+                mfa_password=answers.get('password') or "",
+                # 0 = 用户选了「不自动断开」→ ssh 那边也别设期限
+                keep_hours=self._mfa_keep_secs // 3600,
+            )
+            # 码已经交给 ssh 了，面板这边不再留副本
+            self._clear_pending_mfa()
+            self._session = sess
+            return
+
         sess = SSHSession(host, parent=self)
         sess.connected.connect(lambda: self._on_session_connected(sess))
         sess.connect_failed.connect(lambda msg: self._on_session_connect_failed(sess, msg))
@@ -1717,24 +1749,38 @@ class RemoteExplorerPanel(QWidget):
             # 走 MFA 的主机：一把密钥都别试。堡垒机同时宣告 publickey，但只有
             # 交互认证能过，试密钥只会把 MaxAuthTries 打满被掐线
             # （"transport shut down or saw EOF"），码框都轮不到弹。
-            prefer_interactive=(mfa_answers is not None
-                                or self._is_mfa_host(host.alias)),
+            prefer_interactive=mfa,
         )
         self._session = sess
 
     # ---------- MFA / 动态码登录 ----------
 
-    def _mfa_login(self, host: HostConfig):
+    def _mfa_login(self, host: HostConfig, *, allow_reuse: bool = True):
         """弹 MFA 登录框收动态码（+可选密码），然后带着答案去连。
 
+        主连接还在（控制套接字存在）时直接复用，一个码都不用输 —— 这正是
+        「常驻主连接」的意义。复用失败会回到这里再要一次码（allow_reuse=False）。
         取消 → 什么都不做（不留半连接状态）。
         """
+        if (allow_reuse and ssh_control.is_supported()
+                and ssh_control.master_socket_exists(host)):
+            logger.info("[RemoteExplorerPanel] reusing existing ssh master for %s",
+                        host.alias)
+            self._mfa_reuse_attempt = True
+            self._connect_to(host, mfa_answers={
+                'alias': host.alias, 'code': None, 'code_used': True,
+                'password': None, 'password_used': True, 'reuse': True,
+            })
+            return
         dlg = _MfaLoginDialog(
             self, alias=host.alias,
             keep_secs=self._get_mfa_keep(host.alias),
+            # 有主连接可复用时，终端标签不用再输码 → 默认帮用户勾上
+            terminal_default=ssh_control.is_supported(),
         )
         if dlg.exec() != QDialog.DialogCode.Accepted:
             return
+        self._mfa_reuse_attempt = False
         code = dlg.code()
         password = dlg.password()
         self._mfa_keep_secs = dlg.keep_secs()
@@ -1827,6 +1873,27 @@ class RemoteExplorerPanel(QWidget):
         """记一次「用户还在用这条连接」。自动刷新轮询不算（否则永远不空闲）。"""
         self._last_activity = time.monotonic()
 
+    @staticmethod
+    def _shutdown_master(sess) -> bool:
+        """关掉 ssh 常驻主连接（只有 ControlMaster 后端有这回事）。"""
+        fn = getattr(sess, 'shutdown_master', None)
+        if fn is None:
+            return False
+        try:
+            return bool(fn())
+        except Exception:
+            logger.debug("shutdown_master failed", exc_info=True)
+            return False
+
+    def _drop_master(self, host: HostConfig):
+        """右键「退出主连接」：断开并关掉主连接，下次要重新输动态码。"""
+        if (self._session is not None
+                and self._session.host_config.alias == host.alias):
+            self._shutdown_master(self._session)
+            self._disconnect()
+            return
+        ssh_control.master_exit(host)
+
     def _check_idle_timeout(self):
         """空闲看门狗：超过保持时长就断开主连接，提示需要重新 MFA 登录。"""
         if self._session is None or self._mfa_keep_secs <= 0:
@@ -1838,6 +1905,9 @@ class RemoteExplorerPanel(QWidget):
         logger.info("[RemoteExplorerPanel] MFA session idle %.0fs > %ds, "
                     "closing master connection to %s",
                     idle, self._mfa_keep_secs, alias)
+        # ControlMaster 后端的 disconnect() 故意留着主连接（它是一个动态码换来
+        # 的），所以空闲到期必须显式把它关掉，否则"保持时长"形同虚设
+        self._shutdown_master(self._session)
         self._disconnect()
         self.error_occurred.emit(t(
             "remote.mfa_idle_disconnected", host=alias,
@@ -1983,6 +2053,20 @@ class RemoteExplorerPanel(QWidget):
             return
         self._clear_pending_mfa()
         self._idle_timer.stop()
+        # 复用旧主连接的尝试失败（套接字是陈的/主连接已过期）→ 不报错，
+        # 直接回到 MFA 登录框要一个新码，用户感知就是「该重新登录了」
+        if getattr(self, '_mfa_reuse_attempt', False):
+            self._mfa_reuse_attempt = False
+            host = sess.host_config
+            logger.info("[RemoteExplorerPanel] stale ssh master for %s (%s), "
+                        "asking for a fresh code", host.alias, msg)
+            self._session = None
+            self._subtitle_label.setText("")
+            self._add_btn.show()
+            self._reload_btn.show()
+            self._hosts_btn.hide()
+            self._mfa_login(host, allow_reuse=False)
+            return
         QMessageBox.warning(
             self, t("remote.connect_failed_title"),
             t("remote.connect_failed_msg", host=sess.host_config.alias, error=msg),
