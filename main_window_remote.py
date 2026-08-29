@@ -206,9 +206,19 @@ class RemotePanelMixin:
         """
         # 构造 ssh 命令：统一走 build_ssh_terminal_command（含 claude 相关
         # 环境注入——export 后 exec 登录 shell，远程 claude 与本地体验一致）
-        from ssh_session import build_ssh_terminal_command
+        from ssh_session import build_ssh_terminal_command, bastion_boot_line
         alias = host_config.alias
-        cmd_string = build_ssh_terminal_command(host_config, remote_cd_path)
+        # MFA 主机基本都是 JumpServer 式网关：它们不接受"远程命令"，递过去
+        # 只会一片黑。这类主机只发 `ssh -tt <目标>`，让网关自己出 shell/菜单，
+        # 环境注入与 cd 等 shell 出来后当用户输入补发。
+        bastion = False
+        try:
+            bastion = bool(self.remote_panel._is_mfa_host(alias))
+        except Exception:
+            logger.debug("_open_ssh_terminal_tab: mfa host probe failed",
+                         exc_info=True)
+        cmd_string = build_ssh_terminal_command(host_config, remote_cd_path,
+                                                bastion=bastion)
 
         # 标签名标记 SSH host
         tab_name = t("remote.terminal_tab_name", host=alias)
@@ -250,8 +260,50 @@ class RemotePanelMixin:
             term._start_and_execute([cmd_string])
             # 标签页徽章：SSH 会话已启动 → 运行状态点
             self._refresh_tab_badge(idx)
+            if bastion:
+                self._send_bastion_boot_line(term, bastion_boot_line(remote_cd_path))
         except Exception as e:
             self.statusbar.showMessage(f"Failed to start SSH: {e}", 5000)
+
+    def _send_bastion_boot_line(self, term, line: str, settle_ms: int = 1200):
+        """堡垒机登录后，把环境注入 / cd 当作用户输入补发进去。
+
+        远程命令递不进这类网关（递了就一片黑），只能等它把 shell 吐出来再敲。
+        触发点是「远端来了第一段输出」而不是固定延时——堡垒机登录快慢差很多，
+        定时器要么敲早了打进认证过程，要么白等。收到首段输出后再让子弹飞
+        settle_ms，等登录横幅/菜单打完，然后敲一行。
+
+        远端一直没输出就什么都不发（宁可不 cd，也别往未知状态里乱敲）。
+        """
+        if not line:
+            return
+        state = {"done": False}
+
+        def _send():
+            if state["done"]:
+                return
+            state["done"] = True
+            try:
+                if sip.isdeleted(term):
+                    return
+                term.send_text(line + "\n")
+            except Exception:
+                logger.debug("_send_bastion_boot_line: send failed", exc_info=True)
+
+        def _on_output(_data):
+            if state["done"]:
+                return
+            try:
+                term.raw_output_received.disconnect(_on_output)
+            except Exception:
+                logger.debug("_send_bastion_boot_line: disconnect failed",
+                             exc_info=True)
+            QTimer.singleShot(settle_ms, _send)
+
+        try:
+            term.raw_output_received.connect(_on_output)
+        except Exception:
+            logger.debug("_send_bastion_boot_line: connect failed", exc_info=True)
 
     def _open_ssh_in_new_window(self, host_config):
         """新开一个独立窗口，并在其中完整连接该主机（Remote 右键「在新窗口中连接」）。

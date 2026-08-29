@@ -446,6 +446,179 @@ class TestTerminalTabReusesMaster(unittest.TestCase):
 
 
 @_POSIX_ONLY
+class TestBastionTerminalMode(unittest.TestCase):
+    """JumpServer/koko 不接受"远程命令"：递过去就是一片黑（用户实测）。"""
+
+    def test_bastion_command_carries_no_remote_command(self):
+        from ssh_session import build_ssh_terminal_command
+        with mock.patch('ssh_control.master_socket_exists', lambda c: False):
+            cmd = build_ssh_terminal_command(_host('bastion'), '/root/work',
+                                             bastion=True)
+        self.assertTrue(cmd.endswith('-tt'), cmd)
+        self.assertNotIn('exec ${SHELL', cmd)
+        self.assertNotIn('cd ', cmd)
+        self.assertIn('bastion', cmd)
+
+    def test_normal_hosts_keep_the_remote_command(self):
+        from ssh_session import build_ssh_terminal_command
+        with mock.patch('ssh_control.master_socket_exists', lambda c: False):
+            cmd = build_ssh_terminal_command(_host('plain'), '/root/work')
+        self.assertIn('exec ${SHELL:-/bin/bash} -l', cmd)
+        self.assertIn('/root/work', cmd)
+
+    def test_boot_line_carries_env_and_cd(self):
+        """远程命令递不进去 → 环境注入和 cd 只能等 shell 出来后敲进去。"""
+        from ssh_session import bastion_boot_line
+        line = bastion_boot_line("/root/my dir")
+        self.assertIn('export', line)
+        self.assertIn("cd -- '/root/my dir'", line)   # 带空格的路径要引起来
+        self.assertNotIn('\n', line, '补发的是一行，换行由调用方加')
+
+    def test_boot_line_without_cd(self):
+        from ssh_session import bastion_boot_line
+        self.assertNotIn('cd ', bastion_boot_line(None))
+
+    def test_bastion_still_rides_the_master(self):
+        """堡垒机模式也要复用主连接，否则终端又要一个动态码。"""
+        from ssh_session import build_ssh_terminal_command
+        h = _host('bastion')
+        with mock.patch('ssh_control.is_supported', lambda: True), \
+                mock.patch('ssh_control.master_socket_exists', lambda c: True):
+            cmd = build_ssh_terminal_command(h, bastion=True)
+        self.assertIn(ssh_control.control_path_for(h), cmd)
+        self.assertIn('ControlMaster=no', cmd)
+
+
+@_POSIX_ONLY
+class TestBastionTerminalWiring(unittest.TestCase):
+    """面板→终端标签这一段的接线：MFA 主机要走堡垒机模式并补发启动行。"""
+
+    @classmethod
+    def setUpClass(cls):
+        os.environ.setdefault('QT_QPA_PLATFORM', 'offscreen')
+        from PyQt6.QtWidgets import QApplication
+        cls.app = QApplication.instance() or QApplication([])
+
+    @staticmethod
+    def _mixin():
+        # main_window_remote 模块级 `import main_window`，而 main_window 又
+        # 导入本模块 —— 先导入 main_window 才不会撞上这个循环（应用里天然
+        # 是这个顺序，只有直接单独导入 mixin 才会踩到）。
+        import main_window  # noqa: F401
+        from main_window_remote import RemotePanelMixin
+        return RemotePanelMixin
+
+    def _stub_window(self, is_mfa: bool):
+        from PyQt6.QtCore import QObject
+
+        class _Term(QObject):
+            def __init__(self):
+                super().__init__()
+                self.executed = []
+                self.sent = []
+                self._ssh_host_config = None
+
+            def has_started(self):
+                return False
+
+            def setFocus(self):
+                pass
+
+            def _start_and_execute(self, cmds):
+                self.executed.extend(cmds)
+
+            def send_text(self, text):
+                self.sent.append(text)
+
+            def arm_password_autofill(self, pw):
+                pass
+
+        term = _Term()
+        # 不加 spec：_open_ssh_terminal_tab 还会碰到 MainWindow 本体上的方法
+        # （_update_window_title_from_tab / _refresh_tab_badge 等）
+        win = mock.MagicMock()
+        win.remote_panel = mock.MagicMock()
+        win.remote_panel._is_mfa_host.return_value = is_mfa
+        win.remote_panel.get_cached_password.return_value = None
+        win.tab_widget = mock.MagicMock()
+        win.tab_widget.currentIndex.return_value = 0
+        win.tab_widget.widget.return_value = mock.MagicMock(_custom_tab_name=None)
+        win.tab_terminals = {0: [term]}
+        return win, term
+
+    def _open(self, is_mfa, cd_path=None):
+        RemotePanelMixin = self._mixin()
+        win, term = self._stub_window(is_mfa)
+        RemotePanelMixin._open_ssh_terminal_tab(win, _host('bastion'), cd_path)
+        return term
+
+    def test_mfa_host_gets_a_bare_tty_session(self):
+        """带远程命令的 ssh 在 JumpServer 上就是一片黑（用户实测的现象）。"""
+        with mock.patch('ssh_control.master_socket_exists', lambda c: False):
+            term = self._open(True, '/root/work')
+        self.assertEqual(len(term.executed), 1)
+        self.assertTrue(term.executed[0].endswith('-tt'), term.executed[0])
+        self.assertNotIn('exec ${SHELL', term.executed[0])
+
+    def test_plain_host_keeps_the_remote_command(self):
+        with mock.patch('ssh_control.master_socket_exists', lambda c: False):
+            term = self._open(False, '/root/work')
+        self.assertIn('exec ${SHELL:-/bin/bash} -l', term.executed[0])
+
+    def test_boot_line_waits_for_the_remote_to_speak_first(self):
+        """定时器靠不住：堡垒机登录快慢差很多，早敲会打进认证过程。"""
+        RemotePanelMixin = self._mixin()
+        from PyQt6.QtCore import QObject, pyqtSignal
+
+        class _Term(QObject):
+            raw_output_received = pyqtSignal(str)
+
+            def __init__(self):
+                super().__init__()
+                self.sent = []
+
+            def send_text(self, text):
+                self.sent.append(text)
+
+        term = _Term()
+        RemotePanelMixin._send_bastion_boot_line(
+            mock.MagicMock(), term, "export X=1; cd -- /root", settle_ms=0)
+        self.app.processEvents()
+        self.assertEqual(term.sent, [], '远端还没出声就不能敲')
+
+        term.raw_output_received.emit('Last login: ...\n[root@host ~]# ')
+        self.app.processEvents()
+        self.assertEqual(term.sent, ["export X=1; cd -- /root\n"])
+
+        # 只敲一次：后续输出不该再触发
+        term.raw_output_received.emit('more output')
+        self.app.processEvents()
+        self.assertEqual(len(term.sent), 1)
+
+    def test_nothing_is_typed_when_there_is_nothing_to_say(self):
+        """没东西要补就别乱敲——网关菜单里敲一行会被当成选项。"""
+        RemotePanelMixin = self._mixin()
+        from PyQt6.QtCore import QObject, pyqtSignal
+
+        class _Term(QObject):
+            raw_output_received = pyqtSignal(str)
+
+            def __init__(self):
+                super().__init__()
+                self.sent = []
+
+            def send_text(self, text):
+                self.sent.append(text)
+
+        term = _Term()
+        RemotePanelMixin._send_bastion_boot_line(mock.MagicMock(), term, "",
+                                                 settle_ms=0)
+        term.raw_output_received.emit('banner')
+        self.app.processEvents()
+        self.assertEqual(term.sent, [])
+
+
+@_POSIX_ONLY
 class TestLsParsing(unittest.TestCase):
     """ls 输出解析是这个后端最容易悄悄错的地方（错了就是文件名被截断）。"""
 

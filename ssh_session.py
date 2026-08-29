@@ -466,8 +466,15 @@ def update_ssh_config_host(alias: str, hostname: str, user: str = "",
 # ---------- 交互式 ssh 终端命令构造 ----------
 
 def build_ssh_terminal_command(host_config: "HostConfig",
-                               remote_cd_path: Optional[str] = None) -> str:
+                               remote_cd_path: Optional[str] = None,
+                               bastion: bool = False) -> str:
     """构造在本地终端里运行的交互式 ssh 命令串（Remote 面板「打开终端」用）。
+
+    bastion=True（MFA 堡垒机）：**不带远程命令**，只 `ssh -tt <目标>`。
+    JumpServer/koko 这类网关不接受"远程命令"——把 `exec $SHELL -l` 递过去，
+    对端要么忽略要么静默挂着，用户看到的就是一片黑。-tt 强制分配 tty（本地
+    stdin 是管道也照给），让网关自己出登录 shell / 菜单。环境注入与 cd 改由
+    调用方在会话起来后按"用户输入"补发（见 bastion_boot_line）。
 
     远程命令统一为 "export <注入>; [cd <dir> && ] exec ${SHELL:-/bin/bash} -l"：
     - export 写在 exec 之前，登录 shell 经 exec 继承这些变量——把本地终端
@@ -517,6 +524,11 @@ def build_ssh_terminal_command(host_config: "HostConfig",
                   if host_config.user else host_config.hostname)
         ssh_args.append(target)
 
+    if bastion:
+        # 堡垒机：一个远程命令都不能带，-tt 强制要 tty，剩下交给网关
+        ssh_args.append("-tt")
+        return " ".join(shlex.quote(a) for a in ssh_args)
+
     remote_cmd = remote_env_export_prefix()
     if remote_cd_path:
         remote_cmd += f"cd {shlex.quote(remote_cd_path)} && "
@@ -524,6 +536,24 @@ def build_ssh_terminal_command(host_config: "HostConfig",
     # -t 强制分配 tty（带远程命令时 ssh 默认不分配）
     ssh_args.extend(["-t", remote_cmd])
     return " ".join(shlex.quote(a) for a in ssh_args)
+
+
+def bastion_boot_line(remote_cd_path: Optional[str] = None) -> str:
+    """堡垒机会话起来之后，当作"用户输入"补发的那一行（不含换行）。
+
+    远程命令递不进去，所以环境注入和 cd 只能等 shell 出来后自己敲进去。
+    没有任何东西要补时返回空串（调用方就别发了，免得在网关菜单里乱敲）。
+    """
+    import shlex
+    from terminal_backend import remote_env_export_prefix
+
+    parts = []
+    prefix = (remote_env_export_prefix() or "").strip()
+    if prefix:
+        parts.append(prefix.rstrip(";").strip())
+    if remote_cd_path:
+        parts.append(f"cd -- {shlex.quote(remote_cd_path)}")
+    return "; ".join(parts)
 
 
 # ---------- SFTP entry ----------
