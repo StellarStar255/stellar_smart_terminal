@@ -264,8 +264,8 @@ from PyQt6.QtCore import QThread, pyqtSignal, Qt, QTimer, QEvent, QPoint, QUrl, 
 from PyQt6.QtGui import (
     QFont, QColor, QPainter, QPen, QFontMetrics, QFontMetricsF, QFontInfo,
     QKeyEvent, QResizeEvent, QShortcut, QKeySequence,
-    QMouseEvent, QAction, QDesktopServices, QDragEnterEvent, QDropEvent,
-    QPixmap, QImage
+    QMouseEvent, QAction, QActionGroup, QDesktopServices, QDragEnterEvent,
+    QDropEvent, QPixmap, QImage
 )
 
 
@@ -679,6 +679,9 @@ class TerminalWidget(TerminalRenderMixin, QWidget):
         # 滚动支持
         self.scroll_offset = 0  # 向上滚动的行数（0表示在底部）
         self._scroll_accum = 0.0  # 滚轮滚动的小数累加器（用于半行滚动）
+        # 备用屏幕里把滚轮转发给 TUI 时的小数累加器：触控板一次轻扫会发几十个
+        # 高分辨率小事件，逐个转成一格滚轮就会快得离谱，必须攒够一行再发
+        self._app_wheel_accum = 0.0
         self._rendered_display_start = 0  # 上次实际渲染时使用的 display_start
 
         # 图片路径前缀设置（用于 Gemini 等需要 @ 前缀的工具）
@@ -2347,22 +2350,83 @@ class TerminalWidget(TerminalRenderMixin, QWidget):
             input_method.reset()
         self.update()
 
+    # 鼠标滚轮一"格"（angleDelta=120）滚多少行。触控板不走这个常数，
+    # 它按手指移动的像素换算，见 _wheel_lines。
+    WHEEL_LINES_PER_NOTCH = 1.5
+    # 滚动灵敏度倍数（右键菜单可调，落配置）。1.0 = 触控板滑过多少像素就滚多少行
+    CONFIG_KEY_SCROLL_SENSITIVITY = 'terminal_scroll_sensitivity'
+    SCROLL_SENSITIVITY_CHOICES = (0.5, 0.75, 1.0, 1.5, 2.0)
+    _scroll_sensitivity_cache = None      # 进程内缓存，别让每个滚轮事件都读配置
+
+    @classmethod
+    def scroll_sensitivity(cls) -> float:
+        """当前滚动灵敏度倍数（读一次配置后进程内缓存）。"""
+        if cls._scroll_sensitivity_cache is None:
+            try:
+                import app_config
+                val = float(app_config.read_config().get(
+                    cls.CONFIG_KEY_SCROLL_SENSITIVITY))
+            except Exception:
+                val = 1.0
+            # 卡在合理区间：配置被手改成 0 或负数时不至于滚不动/反着滚
+            cls._scroll_sensitivity_cache = min(4.0, max(0.1, val))
+        return cls._scroll_sensitivity_cache
+
+    @classmethod
+    def set_scroll_sensitivity(cls, value: float):
+        """设置滚动灵敏度并持久化（对所有终端立即生效）。"""
+        value = min(4.0, max(0.1, float(value)))
+        cls._scroll_sensitivity_cache = value
+        try:
+            import app_config
+            app_config.update_config({cls.CONFIG_KEY_SCROLL_SENSITIVITY: value},
+                                     description='terminal-scroll-sensitivity')
+        except Exception:
+            logger.debug("set_scroll_sensitivity: save failed", exc_info=True)
+
+    def _wheel_lines(self, event) -> float:
+        """这次滚轮事件该滚多少行（带符号，正=向上看历史）。
+
+        以前不论事件幅度一律算 1.5 行 —— 鼠标滚轮没问题（一格一个事件），
+        但 macOS 触控板一次轻扫会发出几十个高分辨率小事件，每个也当 1.5 行，
+        于是轻轻一划就窜出去几十行，就是"太灵敏"的由来。
+        现在按事件自身的幅度换算：触控板有像素增量就按「像素 / 行高」，
+        鼠标滚轮按「角度 / 120 格」，再乘用户设定的灵敏度。
+        """
+        sens = self.scroll_sensitivity()
+        pixels = event.pixelDelta().y()
+        if pixels:
+            row_h = float(getattr(self, 'char_height', 0) or 0) or 16.0
+            return pixels / row_h * sens
+        degrees = event.angleDelta().y()
+        if not degrees:
+            return 0.0
+        return degrees / 120.0 * self.WHEEL_LINES_PER_NOTCH * sens
+
     def wheelEvent(self, event):
         """鼠标滚轮事件 - 滚动历史"""
-        delta = event.angleDelta().y()
-        if delta == 0:
+        step_lines = self._wheel_lines(event)
+        if step_lines == 0:
             event.accept()
             return
 
-        going_up = delta > 0
+        going_up = step_lines > 0
 
         # 备用屏幕里运行的全屏 TUI（Claude Code / vim / less / tmux 等）若启用了
         # 鼠标报告，就把滚轮作为鼠标事件转发给程序，让它滚动自己的内容。备用屏幕
         # 没有本地 scrollback，不转发滚轮就会落空，表现为"无法向上回看历史"。
         # 仅限备用屏幕：主屏幕始终保留本地回滚，绝不把滚轮从用户手里夺走。
         if self._mouse_mode and getattr(self.screen, '_in_alt_screen', False):
-            notches = max(1, int(round(abs(delta) / 120.0)))
-            self._send_wheel_to_app(going_up, event.position().toPoint(), notches)
+            # 攒够一整行才发一格：触控板的高分辨率小事件逐个发格子，
+            # 在 vim/less/Claude Code 里同样会快得没法用
+            if (self._app_wheel_accum > 0) != going_up:
+                self._app_wheel_accum = 0.0     # 换方向：上一方向的余量作废
+            self._app_wheel_accum += step_lines
+            notches = int(abs(self._app_wheel_accum))
+            if notches:
+                self._app_wheel_accum -= notches if going_up else -notches
+                self._send_wheel_to_app(going_up, event.position().toPoint(),
+                                        notches)
             self._scroll_accum = 0.0
             event.accept()
             return
@@ -2388,15 +2452,10 @@ class TerminalWidget(TerminalRenderMixin, QWidget):
             return
 
         old_offset = self.scroll_offset
-        # 每次滚轮事件滚动的行数（原为3，减半为1.5）
-        # 使用小数累加器，避免整数取整丢失半行
-        scroll_step = 1.5
-        if going_up:
-            # 向上滚动（查看历史）- 增加scroll_offset
-            self._scroll_accum += scroll_step
-        else:
-            # 向下滚动（回到最新）- 减少scroll_offset
-            self._scroll_accum -= scroll_step
+        # 按事件真实幅度累加（触控板按像素、滚轮按格），小数累加器保证
+        # 不足一行的滚动不会被取整丢掉
+        self._app_wheel_accum = 0.0
+        self._scroll_accum += step_lines
 
         # 取整数部分应用到scroll_offset，保留小数部分到下次累加
         lines = int(self._scroll_accum)
@@ -2404,9 +2463,11 @@ class TerminalWidget(TerminalRenderMixin, QWidget):
             self._scroll_accum -= lines
             self.scroll_offset = max(0, min(self.scroll_offset + lines, max_scroll))
 
-        # 撞到顶/底边界后丢弃残留的小数部分：否则上次累积的半行会在下次反向
-        # 滚动时抢跑一行，造成边界处的轻微抽动。
-        if self.scroll_offset >= max_scroll or self.scroll_offset <= 0:
+        # 撞到顶/底后只丢弃"继续往墙外推"的那部分残留小数（它会在下次反向
+        # 滚动时抢跑一行，造成边界处的抽动）；指回可滚区间的残留必须留着——
+        # 触控板每个事件都不足一行，在底部一律清零的话轻扫会完全滚不动。
+        if ((self.scroll_offset >= max_scroll and self._scroll_accum > 0)
+                or (self.scroll_offset <= 0 and self._scroll_accum < 0)):
             self._scroll_accum = 0.0
 
         # 只有在滚动位置实际改变时才更新
@@ -2943,6 +3004,23 @@ class TerminalWidget(TerminalRenderMixin, QWidget):
         rename_split_action = QAction(t("ctx.rename_split"), self)
         rename_split_action.triggered.connect(self.rename_split_requested.emit)
         menu.addAction(rename_split_action)
+
+        # 滚动灵敏度（触控板尤其需要：手感因人、因设备差别很大）
+        scroll_menu = QMenu(t("ctx.scroll_sensitivity"), menu)
+        scroll_menu.setStyleSheet(menu.styleSheet())
+        cur_sens = self.scroll_sensitivity()
+        sens_group = QActionGroup(scroll_menu)
+        sens_group.setExclusive(True)
+        for factor in self.SCROLL_SENSITIVITY_CHOICES:
+            act = QAction(t("ctx.scroll_sensitivity_item", factor=f"{factor:g}"),
+                          self)
+            act.setCheckable(True)
+            act.setChecked(abs(cur_sens - factor) < 0.01)
+            sens_group.addAction(act)
+            act.triggered.connect(
+                lambda checked=False, f=factor: self.set_scroll_sensitivity(f))
+            scroll_menu.addAction(act)
+        menu.addMenu(scroll_menu)
 
         menu.addSeparator()
 

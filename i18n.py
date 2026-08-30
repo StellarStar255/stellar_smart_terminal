@@ -1042,6 +1042,8 @@ TRANSLATIONS = {
         "en": "\n===== Content too long, {n} more entries not shown; export to see all ====="},
 
     # ===== 终端右键菜单 =====
+    "ctx.scroll_sensitivity": {"zh": "滚动灵敏度", "en": "Scroll speed"},
+    "ctx.scroll_sensitivity_item": {"zh": "{factor}×", "en": "{factor}×"},
     "ctx.copy": {"zh": "复制 (⌘C)", "en": "Copy (⌘C)"},
     "ctx.copy_win": {"zh": "复制 (Ctrl+C)", "en": "Copy (Ctrl+C)"},
     "ctx.paste": {"zh": "粘贴 (⌘V)", "en": "Paste (⌘V)"},
