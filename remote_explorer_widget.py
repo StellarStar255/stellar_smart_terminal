@@ -1034,7 +1034,7 @@ class _RemoteTreeWidget(QTreeWidget):
                 event.ignore()
                 return
             event.acceptProposedAction()
-            self._panel._handle_drop_upload(local_paths, target_dir, target_item)
+            self._panel._upload_paths(local_paths, target_dir, target_item)
         except RuntimeError:
             return
 
@@ -3831,23 +3831,7 @@ class RemoteExplorerPanel(QWidget):
         # 批量上传攒下的本地文件：单 worker 线程串行执行，所有文件共用一个
         # live 字节计数，进度框显示「已完成文件累计 + 当前文件已传字节」
         if pending_files:
-            futures = []
-            sizes = []
-            live = {"bytes": 0}
-            live_cb = self._make_live_progress_cb(live)
-            for src, dst in pending_files:
-                try:
-                    sizes.append(os.path.getsize(src))
-                except OSError:
-                    sizes.append(0)
-                futures.append(sess.submit(sess.upload_with_progress,
-                                           src, dst, live_cb))
-            try:
-                self._wait_future_with_progress(
-                    futures, t("remote.pasting_progress", dst=target_dir),
-                    sizes=sizes, live=live, abort_sessions=[sess])
-            except Exception as e:
-                errors.append(str(e))
+            errors.extend(self._upload_pairs(sess, pending_files, target_dir))
 
         if errors:
             QMessageBox.warning(self, t("remote.op_failed_title"), "\n".join(errors))
@@ -4664,34 +4648,149 @@ class RemoteExplorerPanel(QWidget):
         menu.exec(self._path_edit.mapToGlobal(pos))
 
     def _upload_at(self, parent_path: str, parent_item: Optional[QTreeWidgetItem]):
-        local_path, _ = QFileDialog.getOpenFileName(self, t("remote.upload"))
-        if not local_path:
+        # 多选：一次挑几十个文件是常事，选一个再来一遍太难用；
+        # 多个文件走 _upload_paths 的 tar 单流批量路径
+        local_paths, _ = QFileDialog.getOpenFileNames(self, t("remote.upload"))
+        if not local_paths:
             return
-        sess = self._session
-        if sess is None:
+        if self._session is None:
             return
-        remote_path = posixpath.join(parent_path, os.path.basename(local_path))
-        try:
-            nbytes = os.path.getsize(local_path)
-        except OSError:
-            nbytes = 0
-        live = {"bytes": 0}
-        fut = sess.submit(sess.upload_with_progress, local_path, remote_path,
-                          self._make_live_progress_cb(live))
-        # 错误经 _refresh_after 的 error_signal 报告，这里 tolerate 掉避免重复弹窗
-        self._refresh_after(fut, parent_item, parent_path)
-        self._wait_future_with_progress([fut], t("remote.uploading_to",
-                                                 dst=parent_path),
-                                        tolerate_errors=True,
-                                        sizes=[nbytes], live=live,
-                                        abort_sessions=[sess])
+        self._upload_paths(local_paths, parent_path, parent_item)
 
     def _upload_into(self, dir_entry: RemoteEntry, dir_item: QTreeWidgetItem):
         self._upload_at(dir_entry.path, dir_item)
 
+    # 批量上传的门槛：超过这个条数（或拖进来带目录）就走 tar 单流，
+    # 而不是一个文件一条通道。1 个文件按老路走，进度/错误信息更直接。
+    _TAR_BATCH_MIN = 2
+
+    def _upload_paths(self, local_paths: list, target_dir: str,
+                      target_item: Optional[QTreeWidgetItem]):
+        """把一批本地文件/目录传到 target_dir —— 多个条目时打成一条 tar 流。
+
+        逐文件上传在"几百个小文件"下是灾难：每个文件都要 open/write/close/
+        rename 一轮往返（ControlMaster 后端则是各起一条 ssh 进程），几十 ms
+        RTT 下光往返就要几分钟，而且进度条一格一格挪、取消也不跟手。一条
+        tar 流没有按文件的往返，通常快 1-2 个数量级，还顺带支持拖入文件夹
+        （以前拖文件夹会直接报错）。远端没有 tar 时自动退回逐文件。
+        """
+        if self._session is None or not local_paths:
+            return
+        sess = self._session
+        multi = (len(local_paths) >= self._TAR_BATCH_MIN
+                 or any(os.path.isdir(p) for p in local_paths))
+        if multi and self._remote_supports_tar(sess):
+            self._upload_batch_tar(sess, local_paths, target_dir, target_item)
+            return
+        self._handle_drop_upload(local_paths, target_dir, target_item)
+
+    def _remote_supports_tar(self, sess) -> bool:
+        """远端有没有 tar（按会话缓存，探测本身不阻塞 UI）。"""
+        fut = sess.submit(sess.remote_has_tar)
+        self._wait_future_with_progress(
+            [fut], t("remote.uploading_to", dst=""), tolerate_errors=True,
+            abort_sessions=[sess])
+        try:
+            return bool(fut.result())
+        except Exception:
+            return False
+
+    def _upload_batch_tar(self, sess, local_paths: list, target_dir: str,
+                          target_item: Optional[QTreeWidgetItem]):
+        """一条 tar 流把整批传上去，进度按字节走。"""
+        total_bytes = 0
+        for p in local_paths:
+            if os.path.isdir(p):
+                for root, _dirs, files in os.walk(p):
+                    for fname in files:
+                        try:
+                            total_bytes += os.path.getsize(os.path.join(root, fname))
+                        except OSError:
+                            pass
+            else:
+                try:
+                    total_bytes += os.path.getsize(p)
+                except OSError:
+                    pass
+        live = {"bytes": 0}
+        fut = sess.submit(sess.upload_files_tar, list(local_paths), target_dir,
+                          total_bytes, self._make_live_progress_cb(live))
+        label = t("remote.uploading_many",
+                  count=len(local_paths), dst=target_dir)
+        self._wait_future_with_progress(
+            [fut], label, tolerate_errors=True, sizes=[total_bytes],
+            live=live, abort_sessions=[sess])
+        skipped = []
+        try:
+            skipped = fut.result() or []
+        except Exception as e:      # noqa: BLE001 — 整批失败，原样报给用户
+            QMessageBox.warning(self, t("remote.op_failed_title"), str(e))
+        if skipped:
+            # 单个读不了的文件已被跳过，其余照传——只把跳过的列出来
+            QMessageBox.warning(
+                self, t("remote.op_failed_title"),
+                "\n".join(f"{os.path.basename(p)}: {why}" for p, why in skipped[:20]))
+        self._refresh_upload_target(target_item, target_dir)
+
+    def _upload_pairs(self, sess, pairs: list, target_dir: str) -> list:
+        """把 [(本地路径, 远端目标路径)] 批量传到 target_dir，返回错误列表。
+
+        多个文件时同样打一条 tar 流：粘贴一整批文件和拖进来一整批是同一件事，
+        没理由一个走快路径、另一个逐文件磨。目标可能被改过名（冲突时的
+        "x (2).txt"），所以按 (路径, 归档名) 传给 tar。
+        """
+        errors: list = []
+        sizes = []
+        for src, _dst in pairs:
+            try:
+                sizes.append(os.path.getsize(src))
+            except OSError:
+                sizes.append(0)
+        live = {"bytes": 0}
+        live_cb = self._make_live_progress_cb(live)
+        label = t("remote.pasting_progress", dst=target_dir)
+        if len(pairs) >= self._TAR_BATCH_MIN and self._remote_supports_tar(sess):
+            items = [(src, posixpath.basename(dst)) for src, dst in pairs]
+            fut = sess.submit(sess.upload_files_tar, items, target_dir,
+                              sum(sizes), live_cb)
+            self._wait_future_with_progress(
+                [fut], label, tolerate_errors=True, sizes=[sum(sizes)],
+                live=live, abort_sessions=[sess])
+            try:
+                for p_, why in (fut.result() or []):
+                    errors.append(f"{os.path.basename(p_)}: {why}")
+            except Exception as e:      # noqa: BLE001 — 整批失败
+                errors.append(str(e))
+            return errors
+        futures = []
+        for src, dst in pairs:
+            futures.append(sess.submit(sess.upload_with_progress, src, dst,
+                                       live_cb))
+        try:
+            self._wait_future_with_progress(
+                futures, label, sizes=sizes, live=live, abort_sessions=[sess])
+        except Exception as e:          # noqa: BLE001
+            errors.append(str(e))
+        return errors
+
+    def _refresh_upload_target(self, target_item: Optional[QTreeWidgetItem],
+                               target_dir: str):
+        """上传收尾：刷新目标目录（panel/item 已销毁时安全跳过）。"""
+        try:
+            if target_item is not None and not sip.isdeleted(target_item):
+                entry: RemoteEntry = target_item.data(0, _ROLE_ENTRY)
+                if entry and entry.is_dir:
+                    self._reload_subtree(target_item, target_dir)
+                else:
+                    self._populate_tree_root()
+            else:
+                self._populate_tree_root()
+        except RuntimeError:
+            logger.debug("_refresh_upload_target: widget gone", exc_info=True)
+
     def _handle_drop_upload(self, local_paths: list[str], target_dir: str,
                               target_item: Optional[QTreeWidgetItem]):
-        """处理拖入：把每个本地文件上传到 target_dir，完成后刷新对应子树"""
+        """逐文件上传（单个文件，或远端没有 tar 时的兜底）。"""
         if self._session is None:
             return
         sess = self._session
@@ -4797,18 +4896,7 @@ class RemoteExplorerPanel(QWidget):
                 )
             except RuntimeError:
                 pass
-        # 刷新目标目录视图（panel 已被销毁时跳过）
-        try:
-            if target_item is not None and not sip.isdeleted(target_item):
-                entry: RemoteEntry = target_item.data(0, _ROLE_ENTRY)
-                if entry and entry.is_dir:
-                    self._reload_subtree(target_item, target_dir)
-                else:
-                    self._populate_tree_root()
-            else:
-                self._populate_tree_root()
-        except RuntimeError:
-            pass
+        self._refresh_upload_target(target_item, target_dir)
 
     # ---------- 内部拖拽：远端 → 远端 移动 ----------
 

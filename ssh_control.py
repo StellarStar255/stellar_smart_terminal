@@ -777,8 +777,12 @@ class ControlMasterSession(QObject):
         total = os.path.getsize(local_path)
         tmp_remote = remote_path + ".part"
         with self._lock:
-            proc = self._spawn(f"cat > {_qpath(tmp_remote)}",
-                               stdin=subprocess.PIPE, stdout=subprocess.DEVNULL)
+            # 先落 .part 再改名（半成品不会被别人看见），但两步放进**同一条**
+            # 远端命令：每多一条 ssh 就多一次进程启动，批量上传时这笔开销很实在
+            proc = self._spawn(
+                f"cat > {_qpath(tmp_remote)} && mv -- {_qpath(tmp_remote)} "
+                f"{_qpath(remote_path)}",
+                stdin=subprocess.PIPE, stdout=subprocess.DEVNULL)
             done = 0
             try:
                 with open(local_path, "rb") as fh:
@@ -805,7 +809,6 @@ class ControlMasterSession(QObject):
             except Exception:
                 logger.debug("upload cleanup failed", exc_info=True)
             raise RuntimeError(self._explain(err) or f"上传失败 (exit {proc.returncode})")
-        self._run(f"mv -- {_qpath(tmp_remote)} {_qpath(remote_path)}")
         self.invalidate_cache(self._parent(remote_path))
 
     def remote_has_tar(self) -> bool:
@@ -822,45 +825,88 @@ class ControlMasterSession(QObject):
                        total_bytes: int = 0, progress_cb=None):
         """整目录上传快路径：本地打 tar 流 → 主连接 → 远端解包。
 
-        逐文件上传每个文件都要起一条 ssh 通道，几百个小文件能拖上几分钟；
+        逐文件上传每个文件都要起一条 ssh 进程，几百个小文件能拖上几分钟；
         tar 流没有按文件的往返，通常快 1-2 个数量级。
         """
-        tar_bin = shutil.which("tar")
-        if not tar_bin:
-            raise RuntimeError("本机没有 tar")
+        self._stream_tar(remote_dir, lambda tf: tf.add(local_dir, arcname="."),
+                         total_bytes, progress_cb)
+
+    def upload_files_tar(self, local_paths: list, remote_dir: str,
+                         total_bytes: int = 0, progress_cb=None) -> list:
+        """一批文件/目录打成一条 tar 流上传（arcname 取 basename）。
+
+        返回读不了的条目 [(路径, 原因)] —— 单个坏文件不该让整批失败。
+        """
+        skipped: list = []
+
+        def _add(tf):
+            for item in local_paths:
+                # 每项可以是路径，也可以是 (路径, 归档名) —— 粘贴时目标可能被
+                # 改过名（"x (2).txt"），归档名就得用改过的那个
+                if isinstance(item, (tuple, list)):
+                    p, arc = item[0], item[1]
+                else:
+                    p, arc = item, os.path.basename(str(item).rstrip(os.sep))
+                try:
+                    tf.add(p, arcname=arc)
+                except Exception as e:      # noqa: BLE001 — 逐个跳过并回报
+                    logger.warning("upload_files_tar: skipping %s: %s", p, e)
+                    skipped.append((p, str(e)))
+
+        self._stream_tar(remote_dir, _add, total_bytes, progress_cb)
+        return skipped
+
+    def _stream_tar(self, remote_dir: str, add_entries, total_bytes: int = 0,
+                    progress_cb=None):
+        """把 add_entries 塞进 tarfile 的内容经主连接灌给远端 tar 解包。
+
+        用 Python 的 tarfile 而不是本机 tar 命令：进度按真实送出的字节算，
+        入口既可以是"一个目录"也可以是"一批路径"，也不用要求本机装 tar。
+        """
+        import tarfile
+
         q_remote = _qpath(remote_dir)
         with self._lock:
-            src = subprocess.Popen(
-                [tar_bin, "-cf", "-", "-C", local_dir, "."],
-                stdout=subprocess.PIPE, stderr=subprocess.PIPE)
-            proc = self._spawn(f"mkdir -p {q_remote} && tar -xpf - -C {q_remote}",
-                               stdin=subprocess.PIPE, stdout=subprocess.DEVNULL)
-            with self._procs_lock:
-                self._procs.add(src)
-            sent = 0
-            try:
-                while True:
-                    chunk = src.stdout.read(_CHUNK)
-                    if not chunk:
-                        break
-                    proc.stdin.write(chunk)
-                    sent += len(chunk)
+            proc = self._spawn(
+                f"mkdir -p {q_remote} && tar -xpf - -C {q_remote}",
+                stdin=subprocess.PIPE, stdout=subprocess.DEVNULL)
+            sent = {"n": 0}
+
+            class _StdinWriter:
+                """tarfile 的写出 → ssh stdin，顺带计数/回调。"""
+
+                def write(self, data):
+                    proc.stdin.write(data)
+                    sent["n"] += len(data)
                     if progress_cb is not None:
-                        progress_cb(min(sent, total_bytes or sent), total_bytes or sent)
+                        done = sent["n"]
+                        if total_bytes:
+                            done = min(done, total_bytes)
+                        progress_cb(done, total_bytes)
+                    return len(data)
+
+                def flush(self):
+                    pass
+
+            try:
+                # bufsize 调大：攒到 256KB 再写一次，减少系统调用
+                tf = tarfile.open(mode="w|", fileobj=_StdinWriter(),
+                                  bufsize=_CHUNK)
+                try:
+                    add_entries(tf)
+                finally:
+                    tf.close()
                 proc.stdin.close()
                 err = (proc.stderr.read() or b"").decode("utf-8", "replace")
                 proc.wait(timeout=600)
-                src.wait(timeout=30)
             except Exception:
                 proc.kill()
-                src.kill()
                 raise
             finally:
                 self._reap(proc)
-                with self._procs_lock:
-                    self._procs.discard(src)
         if proc.returncode != 0:
-            raise RuntimeError(self._explain(err) or f"目录上传失败 (exit {proc.returncode})")
+            raise RuntimeError(self._explain(err)
+                               or f"上传失败 (exit {proc.returncode})")
         self.invalidate_cache(remote_dir)
         self.invalidate_cache(self._parent(remote_dir))
 

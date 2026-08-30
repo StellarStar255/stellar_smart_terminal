@@ -257,21 +257,29 @@ class TestTempLocalPath(_Base):
 class _FakeSession:
     """submit 即刻完成的假 SSH 会话：只记录提交了什么，不做任何 IO。
 
-    remote_has_tar 返回 False → _upload_local_dir 走逐文件 SFTP 兜底路径。
+    has_tar 默认 False → 走逐文件兜底路径；置 True 可验证 tar 批量快路径。
     """
 
-    def __init__(self):
+    def __init__(self, has_tar=False):
         self.calls = []          # (fn_name, args)
+        self.has_tar = has_tar
 
     def submit(self, fn, *args):
         self.calls.append((fn.__name__, args))
         fut = Future()
-        # remote_has_tar 的探测结果要真实返回，其余调用只记录不执行
-        fut.set_result(fn(*args) if fn.__name__ == "remote_has_tar" else None)
+        # 探测类调用要真实返回结果，其余只记录不执行
+        if fn.__name__ in ("remote_has_tar", "upload_files_tar"):
+            fut.set_result(fn(*args))
+        else:
+            fut.set_result(None)
         return fut
 
     def remote_has_tar(self):
-        return False
+        return self.has_tar
+
+    def upload_files_tar(self, items, remote_dir, total_bytes=0,
+                         progress_cb=None):
+        return []
 
     def mkdir(self, path):
         pass
@@ -469,6 +477,208 @@ class TestUploadDirTarStream(_Base):
             sess._executor.shutdown(wait=False)
 
 
+class _TarStreamHarness:
+    """收集 SSHSession 往通道里灌的 tar 字节（假 channel，不碰网络）。"""
+
+    def __init__(self):
+        self.buf = bytearray()
+        harness = self
+
+        class _FakeChan:
+            cmd = None
+            write_closed = False
+
+            def settimeout(self, t):
+                pass
+
+            def exec_command(self, cmd):
+                self.cmd = cmd
+
+            def sendall(self, data):
+                harness.buf.extend(data)
+
+            def recv_stderr_ready(self):
+                return False
+
+            def recv_ready(self):
+                return False
+
+            def shutdown_write(self):
+                self.write_closed = True
+
+            def exit_status_ready(self):
+                return True
+
+            def recv_exit_status(self):
+                return 0
+
+            def close(self):
+                pass
+
+        self.chan = _FakeChan()
+
+        class _FakeTransport:
+            def open_session(self_inner, timeout=None):
+                return harness.chan
+
+            def is_active(self_inner):
+                return True
+
+        class _FakeClient:
+            def get_transport(self_inner):
+                return _FakeTransport()
+
+        self.client = _FakeClient()
+
+    def members(self):
+        import io
+        import tarfile as tarfile_mod
+        tf = tarfile_mod.open(fileobj=io.BytesIO(bytes(self.buf)), mode="r:")
+        return {m.name: tf for m in tf.getmembers()}, tf
+
+
+class TestUploadFilesTar(_Base):
+    """多文件批量上传：一条 tar 流，而不是 N 次逐文件往返。"""
+
+    def _session(self, harness):
+        from ssh_session import SSHSession, HostConfig
+        sess = SSHSession(HostConfig(alias="t", hostname="h"))
+        sess._client = harness.client
+        return sess
+
+    def test_batch_lands_as_one_tar_with_basenames(self):
+        harness = _TarStreamHarness()
+        sess = self._session(harness)
+        try:
+            src = Path(tempfile.mkdtemp())
+            (src / "a.txt").write_text("hello", encoding="utf-8")
+            (src / "b b.txt").write_text("spaces", encoding="utf-8")
+            (src / "dir").mkdir()
+            (src / "dir" / "c.txt").write_text("nested", encoding="utf-8")
+
+            progress = []
+            skipped = sess.upload_files_tar(
+                [str(src / "a.txt"), str(src / "b b.txt"), str(src / "dir")],
+                "/dst/my target", total_bytes=17,
+                progress_cb=lambda d, t: progress.append((d, t)))
+
+            self.assertEqual(skipped, [])
+            # 目标路径经 shell 引号保护（带空格也不会被拆开）
+            self.assertIn("tar -xpf - -C '/dst/my target'", harness.chan.cmd)
+            names, tf = harness.members()
+            # 归档里用 basename：拖进来的东西直接落在目标目录下
+            self.assertIn("a.txt", names)
+            self.assertIn("b b.txt", names)
+            self.assertIn("dir/c.txt", names)
+            self.assertEqual(tf.extractfile("a.txt").read(), b"hello")
+            self.assertEqual(tf.extractfile("dir/c.txt").read(), b"nested")
+            self.assertTrue(progress)
+            self.assertLessEqual(max(d for d, _ in progress), 17)
+        finally:
+            sess._executor.shutdown(wait=False)
+
+    def test_unreadable_entry_is_skipped_not_fatal(self):
+        """一个读不了的文件不该让另外 299 个也传不上去。"""
+        harness = _TarStreamHarness()
+        sess = self._session(harness)
+        try:
+            src = Path(tempfile.mkdtemp())
+            (src / "ok.txt").write_text("fine", encoding="utf-8")
+            missing = str(src / "gone.txt")
+
+            skipped = sess.upload_files_tar([str(src / "ok.txt"), missing],
+                                            "/dst", total_bytes=4)
+            self.assertEqual([p for p, _why in skipped], [missing])
+            names, tf = harness.members()
+            self.assertIn("ok.txt", names)
+        finally:
+            sess._executor.shutdown(wait=False)
+
+
+class TestUploadBatching(_Base):
+    """面板决定"走 tar 单流还是逐文件"的分流逻辑。"""
+
+    def _panel_with_session(self, has_tar=True):
+        from concurrent.futures import Future
+        panel = self._panel()
+
+        class _Sess:
+            host_config = None
+
+            def __init__(self):
+                self.tar_calls = []
+                self.file_calls = []
+
+            def submit(self, fn, *a, **k):
+                fut = Future()
+                try:
+                    fut.set_result(fn(*a, **k))
+                except Exception as e:      # pragma: no cover
+                    fut.set_exception(e)
+                return fut
+
+            def remote_has_tar(self):
+                return has_tar
+
+            def upload_files_tar(self, paths, dst, total=0, cb=None):
+                self.tar_calls.append((list(paths), dst))
+                return []
+
+            def upload_with_progress(self, local, remote, cb=None):
+                self.file_calls.append((local, remote))
+
+            def abort(self):
+                pass
+
+        sess = _Sess()
+        panel._session = sess
+        # 进度框/刷新都不参与本用例的判定
+        panel._wait_future_with_progress = lambda *a, **k: None
+        panel._refresh_upload_target = lambda *a, **k: None
+        return panel, sess
+
+    def _files(self, n):
+        d = Path(tempfile.mkdtemp())
+        out = []
+        for i in range(n):
+            p = d / f"f{i}.bin"
+            p.write_bytes(b"x" * 16)
+            out.append(str(p))
+        return out
+
+    def test_many_files_go_through_a_single_tar_stream(self):
+        panel, sess = self._panel_with_session(has_tar=True)
+        paths = self._files(5)
+        panel._upload_paths(paths, "/dst", None)
+        self.assertEqual(len(sess.tar_calls), 1, "5 个文件应该只有一条 tar 流")
+        self.assertEqual(sess.tar_calls[0][0], paths)
+        self.assertEqual(sess.file_calls, [], "不该再逐文件上传")
+
+    def test_single_file_keeps_the_direct_path(self):
+        """单文件走老路：进度和错误信息更直接，也省掉打包开销。"""
+        panel, sess = self._panel_with_session(has_tar=True)
+        panel._upload_paths(self._files(1), "/dst", None)
+        self.assertEqual(sess.tar_calls, [])
+        self.assertEqual(len(sess.file_calls), 1)
+
+    def test_folder_drop_uses_tar_even_alone(self):
+        """以前拖文件夹会直接报错（SFTP put 一个目录）；现在走 tar。"""
+        panel, sess = self._panel_with_session(has_tar=True)
+        d = Path(tempfile.mkdtemp())
+        (d / "inner").mkdir()
+        (d / "inner" / "x.txt").write_text("hi", encoding="utf-8")
+        panel._upload_paths([str(d / "inner")], "/dst", None)
+        self.assertEqual(len(sess.tar_calls), 1)
+        self.assertEqual(sess.file_calls, [])
+
+    def test_falls_back_per_file_when_remote_has_no_tar(self):
+        panel, sess = self._panel_with_session(has_tar=False)
+        paths = self._files(3)
+        panel._upload_paths(paths, "/dst", None)
+        self.assertEqual(sess.tar_calls, [])
+        self.assertEqual(len(sess.file_calls), 3)
+
+
 class TestSortPersistence(_Base):
     def test_invalid_key_falls_back_to_name(self):
         p = self._panel()
@@ -489,11 +699,11 @@ class TestClipboardPasteBatch(_Base):
     解析完成后攒成一批、单次 _wait_future_with_progress（带 sizes 总量）。
     """
 
-    def _paste_files(self, n_files):
+    def _paste_files(self, n_files, has_tar=False):
         """粘贴 n 个本地文件到假会话，返回 (带 sizes 的进度调用列表, 会话)。"""
         import remote_explorer_widget as rew
         p = self._panel()
-        sess = _FakeSession()
+        sess = _FakeSession(has_tar=has_tar)
         p._session = sess
         p._current_path = "/dst"
 
@@ -528,7 +738,34 @@ class TestClipboardPasteBatch(_Base):
             rew.explorer_clipboard.effective_items = orig_items
         return progress_calls, sess
 
-    def test_multi_file_paste_shows_single_overall_progress(self):
+    def test_multi_file_paste_uses_one_tar_stream(self):
+        """粘贴一批文件和拖进来一批是同一件事——都该走 tar 单流。"""
+        progress_calls, sess = self._paste_files(3, has_tar=True)
+        tar_calls = [a for n, a in sess.calls if n == "upload_files_tar"]
+        self.assertEqual(len(tar_calls), 1, "3 个文件应合并成一条 tar 流")
+        items, remote_dir = tar_calls[0][0], tar_calls[0][1]
+        self.assertEqual(remote_dir, "/dst")
+        # 每项是 (本地路径, 归档名)，归档名取目标名（冲突改名后也对得上）
+        self.assertEqual(sorted(arc for _src, arc in items),
+                         ["f0.bin", "f1.bin", "f2.bin"])
+        self.assertFalse([n for n, _a in sess.calls if n == "upload_with_progress"],
+                         "走了 tar 就不该再逐文件上传")
+        self.assertEqual(len(progress_calls), 1)
+
+    def test_renamed_target_keeps_its_new_name_in_the_archive(self):
+        """冲突改名成 "x (2).txt" 时，tar 里的归档名必须是改过的那个。"""
+        p = self._panel()
+        sess = _FakeSession(has_tar=True)
+        p._wait_future_with_progress = lambda *a, **k: None
+        src = Path(tempfile.mkdtemp()) / "x.txt"
+        src.write_text("hi", encoding="utf-8")
+        errors = p._upload_pairs(sess, [(str(src), "/dst/x (2).txt"),
+                                        (str(src), "/dst/x (3).txt")], "/dst")
+        self.assertEqual(errors, [])
+        items = [a for n, a in sess.calls if n == "upload_files_tar"][0][0]
+        self.assertEqual([arc for _s, arc in items], ["x (2).txt", "x (3).txt"])
+
+    def test_multi_file_paste_falls_back_per_file_without_tar(self):
         progress_calls, sess = self._paste_files(3)
 
         uploads = [a for n, a in sess.calls if n == "upload_with_progress"]

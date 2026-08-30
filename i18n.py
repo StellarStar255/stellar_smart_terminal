@@ -971,6 +971,8 @@ TRANSLATIONS = {
     "remote.load_failed": {"zh": "加载失败: {error}", "en": "Load failed: {error}"},
     "remote.transfer_stats": {"zh": "{rate} · 剩余 {eta}", "en": "{rate} · {eta} left"},
     "remote.uploading_to": {"zh": "正在上传到 {dst}…", "en": "Uploading to {dst}..."},
+    "remote.uploading_many": {"zh": "正在上传 {count} 项到 {dst}…",
+                               "en": "Uploading {count} items to {dst}..."},
 
     # ===== SSH 会话 =====
     "ssh.reconnect_failed": {"zh": "SSH 自动重连失败", "en": "SSH automatic reconnect failed"},

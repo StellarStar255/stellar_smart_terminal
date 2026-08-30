@@ -378,14 +378,15 @@ class TestTransfers(unittest.TestCase):
         proc = _FakeProc()
         cmds = []
         self._arm(proc, cmds)
-        moved = []
-        self.sess._run = lambda cmd, timeout=None: moved.append(cmd) or ''
+        extra = []
+        self.sess._run = lambda cmd, timeout=None: extra.append(cmd) or ''
         seen = []
         self.sess.upload_with_progress(local, '/d/up.bin',
                                        lambda d, t: seen.append((d, t)))
         self.assertEqual(proc.stdin.written, payload)
-        self.assertEqual(cmds[0], 'cat > /d/up.bin.part')
-        self.assertEqual(moved, ['mv -- /d/up.bin.part /d/up.bin'])
+        # 落 .part 再改名，但只起**一条** ssh —— 批量上传时进程启动是真开销
+        self.assertEqual(cmds, ['cat > /d/up.bin.part && mv -- /d/up.bin.part /d/up.bin'])
+        self.assertEqual(extra, [], '成功路径不该再多一条 ssh')
         self.assertEqual(seen[-1], (len(payload), len(payload)))
 
     def test_failed_upload_cleans_the_remote_part(self):

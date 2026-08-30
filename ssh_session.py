@@ -1697,6 +1697,36 @@ class SSHSession(QObject):
             return False
 
     @_auto_reconnect
+    def upload_files_tar(self, local_paths: list, remote_dir: str,
+                         total_bytes: int = 0, progress_cb=None) -> list:
+        """多个文件/目录一次性打 tar 流上传到 remote_dir（arcname 取 basename）。
+
+        和 upload_dir_tar 同一条快路径，只是入口是"一批路径"而不是"一个目录"：
+        拖进来 300 个文件时，逐文件走 SFTP 是 300×(open/write/close/rename)
+        的串行往返，几十 ms RTT 下要几分钟；一条 tar 流没有按文件的往返。
+
+        返回读不了的文件列表 [(路径, 原因)] —— 单个坏文件不该让整批失败。
+        """
+        skipped: list = []
+
+        def _add(tf):
+            for item in local_paths:
+                # 每项可以是路径，也可以是 (路径, 归档名) —— 粘贴时目标可能被
+                # 改过名（"x (2).txt"），归档名就得用改过的那个
+                if isinstance(item, (tuple, list)):
+                    p, arc = item[0], item[1]
+                else:
+                    p, arc = item, os.path.basename(str(item).rstrip(os.sep))
+                try:
+                    tf.add(p, arcname=arc)
+                except Exception as e:      # noqa: BLE001 — 逐个跳过并回报
+                    logger.warning("upload_files_tar: skipping %s: %s", p, e)
+                    skipped.append((p, str(e)))
+
+        self._stream_tar(remote_dir, _add, total_bytes, progress_cb)
+        return skipped
+
+    @_auto_reconnect
     def upload_dir_tar(self, local_dir: str, remote_dir: str,
                        total_bytes: int = 0, progress_cb=None):
         """整目录上传快路径：本地打 tar 流 → 单条 SSH 通道 → 远端 tar 解包。
@@ -1711,6 +1741,22 @@ class SSHSession(QObject):
         tar 头部开销，显示用 total_bytes 封顶）。取消走 session.abort()
         关 socket → sendall 立刻抛错；abort 已置 _was_connected=False，
         _auto_reconnect 不会把被取消的传输再重跑一遍。
+        """
+        self._stream_tar(remote_dir, lambda tf: tf.add(local_dir, arcname="."),
+                         total_bytes, progress_cb)
+
+    def _stream_tar(self, remote_dir: str, add_entries, total_bytes: int = 0,
+                    progress_cb=None):
+        """把 add_entries 往 tarfile 里塞的东西，经单条 SSH 通道灌给远端 tar。
+
+        整目录上传和多文件批量上传共用这一条路：区别只在 add_entries 往
+        归档里加什么。语义与逐文件路径一致（解包进已存在/新建的 remote_dir，
+        符号链接原样保留）。
+
+        progress_cb(bytes_done, total_bytes)：按已送入通道的字节回调（含 tar
+        头部开销，显示用 total_bytes 封顶）。取消走 session.abort() 关 socket
+        → sendall 立刻抛错；abort 已置 _was_connected=False，_auto_reconnect
+        不会把被取消的传输再重跑一遍。
         """
         client = self._client
         transport = client.get_transport() if client is not None else None
@@ -1753,7 +1799,7 @@ class SSHSession(QObject):
             tf = tarfile.open(mode="w|", fileobj=_ChanWriter(),
                               bufsize=256 * 1024)
             try:
-                tf.add(local_dir, arcname=".")
+                add_entries(tf)
             finally:
                 tf.close()
             chan.shutdown_write()
@@ -1777,7 +1823,7 @@ class SSHSession(QObject):
             try:
                 chan.close()
             except Exception:
-                logger.debug("upload_dir_tar: channel close failed", exc_info=True)
+                logger.debug("_stream_tar: channel close failed", exc_info=True)
         self.invalidate_cache(remote_dir)
         self.invalidate_cache(self._parent(remote_dir))
 
