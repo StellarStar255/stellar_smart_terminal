@@ -478,6 +478,7 @@ TRANSLATIONS = {
     "paste.btn_cancel": {"zh": "取消", "en": "Cancel"},
     "paste.apply_to_all": {"zh": "对剩余冲突应用相同操作", "en": "Apply to all remaining conflicts"},
     "explorer.pasting": {"zh": "正在粘贴…", "en": "Pasting…"},
+    "explorer.pasting_into": {"zh": "正在粘贴到 {dst}…", "en": "Pasting into {dst}…"},
     "explorer.reveal_in_finder": {"zh": "在 Finder 中显示", "en": "Reveal in Finder"},
     "explorer.reveal_in_explorer": {"zh": "在资源管理器中显示", "en": "Reveal in Explorer"},
     "explorer.reveal_in_file_manager": {"zh": "在文件管理器中显示", "en": "Reveal in File Manager"},
@@ -973,6 +974,23 @@ TRANSLATIONS = {
     "remote.uploading_to": {"zh": "正在上传到 {dst}…", "en": "Uploading to {dst}..."},
     "remote.uploading_many": {"zh": "正在上传 {count} 项到 {dst}…",
                                "en": "Uploading {count} items to {dst}..."},
+
+    # ===== 批量传输进度窗口 =====
+    "transfer.title": {"zh": "传输", "en": "Transfer"},
+    "transfer.col_name": {"zh": "名称", "en": "Name"},
+    "transfer.col_status": {"zh": "状态", "en": "Status"},
+    "transfer.state_pending": {"zh": "等待中", "en": "Waiting"},
+    "transfer.state_running": {"zh": "进行中…", "en": "In progress..."},
+    "transfer.state_done": {"zh": "已完成", "en": "Done"},
+    "transfer.state_failed": {"zh": "失败：{error}", "en": "Failed: {error}"},
+    "transfer.state_skipped": {"zh": "已取消", "en": "Canceled"},
+    "transfer.summary_ok": {"zh": "{done}/{total} 已完成",
+                             "en": "{done}/{total} done"},
+    "transfer.summary_failed": {"zh": "{done}/{total} 已完成 · {failed} 项失败",
+                                 "en": "{done}/{total} done · {failed} failed"},
+    "transfer.cancel": {"zh": "取消", "en": "Cancel"},
+    "transfer.canceling": {"zh": "正在取消…", "en": "Canceling..."},
+    "transfer.close": {"zh": "关闭", "en": "Close"},
 
     # ===== SSH 会话 =====
     "ssh.reconnect_failed": {"zh": "SSH 自动重连失败", "en": "SSH automatic reconnect failed"},

@@ -354,7 +354,7 @@ class _DotFileProxy(QSortFilterProxyModel):
         return self.sourceModel().fileName(self.mapToSource(proxy_index))
 
 
-class ExplorerPanel(QWidget):
+class ExplorerPanel(QWidget, explorer_common.TransferJobHost):
     """Explorer 文件浏览器面板"""
 
     # 信号
@@ -1906,10 +1906,23 @@ class ExplorerPanel(QWidget):
         def local_name_exists(name: str) -> bool:
             return os.path.exists(os.path.join(target_dir, name))
 
-        for it in items:
-            if cancel_all:
+        # 一批粘贴 = 一个统一窗口：每个条目一行（等待 / 进行中 / 完成 / 失败），
+        # 而不是逐条目、逐阶段各弹一个进度框（远端 → 本地那条路尤其明显）。
+        job = self._begin_transfer_job(
+            [self._clipboard_item_name(it) for it in items],
+            header=t("explorer.pasting_into", dst=target_dir))
+
+        for row, it in enumerate(items):
+            if cancel_all or (job is not None and job.was_canceled()):
+                cancel_all = True
                 break
             kind = it[0]
+            if job is not None:
+                job.set_active_rows([row])
+                # 本地复制是同步阻塞的：先让窗口把这一行画出来，
+                # 否则整批看着像卡住。只放重绘，不派发用户输入（防重入）
+                QApplication.processEvents(
+                    QEventLoop.ProcessEventsFlag.ExcludeUserInputEvents)
             try:
                 if kind == "local":
                     src = it[1]
@@ -1919,6 +1932,7 @@ class ExplorerPanel(QWidget):
                     dst = os.path.join(target_dir, name)
                     # 剪切到原文件夹 = 原地移动，无事可做
                     if move_mode and same_folder:
+                        self._finish_job_row(job, row)
                         continue
                     # 同源同目标：原地复制 → 自动 (N) 后缀，绝不弹窗
                     if same_folder:
@@ -1949,11 +1963,13 @@ class ExplorerPanel(QWidget):
                         shutil.copytree(src, dst)
                     else:
                         shutil.copy2(src, dst)
+                    self._finish_job_row(job, row)
 
                 elif kind == "remote":
                     _, host_alias, remote_path, session = it
                     if session is None or not session.is_connected():
                         errors.append(f"{remote_path}: {t('remote.session_lost')}")
+                        self._finish_job_row(job, row, t("remote.session_lost"))
                         continue
                     name = posixpath.basename(remote_path.rstrip("/")) or host_alias
                     dst = os.path.join(target_dir, name)
@@ -1975,15 +1991,27 @@ class ExplorerPanel(QWidget):
                             name = explorer_clipboard.next_free_name(name, local_name_exists)
                             dst = os.path.join(target_dir, name)
                     self._download_remote_recursive(session, remote_path, dst)
+                    self._finish_job_row(job, row)
                 else:
                     errors.append(f"Unknown clipboard item: {it!r}")
+                    self._finish_job_row(job, row, f"Unknown clipboard item: {it!r}")
             except Exception as e:
                 errors.append(f"{it}: {e}")
+                self._finish_job_row(job, row, str(e))
 
+        failures = {}
+        if job is not None and not sip.isdeleted(job):
+            failures = job.failures()
+            self._transfer_job = None
+            job.finish_all()      # 全绿自动关窗；有失败则留窗逐行显示原因
+        else:
+            self._transfer_job = None
         if move_mode:
             # 剪切是一次性的：来源已被移走，残留的剪贴板路径已失效
             explorer_clipboard.clear()
-        if errors:
+        # 失败已经逐行写在统一窗口里了，就不再叠一个弹窗；没有窗口
+        # （单条目粘贴）或映射不上的错误仍照旧弹出来
+        if errors and not failures:
             QMessageBox.warning(self, t("explorer.error"), "\n".join(errors))
         self.refresh()
 
@@ -2032,24 +2060,33 @@ class ExplorerPanel(QWidget):
 
         abort_sessions：给出时进度框带「取消」按钮，点击后 abort 这些
         会话直接关 socket，让卡住的传输立刻失败返回。
+
+        批量粘贴期间 self._transfer_job 是那一批的统一进度窗口：这里就不再
+        新开 QProgressDialog，而是把阶段文案/比例画进窗口里当前那一行。
         """
         if not futures:
             return
-        cancel_text = t("remote.cancel_transfer") if abort_sessions else None
-        progress = QProgressDialog(label, cancel_text, 0, len(futures), self)
-        # 非模态：传输期间应用可继续正常使用（后台传输），与远程面板一致
-        progress.setWindowModality(Qt.WindowModality.NonModal)
-        progress.setMinimumDuration(300)
-        progress.setValue(0)
-        if abort_sessions:
-            def _on_cancel(_sessions=list(abort_sessions)):
-                for s in _sessions:
-                    if s is not None:
-                        try:
-                            s.abort()
-                        except Exception:
-                            logger.debug("_on_cancel: suppressed exception", exc_info=True)
-            progress.canceled.connect(_on_cancel)
+        job = self._active_transfer_job()
+        progress = None
+        if job is not None:
+            job.set_stage(label)
+            self._register_job_abort(job, abort_sessions)
+        else:
+            cancel_text = t("remote.cancel_transfer") if abort_sessions else None
+            progress = QProgressDialog(label, cancel_text, 0, len(futures), self)
+            # 非模态：传输期间应用可继续正常使用（后台传输），与远程面板一致
+            progress.setWindowModality(Qt.WindowModality.NonModal)
+            progress.setMinimumDuration(300)
+            progress.setValue(0)
+            if abort_sessions:
+                def _on_cancel(_sessions=list(abort_sessions)):
+                    for s in _sessions:
+                        if s is not None:
+                            try:
+                                s.abort()
+                            except Exception:
+                                logger.debug("_on_cancel: suppressed exception", exc_info=True)
+                progress.canceled.connect(_on_cancel)
         done = {"n": 0, "errors": []}
 
         def make_cb(_):
@@ -2071,7 +2108,8 @@ class ExplorerPanel(QWidget):
             # 父 widget 可能在等待期间被销毁（如用户关掉 panel/窗口），
             # 此时 progress 也已 deleteLater'd → 任何访问都会段错误
             try:
-                if sip.isdeleted(progress):
+                ui = progress if progress is not None else job
+                if sip.isdeleted(ui):
                     # 面板在传输中被销毁：abort 会话让 pending futures 快速
                     # 失败，否则调用方紧接着的 fut.result() 会在 GUI 线程上
                     # 无限期阻塞（与 remote_explorer_widget 同一处理）
@@ -2085,7 +2123,11 @@ class ExplorerPanel(QWidget):
                     timer.stop()
                     loop.quit()
                     return
-                progress.setValue(done["n"])
+                if progress is not None:
+                    progress.setValue(done["n"])
+                else:
+                    # 统一窗口：进度按「已完成条目 + 当前条目比例」推进
+                    job.set_stage_progress(done["n"] / len(futures))
                 if done["n"] >= len(futures):
                     timer.stop()
                     loop.quit()
@@ -2096,8 +2138,10 @@ class ExplorerPanel(QWidget):
         timer.start()
         loop.exec()
         try:
-            if not sip.isdeleted(progress):
+            if progress is not None and not sip.isdeleted(progress):
                 progress.setValue(len(futures))
+            elif progress is None and not sip.isdeleted(job):
+                job.set_stage_progress(1.0)
         except RuntimeError:
             pass
         if done["errors"]:

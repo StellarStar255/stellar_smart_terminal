@@ -1143,7 +1143,7 @@ class _RemoteItemDelegate(QStyledItemDelegate):
         self._panel._do_inline_rename(entry, item, new_name)
 
 
-class RemoteExplorerPanel(QWidget):
+class RemoteExplorerPanel(QWidget, explorer_common.TransferJobHost):
     """远程文件浏览面板"""
 
     # 信号：请求在编辑器中打开一个已下载到本地临时位置的远程文件
@@ -3751,6 +3751,14 @@ class RemoteExplorerPanel(QWidget):
         sticky_decision: Optional[str] = None
         cancel_all = False
 
+        # 一批粘贴 = 一个统一窗口：每个条目一行（等待 / 进行中 / 完成 / 失败），
+        # 而不是逐条目、逐阶段各弹一个进度框闪个不停。窗口要先于任何远端调用
+        # 建好，连预拉目录清单那一步的等待也画在同一个窗口里。
+        job = self._begin_transfer_job(
+            [self._clipboard_item_name(it) for it in items],
+            header=t("remote.pasting_progress", dst=target_dir),
+            title=t("remote.title"))
+
         # 把目标目录的现有条目名预拉一次，避免每次起名都来回 stat
         existing = self._remote_listing_names(sess, target_dir)
 
@@ -3761,11 +3769,15 @@ class RemoteExplorerPanel(QWidget):
         # 共用一个整体字节进度框（多文件粘贴不再一个文件弹一个进度）。
         # 目录仍走 _upload_local_dir：tar 快路径本身就是单一整体进度。
         pending_files: list[tuple[str, str]] = []  # (本地 src, 远端 dst)
+        pending_rows: list[int] = []               # 与 pending_files 对齐的行号
 
-        for it in items:
-            if cancel_all:
+        for row, it in enumerate(items):
+            if cancel_all or (job is not None and job.was_canceled()):
+                cancel_all = True
                 break
             kind = it[0]
+            if job is not None:
+                job.set_active_rows([row])
             try:
                 if kind == "local":
                     src = it[1]
@@ -3788,14 +3800,18 @@ class RemoteExplorerPanel(QWidget):
                             dst = posixpath.join(target_dir, name)
                     if os.path.isdir(src) and not os.path.islink(src):
                         self._upload_local_dir(sess, src, dst)
+                        self._finish_job_row(job, row)
                     else:
+                        # 攒到最后一批传：行状态留到 _upload_pairs 里更新
                         pending_files.append((src, dst))
+                        pending_rows.append(row)
                     existing.add(name)
 
                 elif kind == "remote":
                     _, host_alias, remote_src, src_sess = it
                     if src_sess is None or not src_sess.is_connected():
                         errors.append(f"{remote_src}: {t('remote.session_lost')}")
+                        self._finish_job_row(job, row, t("remote.session_lost"))
                         continue
                     name = posixpath.basename(remote_src.rstrip("/")) or host_alias
                     dst = posixpath.join(target_dir, name)
@@ -3823,17 +3839,30 @@ class RemoteExplorerPanel(QWidget):
                     # 走临时文件中转：远程源 → 本地 temp → 远程目标
                     self._remote_to_remote(src_sess, sess, remote_src, dst)
                     existing.add(name)
+                    self._finish_job_row(job, row)
                 else:
                     errors.append(f"Unknown clipboard item: {it!r}")
+                    self._finish_job_row(job, row, f"Unknown clipboard item: {it!r}")
             except Exception as e:
                 errors.append(f"{it}: {e}")
+                self._finish_job_row(job, row, str(e))
 
         # 批量上传攒下的本地文件：单 worker 线程串行执行，所有文件共用一个
         # live 字节计数，进度框显示「已完成文件累计 + 当前文件已传字节」
-        if pending_files:
-            errors.extend(self._upload_pairs(sess, pending_files, target_dir))
+        if pending_files and not cancel_all:
+            errors.extend(self._upload_pairs(sess, pending_files, target_dir,
+                                             rows=pending_rows))
 
-        if errors:
+        failures = {}
+        if job is not None and not sip.isdeleted(job):
+            failures = job.failures()
+            self._transfer_job = None
+            job.finish_all()      # 全绿自动关窗；有失败则留窗逐行显示原因
+        else:
+            self._transfer_job = None
+        # 失败已经逐行写在统一窗口里了，就不再叠一个弹窗；没有窗口
+        # （单条目粘贴）或映射不上的错误仍照旧弹出来
+        if errors and not failures:
             QMessageBox.warning(self, t("remote.op_failed_title"), "\n".join(errors))
         # 刷新当前树根（target_dir 通常就是 _current_path 或它的子目录）
         if target_dir == self._current_path:
@@ -4044,35 +4073,45 @@ class RemoteExplorerPanel(QWidget):
         download_with_progress 的字节级回调（worker 线程）往里写"当前
         正在传的这个文件已完成的字节数"，这里在主线程轮询时读出来叠加到
         已完成 future 的累计字节上，让单个大文件传输期间速率/ETA 也会动。
-        不给 live 时退化为旧行为（按已完成文件粒度累计）。"""
+        不给 live 时退化为旧行为（按已完成文件粒度累计）。
+
+        批量任务（粘贴一批文件）期间 self._transfer_job 是那一批的统一进度
+        窗口：这里就不再新开 QProgressDialog，而是把阶段文案/比例画进窗口里
+        当前那一行，全程只有一个窗口。"""
         if not futures:
             return
-        # 有可中断的会话时给一个「取消」按钮：点了就 abort 这些会话，直接关 socket，
-        # 让卡在 recv 上的传输立刻失败、对话框随即关闭，避免网络切换时一直卡在传输框里。
-        cancel_text = t("remote.cancel_transfer") if abort_sessions else None
         total_bytes = sum(s or 0 for s in sizes) if sizes else 0
-        # 进度条刻度：知道总字节时按字节走（千分比），否则退化为「完成的任务数」。
-        # 按任务数在单任务传输（tar 整目录快路径、单个大文件）时永远是 0/1 ——
-        # 条子空着直到传完瞬间跳满，看不出任何进度。
+        job = self._active_transfer_job()
+        progress = None
         bar_max = _BYTE_BAR_SCALE if total_bytes > 0 else len(futures)
-        progress = QProgressDialog(label, cancel_text, 0, bar_max, self)
-        progress.setWindowTitle(t("remote.title"))
-        # 非模态：大文件粘贴/传输期间应用可继续正常使用（后台传输），
-        # 进度框只悬浮展示进度。等待仍走下面的局部事件循环，传输间的
-        # 用户操作在嵌套循环里正常处理；同一 session 的操作由其单 worker
-        # 线程天然串行，不会并发冲突。
-        progress.setWindowModality(Qt.WindowModality.NonModal)
-        progress.setMinimumDuration(300)
-        progress.setValue(0)
-        if abort_sessions:
-            def _on_cancel(_sessions=list(abort_sessions)):
-                for s in _sessions:
-                    if s is not None:
-                        try:
-                            s.abort()
-                        except Exception as e:
-                            logger.debug(f"[RemoteExplorerPanel] session abort failed: {e}")
-            progress.canceled.connect(_on_cancel)
+        if job is not None:
+            job.set_stage(label)
+            self._register_job_abort(job, abort_sessions)
+        else:
+            # 有可中断的会话时给一个「取消」按钮：点了就 abort 这些会话，直接关 socket，
+            # 让卡在 recv 上的传输立刻失败、对话框随即关闭，避免网络切换时一直卡在传输框里。
+            cancel_text = t("remote.cancel_transfer") if abort_sessions else None
+            # 进度条刻度：知道总字节时按字节走（千分比），否则退化为「完成的任务数」。
+            # 按任务数在单任务传输（tar 整目录快路径、单个大文件）时永远是 0/1 ——
+            # 条子空着直到传完瞬间跳满，看不出任何进度。
+            progress = QProgressDialog(label, cancel_text, 0, bar_max, self)
+            progress.setWindowTitle(t("remote.title"))
+            # 非模态：大文件粘贴/传输期间应用可继续正常使用（后台传输），
+            # 进度框只悬浮展示进度。等待仍走下面的局部事件循环，传输间的
+            # 用户操作在嵌套循环里正常处理；同一 session 的操作由其单 worker
+            # 线程天然串行，不会并发冲突。
+            progress.setWindowModality(Qt.WindowModality.NonModal)
+            progress.setMinimumDuration(300)
+            progress.setValue(0)
+            if abort_sessions:
+                def _on_cancel(_sessions=list(abort_sessions)):
+                    for s in _sessions:
+                        if s is not None:
+                            try:
+                                s.abort()
+                            except Exception as e:
+                                logger.debug(f"[RemoteExplorerPanel] session abort failed: {e}")
+                progress.canceled.connect(_on_cancel)
         done = {"n": 0, "errors": [], "bytes": 0}
         tracker = _TransferRateTracker() if total_bytes > 0 else None
         # 进度文案节流（与 subtitle 路径的 350ms 节流一致）：QTimer 80ms
@@ -4103,9 +4142,10 @@ class RemoteExplorerPanel(QWidget):
         timer.setInterval(80)
         def tick():
             # 父 widget 可能在等待期间被销毁（如用户关掉 panel/窗口），
-            # 此时 progress 也已 deleteLater'd → 任何访问都会段错误
+            # 此时进度窗口也已 deleteLater'd → 任何访问都会段错误
             try:
-                if sip.isdeleted(progress):
+                ui = progress if progress is not None else job
+                if sip.isdeleted(ui):
                     # 面板在传输中被销毁：abort 会话让 pending futures 快速
                     # 失败，避免调用方后续 fut.result() 隐形阻塞主线程
                     for s in (abort_sessions or []):
@@ -4122,22 +4162,30 @@ class RemoteExplorerPanel(QWidget):
                 self._touch_activity()
                 cur_bytes = done["bytes"] + (live["bytes"] if live else 0)
                 if total_bytes > 0:
-                    progress.setValue(min(_BYTE_BAR_SCALE,
-                                          cur_bytes * _BYTE_BAR_SCALE // total_bytes))
+                    frac = min(1.0, cur_bytes / total_bytes)
                 else:
-                    progress.setValue(done["n"])
+                    frac = done["n"] / len(futures)
+                if progress is not None:
+                    progress.setValue(int(frac * bar_max))
                 now = time.monotonic()
-                if (tracker is not None and cur_bytes < total_bytes
-                        and now - label_ts["t"] >= 0.35):
+                detail = ""
+                refresh_text = (tracker is not None and cur_bytes < total_bytes
+                                and now - label_ts["t"] >= 0.35)
+                if refresh_text:
                     label_ts["t"] = now
                     tracker.update("batch", cur_bytes)
-                    text = (f"{label} · {self._fmt_size(cur_bytes)}"
-                            f" / {self._fmt_size(total_bytes)}")
+                    detail = (f"{self._fmt_size(cur_bytes)}"
+                              f" / {self._fmt_size(total_bytes)}")
                     stats = self._transfer_stats_text(
                         tracker, cur_bytes, total_bytes)
                     if stats:
-                        text += f" · {stats}"
-                    progress.setLabelText(text)
+                        detail += f" · {stats}"
+                    if progress is not None:
+                        progress.setLabelText(f"{label} · {detail}")
+                if progress is None:
+                    # 统一窗口：进度条按「已完成条目 + 当前条目比例」推进，
+                    # 速率/字节写进当前那一行的状态列
+                    job.set_stage_progress(frac, detail)
                 if done["n"] >= len(futures):
                     timer.stop()
                     loop.quit()
@@ -4148,8 +4196,10 @@ class RemoteExplorerPanel(QWidget):
         timer.start()
         loop.exec()
         try:
-            if not sip.isdeleted(progress):
+            if progress is not None and not sip.isdeleted(progress):
                 progress.setValue(bar_max)   # 收尾拉满（关闭对话框）
+            elif progress is None and not sip.isdeleted(job):
+                job.set_stage_progress(1.0)
         except RuntimeError:
             pass
         if done["errors"] and not tolerate_errors:
@@ -4732,12 +4782,16 @@ class RemoteExplorerPanel(QWidget):
                 "\n".join(f"{os.path.basename(p)}: {why}" for p, why in skipped[:20]))
         self._refresh_upload_target(target_item, target_dir)
 
-    def _upload_pairs(self, sess, pairs: list, target_dir: str) -> list:
+    def _upload_pairs(self, sess, pairs: list, target_dir: str,
+                      rows: Optional[list] = None) -> list:
         """把 [(本地路径, 远端目标路径)] 批量传到 target_dir，返回错误列表。
 
         多个文件时同样打一条 tar 流：粘贴一整批文件和拖进来一整批是同一件事，
         没理由一个走快路径、另一个逐文件磨。目标可能被改过名（冲突时的
         "x (2).txt"），所以按 (路径, 归档名) 传给 tar。
+
+        rows：与 pairs 对齐的统一进度窗口行号；给出时这一批的每一行都会被
+        标成进行中，结束时按各自的成败落到「已完成 / 失败：原因」。
         """
         errors: list = []
         sizes = []
@@ -4749,6 +4803,15 @@ class RemoteExplorerPanel(QWidget):
         live = {"bytes": 0}
         live_cb = self._make_live_progress_cb(live)
         label = t("remote.pasting_progress", dst=target_dir)
+        job = self._active_transfer_job() if rows else None
+        if job is not None:
+            job.set_active_rows(list(rows))
+        row_of = dict(zip(range(len(pairs)), rows or []))
+
+        def settle(idx: int, error: Optional[str] = None):
+            if idx in row_of:
+                self._finish_job_row(job, row_of[idx], error)
+
         if len(pairs) >= self._TAR_BATCH_MIN and self._remote_supports_tar(sess):
             items = [(src, posixpath.basename(dst)) for src, dst in pairs]
             fut = sess.submit(sess.upload_files_tar, items, target_dir,
@@ -4756,21 +4819,36 @@ class RemoteExplorerPanel(QWidget):
             self._wait_future_with_progress(
                 [fut], label, tolerate_errors=True, sizes=[sum(sizes)],
                 live=live, abort_sessions=[sess])
+            failed_src = {}
             try:
                 for p_, why in (fut.result() or []):
                     errors.append(f"{os.path.basename(p_)}: {why}")
+                    failed_src[p_] = str(why)
             except Exception as e:      # noqa: BLE001 — 整批失败
                 errors.append(str(e))
+                failed_src = {src: str(e) for src, _dst in pairs}
+            for i, (src, _dst) in enumerate(pairs):
+                settle(i, failed_src.get(src))
             return errors
         futures = []
         for src, dst in pairs:
             futures.append(sess.submit(sess.upload_with_progress, src, dst,
                                        live_cb))
-        try:
-            self._wait_future_with_progress(
-                futures, label, sizes=sizes, live=live, abort_sessions=[sess])
-        except Exception as e:          # noqa: BLE001
-            errors.append(str(e))
+        # tolerate_errors：逐个 future 自己收错，才能把失败落到对应的那一行
+        self._wait_future_with_progress(
+            futures, label, tolerate_errors=True, sizes=sizes, live=live,
+            abort_sessions=[sess])
+        for i, fut in enumerate(futures):
+            err = None
+            try:
+                exc = fut.exception(timeout=0) if fut.done() else None
+                if exc is not None:
+                    err = f"{os.path.basename(pairs[i][0])}: {exc}"
+            except Exception as e:      # noqa: BLE001 — 取消/超时也算失败
+                err = f"{os.path.basename(pairs[i][0])}: {e}"
+            if err:
+                errors.append(err)
+            settle(i, err)
         return errors
 
     def _refresh_upload_target(self, target_item: Optional[QTreeWidgetItem],

@@ -5,11 +5,16 @@
 逐字复制粘贴、且已实际分叉出 bug。把这些收敛到这里单点维护。
 """
 import os
+import posixpath
 from typing import Optional, Tuple
 
 from PyQt6.QtWidgets import QMessageBox, QCheckBox
 
 from i18n import t
+from transfer_progress import TransferProgressDialog
+from app_logging import get_logger
+
+logger = get_logger(__name__)
 
 
 def resolve_paste_conflict(parent, name: str,
@@ -67,6 +72,109 @@ SYSTEM_OPEN_EXTS = {
     '.ttf', '.otf', '.woff', '.woff2',
     '.sqlite', '.sqlite3', '.db', '.psd', '.ai', '.sketch',
 }
+
+
+class TransferJobHost:
+    """给 explorer 面板接上「一批传输一个列表窗口」的能力（本地/远程共用）。
+
+    以前一次粘贴里每个条目（远程侧还按 stat/download/upload 每个阶段）
+    各弹一个 QProgressDialog，几十项就是几十次弹框闪烁，看不出整体进度、
+    也说不清哪一项失败。面板混入这个类后：
+
+        job = self._begin_transfer_job(names, header=...)   # < 2 项返回 None
+        job 存在时各自的 _wait_future_with_progress 把进度画进窗口当前行，
+        条目做完调 self._finish_job_row(job, row[, error])，
+        整批收尾调 job.finish_all()（全绿自动关窗，有失败留窗逐行显示）。
+
+    属性用类级默认值，面板不必在 __init__ 里初始化（QWidget 多继承时
+    mixin 定义 __init__ 容易踩 MRO 的坑）。
+    """
+
+    # 一次粘贴至少这么多条目才开列表窗口；单条目还是老的单进度框
+    # （一行的列表窗反而比进度条啰嗦）
+    _JOB_MIN_ITEMS = 2
+
+    _transfer_job: Optional[TransferProgressDialog] = None
+    _job_abort_targets: list = []      # 只读默认；开新任务时换成实例列表
+
+    def _begin_transfer_job(self, names: list, header: str,
+                            title: str = "") -> Optional[TransferProgressDialog]:
+        """给一批传输开一个统一进度窗口，并接上取消 → abort 会话。"""
+        self._transfer_job = None
+        self._job_abort_targets = []
+        if len(names) < self._JOB_MIN_ITEMS:
+            return None
+        job = TransferProgressDialog(names, parent=self, title=title,
+                                     header=header)
+        job.canceled.connect(
+            lambda: self._abort_sessions(self._job_abort_targets))
+        self._transfer_job = job
+        return job
+
+    def _active_transfer_job(self) -> Optional[TransferProgressDialog]:
+        """当前批次的统一进度窗口；没有 / 已销毁 / 已收尾时返回 None。"""
+        from PyQt6 import sip
+
+        job = self._transfer_job
+        if job is None:
+            return None
+        try:
+            if sip.isdeleted(job) or job.is_finished():
+                self._transfer_job = None
+                return None
+        except (RuntimeError, TypeError):
+            self._transfer_job = None
+            return None
+        return job
+
+    def _register_job_abort(self, job: TransferProgressDialog,
+                            sessions: Optional[list]):
+        """把本阶段可中断的会话登记到统一窗口的取消按钮上。
+
+        点过取消之后才提交的阶段要立刻中断，否则「取消」只对当前这一个
+        阶段生效，后面的条目照传不误。
+        """
+        for s in (sessions or []):
+            if s is not None and all(s is not x for x in self._job_abort_targets):
+                self._job_abort_targets.append(s)
+        if job.was_canceled():
+            self._abort_sessions(sessions)
+
+    @staticmethod
+    def _abort_sessions(sessions: Optional[list]):
+        for s in (sessions or []):
+            if s is not None:
+                try:
+                    s.abort()
+                except Exception as e:      # noqa: BLE001 — 中断尽力而为
+                    logger.debug(f"session abort failed: {e}")
+
+    @staticmethod
+    def _finish_job_row(job: Optional[TransferProgressDialog], row: int,
+                        error: Optional[str] = None):
+        """把某一行标成完成/失败（窗口可能已被销毁，安全跳过）。"""
+        from PyQt6 import sip
+
+        if job is None:
+            return
+        try:
+            if not sip.isdeleted(job):
+                job.finish_row(row, error)
+        except RuntimeError:
+            logger.debug("_finish_job_row: dialog gone", exc_info=True)
+
+    @staticmethod
+    def _clipboard_item_name(it) -> str:
+        """剪贴板条目在列表窗口里显示的名字。"""
+        kind = it[0] if it else ""
+        if kind == "local":
+            src = str(it[1])
+            return os.path.basename(src.rstrip("/\\")) or src
+        if kind == "remote":
+            host_alias, remote_src = it[1], str(it[2])
+            base = posixpath.basename(remote_src.rstrip("/")) or remote_src
+            return f"{host_alias}:{base}" if host_alias else base
+        return str(it)
 
 
 def editor_can_display(file_path: str) -> bool:
