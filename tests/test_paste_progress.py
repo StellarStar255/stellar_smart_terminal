@@ -447,6 +447,76 @@ class TestBatchRowsAdvance(_Base):
         self.assertEqual(job.row_states(), ["done"] * 3)   # 传完全部落地
 
 
+class TestHideAndReopen(_Base):
+    """窗口要一直看得见（置顶），嫌挡事能收起，收起后能叫回来。"""
+
+    def _dialog(self, rows=("a", "b")):
+        from transfer_progress import TransferProgressDialog
+        return TransferProgressDialog(list(rows), delay_ms=0)
+
+    def test_window_stays_on_top(self):
+        from PyQt6.QtCore import Qt
+        dlg = self._dialog()
+        self.assertTrue(bool(dlg.windowFlags()
+                             & Qt.WindowType.WindowStaysOnTopHint))
+
+    def test_hide_keeps_the_transfer_running(self):
+        dlg = self._dialog()
+        seen = []
+        dlg.visibility_changed.connect(seen.append)
+        dlg.canceled.connect(lambda: seen.append("canceled"))
+        dlg.hide_for_now()
+        self.assertFalse(dlg.isVisible())
+        self.assertFalse(dlg.was_canceled(), "收起窗口不该把传输掐了")
+        self.assertEqual(seen, [False])
+        dlg.reopen()
+        self.assertTrue(dlg.isVisible())
+        self.assertEqual(seen, [False, True])
+
+    def test_closing_hides_instead_of_canceling(self):
+        dlg = self._dialog()
+        dlg.close()
+        self.assertFalse(dlg.isVisible())
+        self.assertFalse(dlg.was_canceled())
+
+    def test_delayed_show_respects_a_manual_hide(self):
+        from transfer_progress import TransferProgressDialog
+        dlg = TransferProgressDialog(["a", "b"], delay_ms=5000)
+        dlg.hide_for_now()
+        dlg._show_if_running()          # 延时显示的定时器到点了
+        self.assertFalse(dlg.isVisible(), "收起过就别再自己弹出来")
+
+    def test_failures_bring_a_hidden_window_back(self):
+        dlg = self._dialog()
+        dlg.hide_for_now()
+        dlg.finish_row(0)
+        dlg.finish_row(1, error="boom")
+        dlg.finish_all()
+        self.assertTrue(dlg.isVisible(), "有失败必须让人看见")
+
+    def test_panel_button_appears_only_while_hidden(self):
+        dst = _FakeRemoteSession(alias="dst")
+        panel = self._panel(dst)
+        job = panel._begin_transfer_job(["a", "b"], header="h")
+        self.assertTrue(panel._transfer_chip.isHidden())
+        job.hide_for_now()
+        self.assertFalse(panel._transfer_chip.isHidden())
+        panel._reopen_transfer_job()
+        self.assertTrue(panel._transfer_chip.isHidden())
+        job.hide_for_now()
+        panel._end_transfer_job(job)     # 整批收尾 → 按钮灭掉
+        self.assertTrue(panel._transfer_chip.isHidden())
+
+    def test_local_panel_has_the_same_button(self):
+        panel = self.ew.ExplorerPanel()
+        panel.refresh = lambda: None
+        job = panel._begin_transfer_job(["a", "b"], header="h")
+        job.hide_for_now()
+        self.assertFalse(panel._transfer_chip.isHidden())
+        panel._end_transfer_job(job)
+        self.assertTrue(panel._transfer_chip.isHidden())
+
+
 class TestDialogLifecycle(_Base):
     """窗口自身的收尾规矩：全绿自动关，有失败留窗，且永远关得掉。"""
 
@@ -473,18 +543,15 @@ class TestDialogLifecycle(_Base):
         dlg.close()                      # 收尾后关得掉
         self.assertFalse(dlg.isVisible())
 
-    def test_close_before_finish_cancels_then_lets_go(self):
-        """第一次关 = 请求取消（窗口留着看收尾）；再关一次必须放行，
-        不能给用户留一个关不掉的窗口。"""
+    def test_cancel_button_aborts_without_closing_the_window(self):
+        """取消是「取消」按钮的事：置位 + 发信号，窗口留着看收尾状态。"""
         dlg = self._dialog()
         seen = []
         dlg.canceled.connect(lambda: seen.append(1))
-        dlg.close()
+        dlg._on_button()
         self.assertTrue(dlg.was_canceled())
         self.assertEqual(seen, [1])
         self.assertTrue(dlg.isVisible())
-        dlg.close()
-        self.assertFalse(dlg.isVisible())
 
     def test_overall_bar_counts_settled_rows_plus_current_fraction(self):
         from transfer_progress import BAR_SCALE

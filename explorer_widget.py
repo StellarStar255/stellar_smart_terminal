@@ -541,6 +541,16 @@ class ExplorerPanel(QWidget, explorer_common.TransferJobHost):
         self.search_edit.textChanged.connect(self._on_search_text_changed)
         search_bar.addWidget(self.search_edit, 1)
 
+        # 传输进度窗口被收起时才出现：点一下把窗口叫回来
+        self._transfer_chip = QPushButton(t("transfer.reopen"))
+        self._transfer_chip.setFixedHeight(22)
+        self._transfer_chip.setToolTip(t("transfer.reopen_tooltip"))
+        self._transfer_chip.setCursor(Qt.CursorShape.PointingHandCursor)
+        self._transfer_chip.setFocusPolicy(Qt.FocusPolicy.NoFocus)
+        self._transfer_chip.clicked.connect(self._reopen_transfer_job)
+        self._transfer_chip.hide()
+        search_bar.addWidget(self._transfer_chip)
+
         layout.addLayout(search_bar)
 
         # 搜索结果列表（扁平展示命中项；默认隐藏，搜索时替换 tree_view）。
@@ -1999,13 +2009,7 @@ class ExplorerPanel(QWidget, explorer_common.TransferJobHost):
                 errors.append(f"{it}: {e}")
                 self._finish_job_row(job, row, str(e))
 
-        failures = {}
-        if job is not None and not sip.isdeleted(job):
-            failures = job.failures()
-            self._transfer_job = None
-            job.finish_all()      # 全绿自动关窗；有失败则留窗逐行显示原因
-        else:
-            self._transfer_job = None
+        failures = self._end_transfer_job(job)
         if move_mode:
             # 剪切是一次性的：来源已被移走，残留的剪贴板路径已失效
             explorer_clipboard.clear()

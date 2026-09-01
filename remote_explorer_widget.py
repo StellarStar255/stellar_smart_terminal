@@ -1334,6 +1334,16 @@ class RemoteExplorerPanel(QWidget, explorer_common.TransferJobHost):
         h_layout.addWidget(self._subtitle_label, 1)  # 占据中间剩余空间
         # （原来这里有 addStretch；现在交给上面 stretch=1 的 label 接管）
 
+        # 传输进度窗口被收起时才出现：点一下把窗口叫回来
+        self._transfer_chip = QPushButton(t("transfer.reopen"))
+        self._transfer_chip.setFixedHeight(22)
+        self._transfer_chip.setToolTip(t("transfer.reopen_tooltip"))
+        self._transfer_chip.setCursor(Qt.CursorShape.PointingHandCursor)
+        self._transfer_chip.setFocusPolicy(Qt.FocusPolicy.NoFocus)
+        self._transfer_chip.clicked.connect(self._reopen_transfer_job)
+        self._transfer_chip.hide()
+        h_layout.addWidget(self._transfer_chip)
+
         # 三个统一风格的矢量线条图标按钮（图标在 _apply_theme 里按主题色绘制）
         self._reload_btn = QPushButton()
         self._reload_btn.setFixedSize(28, 28)
@@ -3872,13 +3882,7 @@ class RemoteExplorerPanel(QWidget, explorer_common.TransferJobHost):
             errors.extend(self._upload_pairs(sess, pending_files, target_dir,
                                              rows=pending_rows))
 
-        failures = {}
-        if job is not None and not sip.isdeleted(job):
-            failures = job.failures()
-            self._transfer_job = None
-            job.finish_all()      # 全绿自动关窗；有失败则留窗逐行显示原因
-        else:
-            self._transfer_job = None
+        failures = self._end_transfer_job(job)
         # 失败已经逐行写在统一窗口里了，就不再叠一个弹窗；没有窗口
         # （单条目粘贴）或映射不上的错误仍照旧弹出来
         if errors and not failures:

@@ -75,6 +75,9 @@ class TransferProgressDialog(QDialog):
     """
 
     canceled = pyqtSignal()
+    # 用户手动收起 / 重新打开窗口（True = 现在可见）。调用方据此在面板上
+    # 显示「传输进度」按钮，收起后还能找回来。
+    visibility_changed = pyqtSignal(bool)
 
     def __init__(self, rows, parent=None, title: str = "", header: str = "",
                  delay_ms: int = 300):
@@ -83,7 +86,11 @@ class TransferProgressDialog(QDialog):
         self.setWindowTitle(self._base_title)
         self.setWindowModality(Qt.WindowModality.NonModal)
         self.setWindowFlag(Qt.WindowType.WindowContextHelpButtonHint, False)
+        # 传输窗口要一直看得见：非模态窗口很容易被别的窗口盖住再也找不到。
+        # 嫌挡事就点「隐藏」，面板上的按钮能随时把它叫回来。
+        self.setWindowFlag(Qt.WindowType.WindowStaysOnTopHint, True)
         self.finished.connect(self.deleteLater)
+        self._user_hidden = False
 
         self._names = list(rows)
         self._states = [STATE_PENDING] * len(self._names)
@@ -138,6 +145,10 @@ class TransferProgressDialog(QDialog):
 
         buttons = QHBoxLayout()
         buttons.addStretch(1)
+        # 「隐藏」只是收起窗口，传输照常继续；真正中断走「取消」
+        self._hide_button = QPushButton(t("transfer.hide"))
+        self._hide_button.clicked.connect(self.hide_for_now)
+        buttons.addWidget(self._hide_button)
         self._button = QPushButton(t("transfer.cancel"))
         self._button.clicked.connect(self._on_button)
         buttons.addWidget(self._button)
@@ -226,8 +237,27 @@ class TransferProgressDialog(QDialog):
         for i in indices:
             self.finish_row(i, (error_by_index or {}).get(i))
 
+    # ---------- 收起 / 找回 ----------
+
+    def hide_for_now(self):
+        """收起窗口，传输继续跑（面板上的按钮可以把它叫回来）。"""
+        if self._finished:
+            self.close()
+            return
+        self._user_hidden = True
+        self.hide()
+        self.visibility_changed.emit(False)
+
+    def reopen(self):
+        """把收起的窗口叫回来并顶到最前。"""
+        self._user_hidden = False
+        self.show()
+        self.raise_()
+        self.activateWindow()
+        self.visibility_changed.emit(True)
+
     def finish_all(self):
-        """收尾：没失败就自动关窗；有失败则留窗，按钮变「关闭」。"""
+        """收尾：没失败就自动关窗；有失败则留窗（收起过也叫回来），按钮变「关闭」。"""
         self._finished = True
         # 收尾时还挂在 pending/running 上的都是没做成的（取消/中途 break）——
         # 一律记「已取消」，绝不把没验证过的条目标成已完成
@@ -239,12 +269,20 @@ class TransferProgressDialog(QDialog):
         self._frac = 0.0
         self._sync_summary()
         if not self.failures():
+            # 不发 visibility_changed：那个信号的含义是「用户收起了，
+            # 面板上亮个按钮好找回来」，任务都结束了没什么可找回的
             self.close()
             return
         self._bar.setValue(BAR_SCALE)
-        self._stage.setText("")
+        self._stage_base = ""
+        self._aggregate = ""
+        self._refresh_stage()
+        self._hide_button.hide()
         self._button.setEnabled(True)
         self._button.setText(t("transfer.close"))
+        # 有失败必须让人看见，哪怕之前被收起来了
+        self.show()
+        self.raise_()
 
     # ---------- 查询 ----------
 
@@ -274,7 +312,8 @@ class TransferProgressDialog(QDialog):
     # ---------- 内部 ----------
 
     def _show_if_running(self):
-        if not self._finished:
+        # 用户已经手动收起过就别再自作主张弹出来
+        if not self._finished and not self._user_hidden:
             self.show()
 
     def _refresh_stage(self):
@@ -328,17 +367,17 @@ class TransferProgressDialog(QDialog):
         self._button.setText(t("transfer.canceling"))
         self.canceled.emit()
 
-    # Esc / 关窗：第一次是「请求取消」（传输还在收尾，窗口留着看状态），
-    # 已经取消过还要关 → 放行，绝不留一个关不掉的窗口给用户。
+    # Esc / 关窗 = 收起（传输继续），不是取消 —— 取消是「取消」按钮的事，
+    # 关个窗就把几十个文件的传输掐了太吓人。收尾之后照常关闭。
     def reject(self):                      # noqa: N802 — Qt 接口
-        if not self._finished and not self._canceled:
-            self._request_cancel()
+        if not self._finished:
+            self.hide_for_now()
             return
         super().reject()
 
     def closeEvent(self, event):           # noqa: N802 — Qt 回调
-        if not self._finished and not self._canceled:
-            self._request_cancel()
+        if not self._finished:
+            self.hide_for_now()
             event.ignore()
             return
         super().closeEvent(event)

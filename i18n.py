@@ -989,6 +989,10 @@ TRANSLATIONS = {
     "transfer.summary_failed": {"zh": "{done}/{total} 已完成 · {failed} 项失败",
                                  "en": "{done}/{total} done · {failed} failed"},
     "transfer.cancel": {"zh": "取消", "en": "Cancel"},
+    "transfer.hide": {"zh": "隐藏", "en": "Hide"},
+    "transfer.reopen": {"zh": "传输进度", "en": "Transfer"},
+    "transfer.reopen_tooltip": {"zh": "显示传输进度窗口",
+                                 "en": "Show the transfer progress window"},
     "transfer.canceling": {"zh": "正在取消…", "en": "Canceling..."},
     "transfer.close": {"zh": "关闭", "en": "Close"},
 

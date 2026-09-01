@@ -108,8 +108,40 @@ class TransferJobHost:
                                      header=header)
         job.canceled.connect(
             lambda: self._abort_sessions(self._job_abort_targets))
+        # 窗口被收起 → 面板上亮出「传输进度」按钮，随时叫得回来
+        job.visibility_changed.connect(
+            lambda visible: self._set_transfer_chip_visible(not visible))
         self._transfer_job = job
         return job
+
+    def _end_transfer_job(self, job) -> dict:
+        """整批收尾：返回失败映射，清掉引用、收窗、灭掉面板上的按钮。"""
+        from PyQt6 import sip
+
+        self._transfer_job = None
+        self._set_transfer_chip_visible(False)
+        if job is None:
+            return {}
+        try:
+            if sip.isdeleted(job):
+                return {}
+            failures = job.failures()
+            job.finish_all()       # 全绿自动关窗；有失败则留窗逐行显示原因
+            return failures
+        except RuntimeError:
+            logger.debug("_end_transfer_job: dialog gone", exc_info=True)
+            return {}
+
+    def _set_transfer_chip_visible(self, visible: bool):
+        """面板上的「传输进度」按钮显隐；面板没有这个按钮就什么也不做。"""
+        btn = getattr(self, "_transfer_chip", None)
+        if btn is not None:
+            btn.setVisible(bool(visible))
+
+    def _reopen_transfer_job(self):
+        job = self._active_transfer_job()
+        if job is not None:
+            job.reopen()
 
     def _active_transfer_job(self) -> Optional[TransferProgressDialog]:
         """当前批次的统一进度窗口；没有 / 已销毁 / 已收尾时返回 None。"""
