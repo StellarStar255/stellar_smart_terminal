@@ -41,6 +41,51 @@ from app_logging import get_logger
 
 logger = get_logger(__name__)
 
+
+# 已经压过的格式：再 gzip 一遍纯属白烧 CPU，压不动还拖慢
+_ALREADY_COMPRESSED = {
+    '.gz', '.tgz', '.bz2', '.xz', '.zst', '.zip', '.7z', '.rar',
+    '.jpg', '.jpeg', '.png', '.gif', '.webp', '.heic', '.mp3', '.aac',
+    '.m4a', '.flac', '.ogg', '.mp4', '.mov', '.mkv', '.avi', '.webm',
+    '.pdf', '.docx', '.xlsx', '.pptx', '.whl', '.jar', '.apk', '.dmg',
+}
+
+
+def _worth_compressing(items) -> bool:
+    """这批东西值不值得压：按字节算，已压格式占比超过一半就别压了。
+
+    jsonl / 日志 / 源码这类文本能压 5-10 倍，慢链路上是最大的一块；
+    而一堆 mp4、图片压了也就那样，只是白白多烧一遍 CPU。
+    """
+    plain = compressed = 0
+    for item in items:
+        path = item[0] if isinstance(item, (tuple, list)) else item
+        try:
+            size = os.path.getsize(path) if os.path.isfile(path) else 0
+        except OSError:
+            size = 0
+        if os.path.splitext(str(path))[1].lower() in _ALREADY_COMPRESSED:
+            compressed += size
+        else:
+            plain += size
+    if plain + compressed == 0:
+        return True          # 目录/空批次：按可压处理
+    return plain >= compressed
+
+
+class _CountingReader:
+    """读多少就报多少 —— 压缩流里进度必须按原始字节算。"""
+
+    def __init__(self, fileobj, note):
+        self._f = fileobj
+        self._note = note
+
+    def read(self, size=-1):
+        data = self._f.read(size)
+        if data and self._note is not None:
+            self._note(len(data))
+        return data
+
 from i18n import t
 
 # --- 连接稳定性参数 ---
@@ -663,6 +708,7 @@ class SSHSession(QObject):
         self._cache_lock = threading.Lock()
         # 远端是否有 tar（目录上传快路径的探测结果，按会话缓存）
         self._remote_has_tar: Optional[bool] = None
+        self._remote_has_gzip: Optional[bool] = None
         # 上次重连失败的时刻（monotonic）；冷却期内的操作快速失败，
         # 见 _reconnect_or_fail_fast
         self._last_reconnect_failure: Optional[float] = None
@@ -1696,9 +1742,37 @@ class SSHSession(QObject):
             logger.debug("remote_has_tar probe failed", exc_info=True)
             return False
 
+    def remote_has_gzip(self) -> bool:
+        """远端有没有 gzip —— 有就把 tar 流压缩了再传。
+
+        jsonl / 日志 / 源码这类文本压缩率常有 5-10 倍，等于把要搬的字节数
+        直接砍掉一个数量级；链路慢的时候这是最大的一块。结果按会话缓存。
+        """
+        if self._remote_has_gzip is not None:
+            return self._remote_has_gzip
+        if self._client is None:
+            return False
+        try:
+            transport = self._client.get_transport()
+            if transport is None or not transport.is_active():
+                return False
+            chan = transport.open_session(timeout=CONNECT_TIMEOUT)
+            try:
+                chan.settimeout(CONNECT_TIMEOUT)
+                chan.exec_command("command -v gzip")
+                rc = chan.recv_exit_status()
+            finally:
+                chan.close()
+            self._remote_has_gzip = (rc == 0)
+            return self._remote_has_gzip
+        except Exception:
+            logger.debug("remote_has_gzip probe failed", exc_info=True)
+            return False
+
     @_auto_reconnect
     def upload_files_tar(self, local_paths: list, remote_dir: str,
-                         total_bytes: int = 0, progress_cb=None) -> list:
+                         total_bytes: int = 0, progress_cb=None,
+                         should_stop=None) -> list:
         """多个文件/目录一次性打 tar 流上传到 remote_dir（arcname 取 basename）。
 
         和 upload_dir_tar 同一条快路径，只是入口是"一批路径"而不是"一个目录"：
@@ -1706,11 +1780,18 @@ class SSHSession(QObject):
         的串行往返，几十 ms RTT 下要几分钟；一条 tar 流没有按文件的往返。
 
         返回读不了的文件列表 [(路径, 原因)] —— 单个坏文件不该让整批失败。
+
+        should_stop()：每个文件开始前问一次，返回 True 就**在两个文件之间**
+        停下来正常收尾（写完归档结束标记、关流），远端 tar 解出来的都是完整
+        文件。用户点「取消」走的是这条，而不是直接关 socket —— 关 socket 会
+        让正在写的那个文件在远端留半截。
         """
         skipped: list = []
 
-        def _add(tf):
+        def _add(tf, note_raw):
             for item in local_paths:
+                if should_stop is not None and should_stop():
+                    break
                 # 每项可以是路径，也可以是 (路径, 归档名) —— 粘贴时目标可能被
                 # 改过名（"x (2).txt"），归档名就得用改过的那个
                 if isinstance(item, (tuple, list)):
@@ -1718,12 +1799,21 @@ class SSHSession(QObject):
                 else:
                     p, arc = item, os.path.basename(str(item).rstrip(os.sep))
                 try:
-                    tf.add(p, arcname=arc)
+                    info = tf.gettarinfo(p, arcname=arc)
+                    if info is not None and info.isreg():
+                        # 自己读文件体，好按「原始字节」报进度：压缩之后
+                        # 通道字节和文件字节不是一回事
+                        with open(p, "rb") as fh:
+                            tf.addfile(info, _CountingReader(fh, note_raw))
+                    else:
+                        tf.add(p, arcname=arc)   # 目录 / 软链：没有数据体
                 except Exception as e:      # noqa: BLE001 — 逐个跳过并回报
                     logger.warning("upload_files_tar: skipping %s: %s", p, e)
                     skipped.append((p, str(e)))
 
-        self._stream_tar(remote_dir, _add, total_bytes, progress_cb)
+        self._stream_tar(remote_dir, _add, total_bytes, progress_cb,
+                         compress=_worth_compressing(local_paths)
+                         and self.remote_has_gzip())
         return skipped
 
     @_auto_reconnect
@@ -1742,11 +1832,13 @@ class SSHSession(QObject):
         关 socket → sendall 立刻抛错；abort 已置 _was_connected=False，
         _auto_reconnect 不会把被取消的传输再重跑一遍。
         """
-        self._stream_tar(remote_dir, lambda tf: tf.add(local_dir, arcname="."),
-                         total_bytes, progress_cb)
+        self._stream_tar(remote_dir,
+                         lambda tf, _note: tf.add(local_dir, arcname="."),
+                         total_bytes, progress_cb,
+                         compress=self.remote_has_gzip())
 
     def _stream_tar(self, remote_dir: str, add_entries, total_bytes: int = 0,
-                    progress_cb=None):
+                    progress_cb=None, compress: bool = False):
         """把 add_entries 往 tarfile 里塞的东西，经单条 SSH 通道灌给远端 tar。
 
         整目录上传和多文件批量上传共用这一条路：区别只在 add_entries 往
@@ -1775,16 +1867,33 @@ class SSHSession(QObject):
         try:
             chan.settimeout(SFTP_OP_TIMEOUT)
             q = shlex.quote(remote_dir)
-            chan.exec_command(f"mkdir -p {q} && tar -xpf - -C {q}")
+            # 压缩流：本地 gzip、远端 tar -z 解 —— 文本类文件能把上线字节
+            # 砍掉 5-10 倍，慢链路上就是几倍到十几倍的实际传输速度
+            flags = "-xzpf" if compress else "-xpf"
+            chan.exec_command(f"mkdir -p {q} && tar {flags} - -C {q}")
 
             sent = {"n": 0}
+            # 压缩之后「通道上的字节」不再等于「文件的字节」，进度必须按
+            # 原始字节算（否则条子会提前跑满，逐文件定位也全错）。
+            raw = {"n": 0, "used": False}
+
+            def note_raw(n):
+                raw["used"] = True
+                raw["n"] += n
+                if progress_cb is not None:
+                    done = raw["n"]
+                    if total_bytes:
+                        done = min(done, total_bytes)
+                    progress_cb(done, total_bytes)
 
             class _ChanWriter:
                 """把 tarfile 的写出转成 channel.sendall，顺带计数/回调/排空。"""
                 def write(self, data):
                     chan.sendall(data)
                     sent["n"] += len(data)
-                    if progress_cb is not None:
+                    # add_entries 会自己上报原始字节时（逐文件路径）就别再
+                    # 按通道字节报一遍，两者会打架
+                    if progress_cb is not None and not raw["used"]:
                         done = sent["n"]
                         if total_bytes:
                             done = min(done, total_bytes)
@@ -1796,10 +1905,13 @@ class SSHSession(QObject):
                     pass
 
             # bufsize 调大：tar 块攒到 256KB 再 sendall，减少系统调用次数
-            tf = tarfile.open(mode="w|", fileobj=_ChanWriter(),
-                              bufsize=256 * 1024)
+            # compresslevel=1：文本压缩率已经接近上限，CPU 却只有高等级的
+            # 零头（本机 100+ MB/s），不会反过来成为瓶颈
+            tf = tarfile.open(mode="w|gz" if compress else "w|",
+                              fileobj=_ChanWriter(), bufsize=256 * 1024,
+                              **({"compresslevel": 1} if compress else {}))
             try:
-                add_entries(tf)
+                add_entries(tf, note_raw)
             finally:
                 tf.close()
             chan.shutdown_write()

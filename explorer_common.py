@@ -135,7 +135,9 @@ class TransferJobHost:
             return None
         job = TransferProgressDialog(names, parent=self, title=title,
                                      header=header)
-        job.canceled.connect(
+        # 「取消」只是请求优雅停（当前文件传完再停），绝不在这里关 socket ——
+        # 关了远端那个文件就留半截。用户再按一次才走强制中断。
+        job.force_canceled.connect(
             lambda: self._abort_sessions(self._job_abort_targets))
         # 窗口被收起 → 面板上亮出「传输进度」按钮，随时叫得回来
         job.visibility_changed.connect(
@@ -198,7 +200,8 @@ class TransferJobHost:
         for s in (sessions or []):
             if s is not None and all(s is not x for x in self._job_abort_targets):
                 self._job_abort_targets.append(s)
-        if job.was_canceled():
+        # 只有「强制停止」才关 socket；优雅停靠调用方在条目之间自己收手
+        if job.was_force_canceled():
             self._abort_sessions(sessions)
 
     @staticmethod

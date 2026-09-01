@@ -3804,8 +3804,10 @@ class RemoteExplorerPanel(QWidget, explorer_common.TransferJobHost):
             header=t("remote.pasting_progress", dst=target_dir),
             title=t("remote.title"))
 
-        # 把目标目录的现有条目名预拉一次，避免每次起名都来回 stat
-        existing = self._remote_listing_names(sess, target_dir)
+        # 把目标目录的现有条目预拉一次：既避免每次起名都来回 stat，也让
+        # 「覆盖」时能直接知道同名的是文件还是目录（决定要不要先删）
+        existing_entries = self._remote_listing_entries(sess, target_dir)
+        existing = set(existing_entries)
 
         def remote_name_exists(name: str) -> bool:
             return name in existing
@@ -3822,7 +3824,8 @@ class RemoteExplorerPanel(QWidget, explorer_common.TransferJobHost):
                 break
             kind = it[0]
             if job is not None:
-                job.set_active_rows([row])
+                # 这一步只是准备（解冲突 / 覆盖前删旧文件），不是在传数据
+                job.set_active_rows([row], detail=t("transfer.state_checking"))
             try:
                 if kind == "local":
                     src = it[1]
@@ -3838,7 +3841,11 @@ class RemoteExplorerPanel(QWidget, explorer_common.TransferJobHost):
                         if sticky:
                             sticky_decision = action
                         if action == "overwrite":
-                            self._remote_remove(sess, dst)
+                            # 普通文件盖普通文件不用先删，上传本身就是覆盖写
+                            if self._overwrite_needs_delete(
+                                    existing_entries.get(name),
+                                    os.path.isdir(src) and not os.path.islink(src)):
+                                self._remote_remove(sess, dst)
                             existing.discard(name)
                         else:
                             name = explorer_clipboard.next_free_name(name, remote_name_exists)
@@ -3918,12 +3925,35 @@ class RemoteExplorerPanel(QWidget, explorer_common.TransferJobHost):
 
         失败时返回空 set，调用方会回落到单次 stat 判定（next_free_name 内会 stat）。
         """
+        return set(self._remote_listing_entries(sess, path))
+
+    def _remote_listing_entries(self, sess: SSHSession, path: str) -> dict:
+        """同上，但返回 {名字: RemoteEntry} —— 覆盖时要知道同名的是文件还是目录。
+
+        失败时返回空 dict。
+        """
         try:
             entries = self._await_remote(sess, sess.listdir, path,
                                          label=t("remote.pasting_progress", dst=path))
-            return {e.name for e in entries}
+            return {e.name: e for e in entries}
         except Exception:
-            return set()
+            return {}
+
+    @staticmethod
+    def _overwrite_needs_delete(entry, src_is_dir: bool) -> bool:
+        """覆盖前是否必须先删远端旧条目。
+
+        普通文件覆盖普通文件不用删：tar 解包和 SFTP 上传本来就是覆盖写，
+        先删纯属白花一趟 stat + 一趟 remove —— 粘 64 个文件就是 128 次
+        往返全耗在还没开始传数据的地方。目录、软链、以及"用目录盖文件"
+        这些情况仍必须先删干净，否则 tar 会报 Is a directory 之类的错。
+        """
+        if entry is None:
+            return True          # 不知道对面是什么 → 保守地删
+        if src_is_dir:
+            return True
+        return bool(getattr(entry, "is_dir", False)
+                    or getattr(entry, "is_link", False))
 
     def _resolve_paste_conflict(self, name: str, sticky: Optional[str]):
         """跨目录/跨主机冲突时的三选一对话框（收敛到 explorer_common 单点维护）。"""
@@ -4163,6 +4193,11 @@ class RemoteExplorerPanel(QWidget, explorer_common.TransferJobHost):
 
         def make_cb(nbytes=0):
             def cb(f):
+                # 优雅停时没轮到的 future 会被 cancel()：CancelledError 继承
+                # 的是 BaseException，漏掉它这里就不会计数，等待循环永远不退
+                if f.cancelled():
+                    done["n"] += 1
+                    return
                 try:
                     f.result()
                 except Exception as e:
@@ -4203,6 +4238,11 @@ class RemoteExplorerPanel(QWidget, explorer_common.TransferJobHost):
                     return
                 # 传输进行中一律算活动，别让空闲看门狗掐掉正在传数据的连接
                 self._touch_activity()
+                if job is not None and job.was_canceled():
+                    # 优雅停：还没轮到的直接取消（cancel() 对已在跑的返回
+                    # False，所以正在写的那个文件会照常传完，不会留半截）
+                    for f in futures:
+                        f.cancel()
                 cur_bytes = done["bytes"] + (live["bytes"] if live else 0)
                 if total_bytes > 0:
                     frac = min(1.0, cur_bytes / total_bytes)
@@ -4886,10 +4926,15 @@ class RemoteExplorerPanel(QWidget, explorer_common.TransferJobHost):
                 frac, f"{self._fmt_size(done_in_file)} / {self._fmt_size(size_i)}")
 
         job_cb = on_bytes if job is not None else None
+        # 点了「取消」→ 在两个文件之间停下来正常收尾，而不是关 socket 让
+        # 正在写的那个文件在远端留半截
+        def should_stop():
+            return job is not None and job.was_canceled()
+
         if len(pairs) >= self._TAR_BATCH_MIN and self._remote_supports_tar(sess):
             items = [(src, posixpath.basename(dst)) for src, dst in pairs]
             fut = sess.submit(sess.upload_files_tar, items, target_dir,
-                              sum(sizes), live_cb)
+                              sum(sizes), live_cb, should_stop)
             self._wait_future_with_progress(
                 [fut], label, tolerate_errors=True, sizes=[sum(sizes)],
                 live=live, abort_sessions=[sess], on_bytes=job_cb)
@@ -4913,12 +4958,14 @@ class RemoteExplorerPanel(QWidget, explorer_common.TransferJobHost):
             futures, label, tolerate_errors=True, sizes=sizes, live=live,
             abort_sessions=[sess], on_bytes=job_cb)
         for i, fut in enumerate(futures):
+            if fut.cancelled():
+                continue            # 优雅停时还没开传的那些：留给收尾标「已取消」
             err = None
             try:
                 exc = fut.exception(timeout=0) if fut.done() else None
                 if exc is not None:
                     err = f"{os.path.basename(pairs[i][0])}: {exc}"
-            except Exception as e:      # noqa: BLE001 — 取消/超时也算失败
+            except Exception as e:      # noqa: BLE001 — 超时等也算失败
                 err = f"{os.path.basename(pairs[i][0])}: {e}"
             if err:
                 errors.append(err)

@@ -981,6 +981,10 @@ TRANSLATIONS = {
     "transfer.col_status": {"zh": "状态", "en": "Status"},
     "transfer.state_pending": {"zh": "等待中", "en": "Waiting"},
     "transfer.state_running": {"zh": "进行中…", "en": "In progress..."},
+    # 扫描阶段：解重名冲突、覆盖前删远端旧文件（每个文件一趟 SSH 往返），
+    # 这会儿还没开始传数据，和「进行中」必须分开说，否则用户会问
+    # 「它到底在干嘛、为什么走过去又变回等待」
+    "transfer.state_checking": {"zh": "检查中…", "en": "Checking..."},
     "transfer.state_done": {"zh": "已完成", "en": "Done"},
     "transfer.state_failed": {"zh": "失败：{error}", "en": "Failed: {error}"},
     "transfer.state_skipped": {"zh": "已取消", "en": "Canceled"},
@@ -994,6 +998,15 @@ TRANSLATIONS = {
     "transfer.reopen_tooltip": {"zh": "显示传输进度窗口",
                                  "en": "Show the transfer progress window"},
     "transfer.canceling": {"zh": "正在取消…", "en": "Canceling..."},
+    "transfer.force_stop": {"zh": "强制停止", "en": "Force stop"},
+    "transfer.force_stop_tip": {
+        "zh": "立刻中断，正在写入的那个文件会不完整",
+        "en": "Stop immediately — the file being written will be left incomplete"
+    },
+    "transfer.finishing_current": {
+        "zh": "已请求停止：正在把当前文件传完…",
+        "en": "Stopping: finishing the file currently being written..."
+    },
     "transfer.close": {"zh": "关闭", "en": "Close"},
 
     # ===== SSH 会话 =====

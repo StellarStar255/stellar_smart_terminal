@@ -75,7 +75,10 @@ class TransferProgressDialog(QDialog):
         dlg.finish_all()                       # 全绿则自动关闭，有失败则留窗
     """
 
+    # 第一次点「取消」：优雅停 —— 当前这个文件传完再停，别让远端留半截
     canceled = pyqtSignal()
+    # 再点一次：不等了，立刻断（正在写的文件会不完整）
+    force_canceled = pyqtSignal()
     # 用户手动收起 / 重新打开窗口（True = 现在可见）。调用方据此在面板上
     # 显示「传输进度」按钮，收起后还能找回来。
     visibility_changed = pyqtSignal(bool)
@@ -99,7 +102,8 @@ class TransferProgressDialog(QDialog):
         self._errors: dict = {}
         self._active: list = []
         self._frac = 0.0
-        self._canceled = False
+        self._canceled = False        # 优雅停（传完当前文件）
+        self._force_canceled = False  # 强制停（立刻断）
         self._finished = False
 
         layout = QVBoxLayout(self)
@@ -348,7 +352,12 @@ class TransferProgressDialog(QDialog):
     # ---------- 查询 ----------
 
     def was_canceled(self) -> bool:
+        """用户是否点过取消（含优雅停）——调用方据此不再启动新的传输。"""
         return self._canceled
+
+    def was_force_canceled(self) -> bool:
+        """是否已经强制中断（可以关 socket 了）。"""
+        return self._force_canceled
 
     def is_finished(self) -> bool:
         return self._finished
@@ -379,6 +388,10 @@ class TransferProgressDialog(QDialog):
 
     def _refresh_stage(self):
         """阶段行 = 阶段说明 + 整批统计；与顶部那句完全相同就不重复占一行。"""
+        # 请求过停止就一直显示「正在收尾」，别被后续阶段文案盖掉
+        if self._canceled and not self._finished:
+            self._stage.setText(t("transfer.finishing_current"))
+            return
         base = self._stage_base
         if base and base == self._header_text:
             base = ""
@@ -418,15 +431,33 @@ class TransferProgressDialog(QDialog):
         if self._finished:
             self.close()
             return
-        self._request_cancel()
+        if self._canceled:
+            self._request_force_cancel()   # 再按一次 = 不等了，立刻断
+        else:
+            self._request_cancel()
 
     def _request_cancel(self):
+        """第一次「取消」：优雅停——把正在传的这个文件传完再停。
+
+        直接关 socket 会让远端那个文件留半截（用户明确要求别这样）。
+        真的等不及可以再按一次按钮强制中断。
+        """
         if self._canceled:
             return
         self._canceled = True
+        self._button.setText(t("transfer.force_stop"))
+        self._button.setToolTip(t("transfer.force_stop_tip"))
+        self._refresh_stage()
+        self.canceled.emit()
+
+    def _request_force_cancel(self):
+        """再按一次：立刻中断，正在写的那个文件会不完整。"""
+        if self._force_canceled:
+            return
+        self._force_canceled = True
         self._button.setEnabled(False)
         self._button.setText(t("transfer.canceling"))
-        self.canceled.emit()
+        self.force_canceled.emit()
 
     # Esc / 关窗 = 收起（传输继续），不是取消 —— 取消是「取消」按钮的事，
     # 关个窗就把几十个文件的传输掐了太吓人。收尾之后照常关闭。

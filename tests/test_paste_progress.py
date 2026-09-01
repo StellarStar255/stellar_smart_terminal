@@ -62,7 +62,8 @@ class _FakeRemoteSession:
     def remote_has_tar(self):
         return False
 
-    def upload_files_tar(self, items, remote_dir, total_bytes=0, cb=None):
+    def upload_files_tar(self, items, remote_dir, total_bytes=0, cb=None,
+                         should_stop=None):
         return []
 
     def abort(self):
@@ -208,7 +209,11 @@ class TestUnifiedPasteWindow(_Base):
                          "失败已逐行显示，不该再弹一个汇总框")
 
     def test_cancel_skips_the_remaining_items(self):
-        """点取消 → 中断会话 + 余下条目标「已取消」，不继续偷偷传。"""
+        """点取消 → 余下条目标「已取消」，不继续偷偷传。
+
+        注意是「优雅停」：不关 socket（那会让正在写的文件在远端留半截），
+        只是不再开始新的条目。
+        """
         state = {"panel": None}
 
         def stat_hook(path):
@@ -228,8 +233,8 @@ class TestUnifiedPasteWindow(_Base):
         self.assertEqual(job.final_status[1:], ["skipped", "skipped"])
         self.assertNotIn("/src/f2.txt", [a[0] for _n, a in src.calls if a],
                          "取消之后不该再碰后面的条目")
-        self.assertGreater(src.aborted + dst.aborted, 0,
-                           "取消要真的 abort 会话，卡住的传输才会立刻失败")
+        self.assertEqual(src.aborted + dst.aborted, 0,
+                         "优雅停不许关 socket——远端会留半截文件")
 
 
 class TestOverwriteConflictStaysInTheWindow(_Base):
@@ -266,6 +271,62 @@ class TestOverwriteConflictStaysInTheWindow(_Base):
                          "覆盖前的 stat/remove 也该画进统一窗口，不许弹框")
         self.assertEqual(len(self.jobs), 1)
         self.assertEqual(self.jobs[0].final_status, ["done"] * 5)
+
+
+class TestOverwriteSkipsUselessDeletes(_Base):
+    """覆盖普通文件不该先删：上传本身就是覆盖写。
+
+    以前每个冲突文件都要 stat + remove 两趟 SSH 往返，粘 64 个就是 128 次
+    往返全花在还没开始传数据的地方（用户看到一行行「检查中」慢慢爬）。
+    """
+
+    class _Ent:
+        def __init__(self, name, is_dir=False, is_link=False):
+            self.name = name
+            self.is_dir = is_dir
+            self.is_link = is_link
+            self.path = "/dst/" + name
+
+    def _paste_over(self, entries, n=3):
+        src_dir = Path(tempfile.mkdtemp())
+        items = []
+        for i in range(n):
+            f = src_dir / f"f{i}.jsonl"
+            f.write_bytes(b"x" * (i + 1))
+            items.append(("local", str(f)))
+        dst = _FakeRemoteSession(alias="dst", entries=entries)
+        dst.remove = lambda path: None
+        dst.remove_tree = lambda path: None
+        panel = self._panel(dst)
+        panel._resolve_paste_conflict = lambda name, sticky: ("overwrite", True)
+        self._paste(panel, items)
+        return dst
+
+    def test_plain_file_overwrite_does_no_stat_or_remove(self):
+        entries = [self._Ent(f"f{i}.jsonl") for i in range(3)]
+        dst = self._paste_over(entries)
+        names = [n for n, _a in dst.calls]
+        self.assertNotIn("stat", names, "普通文件覆盖不用先 stat")
+        self.assertEqual([n for n in names if n.startswith("remove")], [],
+                         "普通文件覆盖不用先删——上传就是覆盖写")
+        self.assertTrue([n for n in names if n.startswith("upload")],
+                        "该传的还是要传")
+
+    def test_directory_in_the_way_is_still_removed(self):
+        entries = [self._Ent("f0.jsonl", is_dir=True),
+                   self._Ent("f1.jsonl"), self._Ent("f2.jsonl")]
+        dst = self._paste_over(entries)
+        names = [n for n, _a in dst.calls]
+        self.assertIn("stat", names, "同名是目录 → 仍要走删除流程")
+
+    def test_needs_delete_matrix(self):
+        cls = self.rew.RemoteExplorerPanel
+        self.assertFalse(cls._overwrite_needs_delete(self._Ent("a"), False))
+        self.assertTrue(cls._overwrite_needs_delete(self._Ent("a", is_dir=True), False))
+        self.assertTrue(cls._overwrite_needs_delete(self._Ent("a", is_link=True), False))
+        self.assertTrue(cls._overwrite_needs_delete(self._Ent("a"), True))
+        self.assertTrue(cls._overwrite_needs_delete(None, False),
+                        "不知道对面是什么就保守地删")
 
 
 class TestSingleItemKeepsSimpleDialog(_Base):
@@ -630,6 +691,80 @@ class TestQueuedRowsSayWaiting(_Base):
         dlg.finish_row(1)
         dlg.requeue_row(1)                      # 已完成的行不许被退回
         self.assertEqual(dlg.row_states()[1], "done")
+
+
+class TestGracefulCancel(_Base):
+    """点取消要先把正在写的那个文件传完，别在远端留半截。
+
+    用户要求：「请等在正在上传的那个传完再停止（否则文件可能损坏），
+    除非我坚持退出」——所以第一下是优雅停，再按一次才强制断。
+    """
+
+    def _dialog(self, rows=("a", "b")):
+        from transfer_progress import TransferProgressDialog
+        return TransferProgressDialog(list(rows), delay_ms=0)
+
+    def test_first_press_is_graceful_second_is_force(self):
+        from i18n import t
+        dlg = self._dialog()
+        soft, hard = [], []
+        dlg.canceled.connect(lambda: soft.append(1))
+        dlg.force_canceled.connect(lambda: hard.append(1))
+
+        dlg._on_button()
+        self.assertEqual((len(soft), len(hard)), (1, 0), "第一下只请求优雅停")
+        self.assertTrue(dlg.was_canceled())
+        self.assertFalse(dlg.was_force_canceled())
+        self.assertEqual(dlg._button.text(), t("transfer.force_stop"))
+        self.assertIn("停止", dlg.stage_text())
+
+        dlg._on_button()
+        self.assertEqual((len(soft), len(hard)), (1, 1), "再按一次才强制断")
+        self.assertTrue(dlg.was_force_canceled())
+
+    def test_panel_aborts_sessions_only_on_force(self):
+        dst = _FakeRemoteSession(alias="dst")
+        panel = self._panel(dst)
+        job = panel._begin_transfer_job(["a", "b"], header="h")
+        panel._register_job_abort(job, [dst])
+
+        job._on_button()                     # 优雅停
+        self.assertEqual(dst.aborted, 0,
+                         "优雅停绝不能关 socket——远端会留半截文件")
+        job._on_button()                     # 强制停
+        self.assertGreater(dst.aborted, 0, "坚持退出就该真断")
+
+    def test_tar_batch_gets_a_stop_callback(self):
+        """tar 流靠 should_stop 在两个文件之间收尾，而不是被掐断。"""
+        src_dir = Path(tempfile.mkdtemp())
+        pairs = []
+        for i in range(3):
+            f = src_dir / f"f{i}.bin"
+            f.write_bytes(b"x" * (i + 1))
+            pairs.append((str(f), f"/dst/f{i}.bin"))
+
+        seen = {}
+
+        class _TarSession(_FakeRemoteSession):
+            def remote_has_tar(self):
+                return True
+
+            def upload_files_tar(self, items, remote_dir, total_bytes=0,
+                                 cb=None, should_stop=None):
+                seen["should_stop"] = should_stop
+                return []
+
+        dst = _TarSession(alias="dst")
+        panel = self._panel(dst)
+        job = panel._begin_transfer_job(["f0", "f1", "f2"], header="h")
+        panel._wait_future_with_progress = lambda *a, **k: None
+
+        panel._upload_pairs(dst, pairs, "/dst", rows=[0, 1, 2])
+
+        self.assertIsNotNone(seen.get("should_stop"), "得把停止回调传下去")
+        self.assertFalse(seen["should_stop"](), "没点取消时不该停")
+        job._on_button()
+        self.assertTrue(seen["should_stop"](), "点了取消就在下个文件前停下")
 
 
 class TestDialogLifecycle(_Base):
