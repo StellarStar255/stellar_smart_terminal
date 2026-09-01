@@ -21,7 +21,6 @@ from PyQt6.QtWidgets import (
 )
 from PyQt6.QtCore import Qt, pyqtSignal, QTimer
 from PyQt6.QtGui import QPainter, QFontMetrics, QColor, QPalette
-from PyQt6 import sip  # 检查 C++ 对象是否已被销毁
 
 from i18n import t
 
@@ -93,6 +92,7 @@ class TransferProgressDialog(QDialog):
         self.setWindowFlag(Qt.WindowType.WindowStaysOnTopHint, True)
         self.finished.connect(self.deleteLater)
         self._user_hidden = False
+        self._auto_hidden = False   # 因模态框临时藏起来（非用户操作）
 
         self._names = list(rows)
         self._states = [STATE_PENDING] * len(self._names)
@@ -158,10 +158,10 @@ class TransferProgressDialog(QDialog):
 
         self.resize(620, min(520, 200 + 22 * min(len(self._names), 12)))
         self._sync_summary()
-        # 有模态框弹出来时自动让出置顶（详见 _sync_topmost_with_modals）
+        # 有模态框弹出来时自动让位（详见 _sync_with_modals）
         self._modal_watch = QTimer(self)
         self._modal_watch.setInterval(200)
-        self._modal_watch.timeout.connect(self._sync_topmost_with_modals)
+        self._modal_watch.timeout.connect(self._sync_with_modals)
         self._modal_watch.start()
         # 秒完成的批次不该闪一下窗口：延时显示，期间完成就不再露面
         if delay_ms > 0:
@@ -272,42 +272,41 @@ class TransferProgressDialog(QDialog):
         self.hide()
         self.visibility_changed.emit(False)
 
-    def set_topmost(self, enabled: bool):
-        """临时让出/恢复置顶。
+    def yield_for_modal(self):
+        """有模态框要弹了：先把自己藏起来，别压在人家上面。
 
-        置顶窗口会盖住应用自己弹出的模态框（粘贴冲突的三选一、密码框、
-        错误框）——那些框是模态的，被盖住就点不到，整个操作卡在那里。
-        有模态框时必须先让出置顶。
+        为什么是「藏」而不是「临时去掉置顶」：改 window flag 会销毁并重建
+        原生窗口，在模态状态下做这件事会直接段错误（CI 上 macOS 与 Linux
+        各崩过一次）。hide/show 不碰窗口句柄，安全且效果一样明确。
         """
-        enabled = bool(enabled)
-        # 延迟调用（见 event()）落地时窗口可能已经被 deleteLater 掉了：
-        # 对已析构的 C++ 对象调 windowFlags() 会直接段错误
-        try:
-            if sip.isdeleted(self):
-                return
-        except (RuntimeError, TypeError):
+        if self._finished or self._user_hidden or not self.isVisible():
             return
-        current = bool(self.windowFlags() & Qt.WindowType.WindowStaysOnTopHint)
-        if current == enabled:
+        self._auto_hidden = True
+        self.hide()
+
+    def restore_after_modal(self):
+        """模态框关掉了：把刚才自动藏起来的窗口放回来（用户手动收起的不动）。"""
+        if not self._auto_hidden:
             return
-        was_visible = self.isVisible()
-        self.setWindowFlag(Qt.WindowType.WindowStaysOnTopHint, enabled)
-        # 改 window flag 会把窗口隐藏；本来可见的要重新显示，
-        # 用户收起过的保持收起。
-        if was_visible:
-            self.show()
+        self._auto_hidden = False
+        if self._finished or self._user_hidden:
+            return
+        self.show()
+        self.raise_()
 
-    def _sync_topmost_with_modals(self):
-        """应用里只要有模态框在，就让出置顶；模态框关掉再拿回来。
+    def _sync_with_modals(self):
+        """定时检查：应用里有模态框就让位，没有就回来。
 
-        不走 WindowBlocked / WindowUnblocked 事件：offscreen 平台压根不发
-        这两个事件（没法自动化验证），而手工伪造它们会让 Qt 处在「被阻塞
-        但没有模态窗口」的不一致状态，随后改 window flag 在 macOS 上直接
-        段错误。activeModalWidget 是 Qt 自己维护的状态，哪个平台都可靠。
+        用 activeModalWidget（Qt 自己维护的状态）而不是 WindowBlocked /
+        WindowUnblocked 事件 —— 那两个事件在 offscreen 平台压根不发，等于
+        没法自动化验证。
         """
         if self._finished:
             return
-        self.set_topmost(QApplication.activeModalWidget() is None)
+        if QApplication.activeModalWidget() is not None:
+            self.yield_for_modal()
+        else:
+            self.restore_after_modal()
 
     def reopen(self):
         """把收起的窗口叫回来并顶到最前。"""

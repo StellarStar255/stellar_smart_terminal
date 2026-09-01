@@ -18,7 +18,7 @@ logger = get_logger(__name__)
 
 
 def _suspend_topmost_job(parent):
-    """让 parent 面板上正在跑的传输窗口临时让出置顶；返回它以便还原。
+    """弹模态框前让 parent 面板上的传输窗口先藏起来；返回它以便还原。
 
     parent 不是 explorer 面板（或此刻没有传输）时返回 None。
     """
@@ -29,7 +29,7 @@ def _suspend_topmost_job(parent):
         job = getter()
         if job is None:
             return None
-        job.set_topmost(False)
+        job.yield_for_modal()
         return job
     except (RuntimeError, AttributeError):
         logger.debug("suspend topmost failed", exc_info=True)
@@ -67,16 +67,16 @@ def resolve_paste_conflict(parent, name: str,
     apply_all = QCheckBox(t("paste.apply_to_all"))
     box.setCheckBox(apply_all)
     # 传输进度窗口是置顶的，会盖住这个模态框让人点不到（按钮点不着 =
-    # 整个粘贴卡死在这里）。弹框期间先让它让出置顶，关掉再还回去。
+    # 整个粘贴卡死在这里）。弹框期间先让它藏起来，关掉再放回来。
     job = _suspend_topmost_job(parent)
     try:
         box.exec()
     finally:
         if job is not None:
             try:
-                job.set_topmost(True)
+                job.restore_after_modal()
             except RuntimeError:
-                logger.debug("restore topmost: dialog gone", exc_info=True)
+                logger.debug("restore after modal: dialog gone", exc_info=True)
     clicked = box.clickedButton()
     if clicked is cancel_btn or clicked is None:
         return None

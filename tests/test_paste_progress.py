@@ -529,47 +529,42 @@ class TestTopmostYieldsToModals(_Base):
         from PyQt6.QtCore import Qt
         return bool(dlg.windowFlags() & Qt.WindowType.WindowStaysOnTopHint)
 
-    def test_set_topmost_toggles_and_keeps_visibility(self):
-        dlg = self._dialog()
-        self.assertTrue(self._is_topmost(dlg))
-        dlg.set_topmost(False)
-        self.assertFalse(self._is_topmost(dlg))
-        self.assertTrue(dlg.isVisible(), "让出置顶不该把窗口弄没了")
-        dlg.set_topmost(True)
-        self.assertTrue(self._is_topmost(dlg))
-        self.assertTrue(dlg.isVisible())
+    def test_yields_by_hiding_not_by_touching_window_flags(self):
+        """让位靠 hide/show，绝不改 window flag。
 
-    def test_hidden_window_stays_hidden_when_toggling(self):
-        dlg = self._dialog()
-        dlg.hide_for_now()
-        dlg.set_topmost(False)
-        self.assertFalse(dlg.isVisible(), "收起过的窗口不该被切 flag 弄回来")
-        dlg.set_topmost(True)
-        self.assertFalse(dlg.isVisible())
-
-    def test_a_real_modal_makes_it_yield_topmost(self):
-        """用真的模态窗口驱动，不伪造 WindowBlocked 事件。
-
-        手工构造那个事件会让 Qt 处在「被阻塞但没有模态窗口」的不一致状态，
-        随后改 window flag 在 macOS 上直接段错误（CI 实测崩过）。用
-        QDialog.open() 开一个真模态：不进嵌套事件循环，但 Qt 会照常给
-        其它顶层窗口发 WindowBlocked。
+        改 flag 会销毁重建原生窗口，在模态状态下做这件事直接段错误
+        （CI 上 macOS 与 Linux 各崩过一次）。
         """
+        dlg = self._dialog()
+        dlg.yield_for_modal()
+        self.assertFalse(dlg.isVisible())
+        self.assertTrue(self._is_topmost(dlg), "置顶标志自始至终不该动")
+        dlg.restore_after_modal()
+        self.assertTrue(dlg.isVisible())
+        self.assertTrue(self._is_topmost(dlg))
+
+    def test_user_hidden_window_is_left_alone(self):
+        dlg = self._dialog()
+        dlg.hide_for_now()                 # 用户主动收起
+        dlg.yield_for_modal()
+        dlg.restore_after_modal()
+        self.assertFalse(dlg.isVisible(), "用户收起的窗口不该被模态框流程弹回来")
+
+    def test_modal_state_drives_it(self):
         from PyQt6.QtWidgets import QApplication, QDialog
         dlg = self._dialog()
         self.assertTrue(dlg._modal_watch.isActive(),
                         "得有个定时器盯着模态状态，不然没人去让位")
         modal = QDialog()
         modal.setModal(True)
-        modal.open()                      # 非阻塞地进入模态
+        modal.open()                       # 非阻塞地进入模态
         QApplication.processEvents()
-        dlg._sync_topmost_with_modals()   # 定时器到点时做的事
-        self.assertFalse(self._is_topmost(dlg),
-                         "模态框弹着的时候不能压在它上面")
+        dlg._sync_with_modals()            # 定时器到点时做的事
+        self.assertFalse(dlg.isVisible(), "模态框弹着的时候不能压在它上面")
         modal.close()
         QApplication.processEvents()
-        dlg._sync_topmost_with_modals()
-        self.assertTrue(self._is_topmost(dlg), "模态框关掉要把置顶拿回来")
+        dlg._sync_with_modals()
+        self.assertTrue(dlg.isVisible(), "模态框关掉要回来")
 
     def test_conflict_dialog_suspends_the_transfer_window(self):
         """弹冲突框期间传输窗口必须让出置顶，关掉再还回去。"""
@@ -577,6 +572,7 @@ class TestTopmostYieldsToModals(_Base):
         dst = _FakeRemoteSession(alias="dst")
         panel = self._panel(dst)
         job = panel._begin_transfer_job(["a", "b"], header="h")
+        job.show()          # 正常情况下是 300ms 延时显示的，这里直接显示
 
         seen = {}
         orig_box = explorer_common.QMessageBox
@@ -585,7 +581,7 @@ class TestTopmostYieldsToModals(_Base):
 
         class _Box(orig_box):
             def exec(self):               # noqa: A003 — 覆盖 Qt 接口
-                seen["topmost_during"] = outer._is_topmost(job)
+                seen["visible_during"] = job.isVisible()
                 return 0
 
         explorer_common.QMessageBox = _Box
@@ -594,9 +590,9 @@ class TestTopmostYieldsToModals(_Base):
         finally:
             explorer_common.QMessageBox = orig_box
 
-        self.assertFalse(seen["topmost_during"],
+        self.assertFalse(seen["visible_during"],
                          "模态框弹着的时候传输窗口不能还压在上面")
-        self.assertTrue(self._is_topmost(job), "关掉之后要把置顶还回来")
+        self.assertTrue(job.isVisible(), "关掉之后窗口要回来")
 
 
 class TestQueuedRowsSayWaiting(_Base):
