@@ -237,11 +237,22 @@ class TransferProgressDialog(QDialog):
             self._refresh_stage()
         self._sync_summary()
 
-    def finish_row(self, index: int, error: Optional[str] = None):
+    def finish_row(self, index: int, error: Optional[str] = None,
+                   force: bool = False):
+        """标记一行成败。
+
+        force：允许改写已经落定的行 —— 传输中按字节推进的「已完成」是乐观
+        标记，整批失败时必须能被纠正回来，否则就会出现「63 个 Done 但其实
+        一个都没传上去」。
+        """
         if not (0 <= index < len(self._states)):
             return
-        if self._states[index] in (STATE_DONE, STATE_FAILED, STATE_SKIPPED):
+        if (not force
+                and self._states[index] in (STATE_DONE, STATE_FAILED,
+                                            STATE_SKIPPED)):
             return
+        if force and index in self._errors and not error:
+            return          # 不许把已经确认的失败改回成功
         if error:
             self._states[index] = STATE_FAILED
             self._errors[index] = error

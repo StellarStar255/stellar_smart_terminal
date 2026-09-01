@@ -825,3 +825,61 @@ class TestClipboardItemNames(_Base):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class TestBothBackendsShareTheSameContract(_Base):
+    """两个后端（paramiko / ControlMaster）的传输接口签名必须一模一样。
+
+    实战事故：给 ssh_session 的 upload_files_tar 加了 should_stop，忘了
+    ControlMaster 那个同名方法 —— 用户那台主机正好走 ControlMaster，整批
+    粘贴当场 TypeError 全挂。面板是按同一套接口调两个后端的，签名分叉
+    编译期发现不了，只能靠这个测试盯着。
+    """
+
+    def test_transfer_methods_have_identical_signatures(self):
+        import inspect
+        from ssh_session import SSHSession
+        from ssh_control import ControlMasterSession
+        for name in ("upload_files_tar", "upload_dir_tar",
+                     "upload_with_progress", "download", "remote_has_tar",
+                     "remote_has_gzip"):
+            with self.subTest(method=name):
+                a = inspect.signature(getattr(SSHSession, name))
+                b = inspect.signature(getattr(ControlMasterSession, name))
+                self.assertEqual(str(a), str(b), f"{name} 两个后端签名分叉了")
+
+
+class TestFailedBatchDoesNotLookDone(_Base):
+    """整批失败时不能留下一屏「已完成」——用户看到 63 个 Done 其实一个没传。"""
+
+    def test_batch_error_marks_every_row_failed(self):
+        src_dir = Path(tempfile.mkdtemp())
+        pairs = []
+        for i in range(4):
+            f = src_dir / f"f{i}.jsonl"
+            f.write_bytes(b"x" * 100)
+            pairs.append((str(f), f"/dst/f{i}.jsonl"))
+
+        class _BoomSession(_FakeRemoteSession):
+            def remote_has_tar(self):
+                return True
+
+            def upload_files_tar(self, items, remote_dir, total_bytes=0,
+                                 cb=None, should_stop=None):
+                raise TypeError("upload_files_tar() takes 5 but 6 were given")
+
+        dst = _BoomSession(alias="dst")
+        panel = self._panel(dst)
+        job = panel._begin_transfer_job([f"f{i}" for i in range(4)], header="h")
+
+        # 模拟等待期间「乐观」按字节标完成（真实场景里就是这么标出来的）
+        def fake_wait(futures, label, on_bytes=None, **kw):
+            if on_bytes is not None:
+                on_bytes(400)          # 全部字节到位 → 前几行会被标 Done
+        panel._wait_future_with_progress = fake_wait
+
+        errors = panel._upload_pairs(dst, pairs, "/dst", rows=[0, 1, 2, 3])
+
+        self.assertTrue(errors, "整批失败要有错误")
+        self.assertEqual(job.row_states(), ["failed"] * 4,
+                         "整批失败时每一行都得是失败，不能留着乐观的已完成")

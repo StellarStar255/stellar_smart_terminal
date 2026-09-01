@@ -39,7 +39,8 @@ from typing import Callable, Optional
 from PyQt6.QtCore import QObject, pyqtSignal
 
 from app_logging import get_logger
-from ssh_session import HostConfig, RemoteEntry
+from ssh_session import (HostConfig, RemoteEntry,
+                         _CountingReader, _worth_compressing)
 
 logger = get_logger(__name__)
 
@@ -480,6 +481,7 @@ class ControlMasterSession(QObject):
         self._cache_ttl = 30.0
         self._cache_lock = threading.Lock()
         self._remote_has_tar: Optional[bool] = None
+        self._remote_has_gzip: Optional[bool] = None
         # 在跑的子进程：abort() 要能立刻把它们杀掉（取消卡住的传输）
         self._procs: set = set()
         self._procs_lock = threading.Lock()
@@ -821,6 +823,17 @@ class ControlMasterSession(QObject):
             self._remote_has_tar = False
         return self._remote_has_tar
 
+    def remote_has_gzip(self) -> bool:
+        """远端有没有 gzip —— 有就把 tar 流压着传（文本能省 5-10 倍字节）。"""
+        if self._remote_has_gzip is not None:
+            return self._remote_has_gzip
+        try:
+            self._run("command -v gzip", timeout=20)
+            self._remote_has_gzip = True
+        except Exception:
+            self._remote_has_gzip = False
+        return self._remote_has_gzip
+
     def upload_dir_tar(self, local_dir: str, remote_dir: str,
                        total_bytes: int = 0, progress_cb=None):
         """整目录上传快路径：本地打 tar 流 → 主连接 → 远端解包。
@@ -828,19 +841,29 @@ class ControlMasterSession(QObject):
         逐文件上传每个文件都要起一条 ssh 进程，几百个小文件能拖上几分钟；
         tar 流没有按文件的往返，通常快 1-2 个数量级。
         """
-        self._stream_tar(remote_dir, lambda tf: tf.add(local_dir, arcname="."),
-                         total_bytes, progress_cb)
+        self._stream_tar(remote_dir,
+                         lambda tf, _note: tf.add(local_dir, arcname="."),
+                         total_bytes, progress_cb,
+                         compress=self.remote_has_gzip())
 
     def upload_files_tar(self, local_paths: list, remote_dir: str,
-                         total_bytes: int = 0, progress_cb=None) -> list:
+                         total_bytes: int = 0, progress_cb=None,
+                         should_stop=None) -> list:
         """一批文件/目录打成一条 tar 流上传（arcname 取 basename）。
 
         返回读不了的条目 [(路径, 原因)] —— 单个坏文件不该让整批失败。
+
+        should_stop()：每个文件开始前问一次，True 就在**两个文件之间**停下来
+        正常收尾，远端解出来的都是完整文件（用户点「取消」走这条，而不是把
+        连接掐断留半截文件）。签名必须与 ssh_session.SSHSession 完全一致 ——
+        面板是按同一套接口调两个后端的。
         """
         skipped: list = []
 
-        def _add(tf):
+        def _add(tf, note_raw):
             for item in local_paths:
+                if should_stop is not None and should_stop():
+                    break
                 # 每项可以是路径，也可以是 (路径, 归档名) —— 粘贴时目标可能被
                 # 改过名（"x (2).txt"），归档名就得用改过的那个
                 if isinstance(item, (tuple, list)):
@@ -848,16 +871,25 @@ class ControlMasterSession(QObject):
                 else:
                     p, arc = item, os.path.basename(str(item).rstrip(os.sep))
                 try:
-                    tf.add(p, arcname=arc)
+                    info = tf.gettarinfo(p, arcname=arc)
+                    if info is not None and info.isreg():
+                        # 自己读文件体：压缩之后线上字节 ≠ 文件字节，
+                        # 进度必须按原始字节算
+                        with open(p, "rb") as fh:
+                            tf.addfile(info, _CountingReader(fh, note_raw))
+                    else:
+                        tf.add(p, arcname=arc)   # 目录 / 软链：没有数据体
                 except Exception as e:      # noqa: BLE001 — 逐个跳过并回报
                     logger.warning("upload_files_tar: skipping %s: %s", p, e)
                     skipped.append((p, str(e)))
 
-        self._stream_tar(remote_dir, _add, total_bytes, progress_cb)
+        self._stream_tar(remote_dir, _add, total_bytes, progress_cb,
+                         compress=_worth_compressing(local_paths)
+                         and self.remote_has_gzip())
         return skipped
 
     def _stream_tar(self, remote_dir: str, add_entries, total_bytes: int = 0,
-                    progress_cb=None):
+                    progress_cb=None, compress: bool = False):
         """把 add_entries 塞进 tarfile 的内容经主连接灌给远端 tar 解包。
 
         用 Python 的 tarfile 而不是本机 tar 命令：进度按真实送出的字节算，
@@ -867,10 +899,23 @@ class ControlMasterSession(QObject):
 
         q_remote = _qpath(remote_dir)
         with self._lock:
+            flags = "-xzpf" if compress else "-xpf"
             proc = self._spawn(
-                f"mkdir -p {q_remote} && tar -xpf - -C {q_remote}",
+                f"mkdir -p {q_remote} && tar {flags} - -C {q_remote}",
                 stdin=subprocess.PIPE, stdout=subprocess.DEVNULL)
             sent = {"n": 0}
+            # 压缩后线上字节 ≠ 文件字节，进度按原始字节算（否则条子提前
+            # 跑满、逐文件定位全错）
+            raw = {"n": 0, "used": False}
+
+            def note_raw(n):
+                raw["used"] = True
+                raw["n"] += n
+                if progress_cb is not None:
+                    done = raw["n"]
+                    if total_bytes:
+                        done = min(done, total_bytes)
+                    progress_cb(done, total_bytes)
 
             class _StdinWriter:
                 """tarfile 的写出 → ssh stdin，顺带计数/回调。"""
@@ -878,7 +923,7 @@ class ControlMasterSession(QObject):
                 def write(self, data):
                     proc.stdin.write(data)
                     sent["n"] += len(data)
-                    if progress_cb is not None:
+                    if progress_cb is not None and not raw["used"]:
                         done = sent["n"]
                         if total_bytes:
                             done = min(done, total_bytes)
@@ -890,10 +935,11 @@ class ControlMasterSession(QObject):
 
             try:
                 # bufsize 调大：攒到 256KB 再写一次，减少系统调用
-                tf = tarfile.open(mode="w|", fileobj=_StdinWriter(),
-                                  bufsize=_CHUNK)
+                tf = tarfile.open(mode="w|gz" if compress else "w|",
+                                  fileobj=_StdinWriter(), bufsize=_CHUNK,
+                                  **({"compresslevel": 1} if compress else {}))
                 try:
-                    add_entries(tf)
+                    add_entries(tf, note_raw)
                 finally:
                     tf.close()
                 proc.stdin.close()

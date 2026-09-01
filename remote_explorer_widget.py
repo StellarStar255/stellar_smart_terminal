@@ -4267,11 +4267,16 @@ class RemoteExplorerPanel(QWidget, explorer_common.TransferJobHost):
                         progress.setLabelText(f"{label} · {detail}")
                 if progress is None:
                     if on_bytes is not None:
-                        # 调用方自己按累计字节维护行状态（哪个文件在传、
-                        # 传了多少）；这里只把整批统计写到阶段行
+                        # 调用方自己按累计字节维护行状态（哪个文件在传、传了
+                        # 多少）；这里只把整批统计写到阶段行
                         if refresh_text:
                             job.set_stage(f"{label} · {detail}")
-                        on_bytes(cur_bytes)
+                        # 只在「还在传」的时候推进行状态：future 完成那一跳会
+                        # 把字节计数直接顶到总量，**失败时也一样** —— 拿它标
+                        # 「已完成」就会出现「1 秒 63 个 Done，其实一个没传」。
+                        # 最终成败一律由等待结束后的收尾逻辑说了算。
+                        if done["n"] < len(futures):
+                            on_bytes(cur_bytes)
                     else:
                         # 统一窗口：进度条按「已完成条目 + 当前条目比例」推进，
                         # 速率/字节写进当前那一行的状态列
@@ -4946,6 +4951,11 @@ class RemoteExplorerPanel(QWidget, explorer_common.TransferJobHost):
             except Exception as e:      # noqa: BLE001 — 整批失败
                 errors.append(str(e))
                 failed_src = {src: str(e) for src, _dst in pairs}
+                # 整批挂了：把按字节乐观标成「已完成」的行全部纠正回失败
+                if job is not None:
+                    for i in range(len(pairs)):
+                        if i in row_of:
+                            job.finish_row(row_of[i], str(e), force=True)
             for i, (src, _dst) in enumerate(pairs):
                 settle(i, failed_src.get(src))
             return errors
