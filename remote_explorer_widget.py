@@ -9,6 +9,7 @@ UI 有两个状态：
 的模式（透明对编辑器），UI 这边通过 file_open_requested 信号把
 (host_config, remote_path, local_temp_path) 抛给主窗口。
 """
+import bisect
 import os
 import posixpath
 import tempfile
@@ -58,6 +59,24 @@ _ROLE_REQ_GEN = Qt.ItemDataRole.UserRole + 2
 # 的最大值，条子才会随字节平滑推进；否则刻度只能是「完成的任务数」，
 # 单任务传输（整目录 tar 流 / 单个大文件）会全程停在 0 直到结束才跳满。
 _BYTE_BAR_SCALE = 1000
+
+
+def _stream_position(prefix: list, sizes: list, cur_bytes: int) -> tuple:
+    """按「整批已传字节」反推当前正在传第几个文件、这个文件传了多少。
+
+    批量上传（tar 单流，或单 worker 上串行的逐文件）严格按给定顺序推进，
+    所以累计字节能定位到具体的文件——否则列表里 64 行只能都显示整批的
+    同一个数字。tar 的头部/补齐（每个文件 ≤1KB）会让位置略微超前，
+    对显示无影响。
+
+    prefix[i] 是第 i 个文件的起始累计字节。返回 (下标, 该文件已传字节)。
+    """
+    if not sizes:
+        return (0, 0)
+    idx = bisect.bisect_right(prefix, max(0, cur_bytes)) - 1
+    idx = max(0, min(idx, len(sizes) - 1))
+    done = min(sizes[idx] or 0, max(0, cur_bytes - prefix[idx]))
+    return (idx, done)
 
 
 class _TransferRateTracker:
@@ -4063,7 +4082,8 @@ class RemoteExplorerPanel(QWidget, explorer_common.TransferJobHost):
                                     tolerate_errors: bool = False,
                                     sizes: Optional[list] = None,
                                     live: Optional[dict] = None,
-                                    abort_sessions: Optional[list] = None):
+                                    abort_sessions: Optional[list] = None,
+                                    on_bytes=None):
         """阻塞等待 futures 完成，跑事件循环避免 UI 卡死。
 
         sizes：与 futures 一一对应的字节数（未知填 0/None）。给出时进度框
@@ -4183,9 +4203,16 @@ class RemoteExplorerPanel(QWidget, explorer_common.TransferJobHost):
                     if progress is not None:
                         progress.setLabelText(f"{label} · {detail}")
                 if progress is None:
-                    # 统一窗口：进度条按「已完成条目 + 当前条目比例」推进，
-                    # 速率/字节写进当前那一行的状态列
-                    job.set_stage_progress(frac, detail)
+                    if on_bytes is not None:
+                        # 调用方自己按累计字节维护行状态（哪个文件在传、
+                        # 传了多少）；这里只把整批统计写到阶段行
+                        if refresh_text:
+                            job.set_stage(f"{label} · {detail}")
+                        on_bytes(cur_bytes)
+                    else:
+                        # 统一窗口：进度条按「已完成条目 + 当前条目比例」推进，
+                        # 速率/字节写进当前那一行的状态列
+                        job.set_stage_progress(frac, detail)
                 if done["n"] >= len(futures):
                     timer.stop()
                     loop.quit()
@@ -4804,21 +4831,45 @@ class RemoteExplorerPanel(QWidget, explorer_common.TransferJobHost):
         live_cb = self._make_live_progress_cb(live)
         label = t("remote.pasting_progress", dst=target_dir)
         job = self._active_transfer_job() if rows else None
-        if job is not None:
-            job.set_active_rows(list(rows))
         row_of = dict(zip(range(len(pairs)), rows or []))
 
         def settle(idx: int, error: Optional[str] = None):
             if idx in row_of:
                 self._finish_job_row(job, row_of[idx], error)
 
+        # 整批按顺序串行推进 → 用累计字节定位「当前在传第几个」，
+        # 传过去的标完成、当前那个显示自己的字节数，而不是 64 行都写
+        # 整批的同一个数字。
+        prefix = []
+        acc = 0
+        for s in sizes:
+            prefix.append(acc)
+            acc += s or 0
+        cursor = {"i": -1}
+
+        def on_bytes(cur_bytes: int):
+            if job is None:
+                return
+            idx, done_in_file = _stream_position(prefix, sizes, cur_bytes)
+            if idx != cursor["i"]:
+                for j in range(max(0, cursor["i"]), idx):
+                    settle(j)
+                cursor["i"] = idx
+                if idx in row_of:
+                    job.set_active_rows([row_of[idx]])
+            size_i = sizes[idx] or 0
+            frac = (done_in_file / size_i) if size_i else 0.0
+            job.set_stage_progress(
+                frac, f"{self._fmt_size(done_in_file)} / {self._fmt_size(size_i)}")
+
+        job_cb = on_bytes if job is not None else None
         if len(pairs) >= self._TAR_BATCH_MIN and self._remote_supports_tar(sess):
             items = [(src, posixpath.basename(dst)) for src, dst in pairs]
             fut = sess.submit(sess.upload_files_tar, items, target_dir,
                               sum(sizes), live_cb)
             self._wait_future_with_progress(
                 [fut], label, tolerate_errors=True, sizes=[sum(sizes)],
-                live=live, abort_sessions=[sess])
+                live=live, abort_sessions=[sess], on_bytes=job_cb)
             failed_src = {}
             try:
                 for p_, why in (fut.result() or []):
@@ -4837,7 +4888,7 @@ class RemoteExplorerPanel(QWidget, explorer_common.TransferJobHost):
         # tolerate_errors：逐个 future 自己收错，才能把失败落到对应的那一行
         self._wait_future_with_progress(
             futures, label, tolerate_errors=True, sizes=sizes, live=live,
-            abort_sessions=[sess])
+            abort_sessions=[sess], on_bytes=job_cb)
         for i, fut in enumerate(futures):
             err = None
             try:

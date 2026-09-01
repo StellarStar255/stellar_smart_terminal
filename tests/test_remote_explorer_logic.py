@@ -718,13 +718,13 @@ class TestClipboardPasteBatch(_Base):
         orig_wait = p._wait_future_with_progress
 
         def spy_wait(futures, label, tolerate_errors=False, sizes=None,
-                     live=None, abort_sessions=None):
+                     live=None, abort_sessions=None, on_bytes=None):
             if sizes is not None:
                 progress_calls.append((list(futures), list(sizes)))
                 return  # futures 已即刻完成，无需真跑事件循环
             return orig_wait(futures, label, tolerate_errors=tolerate_errors,
                              sizes=sizes, live=live,
-                             abort_sessions=abort_sessions)
+                             abort_sessions=abort_sessions, on_bytes=on_bytes)
 
         p._wait_future_with_progress = spy_wait
         p._populate_tree_root = lambda: None

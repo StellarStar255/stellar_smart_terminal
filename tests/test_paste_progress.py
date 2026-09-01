@@ -345,6 +345,108 @@ class TestLocalExplorerPasteWindow(_Base):
         self.assertEqual(self.warnings, [])
 
 
+class TestPerRowBytes(_Base):
+    """整批的字节数不能写进每一行 —— 用户看到 64 行一模一样的
+    "129.0 MB / 162.8 MB · 3.1 MB/s"。行上要么是它自己的进度，要么是
+    「进行中…」，整批统计归到阶段行。"""
+
+    def _dialog(self, rows=("a", "b", "c")):
+        from transfer_progress import TransferProgressDialog
+        return TransferProgressDialog(list(rows), delay_ms=0,
+                                      header="正在粘贴到 /dst…")
+
+    def test_batch_detail_never_lands_on_every_row(self):
+        from i18n import t
+        dlg = self._dialog()
+        dlg.set_active_rows([0, 1, 2])
+        dlg.set_stage_progress(0.5, "129.0 MB / 162.8 MB · 3.1 MB/s")
+        rows = [dlg.row_status_text(i) for i in range(3)]
+        self.assertEqual(rows, [t("transfer.state_running")] * 3)
+        self.assertIn("129.0 MB", dlg.stage_text())
+
+    def test_single_active_row_keeps_its_own_detail(self):
+        dlg = self._dialog()
+        dlg.set_active_rows([1])
+        dlg.set_stage_progress(0.5, "2.0 MB / 4.0 MB")
+        self.assertEqual(dlg.row_status_text(1), "2.0 MB / 4.0 MB")
+
+    def test_stage_line_does_not_repeat_the_header(self):
+        dlg = self._dialog()
+        dlg.set_stage("正在粘贴到 /dst…")          # 与 header 一字不差
+        self.assertEqual(dlg.stage_text(), "")
+        dlg.set_stage("正在下载 /src/a.jsonl…")     # 不同的阶段照常显示
+        self.assertIn("a.jsonl", dlg.stage_text())
+
+
+class TestStreamPosition(_Base):
+    """按累计字节反推「正在传第几个文件」。"""
+
+    def _pos(self, sizes, cur):
+        from remote_explorer_widget import _stream_position
+        prefix, acc = [], 0
+        for s in sizes:
+            prefix.append(acc)
+            acc += s
+        return _stream_position(prefix, sizes, cur)
+
+    def test_maps_bytes_to_the_file_being_written(self):
+        sizes = [100, 200, 50]
+        self.assertEqual(self._pos(sizes, 0), (0, 0))
+        self.assertEqual(self._pos(sizes, 60), (0, 60))
+        self.assertEqual(self._pos(sizes, 100), (1, 0))
+        self.assertEqual(self._pos(sizes, 250), (1, 150))
+        self.assertEqual(self._pos(sizes, 300), (2, 0))
+
+    def test_overshoot_and_empty_files_stay_in_range(self):
+        # tar 头部/补齐会让累计字节略超总量；空文件不能把游标卡住
+        self.assertEqual(self._pos([100, 200, 50], 10_000), (2, 50))
+        # 空文件不占字节：走到 100 时它已经过去了，游标停在下一个
+        self.assertEqual(self._pos([100, 0, 50], 100), (2, 0))
+        self.assertEqual(self._pos([], 0), (0, 0))
+
+
+class TestBatchRowsAdvance(_Base):
+    """整批上传时行状态要跟着字节往前走：传过去的标完成、当前那个显示
+    自己的字节、后面的还是等待中。"""
+
+    def test_rows_advance_with_the_stream(self):
+        from i18n import t
+        src_dir = Path(tempfile.mkdtemp())
+        pairs = []
+        for i, n in enumerate((100, 200, 50)):
+            f = src_dir / f"f{i}.bin"
+            f.write_bytes(b"x" * n)
+            pairs.append((str(f), f"/dst/f{i}.bin"))
+
+        dst = _FakeRemoteSession(alias="dst")
+        panel = self._panel(dst)
+        job = self.explorer_common.TransferProgressDialog(
+            ["f0.bin", "f1.bin", "f2.bin"], parent=panel, delay_ms=0,
+            header="正在粘贴到 /dst…")
+        panel._transfer_job = job
+
+        # 用假的等待把 on_bytes 推到「第二个文件传了一半」，并在那一刻取快照
+        # （真正传完后所有行都会落成「已完成」，看不到中途状态）
+        snap = {}
+
+        def fake_wait(futures, label, on_bytes=None, **kw):
+            if on_bytes is not None:
+                on_bytes(0)
+                on_bytes(180)      # 100 + 80 → 第 1 个完成，第 2 个 80/200
+                snap["states"] = job.row_states()
+                snap["rows"] = [job.row_status_text(i) for i in range(3)]
+        panel._wait_future_with_progress = fake_wait
+
+        panel._upload_pairs(dst, pairs, "/dst", rows=[0, 1, 2])
+
+        self.assertEqual(snap["states"][0], "done")
+        self.assertIn("80 B / 200 B", snap["rows"][1])
+        self.assertEqual(snap["rows"][2], t("transfer.state_pending"))
+        # 三行的状态互不相同 —— 不是整批的同一个数字广播出去的
+        self.assertEqual(len(set(snap["rows"])), 3)
+        self.assertEqual(job.row_states(), ["done"] * 3)   # 传完全部落地
+
+
 class TestDialogLifecycle(_Base):
     """窗口自身的收尾规矩：全绿自动关，有失败留窗，且永远关得掉。"""
 

@@ -97,7 +97,10 @@ class TransferProgressDialog(QDialog):
         layout.setContentsMargins(14, 12, 14, 12)
         layout.setSpacing(8)
 
-        self._header = ElidedLabel(header)
+        self._header_text = header or ""
+        self._stage_base = ""      # 当前阶段说明
+        self._aggregate = ""       # 整批的字节/速率（多行同时在传时放这儿）
+        self._header = ElidedLabel(self._header_text)
         layout.addWidget(self._header)
 
         self._stage = ElidedLabel("")
@@ -151,11 +154,14 @@ class TransferProgressDialog(QDialog):
     # ---------- 状态推进 ----------
 
     def set_header(self, text: str):
-        self._header.setText(text)
+        self._header_text = text or ""
+        self._header.setText(self._header_text)
+        self._refresh_stage()
 
     def set_stage(self, text: str):
         """当前阶段说明（"正在下载 /a/b…"）。"""
-        self._stage.setText(text)
+        self._stage_base = text or ""
+        self._refresh_stage()
 
     def set_active_rows(self, indices, detail: str = ""):
         """把这些条目标记为进行中，并把「当前批完成比例」清零。"""
@@ -167,13 +173,29 @@ class TransferProgressDialog(QDialog):
             self._set_status_text(i, detail or t("transfer.state_running"))
         self._sync_summary()
 
+    def set_row_detail(self, index: int, text: str):
+        """给某一行单独写状态文案（只对进行中的行生效）。"""
+        if 0 <= index < len(self._states) and self._states[index] == STATE_RUNNING:
+            self._set_status_text(index, text)
+
     def set_stage_progress(self, fraction: float, detail: str = ""):
-        """当前活动条目的完成比例 0..1；detail 为速率/字节等短文案。"""
+        """当前活动条目的完成比例 0..1；detail 为速率/字节等短文案。
+
+        detail 只有在「正好一行在传」时才写进那一行——它描述的是那一个
+        条目。多行同时在传（如一条 tar 流里的一整批）时这个数字是整批的
+        总量，写进每一行就成了 64 行一模一样的 "129 MB / 162.8 MB"；
+        这种情况下它归到阶段行，行上只写「进行中…」。
+        """
         self._frac = min(1.0, max(0.0, float(fraction)))
         if detail:
-            for i in self._active:
-                if self._states[i] == STATE_RUNNING:
-                    self._set_status_text(i, detail)
+            running = [i for i in self._active
+                       if self._states[i] == STATE_RUNNING]
+            if len(running) == 1:
+                self._set_status_text(running[0], detail)
+                self._aggregate = ""
+            else:
+                self._aggregate = detail
+            self._refresh_stage()
         self._sync_summary()
 
     def finish_row(self, index: int, error: Optional[str] = None):
@@ -239,6 +261,9 @@ class TransferProgressDialog(QDialog):
     def row_states(self) -> list:
         return list(self._states)
 
+    def stage_text(self) -> str:
+        return self._stage.text()
+
     def row_status_text(self, index: int) -> str:
         item = self._tree.topLevelItem(index)
         return item.text(1) if item is not None else ""
@@ -251,6 +276,13 @@ class TransferProgressDialog(QDialog):
     def _show_if_running(self):
         if not self._finished:
             self.show()
+
+    def _refresh_stage(self):
+        """阶段行 = 阶段说明 + 整批统计；与顶部那句完全相同就不重复占一行。"""
+        base = self._stage_base
+        if base and base == self._header_text:
+            base = ""
+        self._stage.setText(" · ".join(p for p in (base, self._aggregate) if p))
 
     def _set_status_text(self, index: int, text: str):
         item = self._tree.topLevelItem(index)
