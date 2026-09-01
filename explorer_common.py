@@ -17,6 +17,25 @@ from app_logging import get_logger
 logger = get_logger(__name__)
 
 
+def _suspend_topmost_job(parent):
+    """让 parent 面板上正在跑的传输窗口临时让出置顶；返回它以便还原。
+
+    parent 不是 explorer 面板（或此刻没有传输）时返回 None。
+    """
+    getter = getattr(parent, "_active_transfer_job", None)
+    if getter is None:
+        return None
+    try:
+        job = getter()
+        if job is None:
+            return None
+        job.set_topmost(False)
+        return job
+    except (RuntimeError, AttributeError):
+        logger.debug("suspend topmost failed", exc_info=True)
+        return None
+
+
 def resolve_paste_conflict(parent, name: str,
                            sticky: Optional[str]) -> Optional[Tuple[str, bool]]:
     """粘贴目标已存在时的三选一对话框（覆盖 / 保留二者 / 取消）。
@@ -47,7 +66,17 @@ def resolve_paste_conflict(parent, name: str,
     box.setDefaultButton(keep_btn)
     apply_all = QCheckBox(t("paste.apply_to_all"))
     box.setCheckBox(apply_all)
-    box.exec()
+    # 传输进度窗口是置顶的，会盖住这个模态框让人点不到（按钮点不着 =
+    # 整个粘贴卡死在这里）。弹框期间先让它让出置顶，关掉再还回去。
+    job = _suspend_topmost_job(parent)
+    try:
+        box.exec()
+    finally:
+        if job is not None:
+            try:
+                job.set_topmost(True)
+            except RuntimeError:
+                logger.debug("restore topmost: dialog gone", exc_info=True)
     clicked = box.clickedButton()
     if clicked is cancel_btn or clicked is None:
         return None

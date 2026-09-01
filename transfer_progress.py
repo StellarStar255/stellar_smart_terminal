@@ -18,7 +18,7 @@ from PyQt6.QtWidgets import (
     QDialog, QVBoxLayout, QHBoxLayout, QLabel, QProgressBar, QPushButton,
     QTreeWidget, QTreeWidgetItem, QHeaderView, QSizePolicy, QAbstractItemView,
 )
-from PyQt6.QtCore import Qt, pyqtSignal, QTimer
+from PyQt6.QtCore import Qt, QEvent, pyqtSignal, QTimer
 from PyQt6.QtGui import QPainter, QFontMetrics, QColor, QPalette
 
 from i18n import t
@@ -247,6 +247,38 @@ class TransferProgressDialog(QDialog):
         self._user_hidden = True
         self.hide()
         self.visibility_changed.emit(False)
+
+    def set_topmost(self, enabled: bool):
+        """临时让出/恢复置顶。
+
+        置顶窗口会盖住应用自己弹出的模态框（粘贴冲突的三选一、密码框、
+        错误框）——那些框是模态的，被盖住就点不到，整个操作卡在那里。
+        有模态框时必须先让出置顶。
+        """
+        enabled = bool(enabled)
+        current = bool(self.windowFlags() & Qt.WindowType.WindowStaysOnTopHint)
+        if current == enabled:
+            return
+        was_visible = self.isVisible()
+        self.setWindowFlag(Qt.WindowType.WindowStaysOnTopHint, enabled)
+        # 改 window flag 会把窗口隐藏；本来可见的要重新显示，
+        # 用户收起过的保持收起。
+        if was_visible:
+            self.show()
+
+    def event(self, ev):                   # noqa: N802 — Qt 回调
+        """被模态框挡住时自动让出置顶，模态框关掉再拿回来。
+
+        Qt 在窗口被模态框阻塞/解除时会发 WindowBlocked / WindowUnblocked，
+        比在每个弹框的调用点手工处理可靠（密码框、错误框都覆盖到）。
+        改 flag 会重建窗口，不能在事件处理里直接做，推迟到事件循环下一跳。
+        """
+        et = ev.type()
+        if et == QEvent.Type.WindowBlocked:
+            QTimer.singleShot(0, lambda: self.set_topmost(False))
+        elif et == QEvent.Type.WindowUnblocked and not self._finished:
+            QTimer.singleShot(0, lambda: self.set_topmost(True))
+        return super().event(ev)
 
     def reopen(self):
         """把收起的窗口叫回来并顶到最前。"""

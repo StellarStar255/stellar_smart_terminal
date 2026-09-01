@@ -517,6 +517,75 @@ class TestHideAndReopen(_Base):
         self.assertTrue(panel._transfer_chip.isHidden())
 
 
+class TestTopmostYieldsToModals(_Base):
+    """置顶窗口不能盖住应用自己的模态框（冲突框/密码框），
+    否则按钮点不到、整个粘贴卡死。"""
+
+    def _dialog(self, rows=("a", "b")):
+        from transfer_progress import TransferProgressDialog
+        return TransferProgressDialog(list(rows), delay_ms=0)
+
+    def _is_topmost(self, dlg):
+        from PyQt6.QtCore import Qt
+        return bool(dlg.windowFlags() & Qt.WindowType.WindowStaysOnTopHint)
+
+    def test_set_topmost_toggles_and_keeps_visibility(self):
+        dlg = self._dialog()
+        self.assertTrue(self._is_topmost(dlg))
+        dlg.set_topmost(False)
+        self.assertFalse(self._is_topmost(dlg))
+        self.assertTrue(dlg.isVisible(), "让出置顶不该把窗口弄没了")
+        dlg.set_topmost(True)
+        self.assertTrue(self._is_topmost(dlg))
+        self.assertTrue(dlg.isVisible())
+
+    def test_hidden_window_stays_hidden_when_toggling(self):
+        dlg = self._dialog()
+        dlg.hide_for_now()
+        dlg.set_topmost(False)
+        self.assertFalse(dlg.isVisible(), "收起过的窗口不该被切 flag 弄回来")
+        dlg.set_topmost(True)
+        self.assertFalse(dlg.isVisible())
+
+    def test_window_blocked_event_yields_topmost(self):
+        from PyQt6.QtCore import QEvent
+        from PyQt6.QtWidgets import QApplication
+        dlg = self._dialog()
+        dlg.event(QEvent(QEvent.Type.WindowBlocked))
+        QApplication.processEvents()          # 让 singleShot(0) 跑起来
+        self.assertFalse(self._is_topmost(dlg))
+        dlg.event(QEvent(QEvent.Type.WindowUnblocked))
+        QApplication.processEvents()
+        self.assertTrue(self._is_topmost(dlg))
+
+    def test_conflict_dialog_suspends_the_transfer_window(self):
+        """弹冲突框期间传输窗口必须让出置顶，关掉再还回去。"""
+        import explorer_common
+        dst = _FakeRemoteSession(alias="dst")
+        panel = self._panel(dst)
+        job = panel._begin_transfer_job(["a", "b"], header="h")
+
+        seen = {}
+        orig_box = explorer_common.QMessageBox
+
+        outer = self
+
+        class _Box(orig_box):
+            def exec(self):               # noqa: A003 — 覆盖 Qt 接口
+                seen["topmost_during"] = outer._is_topmost(job)
+                return 0
+
+        explorer_common.QMessageBox = _Box
+        try:
+            explorer_common.resolve_paste_conflict(panel, "a.txt", None)
+        finally:
+            explorer_common.QMessageBox = orig_box
+
+        self.assertFalse(seen["topmost_during"],
+                         "模态框弹着的时候传输窗口不能还压在上面")
+        self.assertTrue(self._is_topmost(job), "关掉之后要把置顶还回来")
+
+
 class TestDialogLifecycle(_Base):
     """窗口自身的收尾规矩：全绿自动关，有失败留窗，且永远关得掉。"""
 
