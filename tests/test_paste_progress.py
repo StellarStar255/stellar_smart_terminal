@@ -232,6 +232,42 @@ class TestUnifiedPasteWindow(_Base):
                            "取消要真的 abort 会话，卡住的传输才会立刻失败")
 
 
+class TestOverwriteConflictStaysInTheWindow(_Base):
+    """目标目录全是同名文件、用户选「覆盖并应用到剩余」时的删除阶段。
+
+    这条最容易漏：每个文件覆盖前要 stat + remove 两次远端调用，标签是
+    单个文件路径（用户截图里就是这种「Pasting into <某个文件>」），
+    以前每一次都弹一个框。
+    """
+
+    def test_overwrite_deletes_do_not_pop_dialogs(self):
+        class _Entry:
+            def __init__(self, name):
+                self.name = name
+
+        src_dir = Path(tempfile.mkdtemp())
+        paths = []
+        for i in range(5):
+            f = src_dir / f"f{i}.jsonl"
+            f.write_bytes(b"x" * (i + 1))
+            paths.append(str(f))
+
+        dst = _FakeRemoteSession(
+            alias="dst", entries=[_Entry(os.path.basename(p)) for p in paths])
+        dst.remove = lambda path: None
+        dst.remove_tree = lambda path: None
+        panel = self._panel(dst)
+        # 用户在第一次冲突框里选「覆盖」并勾了「应用到剩余」
+        panel._resolve_paste_conflict = lambda name, sticky: ("overwrite", True)
+
+        self._paste(panel, [("local", p) for p in paths])
+
+        self.assertEqual(self.popups, [],
+                         "覆盖前的 stat/remove 也该画进统一窗口，不许弹框")
+        self.assertEqual(len(self.jobs), 1)
+        self.assertEqual(self.jobs[0].final_status, ["done"] * 5)
+
+
 class TestSingleItemKeepsSimpleDialog(_Base):
     def test_single_item_paste_still_uses_plain_progress_dialog(self):
         """只粘一个条目时列表窗反而啰嗦 —— 保持原来的单进度框。"""
