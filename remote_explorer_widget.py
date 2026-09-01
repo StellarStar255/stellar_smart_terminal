@@ -1284,6 +1284,8 @@ class RemoteExplorerPanel(QWidget, explorer_common.TransferJobHost):
         self._auto_refresh_timer.setInterval(10_000)
         self._auto_refresh_timer.timeout.connect(self._auto_refresh_tick)
         self._auto_refresh_pending: int = 0  # 本轮还在 in-flight 的 listdir 个数
+        # 顶层 listdir 的代次：慢结果后到时用它作废，别盖掉新目录的内容
+        self._top_level_gen: int = 0
         self._auto_refresh_fingerprints: dict[str, frozenset] = {}
         # 主连接空闲看门狗（只对设了保持时长的 MFA 会话生效）：每分钟看一眼，
         # 空闲超时就主动断开，避免一条已认证的堡垒机连接无限期挂着。
@@ -2479,9 +2481,15 @@ class RemoteExplorerPanel(QWidget, explorer_common.TransferJobHost):
         self._touch_activity()   # 导航/刷新算用户活动（自动刷新轮询不算）
         # 整树重建 → 旧的自动刷新指纹全部失效，等 _apply_top_level 后重新基线
         self._auto_refresh_fingerprints.clear()
-        self._tree.clear()
         if self._session is None:
+            self._tree.clear()
             return
+        # 注意：这里**不能**先把树清空。listdir 排在会话那条单 worker 线程上，
+        # 正在传一批大文件时要等好几分钟才轮得到它 —— 先清空就等于整个传输
+        # 期间左边一片空白、什么都看不了。旧内容留着，等结果到了由
+        # _apply_top_level 一次性换掉。
+        self._top_level_gen += 1
+        gen = self._top_level_gen
         # path 已变 → 更新 ★/☆ 指示
         self._update_bookmark_btn_state()
         sess = self._session
@@ -2494,6 +2502,10 @@ class RemoteExplorerPanel(QWidget, explorer_common.TransferJobHost):
             except Exception as e:
                 # 在 SSH 工作线程里只能通过信号回 UI 线程，QTimer 在这里不灵
                 self._error_signal.emit(str(e))
+                return
+            # 其间又发起过新的 populate（换目录/再刷新）→ 旧结果作废，
+            # 否则慢的那个后到会把新目录的内容盖掉
+            if gen != self._top_level_gen:
                 return
             self._top_level_ready.emit(entries)
         fut.add_done_callback(on_done)
@@ -2829,6 +2841,10 @@ class RemoteExplorerPanel(QWidget, explorer_common.TransferJobHost):
             return  # 看不见的 panel 不浪费带宽
         if self._auto_refresh_pending > 0:
             return  # 上一轮还没回来，跳过这次
+        if self._active_transfer_job() is not None:
+            # 正在传一批文件：worker 线程被占满，poll 出来的 listdir 只会排
+            # 在传输后面，还会把正在写入的目录反复重排。传完那一下会刷新。
+            return
         targets = self._collect_auto_refresh_paths()
         if not targets:
             return
@@ -3831,9 +3847,12 @@ class RemoteExplorerPanel(QWidget, explorer_common.TransferJobHost):
                         self._upload_local_dir(sess, src, dst)
                         self._finish_job_row(job, row)
                     else:
-                        # 攒到最后一批传：行状态留到 _upload_pairs 里更新
+                        # 攒到最后一批传：这会儿只是排队，退回「等待中」，
+                        # 真轮到它传时 _upload_pairs 再标进行中
                         pending_files.append((src, dst))
                         pending_rows.append(row)
+                        if job is not None:
+                            job.requeue_row(row)
                     existing.add(name)
 
                 elif kind == "remote":

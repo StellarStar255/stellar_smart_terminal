@@ -547,16 +547,29 @@ class TestTopmostYieldsToModals(_Base):
         dlg.set_topmost(True)
         self.assertFalse(dlg.isVisible())
 
-    def test_window_blocked_event_yields_topmost(self):
-        from PyQt6.QtCore import QEvent
-        from PyQt6.QtWidgets import QApplication
+    def test_a_real_modal_makes_it_yield_topmost(self):
+        """用真的模态窗口驱动，不伪造 WindowBlocked 事件。
+
+        手工构造那个事件会让 Qt 处在「被阻塞但没有模态窗口」的不一致状态，
+        随后改 window flag 在 macOS 上直接段错误（CI 实测崩过）。用
+        QDialog.open() 开一个真模态：不进嵌套事件循环，但 Qt 会照常给
+        其它顶层窗口发 WindowBlocked。
+        """
+        from PyQt6.QtWidgets import QApplication, QDialog
         dlg = self._dialog()
-        dlg.event(QEvent(QEvent.Type.WindowBlocked))
-        QApplication.processEvents()          # 让 singleShot(0) 跑起来
-        self.assertFalse(self._is_topmost(dlg))
-        dlg.event(QEvent(QEvent.Type.WindowUnblocked))
+        self.assertTrue(dlg._modal_watch.isActive(),
+                        "得有个定时器盯着模态状态，不然没人去让位")
+        modal = QDialog()
+        modal.setModal(True)
+        modal.open()                      # 非阻塞地进入模态
         QApplication.processEvents()
-        self.assertTrue(self._is_topmost(dlg))
+        dlg._sync_topmost_with_modals()   # 定时器到点时做的事
+        self.assertFalse(self._is_topmost(dlg),
+                         "模态框弹着的时候不能压在它上面")
+        modal.close()
+        QApplication.processEvents()
+        dlg._sync_topmost_with_modals()
+        self.assertTrue(self._is_topmost(dlg), "模态框关掉要把置顶拿回来")
 
     def test_conflict_dialog_suspends_the_transfer_window(self):
         """弹冲突框期间传输窗口必须让出置顶，关掉再还回去。"""
@@ -584,6 +597,43 @@ class TestTopmostYieldsToModals(_Base):
         self.assertFalse(seen["topmost_during"],
                          "模态框弹着的时候传输窗口不能还压在上面")
         self.assertTrue(self._is_topmost(job), "关掉之后要把置顶还回来")
+
+
+class TestQueuedRowsSayWaiting(_Base):
+    """排队等着上传的行不能显示「进行中」——它压根还没开始传。
+
+    用户报告：粘 64 个文件，扫过的十几行全是 "In progress..."，标题却是
+    0/64 done。那些行只是解完冲突在排队。
+    """
+
+    def test_queued_local_files_go_back_to_waiting(self):
+        from i18n import t
+        dst = _FakeRemoteSession(alias="dst")
+        panel = self._panel(dst)
+        seen = {}
+
+        # 在最后的批量上传之前抓一张快照：此刻所有行都只是排过队
+        def fake_upload_pairs(sess, pairs, target_dir, rows=None):
+            job = panel._transfer_job
+            seen["rows"] = [job.row_status_text(i) for i in range(len(pairs))]
+            return []
+        panel._upload_pairs = fake_upload_pairs
+
+        self._paste(panel, self._local_files(4))
+
+        self.assertEqual(seen["rows"], [t("transfer.state_pending")] * 4)
+
+    def test_requeue_only_touches_running_rows(self):
+        from i18n import t
+        from transfer_progress import TransferProgressDialog
+        dlg = TransferProgressDialog(["a", "b"], delay_ms=0)
+        dlg.set_active_rows([0])
+        dlg.requeue_row(0)
+        self.assertEqual(dlg.row_states()[0], "pending")
+        self.assertEqual(dlg.row_status_text(0), t("transfer.state_pending"))
+        dlg.finish_row(1)
+        dlg.requeue_row(1)                      # 已完成的行不许被退回
+        self.assertEqual(dlg.row_states()[1], "done")
 
 
 class TestDialogLifecycle(_Base):

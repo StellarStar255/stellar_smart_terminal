@@ -17,9 +17,11 @@ from typing import Optional
 from PyQt6.QtWidgets import (
     QDialog, QVBoxLayout, QHBoxLayout, QLabel, QProgressBar, QPushButton,
     QTreeWidget, QTreeWidgetItem, QHeaderView, QSizePolicy, QAbstractItemView,
+    QApplication,
 )
-from PyQt6.QtCore import Qt, QEvent, pyqtSignal, QTimer
+from PyQt6.QtCore import Qt, pyqtSignal, QTimer
 from PyQt6.QtGui import QPainter, QFontMetrics, QColor, QPalette
+from PyQt6 import sip  # 检查 C++ 对象是否已被销毁
 
 from i18n import t
 
@@ -156,6 +158,11 @@ class TransferProgressDialog(QDialog):
 
         self.resize(620, min(520, 200 + 22 * min(len(self._names), 12)))
         self._sync_summary()
+        # 有模态框弹出来时自动让出置顶（详见 _sync_topmost_with_modals）
+        self._modal_watch = QTimer(self)
+        self._modal_watch.setInterval(200)
+        self._modal_watch.timeout.connect(self._sync_topmost_with_modals)
+        self._modal_watch.start()
         # 秒完成的批次不该闪一下窗口：延时显示，期间完成就不再露面
         if delay_ms > 0:
             QTimer.singleShot(delay_ms, self._show_if_running)
@@ -182,6 +189,23 @@ class TransferProgressDialog(QDialog):
             if self._states[i] == STATE_PENDING:
                 self._states[i] = STATE_RUNNING
             self._set_status_text(i, detail or t("transfer.state_running"))
+        self._sync_summary()
+
+    def requeue_row(self, index: int):
+        """把一行退回「等待中」。
+
+        本地文件是攒成一批最后统一传的：扫到它时为它做了准备工作（解冲突、
+        覆盖前删旧文件）所以标了「进行中」，但准备完就是排队等着，并没有在
+        传数据——继续显示「进行中」是骗人的。
+        """
+        if not (0 <= index < len(self._states)):
+            return
+        if self._states[index] != STATE_RUNNING:
+            return
+        self._states[index] = STATE_PENDING
+        self._set_status_text(index, t("transfer.state_pending"))
+        self._active = [i for i in self._active if i != index]
+        self._frac = 0.0
         self._sync_summary()
 
     def set_row_detail(self, index: int, text: str):
@@ -256,6 +280,13 @@ class TransferProgressDialog(QDialog):
         有模态框时必须先让出置顶。
         """
         enabled = bool(enabled)
+        # 延迟调用（见 event()）落地时窗口可能已经被 deleteLater 掉了：
+        # 对已析构的 C++ 对象调 windowFlags() 会直接段错误
+        try:
+            if sip.isdeleted(self):
+                return
+        except (RuntimeError, TypeError):
+            return
         current = bool(self.windowFlags() & Qt.WindowType.WindowStaysOnTopHint)
         if current == enabled:
             return
@@ -266,19 +297,17 @@ class TransferProgressDialog(QDialog):
         if was_visible:
             self.show()
 
-    def event(self, ev):                   # noqa: N802 — Qt 回调
-        """被模态框挡住时自动让出置顶，模态框关掉再拿回来。
+    def _sync_topmost_with_modals(self):
+        """应用里只要有模态框在，就让出置顶；模态框关掉再拿回来。
 
-        Qt 在窗口被模态框阻塞/解除时会发 WindowBlocked / WindowUnblocked，
-        比在每个弹框的调用点手工处理可靠（密码框、错误框都覆盖到）。
-        改 flag 会重建窗口，不能在事件处理里直接做，推迟到事件循环下一跳。
+        不走 WindowBlocked / WindowUnblocked 事件：offscreen 平台压根不发
+        这两个事件（没法自动化验证），而手工伪造它们会让 Qt 处在「被阻塞
+        但没有模态窗口」的不一致状态，随后改 window flag 在 macOS 上直接
+        段错误。activeModalWidget 是 Qt 自己维护的状态，哪个平台都可靠。
         """
-        et = ev.type()
-        if et == QEvent.Type.WindowBlocked:
-            QTimer.singleShot(0, lambda: self.set_topmost(False))
-        elif et == QEvent.Type.WindowUnblocked and not self._finished:
-            QTimer.singleShot(0, lambda: self.set_topmost(True))
-        return super().event(ev)
+        if self._finished:
+            return
+        self.set_topmost(QApplication.activeModalWidget() is None)
 
     def reopen(self):
         """把收起的窗口叫回来并顶到最前。"""
@@ -299,6 +328,7 @@ class TransferProgressDialog(QDialog):
                 self._set_status_text(i, t("transfer.state_skipped"))
         self._active = []
         self._frac = 0.0
+        self._modal_watch.stop()
         self._sync_summary()
         if not self.failures():
             # 不发 visibility_changed：那个信号的含义是「用户收起了，
