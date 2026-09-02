@@ -236,6 +236,17 @@ class CenteredComboBox(QComboBox):
     策略：让 Qt 样式先绘制无文本的 combo（边框、背景、下拉箭头等），
     再在整个可见按钮区域居中绘制当前文本，避免默认左对齐文本参与绘制。"""
 
+    # 下拉三角颜色：由 _apply_theme 按主题下发（以前写死 #cfd6ff，浅色主题下几乎看不见）
+    _arrow_color = "#cfd6ff"
+
+    def set_arrow_color(self, color: str):
+        if color and color != self._arrow_color:
+            self._arrow_color = color
+            self.update()
+
+    def arrow_color(self) -> str:
+        return self._arrow_color
+
     def __init__(self, parent=None):
         super().__init__(parent)
         # 强制使用 Qt 可定制的下拉弹窗：否则 macOS 会用原生 NSMenu，
@@ -335,7 +346,7 @@ class CenteredComboBox(QComboBox):
         path.lineTo(cx + half_w, cy - height / 2)
         path.lineTo(cx, cy + height / 2)
         path.closeSubpath()
-        painter.fillPath(path, QColor("#cfd6ff"))
+        painter.fillPath(path, QColor(self._arrow_color))
 
 
 class InlineRenameEdit(QLineEdit):
@@ -478,20 +489,24 @@ class DetachedWindow(QMainWindow):
         # 底部状态栏
         self.statusBar().showMessage(t("window.detached_status"))
 
-    def _apply_style(self):
-        self.setStyleSheet("""
-            QMainWindow {
-                background-color: #0f0f1a;
-            }
-            QWidget {
-                background-color: #1a1a2e;
-            }
-            QStatusBar {
-                background-color: #16213e;
-                color: #888;
+    def _apply_style(self, theme: dict = None):
+        t = theme or {}
+        self.setStyleSheet(f"""
+            QMainWindow {{
+                background-color: {t.get('bg_darkest', '#0f0f1a')};
+            }}
+            QWidget {{
+                background-color: {t.get('bg_dark', '#1a1a2e')};
+            }}
+            QStatusBar {{
+                background-color: {t.get('bg_medium', '#16213e')};
+                color: {t.get('text_dim', '#888')};
                 font-size: 12px;
-            }
+            }}
         """)
+
+    def apply_theme(self, theme: dict):
+        self._apply_style(theme)
 
     def closeEvent(self, event):
         # 完整清理所有终端资源
@@ -567,6 +582,14 @@ class _NavResizeHandle(QWidget):
 
     _IDLE = "#3d3d5c"
     _ACTIVE = "#667eea"
+
+    def set_colors(self, idle: str, active: str):
+        """按主题下发抓手颜色（idle=边框色，active=强调色）。"""
+        if idle:
+            self._IDLE = idle
+        if active:
+            self._ACTIVE = active
+        self.update()
 
     def __init__(self, on_drag, on_release, parent=None):
         super().__init__(parent)

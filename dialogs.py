@@ -18,6 +18,19 @@ from PyQt6.QtCore import Qt, QTimer, pyqtSignal
 from PyQt6.QtGui import QFont, QKeySequence, QTextCursor
 
 from i18n import t
+import themes
+
+
+def _theme_palette(theme) -> dict:
+    """对话框配色：以深蓝色板为底（即以前写死的那套值），叠加传入的主题。
+
+    theme 为 None 时老调用方行为不变；传入「浅色」等主题时对话框跟着变。
+    只取字符串值（终端色板等嵌套项与 QSS 无关）。
+    """
+    base = {k: v for k, v in themes.THEMES["深蓝"].items() if isinstance(v, str)}
+    if theme:
+        base.update({k: v for k, v in theme.items() if isinstance(v, str)})
+    return base
 
 
 def get_default_shell():
@@ -137,8 +150,10 @@ class _IndentingPlainTextEdit(QPlainTextEdit):
 class PresetDialog(QDialog):
     """预设命令管理对话框"""
 
-    def __init__(self, presets: list, parent=None, auto_add: bool = False, title: str = None):
+    def __init__(self, presets: list, parent=None, auto_add: bool = False, title: str = None,
+                 theme: dict = None):
         super().__init__(parent)
+        self._theme = _theme_palette(theme)
         self.presets = [p.copy() for p in presets]  # 深拷贝
         self._auto_add = auto_add
         self.setWindowTitle(title or t("preset.manage_title"))
@@ -248,43 +263,45 @@ class PresetDialog(QDialog):
         self._populate_list()
 
     def _apply_style(self):
-        self.setStyleSheet("""
-            QDialog {
-                background-color: #1a1a2e;
-                color: #eaeaea;
-            }
-            QLabel {
-                color: #aaa;
-            }
-            QLineEdit, QPlainTextEdit {
-                background-color: #16213e;
-                border: 1px solid #3d3d5c;
+        c = self._theme
+        self.setStyleSheet(f"""
+            QDialog {{
+                background-color: {c['bg_dark']};
+                color: {c['text']};
+            }}
+            QLabel {{
+                color: {c['text_dim']};
+            }}
+            QLineEdit, QPlainTextEdit {{
+                background-color: {c['bg_medium']};
+                border: 1px solid {c['border']};
                 border-radius: 4px;
                 padding: 6px;
-                color: #eaeaea;
-            }
-            QLineEdit:focus, QPlainTextEdit:focus {
-                border-color: #667eea;
-            }
-            QListWidget {
-                background-color: #16213e;
-                border: 1px solid #3d3d5c;
+                color: {c['text']};
+            }}
+            QLineEdit:focus, QPlainTextEdit:focus {{
+                border-color: {c['accent']};
+            }}
+            QListWidget {{
+                background-color: {c['bg_medium']};
+                border: 1px solid {c['border']};
                 border-radius: 4px;
-                color: #eaeaea;
-            }
-            QListWidget::item:selected {
-                background-color: #667eea;
-            }
-            QPushButton {
-                background-color: #3d3d5c;
+                color: {c['text']};
+            }}
+            QListWidget::item:selected {{
+                background-color: {c['accent']};
+                color: #ffffff;
+            }}
+            QPushButton {{
+                background-color: {c['bg_lighter']};
                 border: none;
                 border-radius: 4px;
                 padding: 8px 16px;
-                color: #eaeaea;
-            }
-            QPushButton:hover {
-                background-color: #4d4d6c;
-            }
+                color: {c['text']};
+            }}
+            QPushButton:hover {{
+                background-color: {c['bg_hover']};
+            }}
         """)
 
     def _populate_list(self):
@@ -440,8 +457,10 @@ class LLMConfigDialog(QDialog):
         'proxy': ''
     }
 
-    def __init__(self, configs: list, default_index: int = 0, parent=None):
+    def __init__(self, configs: list, default_index: int = 0, parent=None,
+                 theme: dict = None):
         super().__init__(parent)
+        self._theme = _theme_palette(theme)
         self.configs = [c.copy() for c in configs]  # 深拷贝
         self.default_index = default_index
         self.setWindowTitle(t("llm.config_title"))
@@ -678,65 +697,66 @@ class LLMConfigDialog(QDialog):
         self.adv_widget.setVisible(checked)
 
     def _apply_style(self):
-        self.setStyleSheet("""
-            QDialog {
-                background-color: #1a1a2e;
-                color: #eaeaea;
-            }
-            QLabel {
-                color: #9aa0b5;
-            }
-            QLabel#sectionLabel {
-                color: #7f88a8;
+        c = self._theme
+        self.setStyleSheet(f"""
+            QDialog {{
+                background-color: {c['bg_dark']};
+                color: {c['text']};
+            }}
+            QLabel {{
+                color: {c['text_dim']};
+            }}
+            QLabel#sectionLabel {{
+                color: {c['text_dim']};
                 font-weight: 600;
-            }
-            QLineEdit {
-                background-color: #16213e;
-                border: 1px solid #3d3d5c;
+            }}
+            QLineEdit {{
+                background-color: {c['bg_medium']};
+                border: 1px solid {c['border']};
                 border-radius: 6px;
                 padding: 7px 10px;
-                color: #eaeaea;
-                selection-background-color: #667eea;
-            }
-            QLineEdit:focus {
-                border-color: #667eea;
-            }
-            QListWidget {
-                background-color: #16213e;
-                border: 1px solid #3d3d5c;
+                color: {c['text']};
+                selection-background-color: {c['accent']};
+            }}
+            QLineEdit:focus {{
+                border-color: {c['accent']};
+            }}
+            QListWidget {{
+                background-color: {c['bg_medium']};
+                border: 1px solid {c['border']};
                 border-radius: 6px;
                 padding: 4px;
-                color: #eaeaea;
+                color: {c['text']};
                 outline: none;
-            }
-            QListWidget::item {
+            }}
+            QListWidget::item {{
                 padding: 7px 8px;
                 border-radius: 4px;
-            }
-            QListWidget::item:hover {
-                background-color: #222a4d;
-            }
-            QListWidget::item:selected {
-                background-color: #667eea;
+            }}
+            QListWidget::item:hover {{
+                background-color: {c['bg_light']};
+            }}
+            QListWidget::item:selected {{
+                background-color: {c['accent']};
                 color: #ffffff;
-            }
-            QPushButton {
-                background-color: #3d3d5c;
+            }}
+            QPushButton {{
+                background-color: {c['bg_lighter']};
                 border: none;
                 border-radius: 6px;
                 padding: 7px 16px;
-                color: #eaeaea;
-            }
-            QPushButton:hover {
-                background-color: #4d4d6c;
-            }
-            QPushButton:pressed {
-                background-color: #35354f;
-            }
-            QPushButton:disabled {
-                color: #777;
-            }
-            QPushButton#iconBtn {
+                color: {c['text']};
+            }}
+            QPushButton:hover {{
+                background-color: {c['bg_hover']};
+            }}
+            QPushButton:pressed {{
+                background-color: {c['bg_light']};
+            }}
+            QPushButton:disabled {{
+                color: {c['text_dim']};
+            }}
+            QPushButton#iconBtn {{
                 background: transparent;
                 padding: 0;
                 min-width: 26px;
@@ -744,62 +764,62 @@ class LLMConfigDialog(QDialog):
                 min-height: 26px;
                 max-height: 26px;
                 font-size: 15px;
-                color: #9aa0b5;
-            }
-            QPushButton#iconBtn:hover {
-                background-color: #3d3d5c;
-                color: #ffffff;
-            }
-            QPushButton#linkBtn {
+                color: {c['text_dim']};
+            }}
+            QPushButton#iconBtn:hover {{
+                background-color: {c['bg_lighter']};
+                color: {c['text']};
+            }}
+            QPushButton#linkBtn {{
                 background: transparent;
-                border: 1px solid #3d3d5c;
+                border: 1px solid {c['border']};
                 padding: 5px 10px;
-                color: #9aa0b5;
-            }
-            QPushButton#linkBtn:hover {
+                color: {c['text_dim']};
+            }}
+            QPushButton#linkBtn:hover {{
                 background: transparent;
-                border-color: #667eea;
-                color: #eaeaea;
-            }
-            QPushButton[roleChip="true"] {
+                border-color: {c['accent']};
+                color: {c['text']};
+            }}
+            QPushButton[roleChip="true"] {{
                 background: transparent;
-                border: 1px solid #3d3d5c;
+                border: 1px solid {c['border']};
                 border-radius: 13px;
                 padding: 4px 14px;
-                color: #9aa0b5;
-            }
-            QPushButton[roleChip="true"]:hover {
+                color: {c['text_dim']};
+            }}
+            QPushButton[roleChip="true"]:hover {{
                 background: transparent;
-                border-color: #667eea;
-                color: #eaeaea;
-            }
-            QPushButton[roleChip="true"]:checked {
-                background-color: #667eea;
-                border-color: #667eea;
+                border-color: {c['accent']};
+                color: {c['text']};
+            }}
+            QPushButton[roleChip="true"]:checked {{
+                background-color: {c['accent']};
+                border-color: {c['accent']};
                 color: #ffffff;
-            }
-            QPushButton#advToggle {
+            }}
+            QPushButton#advToggle {{
                 background: transparent;
                 border: none;
                 padding: 2px 0;
-                color: #7f88a8;
+                color: {c['text_dim']};
                 text-align: left;
                 font-weight: 600;
-            }
-            QPushButton#advToggle:hover {
+            }}
+            QPushButton#advToggle:hover {{
                 background: transparent;
-                color: #eaeaea;
-            }
-            QDialogButtonBox QPushButton {
+                color: {c['text']};
+            }}
+            QDialogButtonBox QPushButton {{
                 min-width: 72px;
-            }
-            QDialogButtonBox QPushButton:default {
-                background-color: #667eea;
+            }}
+            QDialogButtonBox QPushButton:default {{
+                background-color: {c['accent']};
                 color: #ffffff;
-            }
-            QDialogButtonBox QPushButton:default:hover {
-                background-color: #7b8ef0;
-            }
+            }}
+            QDialogButtonBox QPushButton:default:hover {{
+                background-color: {c['accent_hover']};
+            }}
         """)
 
     def _item_label(self, config) -> str:
@@ -1148,8 +1168,9 @@ class LLMConfigDialog(QDialog):
 class DirectoryHistoryDialog(QDialog):
     """快速启动路径管理对话框"""
 
-    def __init__(self, directories: list, parent=None):
+    def __init__(self, directories: list, parent=None, theme: dict = None):
         super().__init__(parent)
+        self._theme = _theme_palette(theme)
         self.directories = directories.copy()  # 复制列表
         self.setWindowTitle(t("dirhistory.title"))
         self.setMinimumSize(600, 400)
@@ -1162,7 +1183,7 @@ class DirectoryHistoryDialog(QDialog):
 
         # 说明文字
         hint_label = QLabel(t("dirhistory.hint"))
-        hint_label.setStyleSheet("color: #888; margin-bottom: 8px;")
+        hint_label.setStyleSheet(f"color: {self._theme['text_dim']}; margin-bottom: 8px;")
         main_layout.addWidget(hint_label)
 
         # 内容区域（水平布局）
@@ -1221,43 +1242,45 @@ class DirectoryHistoryDialog(QDialog):
         self._update_buttons()
 
     def _apply_style(self):
-        self.setStyleSheet("""
-            QDialog {
-                background-color: #1a1a2e;
-                color: #eaeaea;
-            }
-            QLabel {
-                color: #aaa;
-            }
-            QListWidget {
-                background-color: #16213e;
-                border: 1px solid #3d3d5c;
+        c = self._theme
+        self.setStyleSheet(f"""
+            QDialog {{
+                background-color: {c['bg_dark']};
+                color: {c['text']};
+            }}
+            QLabel {{
+                color: {c['text_dim']};
+            }}
+            QListWidget {{
+                background-color: {c['bg_medium']};
+                border: 1px solid {c['border']};
                 border-radius: 4px;
-                color: #eaeaea;
+                color: {c['text']};
                 padding: 4px;
-            }
-            QListWidget::item {
+            }}
+            QListWidget::item {{
                 padding: 6px;
                 border-radius: 3px;
-            }
-            QListWidget::item:selected {
-                background-color: #667eea;
-            }
-            QPushButton {
-                background-color: #3d3d5c;
+            }}
+            QListWidget::item:selected {{
+                background-color: {c['accent']};
+                color: #ffffff;
+            }}
+            QPushButton {{
+                background-color: {c['bg_lighter']};
                 border: none;
                 border-radius: 4px;
                 padding: 8px 16px;
-                color: #eaeaea;
+                color: {c['text']};
                 min-width: 80px;
-            }
-            QPushButton:hover {
-                background-color: #4d4d6c;
-            }
-            QPushButton:disabled {
-                background-color: #2d2d4c;
-                color: #666;
-            }
+            }}
+            QPushButton:hover {{
+                background-color: {c['bg_hover']};
+            }}
+            QPushButton:disabled {{
+                background-color: {c['bg_light']};
+                color: {c['text_dim']};
+            }}
         """)
 
     @staticmethod
@@ -1456,8 +1479,9 @@ class ShortcutSettingsDialog(QDialog):
     current: {action_id: 当前生效的键序列}
     """
 
-    def __init__(self, specs, current, parent=None):
+    def __init__(self, specs, current, parent=None, theme: dict = None):
         super().__init__(parent)
+        self._theme = _theme_palette(theme)
         self._specs = list(specs)
         self._defaults = {s[0]: s[1] for s in self._specs}
         self._labels = {s[0]: t(s[2]) for s in self._specs}
@@ -1541,32 +1565,34 @@ class ShortcutSettingsDialog(QDialog):
         return dict(self._seqs)
 
     def _apply_style(self):
-        self.setStyleSheet("""
-            QDialog { background-color: #1a1a2e; color: #eaeaea; }
-            QLabel { color: #eaeaea; }
-            QLabel#scHint { color: #9aa; }
-            QLabel#scHeader { color: #888; font-weight: bold; }
-            QLabel#scName { color: #eaeaea; }
-            QPushButton {
-                background-color: #16213e;
-                border: 1px solid #3d3d5c;
+        c = self._theme
+        self.setStyleSheet(f"""
+            QDialog {{ background-color: {c['bg_dark']}; color: {c['text']}; }}
+            QLabel {{ color: {c['text']}; }}
+            QLabel#scHint {{ color: {c['text_dim']}; }}
+            QLabel#scHeader {{ color: {c['text_dim']}; font-weight: bold; }}
+            QLabel#scName {{ color: {c['text']}; }}
+            QPushButton {{
+                background-color: {c['bg_medium']};
+                border: 1px solid {c['border']};
                 border-radius: 4px;
                 padding: 6px 12px;
-                color: #eaeaea;
-            }
-            QPushButton:hover { border-color: #667eea; }
-            QPushButton:checked {
-                background-color: #667eea;
-                border-color: #667eea;
+                color: {c['text']};
+            }}
+            QPushButton:hover {{ border-color: {c['accent']}; }}
+            QPushButton:checked {{
+                background-color: {c['accent']};
+                border-color: {c['accent']};
                 color: white;
-            }
-            QPushButton#scSave {
-                background-color: #2563eb;
+            }}
+            QPushButton#scSave {{
+                background-color: {c['accent']};
+                color: white;
                 border: none;
-            }
-            QPushButton#scSave:hover { background-color: #3b76f0; }
-            QPushButton#scReset { background-color: #3d3d5c; border: none; }
-            QPushButton#scReset:hover { background-color: #4d4d6c; }
+            }}
+            QPushButton#scSave:hover {{ background-color: {c['accent_hover']}; }}
+            QPushButton#scReset {{ background-color: {c['bg_lighter']}; border: none; }}
+            QPushButton#scReset:hover {{ background-color: {c['bg_hover']}; }}
         """)
 
 
@@ -1580,8 +1606,9 @@ class ShortcutCheatSheetDialog(QDialog):
 
     customize_requested = pyqtSignal()
 
-    def __init__(self, groups, parent=None):
+    def __init__(self, groups, parent=None, theme: dict = None):
         super().__init__(parent)
+        self._theme = _theme_palette(theme)
         self._groups = list(groups)
         self.setWindowTitle(t("shortcuts.cheatsheet_title"))
         self.resize(560, 680)
@@ -1652,34 +1679,36 @@ class ShortcutCheatSheetDialog(QDialog):
             group_item.setHidden(visible_children == 0)
 
     def _apply_style(self):
-        self.setStyleSheet("""
-            QDialog { background-color: #1a1a2e; color: #eaeaea; }
-            QLineEdit {
-                background-color: #16213e;
-                border: 1px solid #3d3d5c;
+        c = self._theme
+        self.setStyleSheet(f"""
+            QDialog {{ background-color: {c['bg_dark']}; color: {c['text']}; }}
+            QLineEdit {{
+                background-color: {c['bg_medium']};
+                border: 1px solid {c['border']};
                 border-radius: 4px;
                 padding: 6px 10px;
-                color: #eaeaea;
-            }
-            QLineEdit:focus { border-color: #667eea; }
-            QTreeWidget {
-                background-color: #16213e;
-                border: 1px solid #3d3d5c;
+                color: {c['text']};
+            }}
+            QLineEdit:focus {{ border-color: {c['accent']}; }}
+            QTreeWidget {{
+                background-color: {c['bg_medium']};
+                border: 1px solid {c['border']};
                 border-radius: 4px;
-                color: #eaeaea;
+                color: {c['text']};
                 outline: none;
-            }
-            QTreeWidget::item { padding: 4px 6px; }
-            QPushButton {
-                background-color: #16213e;
-                border: 1px solid #3d3d5c;
+            }}
+            QTreeWidget::item {{ padding: 4px 6px; }}
+            QTreeWidget::item:selected {{ background-color: {c['accent']}; color: #ffffff; }}
+            QPushButton {{
+                background-color: {c['bg_medium']};
+                border: 1px solid {c['border']};
                 border-radius: 4px;
                 padding: 6px 12px;
-                color: #eaeaea;
-            }
-            QPushButton:hover { border-color: #667eea; }
-            QPushButton#scSave { background-color: #2563eb; border: none; }
-            QPushButton#scSave:hover { background-color: #3b76f0; }
-            QPushButton#scReset { background-color: #3d3d5c; border: none; }
-            QPushButton#scReset:hover { background-color: #4d4d6c; }
+                color: {c['text']};
+            }}
+            QPushButton:hover {{ border-color: {c['accent']}; }}
+            QPushButton#scSave {{ background-color: {c['accent']}; color: white; border: none; }}
+            QPushButton#scSave:hover {{ background-color: {c['accent_hover']}; }}
+            QPushButton#scReset {{ background-color: {c['bg_lighter']}; border: none; }}
+            QPushButton#scReset:hover {{ background-color: {c['bg_hover']}; }}
         """)

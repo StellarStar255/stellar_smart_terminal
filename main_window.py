@@ -1547,7 +1547,7 @@ class MainWindow(ThemeMixin, ToolbarMixin, ConfigMixin, ExplorerPanelMixin,
             action_id: self._effective_shortcut(action_id, default_seq)
             for action_id, default_seq, _lk, _slot in self._SHORTCUT_SPECS
         }
-        dialog = ShortcutSettingsDialog(self._SHORTCUT_SPECS, current, self)
+        dialog = ShortcutSettingsDialog(self._SHORTCUT_SPECS, current, self, theme=self.THEMES.get(self.current_theme, self.THEMES["午夜黑"]))
         if dialog.exec() != QDialog.DialogCode.Accepted:
             return
         result = dialog.get_shortcuts()  # {action_id: seq}
@@ -1629,7 +1629,7 @@ class MainWindow(ThemeMixin, ToolbarMixin, ConfigMixin, ExplorerPanelMixin,
                 old.deleteLater()
             except Exception:
                 logger.debug("_show_shortcut_cheatsheet: suppressed exception", exc_info=True)
-        dialog = ShortcutCheatSheetDialog(self._shortcut_cheatsheet_groups(), self)
+        dialog = ShortcutCheatSheetDialog(self._shortcut_cheatsheet_groups(), self, theme=self.THEMES.get(self.current_theme, self.THEMES["午夜黑"]))
         dialog.customize_requested.connect(self._show_shortcut_settings)
         self._cheatsheet_dialog = dialog
         dialog.show()
@@ -2297,7 +2297,7 @@ class MainWindow(ThemeMixin, ToolbarMixin, ConfigMixin, ExplorerPanelMixin,
 
     def _manage_quick_launch_dirs(self):
         """打开快速启动路径管理对话框"""
-        dialog = DirectoryHistoryDialog(self.working_dir_history, self)
+        dialog = DirectoryHistoryDialog(self.working_dir_history, self, theme=self.THEMES.get(self.current_theme, self.THEMES["午夜黑"]))
         if dialog.exec() == QDialog.DialogCode.Accepted:
             new_dirs = dialog.get_directories()
             # 记录被显式删除的路径：进持久黑名单，保存时从磁盘并集中剔除，
@@ -3798,10 +3798,10 @@ class MainWindow(ThemeMixin, ToolbarMixin, ConfigMixin, ExplorerPanelMixin,
         prev = getattr(splitter, '_spring_anim', None)
         if prev is not None:
             prev.stop()
-        terms = [t for t in splitter.findChildren(TerminalWidget)
-                 if hasattr(t, 'set_fast_resize')]
-        for t in terms:
-            t.set_fast_resize(True)   # 动画期间只缩放旧缓存，避免逐帧重建整屏
+        terms = [term for term in splitter.findChildren(TerminalWidget)
+                 if hasattr(term, 'set_fast_resize')]
+        for term in terms:
+            term.set_fast_resize(True)   # 动画期间只缩放旧缓存，避免逐帧重建整屏
 
         anim = QVariantAnimation(self)
         anim.setStartValue(0.0)
@@ -3819,9 +3819,9 @@ class MainWindow(ThemeMixin, ToolbarMixin, ConfigMixin, ExplorerPanelMixin,
             if not sip.isdeleted(splitter):
                 splitter.setSizes(target_sizes)
                 splitter._spring_anim = None
-            for t in terms:
-                if not sip.isdeleted(t):
-                    t.set_fast_resize(False)   # 按最终尺寸重建一次，文本恢复清晰
+            for term in terms:
+                if not sip.isdeleted(term):
+                    term.set_fast_resize(False)   # 按最终尺寸重建一次，文本恢复清晰
 
         anim.valueChanged.connect(_on_val)
         anim.finished.connect(_on_done)
@@ -4615,7 +4615,7 @@ class MainWindow(ThemeMixin, ToolbarMixin, ConfigMixin, ExplorerPanelMixin,
 
     def _show_llm_config(self):
         """显示 LLM API 配置对话框"""
-        dialog = LLMConfigDialog(self.llm_configs, self.default_llm_config, self)
+        dialog = LLMConfigDialog(self.llm_configs, self.default_llm_config, self, theme=self.THEMES.get(self.current_theme, self.THEMES["午夜黑"]))
         if dialog.exec() == QDialog.DialogCode.Accepted:
             self.llm_configs = dialog.get_configs()
             self.default_llm_config = dialog.get_default_index()
@@ -4934,50 +4934,14 @@ class MainWindow(ThemeMixin, ToolbarMixin, ConfigMixin, ExplorerPanelMixin,
         msg_box.setText(text)
         msg_box.setIcon(icon)
         msg_box.setStandardButtons(buttons)
-        # 勾选框要配浅色底专用样式：app 级规则是深色主题配色（深蓝方块），
-        # 放在这个强制浅色的消息框里非常突兀
+        # 底色/文字/按钮全部按当前主题推导（浅色主题浅盒子、深色主题深盒子）；
+        # 勾选框的对勾图仍需显式给，app 级规则的样式在消息框里不生效
         from utils import checkbox_checkmark_url
+        from main_window_theme import message_box_qss
         check_url = checkbox_checkmark_url()
         check_image = f"image: url({check_url});" if check_url else ""
-        msg_box.setStyleSheet(f"""
-            QMessageBox {{
-                background-color: #f0f0f0;
-            }}
-            QMessageBox QLabel {{
-                color: #333333;
-                font-size: 14px;
-            }}
-            QMessageBox QCheckBox {{
-                color: #333333;
-                spacing: 6px;
-            }}
-            QMessageBox QCheckBox::indicator {{
-                width: 16px; height: 16px;
-                border: 1px solid #b6b6bd; border-radius: 4px;
-                background-color: #ffffff;
-            }}
-            QMessageBox QCheckBox::indicator:hover {{
-                border-color: #667eea;
-            }}
-            QMessageBox QCheckBox::indicator:checked {{
-                border-color: #667eea; background-color: #667eea;
-                {check_image}
-            }}
-            QMessageBox QPushButton {{
-                background-color: #e0e0e0;
-                color: #333333;
-                border: 1px solid #999999;
-                padding: 5px 15px;
-                border-radius: 3px;
-                min-width: 60px;
-            }}
-            QMessageBox QPushButton:hover {{
-                background-color: #d0d0d0;
-            }}
-            QMessageBox QPushButton:pressed {{
-                background-color: #c0c0c0;
-            }}
-        """)
+        theme = self.THEMES.get(self.current_theme, self.THEMES["午夜黑"])
+        msg_box.setStyleSheet(message_box_qss(theme, check_image))
         return msg_box
 
     def _styled_message_box(self, icon, title, text, buttons=QMessageBox.StandardButton.Ok):
@@ -5358,7 +5322,7 @@ class MainWindow(ThemeMixin, ToolbarMixin, ConfigMixin, ExplorerPanelMixin,
 
     def _manage_presets(self):
         """打开预设管理对话框"""
-        dialog = PresetDialog(self.presets, self)
+        dialog = PresetDialog(self.presets, self, theme=self.THEMES.get(self.current_theme, self.THEMES["午夜黑"]))
         if dialog.exec() == QDialog.DialogCode.Accepted:
             self.presets = dialog.get_presets()
             self._presets_modified = True  # 标记预设已修改
@@ -5368,7 +5332,7 @@ class MainWindow(ThemeMixin, ToolbarMixin, ConfigMixin, ExplorerPanelMixin,
 
     def _add_new_preset(self):
         """打开预设管理对话框并自动添加新预设"""
-        dialog = PresetDialog(self.presets, self, auto_add=True)
+        dialog = PresetDialog(self.presets, self, auto_add=True, theme=self.THEMES.get(self.current_theme, self.THEMES["午夜黑"]))
         if dialog.exec() == QDialog.DialogCode.Accepted:
             self.presets = dialog.get_presets()
             self._presets_modified = True  # 标记预设已修改
@@ -5410,7 +5374,7 @@ class MainWindow(ThemeMixin, ToolbarMixin, ConfigMixin, ExplorerPanelMixin,
 
     def _manage_local_presets(self):
         """打开本地预设管理对话框"""
-        dialog = PresetDialog(self.local_presets, self, title=t("msg.manage_local_commands"))
+        dialog = PresetDialog(self.local_presets, self, title=t("msg.manage_local_commands"), theme=self.THEMES.get(self.current_theme, self.THEMES["午夜黑"]))
         if dialog.exec() == QDialog.DialogCode.Accepted:
             self.local_presets = dialog.get_presets()
             if self._save_local_commands():
@@ -5419,7 +5383,7 @@ class MainWindow(ThemeMixin, ToolbarMixin, ConfigMixin, ExplorerPanelMixin,
 
     def _add_new_local_preset(self):
         """添加新本地预设"""
-        dialog = PresetDialog(self.local_presets, self, auto_add=True, title=t("msg.manage_local_commands"))
+        dialog = PresetDialog(self.local_presets, self, auto_add=True, title=t("msg.manage_local_commands"), theme=self.THEMES.get(self.current_theme, self.THEMES["午夜黑"]))
         if dialog.exec() == QDialog.DialogCode.Accepted:
             self.local_presets = dialog.get_presets()
             if self._save_local_commands():
@@ -5532,39 +5496,14 @@ class MainWindow(ThemeMixin, ToolbarMixin, ConfigMixin, ExplorerPanelMixin,
 
         if any_running and not force_closing:
             # 创建自定义样式的消息框，避免深色主题导致文字不可见
-            msg_box = QMessageBox(self)
-            msg_box.setWindowTitle(t("msg.confirm_exit_title"))
-            msg_box.setText(t("msg.confirm_exit_msg"))
-            msg_box.setIcon(QMessageBox.Icon.Question)
-            msg_box.setStandardButtons(
+            msg_box = self._make_styled_message_box(
+                QMessageBox.Icon.Question,
+                t("msg.confirm_exit_title"),
+                t("msg.confirm_exit_msg"),
                 QMessageBox.StandardButton.Yes |
                 QMessageBox.StandardButton.No |
-                QMessageBox.StandardButton.Cancel
+                QMessageBox.StandardButton.Cancel,
             )
-            # 设置明确的样式，确保文字可读
-            msg_box.setStyleSheet("""
-                QMessageBox {
-                    background-color: #f0f0f0;
-                }
-                QMessageBox QLabel {
-                    color: #333333;
-                    font-size: 14px;
-                }
-                QMessageBox QPushButton {
-                    background-color: #e0e0e0;
-                    color: #333333;
-                    border: 1px solid #999999;
-                    padding: 5px 15px;
-                    border-radius: 3px;
-                    min-width: 60px;
-                }
-                QMessageBox QPushButton:hover {
-                    background-color: #d0d0d0;
-                }
-                QMessageBox QPushButton:pressed {
-                    background-color: #c0c0c0;
-                }
-            """)
             reply = msg_box.exec()
 
             if reply == QMessageBox.StandardButton.Cancel:

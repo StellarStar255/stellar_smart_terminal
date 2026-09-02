@@ -8,6 +8,7 @@ from explorer_widget import ExplorerPanel
 from file_editor import EditorArea
 from git_widget import _make_git_tool_icon
 from i18n import t
+from main_window_theme import menu_qss
 
 
 class ExplorerPanelMixin:
@@ -202,22 +203,7 @@ class ExplorerPanelMixin:
         if not hasattr(self, 'explorer_panel'):
             return
         menu = QMenu(self)
-        menu.setStyleSheet("""
-            QMenu {
-                background-color: #2d2d44;
-                color: #eaeaea;
-                border: 1px solid #3d3d5c;
-                border-radius: 6px;
-                padding: 4px;
-            }
-            QMenu::item {
-                padding: 6px 24px 6px 12px;
-                border-radius: 4px;
-            }
-            QMenu::item:selected {
-                background-color: #667eea;
-            }
-        """)
+        menu.setStyleSheet(menu_qss(self.THEMES.get(self.current_theme, self.THEMES["午夜黑"])))
         act = menu.addAction(t("explorer.show_hidden_files"))
         act.setCheckable(True)
         act.setChecked(self.explorer_panel.is_showing_hidden())
@@ -332,30 +318,7 @@ class ExplorerPanelMixin:
         文件 → 在内置编辑器打开。底部可一键清空。
         """
         menu = QMenu(self)
-        menu.setStyleSheet("""
-            QMenu {
-                background-color: #2d2d44;
-                color: #eaeaea;
-                border: 1px solid #3d3d5c;
-                border-radius: 6px;
-                padding: 4px;
-            }
-            QMenu::item {
-                padding: 6px 24px 6px 12px;
-                border-radius: 4px;
-            }
-            QMenu::item:selected {
-                background-color: #667eea;
-            }
-            QMenu::item:disabled {
-                color: #666;
-            }
-            QMenu::separator {
-                height: 1px;
-                background-color: #3d3d5c;
-                margin: 4px 10px;
-            }
-        """)
+        menu.setStyleSheet(menu_qss(self.THEMES.get(self.current_theme, self.THEMES["午夜黑"])))
 
         # 当前目录的收藏开关放最上面：用户"就在这个目录、想收藏它"时最顺手
         panel = getattr(self, 'explorer_panel', None)

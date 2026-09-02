@@ -14,6 +14,102 @@ from PyQt6.QtWidgets import (
 )
 from i18n import t
 
+# 弹出菜单 / 消息框的 QSS 由主题推导并按用到的颜色值缓存：以前每次 popup 都
+# 重建一段写死深色的字符串，主题遍历也触不到它们。
+_QSS_CACHE: dict = {}
+
+
+def _theme_key(theme: dict, *names) -> tuple:
+    return tuple(str(theme.get(n, '')) for n in names)
+
+
+def menu_qss(theme: dict, padding: str = "4px", radius: str = "6px") -> str:
+    """临时 QMenu（设置菜单、排序子菜单、★ 快捷方式、颜色选择器）的统一样式。"""
+    key = ("menu", padding, radius) + _theme_key(
+        theme, 'bg_light', 'text', 'border', 'accent', 'text_dim')
+    qss = _QSS_CACHE.get(key)
+    if qss is None:
+        bg = theme.get('bg_light', '#2d2d44')
+        qss = f"""
+            QMenu {{
+                background-color: {bg};
+                color: {theme.get('text', '#eaeaea')};
+                border: 1px solid {theme.get('border', '#3d3d5c')};
+                border-radius: {radius};
+                padding: {padding};
+            }}
+            QMenu::item {{
+                padding: 6px 24px 6px 12px;
+                border-radius: 4px;
+            }}
+            QMenu::item:selected {{
+                background-color: {theme.get('accent', '#667eea')};
+                color: #ffffff;
+            }}
+            QMenu::item:disabled {{
+                color: {theme.get('text_dim', '#666')};
+            }}
+            QMenu::separator {{
+                height: 1px;
+                background-color: {theme.get('border', '#3d3d5c')};
+                margin: 4px 10px;
+            }}
+        """
+        _QSS_CACHE[key] = qss
+    return qss
+
+
+def message_box_qss(theme: dict, check_image: str = "") -> str:
+    """QMessageBox 样式：底色/文字/按钮全部取自主题，浅色主题是浅盒子、深色
+    主题是深盒子（以前一律写死 #f0f0f0 浅色，深色主题下突兀）。"""
+    key = ("msgbox", check_image) + _theme_key(
+        theme, 'bg_dark', 'bg_medium', 'bg_lighter', 'bg_hover', 'bg_light',
+        'text', 'border', 'accent')
+    qss = _QSS_CACHE.get(key)
+    if qss is None:
+        qss = f"""
+            QMessageBox {{
+                background-color: {theme.get('bg_dark', '#f0f0f0')};
+            }}
+            QMessageBox QLabel {{
+                color: {theme.get('text', '#333333')};
+                font-size: 14px;
+            }}
+            QMessageBox QCheckBox {{
+                color: {theme.get('text', '#333333')};
+                spacing: 6px;
+            }}
+            QMessageBox QCheckBox::indicator {{
+                width: 16px; height: 16px;
+                border: 1px solid {theme.get('border', '#b6b6bd')}; border-radius: 4px;
+                background-color: {theme.get('bg_medium', '#ffffff')};
+            }}
+            QMessageBox QCheckBox::indicator:hover {{
+                border-color: {theme.get('accent', '#667eea')};
+            }}
+            QMessageBox QCheckBox::indicator:checked {{
+                border-color: {theme.get('accent', '#667eea')};
+                background-color: {theme.get('accent', '#667eea')};
+                {check_image}
+            }}
+            QMessageBox QPushButton {{
+                background-color: {theme.get('bg_lighter', '#e0e0e0')};
+                color: {theme.get('text', '#333333')};
+                border: 1px solid {theme.get('border', '#999999')};
+                padding: 5px 15px;
+                border-radius: 3px;
+                min-width: 60px;
+            }}
+            QMessageBox QPushButton:hover {{
+                background-color: {theme.get('bg_hover', '#d0d0d0')};
+            }}
+            QMessageBox QPushButton:pressed {{
+                background-color: {theme.get('bg_light', '#c0c0c0')};
+            }}
+        """
+        _QSS_CACHE[key] = qss
+    return qss
+
 
 # 延迟引用宿主类：进程级共享类属性（跨窗口导航器/停靠方式/一次性
 # 标志）必须落在真正的 MainWindow 上，而非 type(self)（对假 self /
@@ -288,6 +384,17 @@ class ThemeMixin:
                     w = item.widget() if item else None
                     if w is not None and w.objectName() == "_flow_separator":
                         w.set_line_color(t['border'])
+
+        # 自绘控件的颜色不吃 QSS，要显式下发：下拉三角、导航分隔条抓手
+        try:
+            from widgets import CenteredComboBox
+            for combo in self.findChildren(CenteredComboBox):
+                combo.set_arrow_color(t['text'])
+        except Exception:
+            logger.debug("_apply_theme: combo arrow colour failed", exc_info=True)
+        handle = getattr(self, 'nav_resize_handle', None)
+        if handle is not None and hasattr(handle, 'set_colors'):
+            handle.set_colors(t['border'], t['accent'])
 
         # 工作目录标签样式
         self.dir_label.setStyleSheet(f"color: {t['text_dim']}; font-size: 12px;")
@@ -957,14 +1064,9 @@ class ThemeMixin:
     def _show_color_picker(self):
         """显示颜色选择器弹窗（支持展开更多颜色）"""
         menu = QMenu(self)
-        menu.setStyleSheet("""
-            QMenu {
-                background-color: #2d2d44;
-                border: 1px solid #3d3d5c;
-                border-radius: 10px;
-                padding: 12px;
-            }
-        """)
+        menu.setStyleSheet(menu_qss(
+            self.THEMES.get(self.current_theme, self.THEMES["午夜黑"]),
+            padding="12px", radius="10px"))
 
         # 状态记录
         self._color_picker_expanded = getattr(self, '_color_picker_expanded', False)
