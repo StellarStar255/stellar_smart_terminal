@@ -609,6 +609,27 @@ class ExplorerPanel(QWidget, explorer_common.TransferJobHost):
             return None
         return parent
 
+    def _on_path_edited(self):
+        """路径栏回车：目录存在就跳过去，否则把文字还原（不静默吞掉）。"""
+        text = (self.path_edit.text() or "").strip()
+        path = os.path.expanduser(text)
+        if path and os.path.isdir(path):
+            self.set_root_path(path)
+        else:
+            self._sync_path_edit()
+
+    def _sync_path_edit(self):
+        """把路径栏文字/提示同步成当前根目录。"""
+        edit = getattr(self, 'path_edit', None)
+        if edit is None:
+            return
+        if edit.text() != self._current_path:
+            edit.setText(self._current_path)
+        # 光标顶到末尾：栏太窄时露出的是路径尾巴（当前目录及其上一两级），
+        # 那才是"我在哪"的关键信息；开头的 /Users/xxx 反而没用
+        edit.setCursorPosition(len(self._current_path or ""))
+        edit.setToolTip(self._current_path)
+
     def go_up(self):
         """回到上一级目录（已经在文件系统根就什么都不做）。"""
         parent = self._parent_dir(self._current_path or os.path.expanduser("~"))
@@ -696,6 +717,20 @@ class ExplorerPanel(QWidget, explorer_common.TransferJobHost):
         search_bar.addWidget(self._transfer_chip)
 
         layout.addLayout(search_bar)
+
+        # 当前所在目录：这个面板以前从不显示自己的路径（根只由主窗口顶部
+        # 那条路径栏驱动），侧边栏嵌入模式下根本看不见，进到深层就不知道
+        # 自己在哪。可编辑，回车跳转，与远程面板一致。
+        self.path_edit = QLineEdit()
+        self.path_edit.setPlaceholderText(t("explorer.path_placeholder"))
+        self.path_edit.setText(self._current_path)
+        self.path_edit.setToolTip(self._current_path)
+        self.path_edit.returnPressed.connect(self._on_path_edited)
+        path_bar = QHBoxLayout()
+        path_bar.setContentsMargins(4, 0, 4, 4)
+        path_bar.setSpacing(4)
+        path_bar.addWidget(self.path_edit, 1)
+        layout.addLayout(path_bar)
 
         # 搜索结果列表（扁平展示命中项；默认隐藏，搜索时替换 tree_view）。
         # 在此处先创建，确保 _update_style() 引用时已存在；稍后再加入布局。
@@ -804,6 +839,11 @@ class ExplorerPanel(QWidget, explorer_common.TransferJobHost):
         text_dim = self.theme.get('text_dim', '#888888')
         border = self.theme.get('border', '#3d3d5c')
         accent = self.theme.get('accent', '#667eea')
+
+        self.path_edit.setStyleSheet(
+            f"QLineEdit {{ background: transparent; border: none;"
+            f" color: {text_dim}; padding: 0 2px; font-size: 11px; }}"
+            f"QLineEdit:focus {{ color: {text}; }}")
 
         # 缩进参考线：取边框色再压淡 —— 要能看出层级，又不能抢文件名的注意力
         guide = QColor(border)
@@ -1006,6 +1046,7 @@ class ExplorerPanel(QWidget, explorer_common.TransferJobHost):
                 return
             self._current_path = path
             self._sync_up_button()
+            self._sync_path_edit()
             self.model.setRootPath(path)
             self.tree_view.setRootIndex(self._proxy.mapFromSource(self.model.index(path)))
             # 切换了根 → 重置自动刷新基线

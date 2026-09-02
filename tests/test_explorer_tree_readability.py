@@ -278,3 +278,51 @@ class TestDoubleClickEntersFolder(_Base):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class TestPathBar(_Base):
+    """面板要能显示自己在哪 —— 侧边栏嵌入模式下看不到主窗口那条路径栏，
+    进到深层目录就完全失去方位（用户实测提出）。"""
+
+    def test_shows_current_folder(self):
+        p = self._panel()
+        root = Path(self._tmp.name)
+        sub = root / "com"
+        sub.mkdir()
+        p.set_root_path(str(sub))
+        self.app.processEvents()
+        self.assertSamePath(p.path_edit.text(), sub)
+        self.assertSamePath(p.path_edit.toolTip(), sub,
+                            "完整路径要能在 tooltip 里看到（栏太窄会截断）")
+
+    def test_follows_navigation(self):
+        p = self._panel()
+        root = Path(self._tmp.name)
+        sub = root / "com" / "aiem"
+        sub.mkdir(parents=True)
+        p.set_root_path(str(sub))
+        self.app.processEvents()
+        p.go_up()
+        self.assertSamePath(p.path_edit.text(), sub.parent,
+                            "退上一级后路径栏要跟着变")
+
+    def test_enter_navigates_to_a_typed_path(self):
+        p = self._panel()
+        root = Path(self._tmp.name)
+        target = root / "resources"
+        target.mkdir()
+        p.set_root_path(str(root))
+        self.app.processEvents()
+        p.path_edit.setText(str(target))
+        p._on_path_edited()
+        self.assertSamePath(p._current_path, target)
+
+    def test_bad_path_is_reverted_not_swallowed(self):
+        p = self._panel()
+        root = Path(self._tmp.name)
+        p.set_root_path(str(root))
+        self.app.processEvents()
+        p.path_edit.setText(str(root / "does-not-exist"))
+        p._on_path_edited()
+        self.assertSamePath(p._current_path, root, "无效路径不该换根")
+        self.assertSamePath(p.path_edit.text(), root, "文字要还原回真实路径")
