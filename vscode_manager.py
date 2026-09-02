@@ -165,6 +165,54 @@ class InstallWorker(QThread):
             self.finished.emit(False, str(e))
 
 
+class ProbeWorker(QThread):
+    """探测 VS Code 可用性 + 已安装扩展的工作线程。
+
+    以前面板一打开就在 GUI 线程连续跑三次 `code` CLI（--version 两次、
+    --list-extensions 一次），每次要拉起 Node/Electron，冷启动 1-3 秒，
+    面板显示即冻住。现在一次线程里做完：一次 --version + 一次 --list-extensions。
+    """
+    finished = pyqtSignal(bool, str, list)  # available, version, installed ids
+
+    def __init__(self, code_path: str, list_only: bool = False, parent=None):
+        super().__init__(parent)
+        self.code_path = code_path
+        self.list_only = list_only
+
+    def run(self):
+        available, version = True, ""
+        if not self.list_only:
+            try:
+                result = subprocess.run(
+                    [self.code_path, "--version"],
+                    capture_output=True, text=True, timeout=10,
+                    creationflags=SUBPROCESS_FLAGS,
+                )
+                available = result.returncode == 0
+                if available:
+                    version = result.stdout.strip().split('\n')[0]
+            except Exception:
+                available = False
+            if not available:
+                self.finished.emit(False, "", [])
+                return
+        installed: List[str] = []
+        try:
+            result = subprocess.run(
+                [self.code_path, "--list-extensions"],
+                capture_output=True, text=True, timeout=30,
+                creationflags=SUBPROCESS_FLAGS,
+            )
+            if result.returncode == 0:
+                installed = [
+                    ext.strip() for ext in result.stdout.strip().split('\n')
+                    if ext.strip()
+                ]
+        except Exception as e:
+            logger.debug("ProbeWorker list-extensions failed: %s", e)
+        self.finished.emit(True, version, installed)
+
+
 class VSCodeManager(QObject):
     """VS Code 扩展管理器"""
 
@@ -173,13 +221,38 @@ class VSCodeManager(QObject):
     install_completed = pyqtSignal(bool, str)  # 安装/卸载完成
     error_occurred = pyqtSignal(str)        # 错误发生
     installed_list_updated = pyqtSignal(list)  # 已安装列表更新
+    probe_completed = pyqtSignal(bool, str)    # 可用性探测完成：available, version
 
     def __init__(self, parent=None):
         super().__init__(parent)
         self._code_path = self._find_code_cli()
         self._search_worker: Optional[SearchWorker] = None
         self._install_worker: Optional[InstallWorker] = None
+        self._probe_worker: Optional[ProbeWorker] = None
         self._installed_extensions: List[str] = []
+
+    def probe_async(self, list_only: bool = False):
+        """异步探测 VS Code 可用性与已安装扩展（结果经 probe_completed /
+        installed_list_updated 信号回 GUI 线程）。list_only=True 只刷新列表。"""
+        if self._probe_worker is not None and self._probe_worker.isRunning():
+            return  # 上一次还没回来，不叠加
+        self._probe_worker = ProbeWorker(self._code_path, list_only, self)
+        self._probe_worker.finished.connect(self._on_probe_finished)
+        self._probe_worker.start()
+
+    def _on_probe_finished(self, available: bool, version: str, installed: list):
+        if available:
+            self._installed_extensions = list(installed)
+        if not (self._probe_worker is not None and self._probe_worker.list_only):
+            self.probe_completed.emit(available, version)
+        if available:
+            self.installed_list_updated.emit(list(installed))
+
+    def shutdown(self, wait_ms: int = 3000):
+        """等所有工作线程退出（面板销毁/测试收尾用），否则 QThread 析构时 abort。"""
+        for w in (self._probe_worker, self._search_worker, self._install_worker):
+            if w is not None and w.isRunning():
+                w.wait(wait_ms)
 
     def _find_code_cli(self) -> str:
         """查找 VS Code CLI 路径"""
@@ -267,9 +340,8 @@ class VSCodeManager(QObject):
         return []
 
     def refresh_installed(self):
-        """刷新已安装列表"""
-        extensions = self.get_installed_extensions()
-        self.installed_list_updated.emit(extensions)
+        """刷新已安装列表（异步：`code --list-extensions` 在工作线程跑）"""
+        self.probe_async(list_only=True)
 
     def install_extension(self, extension_id: str):
         """安装扩展（异步）"""

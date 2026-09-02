@@ -418,18 +418,21 @@ class VSCodeExtensionPanel(QWidget):
         self._manager.install_completed.connect(self._on_install_completed)
         self._manager.error_occurred.connect(self._show_error)
         self._manager.installed_list_updated.connect(self._update_installed_list)
+        self._manager.probe_completed.connect(self._on_probe_completed)
 
         # Tab 切换时刷新已安装列表
         self.tab_widget.currentChanged.connect(self._on_tab_changed)
 
     def _check_vscode(self):
-        """检查 VS Code 可用性"""
-        if self._manager.is_vscode_available():
-            version = self._manager.get_vscode_version()
+        """检查 VS Code 可用性（工作线程探测，结果回 _on_probe_completed）"""
+        self._manager.probe_async()
+
+    def _on_probe_completed(self, available: bool, version: str):
+        if available:
             self.vscode_status.setText(f"VS Code {version}")
             self.no_vscode_label.hide()
             self.tab_widget.show()
-            self._manager.refresh_installed()
+            # 已安装列表随同一次探测经 installed_list_updated 回来，不再另起进程
         else:
             self.vscode_status.setText("VS Code 不可用")
             self.vscode_status.setStyleSheet(f"color: {self.theme.get('danger', '#ef4444')}; font-size: 11px;")

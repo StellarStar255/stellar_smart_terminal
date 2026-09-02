@@ -10,6 +10,7 @@ import subprocess
 import shutil
 import shlex
 import threading
+from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
 from typing import Optional
 
@@ -604,6 +605,20 @@ class _DotFileProxy(QSortFilterProxyModel):
         return self.sourceModel().fileName(self.mapToSource(proxy_index))
 
 
+def copy_local_entry(src: str, dst: str, move: bool = False) -> None:
+    """在工作线程里执行的本地复制/移动（不碰任何 Qt 对象）。
+
+    copytree 必须 symlinks=True：默认会跟随软链，目录里一个 `link -> ..`
+    就一路复制到 ENAMETOOLONG 才停，指向 `/` 的软链会试图复制整块盘。
+    """
+    if move:
+        shutil.move(src, dst)
+    elif os.path.isdir(src) and not os.path.islink(src):
+        shutil.copytree(src, dst, symlinks=True)
+    else:
+        shutil.copy2(src, dst)
+
+
 class ExplorerPanel(QWidget, explorer_common.TransferJobHost):
     """Explorer 文件浏览器面板"""
 
@@ -614,6 +629,13 @@ class ExplorerPanel(QWidget, explorer_common.TransferJobHost):
     save_file_requested = pyqtSignal()  # 请求保存当前编辑的文件
     save_file_as_requested = pyqtSignal()  # 请求另存为当前编辑的文件
     favorites_changed = pyqtSignal()  # 快捷方式（收藏）增删后通知外部刷新 ★ 菜单
+    # 文件树里原地改名后：(旧完整路径, 新完整路径)。编辑器等外部订阅者据此
+    # 把打开的文件跟着改过去，否则会继续按旧路径自动保存产生两份文件
+    file_renamed = pyqtSignal(str, str)
+    # 面板自己删除/移到回收站成功后：(完整路径)
+    file_deleted = pyqtSignal(str)
+    # 60s 安全网的指纹在工作线程算好后回 GUI 线程：{path: frozenset(names)}
+    _fingerprints_ready = pyqtSignal(object)
     # 后台搜索结果回 UI 线程：(generation, items, truncated)
     _search_result_signal = pyqtSignal(int, list, bool)
 
@@ -698,6 +720,11 @@ class ExplorerPanel(QWidget, explorer_common.TransferJobHost):
         self._auto_refresh_timer = QTimer(self)
         self._auto_refresh_timer.setInterval(60_000)
         self._auto_refresh_timer.timeout.connect(self._auto_refresh_tick)
+        self._fingerprints_ready.connect(self._on_fingerprints_ready)
+        self._fingerprint_inflight = False
+        # 本地文件系统重操作（复制/移动/删除、指纹扫描）的工作线程；
+        # GUI 线程只负责冲突询问与进度窗口
+        self._local_pool: Optional[ThreadPoolExecutor] = None
         self._auto_refresh_timer.start()
 
     # ---- 隐藏文件显示开关（持久化到共享配置） ----
@@ -965,6 +992,7 @@ class ExplorerPanel(QWidget, explorer_common.TransferJobHost):
         self.model.setFilter(self._build_filter())
         # 允许通过模型对文件/文件夹原地重命名
         self.model.setReadOnly(False)
+        self.model.fileRenamed.connect(self._on_model_file_renamed)
 
         # 代理模型：在 Windows 上补充过滤 dot-prefix 隐藏文件/文件夹
         self._proxy = _DotFileProxy(self)
@@ -1217,9 +1245,10 @@ class ExplorerPanel(QWidget, explorer_common.TransferJobHost):
         - 已存在的目标默认询问覆盖
         - 目录递归复制
         """
-        copied = 0
         errors = []
         skipped = 0
+        # 先在 GUI 线程把冲突问完，再把真正的复制整批交给工作线程
+        pairs: list = []
         for src in src_paths:
             try:
                 if not os.path.exists(src):
@@ -1243,13 +1272,20 @@ class ExplorerPanel(QWidget, explorer_common.TransferJobHost):
                         shutil.rmtree(dst)
                     else:
                         os.remove(dst)
-                if os.path.isdir(src) and not os.path.islink(src):
-                    shutil.copytree(src, dst)
-                else:
-                    shutil.copy2(src, dst)
-                copied += 1
+                pairs.append((src, dst))
             except Exception as e:
                 errors.append(f"{os.path.basename(src)}: {e}")
+        if pairs:
+            pool = self._local_executor()
+            futures = [pool.submit(copy_local_entry, src, dst) for src, dst in pairs]
+            try:
+                self._wait_future_with_progress(futures, t("explorer.pasting"))
+            except RuntimeError:
+                pass  # 逐个 future 归因到文件名
+            for (src, _dst), fut in zip(pairs, futures):
+                exc = fut.exception() if fut.done() else None
+                if exc is not None:
+                    errors.append(f"{os.path.basename(src)}: {exc}")
         if errors:
             QMessageBox.warning(self, "Copy failed", "\n".join(errors))
         # QFileSystemModel 监听文件系统变化，会自动刷新；保底再 refresh 一次
@@ -1317,6 +1353,7 @@ class ExplorerPanel(QWidget, explorer_common.TransferJobHost):
         self.model.setFilter(self._build_filter())
         self.model.setReadOnly(False)
         self.model.setRootPath("")
+        self.model.fileRenamed.connect(self._on_model_file_renamed)
         self._proxy.setSourceModel(self.model)
         old_model.deleteLater()
 
@@ -1703,22 +1740,49 @@ class ExplorerPanel(QWidget, explorer_common.TransferJobHost):
 
         某个目录第一次出现在检查范围（刚换根/刚展开/刚刷新过）只建基线
         不刷新——模型此刻刚读过盘，数据是新的。"""
-        if not self.isVisible():
+        if not self.isVisible() or self._fingerprint_inflight:
             return
         root = self._current_path
         if not root or not os.path.isdir(root):
             return
-        old = self._auto_refresh_fingerprints
-        fresh: dict = {}
-        changed = False
-        for path in [root] + self._expanded_dir_paths(limit=64):
+        # listdir 在工作线程做：根目录挂在 SMB/NFS/sshfs 上时每次可到秒级，
+        # 放 GUI 线程就是每分钟卡一下。路径列表在 GUI 线程收集，结果经信号回来
+        paths = [root] + self._expanded_dir_paths(limit=64)
+        self._fingerprint_inflight = True
+
+        def scan(_paths=paths):
+            fresh: dict = {}
+            for path in _paths:
+                try:
+                    fresh[path] = frozenset(os.listdir(path))
+                except OSError:
+                    continue
+            return fresh
+
+        fut = self._local_executor().submit(scan)
+
+        def done(f, _self=self):
             try:
-                fresh[path] = frozenset(os.listdir(path))
-            except OSError:
-                continue
-            prev = old.get(path)
-            if prev is not None and prev != fresh[path]:
-                changed = True
+                fresh = f.result()
+            except Exception:
+                fresh = None
+            try:
+                if not sip.isdeleted(_self):
+                    _self._fingerprints_ready.emit(fresh)
+            except RuntimeError:
+                pass
+        fut.add_done_callback(done)
+
+    def _on_fingerprints_ready(self, fresh):
+        """GUI 线程：拿工作线程算好的指纹与基线比对，变了才刷新。"""
+        self._fingerprint_inflight = False
+        if fresh is None:
+            return
+        old = self._auto_refresh_fingerprints
+        changed = any(
+            old.get(path) is not None and old[path] != names
+            for path, names in fresh.items()
+        )
         if changed:
             self.refresh()  # 内部保留展开/选中状态
         self._auto_refresh_fingerprints = fresh
@@ -2166,6 +2230,11 @@ class ExplorerPanel(QWidget, explorer_common.TransferJobHost):
         else:
             editor.selectAll()
 
+    def _on_model_file_renamed(self, dir_path: str, old_name: str, new_name: str):
+        """QFileSystemModel 原地改名成功 → 对外广播完整路径对。"""
+        self.file_renamed.emit(os.path.join(dir_path, old_name),
+                               os.path.join(dir_path, new_name))
+
     def _rename_item(self, file_path: str):
         """在文件树中原地重命名文件/文件夹（不弹窗）"""
         idx = self._proxy.mapFromSource(self.model.index(file_path))
@@ -2239,12 +2308,18 @@ class ExplorerPanel(QWidget, explorer_common.TransferJobHost):
         if reply != QMessageBox.StandardButton.Yes:
             return
 
-        errors: list[str] = []
+        # 整批删除在工作线程跑：macOS 上 Finder 一次 AppleScript 往返可能要
+        # 几秒（未授权时还要先失败再回退），逐个在 GUI 线程跑就是整窗冻结
+        fut = self._local_executor().submit(self._send_to_trash_batch, list(valid))
+        try:
+            self._wait_future_with_progress([fut], t("explorer.delete") + "…")
+        except RuntimeError:
+            pass
+        exc = fut.exception() if fut.done() else None
+        errors: list[str] = [str(exc)] if exc is not None else list(fut.result())
         for p in valid:
-            try:
-                self._send_to_trash(p)
-            except Exception as e:
-                errors.append(f"{os.path.basename(p)}: {e}")
+            if not os.path.lexists(p):
+                self.file_deleted.emit(p)
 
         self.refresh()
         if errors:
@@ -2253,28 +2328,64 @@ class ExplorerPanel(QWidget, explorer_common.TransferJobHost):
                 t("explorer.delete_failed", error="\n".join(errors)),
             )
 
-    @staticmethod
-    def _macos_trash_via_finder(file_path: str) -> bool:
-        """让 Finder 把路径移到废纸篓。成功返回 True，被拦截/失败返回 False。
+    def _local_executor(self) -> ThreadPoolExecutor:
+        if self._local_pool is None:
+            self._local_pool = ThreadPoolExecutor(
+                max_workers=2, thread_name_prefix="explorer-local")
+        return self._local_pool
 
-        用 AppleScript 变量传路径并转义引号/反斜杠，避免路径里带特殊字符时
-        脚本被截断。20s 超时防止 Finder 卡死时一直挂着。
+    @staticmethod
+    def _applescript_trash_script(paths: list) -> str:
+        """一条 AppleScript 把整批路径交给 Finder 丢进废纸篓。
+
+        每个路径都转义反斜杠和双引号（路径里带这些字符时脚本会被截断）。
         """
-        escaped = file_path.replace("\\", "\\\\").replace('"', '\\"')
-        script = (
-            f'set p to POSIX file "{escaped}"\n'
-            f'tell application "Finder" to delete p'
+        items = []
+        for p in paths:
+            escaped = p.replace("\\", "\\\\").replace('"', '\\"')
+            items.append(f'(POSIX file "{escaped}") as alias')
+        return (
+            "set ps to {" + ", ".join(items) + "}\n"
+            'tell application "Finder" to delete ps'
         )
+
+    @classmethod
+    def _macos_trash_via_finder(cls, paths: list) -> bool:
+        """让 Finder 把一批路径移到废纸篓：N 个文件 = 一次 osascript 往返。
+        成功返回 True，被拦截/失败返回 False。超时随批量放宽，防 Finder 卡死。
+        """
+        if not paths:
+            return True
+        script = cls._applescript_trash_script(list(paths))
         try:
             subprocess.run(
                 ['osascript', '-e', script],
-                check=True, capture_output=True, timeout=20,
+                check=True, capture_output=True,
+                timeout=min(120, 20 + 2 * len(paths)),
             )
             return True
         except (subprocess.CalledProcessError, subprocess.TimeoutExpired, OSError):
             return False
 
-    def _send_to_trash(self, file_path: str):
+    def _send_to_trash_batch(self, paths: list) -> list:
+        """工作线程：把一批路径移到回收站，返回 ["name: error", …]。
+
+        macOS 先整批走 Finder（一次往返）；被拦截/失败再逐个回退到
+        send2trash → 永久删除。其它平台逐个走 _send_to_trash。
+        """
+        errors: list = []
+        pending = list(paths)
+        if sys.platform == 'darwin' and pending:
+            if self._macos_trash_via_finder(pending):
+                pending = [p for p in pending if os.path.lexists(p)]
+        for p in pending:
+            try:
+                self._send_to_trash(p, try_finder=False)
+            except Exception as e:
+                errors.append(f"{os.path.basename(p)}: {e}")
+        return errors
+
+    def _send_to_trash(self, file_path: str, try_finder: bool = True):
         """把单个本地路径移到回收站（平台分发）；失败时回退到永久删除。"""
         is_dir = os.path.isdir(file_path)
         if sys.platform == 'darwin':
@@ -2282,7 +2393,8 @@ class ExplorerPanel(QWidget, explorer_common.TransferJobHost):
             # （系统设置 › 隐私与安全性 › 自动化 › 允许本 App 控制 Finder）——
             # 没授权 / Finder 繁忙时 osascript 会报错。以前这里直接 check=True 抛出、
             # 没有任何兜底，于是表现成「右键删不掉文件夹」。现在失败就逐级回退。
-            if self._macos_trash_via_finder(file_path):
+            # 批量路径（_send_to_trash_batch）已经整批试过 Finder，不再逐个重试。
+            if try_finder and self._macos_trash_via_finder([file_path]):
                 return
             # 回退 1：send2trash（走原生 API，不需要 Finder 自动化权限）
             try:
@@ -2383,10 +2495,6 @@ class ExplorerPanel(QWidget, explorer_common.TransferJobHost):
             kind = it[0]
             if job is not None:
                 job.set_active_rows([row])
-                # 本地复制是同步阻塞的：先让窗口把这一行画出来，
-                # 否则整批看着像卡住。只放重绘，不派发用户输入（防重入）
-                QApplication.processEvents(
-                    QEventLoop.ProcessEventsFlag.ExcludeUserInputEvents)
             try:
                 if kind == "local":
                     src = it[1]
@@ -2421,12 +2529,10 @@ class ExplorerPanel(QWidget, explorer_common.TransferJobHost):
                         else:  # keep
                             name = explorer_clipboard.next_free_name(name, local_name_exists)
                             dst = os.path.join(target_dir, name)
-                    if move_mode:
-                        shutil.move(src, dst)
-                    elif os.path.isdir(src) and not os.path.islink(src):
-                        shutil.copytree(src, dst)
-                    else:
-                        shutil.copy2(src, dst)
+                    # 复制/移动在工作线程跑，这里只跑事件循环画进度
+                    fut = self._local_executor().submit(
+                        copy_local_entry, src, dst, move_mode)
+                    self._wait_future_with_progress([fut], t("explorer.pasting"))
                     self._finish_job_row(job, row)
 
                 elif kind == "remote":

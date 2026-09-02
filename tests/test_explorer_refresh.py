@@ -66,6 +66,16 @@ class ExplorerRefreshTest(unittest.TestCase):
         self.app.processEvents()
         shutil.rmtree(self.tmp, ignore_errors=True)
 
+    def _tick(self, ms=3000):
+        """跑一轮安全网：指纹现在在工作线程算，等它经信号回到 GUI 线程。"""
+        import time
+        self.panel._auto_refresh_tick()
+        deadline = time.monotonic() + ms / 1000
+        while self.panel._fingerprint_inflight and time.monotonic() < deadline:
+            self.app.processEvents()
+            time.sleep(0.01)
+        self.app.processEvents()
+
     def _wait_loaded(self, model, path, ms=3000):
         """等待模型异步装载 path 的目录内容。"""
         loaded = []
@@ -142,11 +152,11 @@ class ExplorerRefreshTest(unittest.TestCase):
         self.panel.show()  # tick 里有 isVisible() 守卫
         self.app.processEvents()
 
-        self.panel._auto_refresh_tick()  # 第一轮：建基线，不刷新
+        self._tick()  # 第一轮：建基线，不刷新
         self.assertIn(self._norm(self.sub), self._fingerprint_keys())
 
         open(os.path.join(self.sub, 'sub_c_new.txt'), 'w').close()
-        self.panel._auto_refresh_tick()  # 第二轮：发现子目录变化 → refresh
+        self._tick()  # 第二轮：发现子目录变化 → refresh
         self._wait_loaded(self.panel.model, self.sub)
         self.app.processEvents()
         self.assertIn('sub_c_new.txt', self._visible_names(self.sub))
@@ -160,11 +170,11 @@ class ExplorerRefreshTest(unittest.TestCase):
         self.panel.show()
         self.app.processEvents()
 
-        self.panel._auto_refresh_tick()  # 建基线（空集合也是合法基线）
+        self._tick()  # 建基线（空集合也是合法基线）
         self.assertIn(self._norm(empty_root), self._fingerprint_keys())
 
         open(os.path.join(empty_root, 'first.txt'), 'w').close()
-        self.panel._auto_refresh_tick()  # 旧实现在这里把变化吞成"建基线"
+        self._tick()  # 旧实现在这里把变化吞成"建基线"
         self._wait_loaded(self.panel.model, empty_root)
         self.app.processEvents()
         self.assertIn('first.txt', self._visible_names(empty_root))
