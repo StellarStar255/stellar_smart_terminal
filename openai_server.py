@@ -3,6 +3,7 @@ OpenAI API 兼容的 HTTP 服务器
 将终端中运行的 AI CLI 暴露为标准 OpenAI API
 """
 
+import hmac
 import json
 import uuid
 import time
@@ -822,6 +823,12 @@ class OpenAIRequestHandler(BaseHTTPRequestHandler):
 
     server_version = "SmartTerminal/1.0"
 
+    # socket 读写超时（秒）。BaseHTTPRequestHandler 默认 None：客户端连上后不发
+    # 请求行，handle() 里的 rfile.readline() 会永久阻塞并占住一个线程（slowloris）。
+    # SSE 长响应不受影响：那是写方向，且每 5s 有心跳；写阻塞 30s 说明客户端
+    # 早已不读，按断开处理（见各处 except TimeoutError）。
+    timeout = 30
+
     # 客户端断开标志（SSE 写入失败时置位，停止继续等待生成）
     _client_disconnected = False
 
@@ -861,8 +868,43 @@ class OpenAIRequestHandler(BaseHTTPRequestHandler):
             return True  # No auth configured
         auth_header = self.headers.get('Authorization', '')
         if auth_header.startswith('Bearer '):
-            return auth_header[7:] == self.config.api_key
+            return hmac.compare_digest(auth_header[7:].encode('utf-8'),
+                                       self.config.api_key.encode('utf-8'))
         return False
+
+    _LOOPBACK_HOSTS = ('127.0.0.1', 'localhost', '::1')
+
+    def _check_host(self) -> bool:
+        """Reject requests whose Host header is not this loopback server（DNS rebinding 防护）.
+
+        _check_csrf 只看 Sec-Fetch-Site / Origin：攻击者把 evil.com 的 DNS 重绑到
+        127.0.0.1 之后，浏览器发出的是「同源」请求（Sec-Fetch-Site: same-origin、
+        无 Origin），两道检查全部放行，请求正文随即被写进 PTY 执行。浏览器无法
+        伪造 Host 头，它永远是地址栏里的域名，所以 Host 不是本机回环名就一律拒绝。
+        非浏览器客户端（curl / openai SDK）按 URL 自动带 127.0.0.1:port，照常放行。
+        """
+        raw = (self.headers.get('Host') or '').strip()
+        if not raw:
+            return False
+        try:
+            port = int(self.server.server_address[1])
+        except Exception:
+            port = self.config.port
+        try:
+            # urlsplit 统一处理 host:port / [::1]:port
+            from urllib.parse import urlsplit
+            parts = urlsplit('//' + raw)
+            hostname, hport = parts.hostname, parts.port
+        except ValueError:
+            return False
+        if not hostname or hport != port:
+            return False
+        allowed = set(self._LOOPBACK_HOSTS)
+        cfg_host = (self.config.host or '').strip().lower()
+        # 用户显式绑到某个具体地址（非通配）时，也接受该地址作为 Host
+        if cfg_host and cfg_host not in ('0.0.0.0', '::', ''):
+            allowed.add(cfg_host)
+        return hostname.lower() in allowed
 
     def _check_csrf(self) -> bool:
         """Reject browser-driven cross-site requests (CSRF防护).
@@ -890,6 +932,9 @@ class OpenAIRequestHandler(BaseHTTPRequestHandler):
         return True
 
     def do_OPTIONS(self):
+        if not self._check_host():
+            self._send_error(403, "Host not allowed")
+            return
         self.send_response(200)
         cors_origin = self._get_cors_origin()
         if cors_origin:
@@ -899,6 +944,9 @@ class OpenAIRequestHandler(BaseHTTPRequestHandler):
         self.end_headers()
 
     def do_GET(self):
+        if not self._check_host():
+            self._send_error(403, "Host not allowed")
+            return
         if not self._check_csrf():
             self._send_error(403, "Cross-site request forbidden")
             return
@@ -913,6 +961,9 @@ class OpenAIRequestHandler(BaseHTTPRequestHandler):
             self._send_error(404, "Not Found")
 
     def do_POST(self):
+        if not self._check_host():
+            self._send_error(403, "Host not allowed")
+            return
         if not self._check_csrf():
             self._send_error(403, "Cross-site request forbidden")
             return
@@ -1442,7 +1493,7 @@ class OpenAIRequestHandler(BaseHTTPRequestHandler):
                         self.wfile.write(b": heartbeat\n\n")
                         self.wfile.flush()
                         last_heartbeat_time = current_time
-                    except (BrokenPipeError, ConnectionResetError):
+                    except (BrokenPipeError, ConnectionResetError, TimeoutError):
                         self._client_disconnected = True
                         break
 
@@ -1597,7 +1648,7 @@ class OpenAIRequestHandler(BaseHTTPRequestHandler):
 
             logger.debug(f"[OpenAI Server] Stream complete: {len(final_content)} chars")
 
-        except (BrokenPipeError, ConnectionResetError):
+        except (BrokenPipeError, ConnectionResetError, TimeoutError):
             self._client_disconnected = True
             logger.debug("[OpenAI Server] Client disconnected")
         except Exception as e:
@@ -1709,7 +1760,7 @@ class OpenAIRequestHandler(BaseHTTPRequestHandler):
         try:
             self.wfile.write(f"data: {json.dumps(data, ensure_ascii=False)}\n\n".encode('utf-8'))
             self.wfile.flush()
-        except (BrokenPipeError, ConnectionResetError):
+        except (BrokenPipeError, ConnectionResetError, TimeoutError):
             # 客户端已断开，置位标志让流式循环停止等待生成
             self._client_disconnected = True
 
