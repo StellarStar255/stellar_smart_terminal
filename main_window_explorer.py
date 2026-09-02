@@ -271,6 +271,8 @@ class ExplorerPanelMixin:
         # 文件编辑请求 → 编辑器；快捷方式增删 → 刷新 ★ 按钮提示
         panel.file_edit_requested.connect(self._open_file_in_editor)
         panel.favorites_changed.connect(self._on_explorer_favorites_changed)
+        # 主页按钮 → 回到本窗口的工作目录（顶部 Directory 里的路径）
+        panel.home_requested.connect(self._explorer_go_home)
         # 资源管理器的保存信号 → 活动窗格
         panel.save_file_requested.connect(self.editor_area.save_active)
         panel.save_file_as_requested.connect(self.editor_area.save_active_as)
@@ -286,6 +288,14 @@ class ExplorerPanelMixin:
         self._apply_zoom_to_explorer_tree()
         self._on_explorer_favorites_changed()
         return panel
+
+    def _explorer_go_home(self):
+        """Explorer 主页按钮：把根目录切回窗口当前工作目录。"""
+        panel = getattr(self, 'explorer_panel', None)
+        cwd = getattr(self, '_window_cwd', None)
+        if panel is None or not cwd or not os.path.isdir(cwd):
+            return
+        panel.set_root_path(cwd)
 
     def _apply_zoom_to_explorer_tree(self):
         """文件树字号跟随终端缩放（默认 13pt，范围 8-28），不受 GUI 字号影响。"""

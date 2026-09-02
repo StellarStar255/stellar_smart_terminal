@@ -367,6 +367,7 @@ class FilteredFileSystemModel(QFileSystemModel):
 # 面包屑控件已挪到 explorer_common（本地/远程面板共用）；这里再导出，
 # 保持既有 import 路径与测试可用
 from explorer_common import _CrumbLabel, _BreadcrumbBar  # noqa: F401,E402
+from git_widget import _make_git_tool_icon  # noqa: E402  —— 与远程面板同款矢量线条图标
 
 class _DotFileProxy(QSortFilterProxyModel):
     """在 Windows 上过滤以 '.' 开头的隐藏文件/文件夹。
@@ -519,6 +520,9 @@ class ExplorerPanel(QWidget, explorer_common.TransferJobHost):
     save_file_requested = pyqtSignal()  # 请求保存当前编辑的文件
     save_file_as_requested = pyqtSignal()  # 请求另存为当前编辑的文件
     favorites_changed = pyqtSignal()  # 快捷方式（收藏）增删后通知外部刷新 ★ 菜单
+    # 「主页」按钮：回到窗口当前工作目录（顶部 Directory 里的项目路径）。
+    # 面板自己不知道那是哪，由宿主窗口接这个信号
+    home_requested = pyqtSignal()
     # 文件树里原地改名后：(旧完整路径, 新完整路径)。编辑器等外部订阅者据此
     # 把打开的文件跟着改过去，否则会继续按旧路径自动保存产生两份文件
     file_renamed = pyqtSignal(str, str)
@@ -813,6 +817,15 @@ class ExplorerPanel(QWidget, explorer_common.TransferJobHost):
         self.up_btn.clicked.connect(self.go_up)
         search_bar.addWidget(self.up_btn)
 
+        # 主页：一键回到窗口工作目录。往上翻了几层想回项目根，不用逐级点回去
+        self.home_btn = QToolButton()
+        self.home_btn.setIconSize(QSize(14, 14))
+        self.home_btn.setToolTip(t("explorer.go_home"))
+        self.home_btn.setCursor(Qt.CursorShape.PointingHandCursor)
+        self.home_btn.setFocusPolicy(Qt.FocusPolicy.NoFocus)
+        self.home_btn.clicked.connect(self.home_requested.emit)
+        search_bar.addWidget(self.home_btn)
+
         self.search_mode_btn = QToolButton()
         self.search_mode_btn.setCheckable(True)
         self.search_mode_btn.setText("Aa")
@@ -975,6 +988,8 @@ class ExplorerPanel(QWidget, explorer_common.TransferJobHost):
         accent = self.theme.get('accent', '#667eea')
 
         self.breadcrumb.set_colors(text, text_dim)
+        if getattr(self, 'home_btn', None) is not None:
+            self.home_btn.setIcon(_make_git_tool_icon('home', text, 14))
         self.path_edit.setStyleSheet(
             f"QLineEdit {{ background: transparent; border: none;"
             f" color: {text_dim}; padding: 0 2px; font-size: 11px; }}"
@@ -1700,6 +1715,8 @@ class ExplorerPanel(QWidget, explorer_common.TransferJobHost):
         但常驻的搜索框 placeholder 需要在切换语言时更新。
         """
         self.search_edit.setPlaceholderText(t("search.placeholder"))
+        if getattr(self, 'home_btn', None) is not None:
+            self.home_btn.setToolTip(t("explorer.go_home"))
 
     def set_editing_file(self, file_path: str):
         """设置当前正在编辑的文件路径"""

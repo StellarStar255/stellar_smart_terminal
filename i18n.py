@@ -484,6 +484,7 @@ TRANSLATIONS = {
     "explorer.pasting": {"zh": "正在粘贴…", "en": "Pasting…"},
     "explorer.pasting_into": {"zh": "正在粘贴到 {dst}…", "en": "Pasting into {dst}…"},
     "explorer.go_up": {"zh": "上一级目录", "en": "Go to parent folder"},
+    "explorer.go_home": {"zh": "回到工作目录（顶部 Directory 里的项目路径）", "en": "Back to the working folder (the project path in Directory)"},
     "explorer.path_placeholder": {"zh": "当前目录（可编辑，回车跳转）",
                                    "en": "Current folder (editable, Enter to go)"},
     "explorer.double_click_enter": {
