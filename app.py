@@ -548,8 +548,8 @@ def _install_stack_dump_watchdog():
         secs = float(os.environ.get('STELLAR_STACK_DUMP_SECS', '4'))
         fh = open(path, 'a')  # noqa: SIM115 —— 要活到进程结束
         faulthandler.dump_traceback_later(secs, repeat=True, file=fh)
-    except Exception:
-        pass  # 诊断开关失败不影响启动
+    except (OSError, ValueError):
+        pass  # 文件打不开 / 间隔非法：诊断开关失败不影响启动
 
 
 def main():
