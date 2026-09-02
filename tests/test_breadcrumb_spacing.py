@@ -37,15 +37,18 @@ class TestBreadcrumbSpacing(unittest.TestCase):
             w = bar._layout.itemAt(i).widget()
             if w is not None and w.text():
                 items.append(w)
-        names = [w for w in items if w.text() != '/']
-        self.assertGreaterEqual(len(names), 3)
         fm = QFontMetrics(bar.font())
-        # 相邻两个目录名的文字之间的空白（含分隔符本身的字宽）
+        # 只看"名字 / 名字"这种中间真有分隔符的相邻对：根段（"/" 或 Windows 的
+        # "\\"）后面本就不插分隔符，它与下一段之间的窄缝不算数
         gaps = []
-        for a, b in zip(names, names[1:]):
+        for i in range(len(items) - 2):
+            a, sep, b = items[i], items[i + 1], items[i + 2]
+            if sep.text() != '/' or a.text() == '/' or b.text() == '/':
+                continue
             a_text_right = a.x() + (a.width() + fm.horizontalAdvance(a.text())) // 2
             b_text_left = b.x() + (b.width() - fm.horizontalAdvance(b.text())) // 2
             gaps.append(b_text_left - a_text_right)
+        self.assertGreaterEqual(len(gaps), 2)
         # 旧实现（QToolButton）在 mac 上是 22-25px；新实现 mac 约 10-11px、
         # Linux CI 的字体下 12-15px（末段加粗、字宽估算偏差）。阈值取 18。
         self.assertTrue(all(g <= 18 for g in gaps),
@@ -62,7 +65,8 @@ class TestBreadcrumbSpacing(unittest.TestCase):
         bar.path_selected.connect(got.append)
         seg = [w for w in bar.findChildren(_CrumbLabel) if w.text() == 'x'][0]
         seg.clicked.emit()
-        self.assertEqual(got, ['/Users/x'])
+        self.assertEqual([os.path.normpath(p) for p in got],
+                         [os.path.normpath('/Users/x')])
 
 
 
