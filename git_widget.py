@@ -182,6 +182,10 @@ from app_logging import get_logger
 
 logger = get_logger(__name__)
 
+# shutdown() 等不到的后台线程：脱离面板后由这里持有到它自己结束。
+# 绝不能让一个仍在 running 的 QThread 随父面板析构——那会 abort 整个进程。
+_ORPHANED_WORKERS = set()
+
 
 # 文件状态颜色
 STATUS_COLORS = {
@@ -3460,6 +3464,9 @@ class GitPanel(QWidget):
         worker.finished.connect(lambda w=worker: self._active_workers.discard(w))
         worker.finished.connect(worker.deleteLater)
 
+    # shutdown() 给每个后台线程的等待上限（测试里会调短）
+    _SHUTDOWN_WAIT_MS = 3000
+
     def shutdown(self):
         """关闭前调用：停掉定时器并等待在跑的后台线程，避免线程仍在运行时被销毁导致 abort。
 
@@ -3469,7 +3476,7 @@ class GitPanel(QWidget):
         """
         try:
             self._fetch_timer.stop()
-        except RuntimeError:
+        except RuntimeError:  # Qt 对象已销毁（窗口/面板已关）
             pass
         # 先放掉子进程，worker 线程随即从 communicate() 返回，wait() 几乎瞬间完成
         try:
@@ -3478,11 +3485,17 @@ class GitPanel(QWidget):
             logger.debug("shutdown: suppressed exception", exc_info=True)
         for worker in list(self._active_workers):
             try:
-                if worker.isRunning():
-                    if not worker.wait(3000):
-                        worker.terminate()
-                        worker.wait(1000)
-            except RuntimeError:
+                if worker.isRunning() and not worker.wait(self._SHUTDOWN_WAIT_MS):
+                    # 不再 terminate()：对阻塞在 Python 代码里的线程它会连 GIL
+                    # 一起带走（死锁），对阻塞在 C 库里的又不可靠。等不到就让
+                    # 它脱离面板，由模块级集合持有到自己结束——线程泄漏一个，
+                    # 但进程不会因为"析构仍在运行的 QThread"而 abort。
+                    logger.warning("shutdown: git worker still running, orphaning it")
+                    worker.setParent(None)
+                    _ORPHANED_WORKERS.add(worker)
+                    worker.finished.connect(
+                        lambda w=worker: _ORPHANED_WORKERS.discard(w))
+            except RuntimeError:  # Qt 对象已销毁（窗口/面板已关）
                 pass
         self._active_workers.clear()
 
