@@ -1613,13 +1613,27 @@ class SSHSession(QObject):
 
     @_auto_reconnect
     def stat(self, path: str) -> RemoteEntry:
+        """路径元信息：is_dir/size 跟随软链（导航、进度分母要目标的），
+        is_link 则按链接本身报——否则"指向目录的软链"会被当成真目录，
+        粘贴覆盖时 remove_tree 递归进去把目标目录掏空。
+        非软链只需一次 lstat；软链再补一次 stat 取目标类型/大小。
+        """
         sftp = self._require()
-        attr = sftp.stat(path)
+        lattr = sftp.lstat(path)
+        is_link = stat.S_ISLNK(lattr.st_mode or 0)
+        attr = lattr
+        if is_link:
+            try:
+                attr = sftp.stat(path)
+            except (IOError, OSError):
+                attr = lattr        # 悬空软链：按普通文件（is_dir=False）处理
         # construct a synthetic name from path
         name = os.path.basename(path.rstrip("/")) or path
         parent = os.path.dirname(path.rstrip("/")) or "/"
         attr.filename = name
-        return _attr_to_entry(parent, attr)
+        entry = _attr_to_entry(parent, attr)
+        entry.is_link = is_link
+        return entry
 
     @_auto_reconnect
     def read_file(self, path: str, max_bytes: int = 5 * 1024 * 1024) -> bytes:
@@ -1980,6 +1994,11 @@ class SSHSession(QObject):
 
     def _remove_tree_impl(self, path: str):
         sftp = self._require()
+        # 根路径若是软链：SFTP 服务端 listdir 会跟随链接列出目标目录的内容，
+        # 递归下去删的就是目标目录里的东西。软链只删链接本身，绝不进入。
+        if stat.S_ISLNK(sftp.lstat(path).st_mode or 0):
+            sftp.remove(path)
+            return
         for entry in sftp.listdir_attr(path):
             child = path.rstrip("/") + "/" + entry.filename
             if entry.st_mode and stat.S_ISDIR(entry.st_mode) and not stat.S_ISLNK(entry.st_mode):

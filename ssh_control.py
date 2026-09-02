@@ -185,11 +185,13 @@ def parse_ls_output(text: str, parent: str) -> list[RemoteEntry]:
                 name = name[:i]
         if name in (".", ".."):
             continue
-        # 软链当普通文件对待（面板里双击会走 stat，届时按目标类型解析）
+        # 软链当普通文件对待（面板里双击会走 stat，届时按目标类型解析），
+        # 但 is_link 如实上报——与 paramiko 后端 listdir_attr 的口径一致
         out.append(RemoteEntry(
             name=name,
             path=posixpath.join(parent, name) if parent else name,
             is_dir=(type_char == "d"),
+            is_link=(type_char == "l"),
             size=size,
             mtime=mtime,
         ))
@@ -656,13 +658,19 @@ class ControlMasterSession(QObject):
     def stat(self, path: str) -> RemoteEntry:
         # -L 必须有：软链上 ls -ld 报的是链接本身的大小（= 目标路径的字符数），
         # 拿它当分母算进度会算错。[ -d ] / [ -e ] 本来就跟随软链，口径才一致。
+        # 首行形如 "dir" / "file link" / "none"：[ -L ] 不跟随软链，把链接
+        # 身份附在同一行上报（与 paramiko 后端 stat 的 is_link 口径一致）。
+        q = _qpath(path)
         out = self._run(
-            f"if [ -d {_qpath(path)} ]; then echo dir; "
-            f"elif [ -e {_qpath(path)} ]; then echo file; else echo none; fi; "
-            f"LC_ALL=C ls -ldnL --time-style=+%s -- {_qpath(path)} 2>/dev/null || true")
+            f"if [ -d {q} ]; then k=dir; "
+            f"elif [ -e {q} ]; then k=file; else k=none; fi; "
+            f"if [ -L {q} ]; then echo \"$k link\"; else echo \"$k\"; fi; "
+            f"LC_ALL=C ls -ldnL --time-style=+%s -- {q} 2>/dev/null || true")
         lines = out.split("\n")
-        kind = (lines[0] or "").strip()
-        if kind == "none":
+        head = (lines[0] or "").split()
+        kind = head[0] if head else ""
+        is_link = "link" in head[1:]
+        if kind == "none" and not is_link:
             raise FileNotFoundError(f"远端路径不存在: {path}")
         parent = self._parent(path)
         name = posixpath.basename(path.rstrip("/")) or path
@@ -670,7 +678,7 @@ class ControlMasterSession(QObject):
         size = parsed[0].size if parsed else 0
         mtime = parsed[0].mtime if parsed else 0.0
         return RemoteEntry(name=name, path=path, is_dir=(kind == "dir"),
-                           size=size, mtime=mtime)
+                           is_link=is_link, size=size, mtime=mtime)
 
     def read_file(self, path: str, max_bytes: int = 5 * 1024 * 1024) -> bytes:
         st = self.stat(path)
@@ -680,6 +688,10 @@ class ControlMasterSession(QObject):
             proc = self._spawn(f"cat -- {_qpath(path)}")
             try:
                 out, err = proc.communicate(timeout=CMD_TIMEOUT)
+            except subprocess.TimeoutExpired:
+                proc.kill()
+                proc.communicate()
+                raise RuntimeError(f"远端读取超时: {path}")
             finally:
                 self._reap(proc)
         if proc.returncode != 0:
@@ -692,6 +704,10 @@ class ControlMasterSession(QObject):
                                stdout=subprocess.DEVNULL)
             try:
                 _out, err = proc.communicate(input=content, timeout=CMD_TIMEOUT)
+            except subprocess.TimeoutExpired:
+                proc.kill()
+                proc.communicate()
+                raise RuntimeError(f"远端写入超时: {path}")
             finally:
                 self._reap(proc)
         if proc.returncode != 0:
