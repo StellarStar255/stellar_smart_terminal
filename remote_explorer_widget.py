@@ -27,7 +27,7 @@ from PyQt6.QtWidgets import (
     QApplication, QSizePolicy, QProgressDialog, QStyledItemDelegate,
     QAbstractItemView, QDialog, QComboBox, QCheckBox,
 )
-from PyQt6.QtCore import Qt, pyqtSignal, QTimer, QMimeData, QUrl, QSize
+from PyQt6.QtCore import Qt, pyqtSignal, QTimer, QMimeData, QUrl, QSize, QEvent
 from PyQt6.QtGui import (QAction, QActionGroup, QCursor, QDrag, QShortcut,
                          QKeySequence, QDesktopServices)
 from PyQt6 import sip  # 用于检查 C++ 对象是否已被删除
@@ -36,6 +36,7 @@ from i18n import t
 import explorer_clipboard
 import explorer_common
 from explorer_common import _TransferRateTracker, _BYTE_BAR_SCALE  # 共享的测速/刻度
+from explorer_common import _BreadcrumbBar  # 与本地 Explorer 同款面包屑
 import remote_bookmarks
 import ssh_control
 from ssh_session import (
@@ -1426,11 +1427,21 @@ class RemoteExplorerPanel(QWidget, explorer_common.TransferJobHost):
         self._bookmark_btn.clicked.connect(self._show_bookmark_menu)
         pb_layout.addWidget(self._bookmark_btn)
 
+        # 路径显示与本地 Explorer 同款：面包屑（当前目录亮色、上级可点、宽度不够
+        # 从左折叠），双击换成可编辑的路径框。远端永远是 POSIX 路径，切分用 posixpath。
+        self.breadcrumb = _BreadcrumbBar(path_module=posixpath)
+        self.breadcrumb.path_selected.connect(self._navigate_to_path)
+        self.breadcrumb.edit_requested.connect(self._begin_path_edit)
+        self.breadcrumb.segment_context_requested.connect(self._show_path_segment_menu)
+        pb_layout.addWidget(self.breadcrumb, 1)
+
         self._path_edit = QLineEdit()
         self._path_edit.returnPressed.connect(self._on_path_edited)
         # 在默认的编辑右键菜单（撤销/复制/粘贴等）之上补一个「在此打开终端」
         self._path_edit.setContextMenuPolicy(Qt.ContextMenuPolicy.CustomContextMenu)
         self._path_edit.customContextMenuRequested.connect(self._on_path_edit_context_menu)
+        self._path_edit.installEventFilter(self)   # Esc = 放弃编辑
+        self._path_edit.hide()                      # 默认显示面包屑
         pb_layout.addWidget(self._path_edit, 1)
 
         # 视图设置按钮（齿轮）：弹出菜单，含"显示隐藏文件"开关
@@ -1500,6 +1511,8 @@ class RemoteExplorerPanel(QWidget, explorer_common.TransferJobHost):
         bg_hover = self.theme.get('bg_hover', '#2a2a44')
         text = self.theme.get('text', '#eaeaea')
         text_dim = self.theme.get('text_dim', '#888888')
+        if getattr(self, 'breadcrumb', None) is not None:
+            self.breadcrumb.set_colors(text, text_dim)
         border = self.theme.get('border', '#3d3d5c')
         accent = self.theme.get('accent', '#667eea')
 
@@ -2354,7 +2367,7 @@ class RemoteExplorerPanel(QWidget, explorer_common.TransferJobHost):
         # （目录若已失效，_populate_tree_root 的 listdir 会通过 _error_signal 提示）
         default_dir = self._get_default_dir(sess.host_config.alias)
         self._current_path = default_dir or sess.home()
-        self._path_edit.setText(self._current_path)
+        self._set_path_bar(self._current_path)
         self._populate_tree_root()
         self._auto_refresh_timer.start()
         # 记住最近连上的 host，供"断线后一键重连"使用
@@ -3190,7 +3203,7 @@ class RemoteExplorerPanel(QWidget, explorer_common.TransferJobHost):
         if entry.is_dir:
             # 双击目录 = 进入它，重置树根
             self._current_path = entry.path
-            self._path_edit.setText(self._current_path)
+            self._set_path_bar(self._current_path)
             self._populate_tree_root()
         else:
             self._open_remote_file(entry)
@@ -3348,7 +3361,7 @@ class RemoteExplorerPanel(QWidget, explorer_common.TransferJobHost):
         if e.is_dir:
             self._search_edit.clear()  # 触发 _exit_search
             self._current_path = e.path
-            self._path_edit.setText(self._current_path)
+            self._set_path_bar(self._current_path)
             self._populate_tree_root()
         else:
             self._open_remote_file(e)
@@ -3358,7 +3371,7 @@ class RemoteExplorerPanel(QWidget, explorer_common.TransferJobHost):
             return
         parent = posixpath.dirname(self._current_path.rstrip("/")) or "/"
         self._current_path = parent
-        self._path_edit.setText(self._current_path)
+        self._set_path_bar(self._current_path)
         self._populate_tree_root()
 
     def _on_home(self):
@@ -3367,13 +3380,72 @@ class RemoteExplorerPanel(QWidget, explorer_common.TransferJobHost):
         # 设过默认启动目录就回默认目录，否则回 SSH home —— 与连接时的行为保持一致
         default_dir = self._get_default_dir(self._session.host_config.alias)
         self._current_path = default_dir or self._session.home()
-        self._path_edit.setText(self._current_path)
+        self._set_path_bar(self._current_path)
         self._populate_tree_root()
 
+    def _set_path_bar(self, path: str):
+        """把路径框文字与面包屑同步成 path（完整路径在悬停提示里）。"""
+        if self._path_edit.text() != path:
+            self._path_edit.setText(path)
+        self.breadcrumb.set_path(path)
+
+    def _begin_path_edit(self):
+        """双击面包屑 → 换成可编辑的路径框，全选好直接改。"""
+        self.breadcrumb.hide()
+        self._path_edit.setText(self._current_path or "")
+        self._path_edit.show()
+        self._path_edit.setFocus()
+        self._path_edit.selectAll()
+
+    def _end_path_edit(self):
+        self._path_edit.hide()
+        self.breadcrumb.show()
+
+    def eventFilter(self, obj, event):        # noqa: N802 — Qt 回调
+        """路径编辑框里按 Esc = 放弃编辑，退回面包屑。"""
+        if (obj is getattr(self, '_path_edit', None)
+                and event.type() == QEvent.Type.KeyPress
+                and event.key() == Qt.Key.Key_Escape):
+            self._end_path_edit()
+            return True
+        return super().eventFilter(obj, event)
+
+    def _show_path_segment_menu(self, path: str, global_pos):
+        """面包屑某一段（或空白处 = 当前目录）右键：书签 / 在此打开终端 / 复制路径。"""
+        menu = self._build_path_segment_menu(path)
+        menu.exec(global_pos)
+        self._update_bookmark_btn_state()
+
+    def _build_path_segment_menu(self, path: str) -> QMenu:
+        menu = self._make_menu()
+        if self._session is not None:
+            host = self._session.host_config.alias
+            if remote_bookmarks.is_bookmarked(host, path):
+                act = QAction(t("remote.bookmark_remove", path=path), menu)
+                act.triggered.connect(lambda checked=False, p=path: self._toggle_bookmark(p, add=False))
+            else:
+                act = QAction(t("remote.bookmark_add", path=path), menu)
+                act.triggered.connect(lambda checked=False, p=path: self._toggle_bookmark(p, add=True))
+            menu.addAction(act)
+            act_term = QAction(t("remote.open_terminal_here"), menu)
+            act_term.triggered.connect(lambda checked=False, p=path: self._open_terminal_at_path(p))
+            menu.addAction(act_term)
+            menu.addSeparator()
+        act_copy = QAction(t("explorer.copy_path"), menu)
+        act_copy.triggered.connect(lambda checked=False, p=path: QApplication.clipboard().setText(p))
+        menu.addAction(act_copy)
+        return menu
+
     def _on_path_edited(self):
+        new_path = self._path_edit.text().strip() or "/"
+        self._navigate_to_path(new_path)
+        if self._path_edit.isVisible():
+            self._end_path_edit()
+
+    def _navigate_to_path(self, new_path: str):
+        """跳到 new_path：先 stat 确认存在且是目录（是文件则直接打开）。"""
         if self._session is None:
             return
-        new_path = self._path_edit.text().strip() or "/"
         sess = self._session
         # 先 stat 一下确认存在且是目录
         fut = sess.submit(sess.stat, new_path)
@@ -3392,7 +3464,7 @@ class RemoteExplorerPanel(QWidget, explorer_common.TransferJobHost):
             self._current_path = requested_path
         else:
             self._open_remote_file(entry)
-        self._path_edit.setText(self._current_path)
+        self._set_path_bar(self._current_path)
         self._populate_tree_root()
 
     # ---------- 文件操作 ----------
@@ -5176,6 +5248,6 @@ class RemoteExplorerPanel(QWidget, explorer_common.TransferJobHost):
                 logger.debug("restore_once: suppressed exception", exc_info=True)
             if sess is self._session and saved_cwd:
                 self._current_path = saved_cwd
-                self._path_edit.setText(saved_cwd)
+                self._set_path_bar(saved_cwd)
                 self._populate_tree_root()
         sess.connected.connect(restore_once)

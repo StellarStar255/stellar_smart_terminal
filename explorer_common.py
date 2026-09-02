@@ -11,8 +11,12 @@ from collections import deque
 from typing import Optional, Tuple
 
 from PyQt6 import sip
-from PyQt6.QtCore import Qt, QTimer, QEventLoop
-from PyQt6.QtWidgets import QMessageBox, QCheckBox, QProgressDialog
+from PyQt6.QtCore import Qt, QTimer, QEventLoop, QPoint, pyqtSignal
+from PyQt6.QtGui import QFontMetrics
+from PyQt6.QtWidgets import (
+    QMessageBox, QCheckBox, QProgressDialog, QWidget, QLabel, QToolButton,
+    QHBoxLayout, QMenu, QSizePolicy,
+)
 
 from i18n import t
 from transfer_progress import TransferProgressDialog
@@ -161,6 +165,230 @@ class _TransferRateTracker:
         if avg <= 0:
             return None
         return (bytes_total - bytes_done) / avg
+
+
+class _CrumbLabel(QLabel):
+    """面包屑里的一段：可点击的 QLabel。
+
+    不用 QToolButton：它在 macOS 样式下有 10px 的固定额外宽度（padding 调到 0
+    也去不掉），加上分隔符两侧的留白，相邻两个目录名之间空出 25px，看着松。
+    QLabel 没有这个底线，间距完全由样式表里的 padding 决定。
+    """
+    clicked = pyqtSignal()
+
+    def __init__(self, text: str = "", parent=None):
+        super().__init__(text, parent)
+        # 样式表一设 padding，QLabel 就按"有边框"处理，自动再加约 6px 的
+        # indent——这正是间距压不下去的原因；明确设为 0，留白只由 padding 决定
+        self.setIndent(0)
+
+    def mousePressEvent(self, event):         # noqa: N802 — Qt 回调
+        if event.button() == Qt.MouseButton.LeftButton:
+            self.clicked.emit()
+            event.accept()
+            return
+        super().mousePressEvent(event)
+
+
+class _BreadcrumbBar(QWidget):
+    """当前目录的面包屑：`… / aiem-arranger / src / main / resources`。
+
+    比一行小字路径好在两点：当前目录名是亮色、一眼能认；上级各段可以点，
+    直接跳回去。宽度不够时从**左边**开始折叠成 `…`（点它列出被折叠的
+    上级）——要保留的永远是右边那几段，那才是"我在哪"。
+    """
+
+    path_selected = pyqtSignal(str)
+    edit_requested = pyqtSignal()
+    # 右键某一段（或空白处 = 当前目录）：(该段完整路径, 全局坐标)。
+    # 由面板接管弹菜单——"把这个路径加成快捷方式"的入口就在这里。
+    segment_context_requested = pyqtSignal(str, QPoint)
+
+    def __init__(self, parent=None, path_module=None):
+        super().__init__(parent)
+        # 切分路径用哪套规则：本地面板用 os.path；远程面板传 posixpath——远端
+        # 永远是 POSIX 路径，Windows 宿主机上用 os.path 会把 "/" 拆坏
+        self._pm = path_module or os.path
+        self._path = ""
+        self._dim = "#888888"
+        self._text = "#eaeaea"
+        self._layout = QHBoxLayout(self)
+        self._layout.setContentsMargins(6, 0, 6, 0)
+        self._layout.setSpacing(0)
+        self.setMinimumHeight(22)
+        self.setToolTip("")
+
+    def set_colors(self, text: str, dim: str):
+        self._text, self._dim = text, dim
+        self._rebuild()
+
+    def set_path(self, path: str):
+        self._path = path or ""
+        self.setToolTip(self._path)
+        self._rebuild()
+
+    def path(self) -> str:
+        return self._path
+
+    def segments(self) -> list:
+        """[(显示名, 该段对应的完整路径), …]，从根到当前目录。"""
+        if not self._path:
+            return []
+        parts = []
+        pm = self._pm
+        cur = pm.normpath(self._path)
+        while True:
+            parent = pm.dirname(cur)
+            name = pm.basename(cur)
+            if not name:                     # 到根了（/ 或 C:\）
+                parts.append((cur, cur))
+                break
+            parts.append((name, cur))
+            if parent == cur:
+                break
+            cur = parent
+        parts.reverse()
+        return parts
+
+    def _seg_overhead(self) -> int:
+        """一个段按钮除文字之外要占的像素（按钮内边距 + 分隔符）。
+
+        实测而不是拍脑袋：QToolButton 自己的内边距/边框跟样式表、平台都
+        有关，估小了布局就会把每段挤成 "aie…ger" 那种谁也认不出的样子。
+        """
+        # 样本控件不能以本控件为父：父控件可见时它们会在 deleteLater 生效前
+        # 被画在左上角（曾在最左边多出一个 "/"）。无父对象的隐藏控件不会显示。
+        sample = _CrumbLabel("W")
+        sample.setFont(self.font())
+        sample.setStyleSheet(self._seg_qss(self._dim, "400"))
+        overhead = max(0, sample.sizeHint().width()
+                       - QFontMetrics(self.font()).horizontalAdvance("W"))
+        sample.deleteLater()
+        sep = QLabel("/")
+        sep.setFont(self.font())
+        sep.setIndent(0)
+        sep.setStyleSheet(self._sep_qss())
+        sep_w = sep.sizeHint().width()
+        sep.deleteLater()
+        return overhead + sep_w
+
+    def visible_segments(self, width: int = -1, seg_overhead: int = -1) -> list:
+        """按可用宽度算出真正显示哪几段；折叠掉的用开头的 None 占位。"""
+        segs = self.segments()
+        if not segs:
+            return []
+        if width < 0:
+            width = self.width()
+        margins = self._layout.contentsMargins()
+        avail = max(0, width - margins.left() - margins.right())
+        if seg_overhead < 0:
+            seg_overhead = self._seg_overhead()
+        fm = QFontMetrics(self.font())
+        # 从右往左塞，塞不下就停 —— 右边的段（当前目录）永远优先保留。
+        # 折叠标记 "…" 自己也要占一格。
+        ellipsis_w = fm.horizontalAdvance("…") + seg_overhead
+        kept, used = [], 0
+        for i, (name, full) in enumerate(reversed(segs)):
+            w = fm.horizontalAdvance(name) + seg_overhead
+            reserve = 0 if i == len(segs) - 1 else ellipsis_w
+            if kept and used + w + reserve > avail:
+                break
+            kept.append((name, full))
+            used += w
+        kept.reverse()
+        if len(kept) < len(segs):
+            return [(None, None)] + kept     # 开头放折叠标记
+        return kept
+
+    # 段与分隔符的留白：段两侧各 2px + "/" 两侧各 1px → 相邻目录名间约 10px
+    _SEG_PAD_PX = 2
+    _SEP_PAD_PX = 1
+
+    def _seg_qss(self, color: str, weight: str) -> str:
+        return (f"QLabel {{ background: transparent; color: {color};"
+                f" font-weight: {weight}; padding: 0 {self._SEG_PAD_PX}px; margin: 0; }}"
+                f"QLabel:hover {{ color: {self._text}; text-decoration: underline; }}")
+
+    def _sep_qss(self) -> str:
+        return f"color: {self._dim}; padding: 0 {self._SEP_PAD_PX}px; margin: 0;"
+
+    def _btn_qss(self, color: str, weight: str) -> str:
+        """折叠标记 "…" 仍是 QToolButton（要挂菜单），只把留白压到最小"""
+        return (f"QToolButton {{ border: none; background: transparent;"
+                f" color: {color}; font-weight: {weight}; padding: 0; margin: 0; }}"
+                f"QToolButton:hover {{ color: {self._text};"
+                f" text-decoration: underline; }}"
+                f"QToolButton::menu-indicator {{ image: none; width: 0; }}")
+
+    def mouseDoubleClickEvent(self, event):   # noqa: N802 — Qt 回调
+        # 双击空白处 → 切到可编辑的路径框（手敲路径跳转）
+        self.edit_requested.emit()
+
+    def contextMenuEvent(self, event):        # noqa: N802 — Qt 回调
+        # 右键空白处（或分隔符）→ 当前目录的路径菜单
+        if self._path:
+            self.segment_context_requested.emit(self._path, event.globalPos())
+            event.accept()
+
+    def resizeEvent(self, event):             # noqa: N802 — Qt 回调
+        super().resizeEvent(event)
+        self._rebuild()
+
+    def _rebuild(self):
+        while self._layout.count():
+            item = self._layout.takeAt(0)
+            w = item.widget()
+            if w is not None:
+                w.setParent(None)      # 先摘干净：只 deleteLater 的话
+                w.deleteLater()        # 布局缓存不失效，整行高度会塌成 0
+        shown = self.visible_segments()
+        hidden = [seg for seg in self.segments()
+                  if seg not in [s for s in shown if s[0] is not None]]
+        prev_was_root = False
+        for i, (name, full) in enumerate(shown):
+            # 根那一段本身就是 "/"（Windows 上是 "C:\\"），后面再补一个分隔符
+            # 就成了 "/ / var"，难看
+            if i and not prev_was_root:
+                sep = QLabel("/")
+                sep.setIndent(0)   # 同 _CrumbLabel：不设的话 QSS padding 会额外带 indent
+                sep.setStyleSheet(self._sep_qss())
+                self._layout.addWidget(sep)
+            if name is None:
+                btn = QToolButton()
+                btn.setText("…")
+                btn.setToolTip(self._path)
+                btn.setPopupMode(QToolButton.ToolButtonPopupMode.InstantPopup)
+                menu = QMenu(btn)
+                for h_name, h_full in hidden:
+                    act = menu.addAction(h_name)
+                    act.triggered.connect(
+                        lambda _=False, pth=h_full: self.path_selected.emit(pth))
+                btn.setMenu(menu)
+            else:
+                btn = _CrumbLabel(name)
+                btn.clicked.connect(
+                    lambda pth=full: self.path_selected.emit(pth))
+                btn.setContextMenuPolicy(Qt.ContextMenuPolicy.CustomContextMenu)
+                btn.customContextMenuRequested.connect(
+                    lambda pos, b=btn, pth=full:
+                        self.segment_context_requested.emit(pth, b.mapToGlobal(pos)))
+            prev_was_root = bool(name) and name in (self._pm.sep, "/", full)
+            last = (i == len(shown) - 1)
+            color = self._text if last else self._dim
+            weight = "600" if last else "400"
+            btn.setCursor(Qt.CursorShape.PointingHandCursor)
+            btn.setFocusPolicy(Qt.FocusPolicy.NoFocus)
+            # 不许被布局压扁：宁可少显示几段（左边折叠成 …），也不要把
+            # 每段名字挤成 "aie…ger" 那种谁也认不出的样子
+            btn.setSizePolicy(QSizePolicy.Policy.Fixed,
+                              QSizePolicy.Policy.Preferred)
+            btn.setStyleSheet(self._btn_qss(color, weight) if name is None
+                              else self._seg_qss(color, weight))
+            self._layout.addWidget(btn)
+        self._layout.addStretch(1)
+        self._layout.invalidate()
+        self._layout.activate()
+        self.updateGeometry()
 
 
 class TransferJobHost:
