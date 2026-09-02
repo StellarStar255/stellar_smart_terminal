@@ -3,7 +3,7 @@
 主配置的加载/构建/保存、LLM 配置查询、本地命令与本地配置目录。纯方法
 搬迁，行为不变；对进程级共享类属性 _left_width_by_screen /
 _navigator_dock_mode / _global_window_navigator 的读写走延迟引用
-_mw.MainWindow（见下方 import 注释），落在真正的 MainWindow 类上。
+host_class(self)（见下方 import 注释），落在真正的 MainWindow 类上。
 """
 import app_config
 import os
@@ -19,11 +19,9 @@ from terminal_widget import TerminalWidget
 from utils import atomic_write_json
 
 # 延迟引用宿主类：这些是 MainWindow 上的**进程级共享**类属性（跨窗口
-# 单例：面板宽度、导航停靠方式、全局导航器），必须落在真正的 MainWindow
-# 类上，而非 type(self)（后者对单元测试的假 self / 潜在子类会取错）。
-# 顶层 import main_window 会与 main_window 顶层 import 本模块形成循环，但
-# 只在方法内访问 .MainWindow（调用时两模块都已加载完），是既定安全模式。
-import main_window as _mw
+# 单例：面板宽度、导航停靠方式、全局导航器）落在真正的 MainWindow 类上：
+# 经 window_host.host_class(self) 取宿主类，不 import main_window（打破循环）。
+from window_host import host_class
 from app_logging import get_logger
 
 logger = get_logger(__name__)
@@ -31,13 +29,16 @@ logger = get_logger(__name__)
 
 class ConfigMixin:
 
-    def _load_config(self):
-        """加载配置（预设命令等）"""
-        # 迁移旧配置文件（从用户目录迁移到程序目录）
-        old_config = Path.home() / ".smart_terminal_config.json"
-        if not self.CONFIG_FILE.exists() and old_config.exists():
-            shutil.copy2(old_config, self.CONFIG_FILE)
+    def _init_config_state(self):
+        """ConfigMixin 的实例状态：所有可持久化设置的**唯一**默认值。
 
+        __init__ 显式调用；_load_config 也先调它再读文件（"重置为默认再读盘"），
+        所以重复 _load_config 得到的仍是干净状态。以前这些默认值散落在多处
+        hasattr/getattr 兜底里，一个键改默认要改三份。
+        """
+        self._presets_modified = False  # 预设是否在本窗口中被修改（防止多窗口覆盖）
+        self._llm_configs_modified = False  # LLM API 配置是否在本窗口中被修改
+        self._shortcuts_modified = False  # 快捷键覆盖是否在本窗口中被修改
         self.last_preset_index = 0  # 默认选中第一个
         self.image_prefix_enabled = False  # 图片路径是否加@前缀
         self.image_save_local = True  # 图片是否保存到工作目录（默认开启，方便Gemini访问）
@@ -80,6 +81,15 @@ class ConfigMixin:
         self._custom_shortcuts = {}           # 用户自定义快捷键覆盖 {action_id: seq}
         self.used_label_names = []            # 用过的 标签/分屏 名称历史（可复用）
         self._notify_sound = 'Submarine'      # 完成提示音（绿点点亮时播放；'' = 静音）
+        self._saved_left_panel_width = None   # 左侧栏宽度（本窗口最近一次记忆值）
+
+    def _load_config(self):
+        """加载配置（预设命令等）：先重置为默认值，再按文件覆盖"""
+        self._init_config_state()
+        # 迁移旧配置文件（从用户目录迁移到程序目录）
+        old_config = Path.home() / ".smart_terminal_config.json"
+        if not self.CONFIG_FILE.exists() and old_config.exists():
+            shutil.copy2(old_config, self.CONFIG_FILE)
         try:
             config = app_config.read_config()
             if config:
@@ -87,7 +97,7 @@ class ConfigMixin:
                 self.last_preset_index = config.get('last_preset_index', 0)
                 self.image_prefix_enabled = config.get('image_prefix_enabled', False)
                 self.image_save_local = config.get('image_save_local', True)
-                self._mouse_click_forward_enabled = config.get('mouse_click_forward_enabled', False)
+                self._mouse_click_forward_enabled = config.get('mouse_click_forward_enabled', self._mouse_click_forward_enabled)
                 self.used_label_names = config.get('used_label_names', [])
                 self.working_dir_history = config.get('working_dir_history', [])
                 self._working_dir_freq = config.get('working_dir_freq', {})
@@ -127,10 +137,10 @@ class ConfigMixin:
                 # 加载窗口透明度
                 self._window_opacity = config.get('window_opacity', 100)
                 # 加载左右分屏偏好（Explorer / Remote 各自记忆；Explorer 默认左右并排）
-                self._explorer_split_horizontal = config.get('explorer_split_horizontal', True)
-                self._remote_split_horizontal = config.get('remote_split_horizontal', False)
+                self._explorer_split_horizontal = config.get('explorer_split_horizontal', self._explorer_split_horizontal)
+                self._remote_split_horizontal = config.get('remote_split_horizontal', self._remote_split_horizontal)
                 # 加载弹簧模式偏好（默认开启；老配置里显式存过 false 则尊重用户选择）
-                self._spring_mode_enabled = config.get('spring_mode_enabled', True)
+                self._spring_mode_enabled = config.get('spring_mode_enabled', self._spring_mode_enabled)
                 # 一次性迁移（2026-07）：左右分屏 + 弹簧改为默认开启，老配置里
                 # 保存过 False 的也翻一次到新默认；标记落盘后不再重复，之后
                 # 用户的手动开关照常记忆
@@ -143,11 +153,11 @@ class ConfigMixin:
                          'spring_mode_enabled': True},
                         description='split/spring default-on migration')
                 # 加载 AI 行内补全开关
-                self._ai_completion_enabled = config.get('ai_completion_enabled', False)
-                self._editor_word_wrap = config.get('editor_word_wrap', False)
-                self._editor_auto_save = config.get('editor_auto_save', True)
+                self._ai_completion_enabled = config.get('ai_completion_enabled', self._ai_completion_enabled)
+                self._editor_word_wrap = config.get('editor_word_wrap', self._editor_word_wrap)
+                self._editor_auto_save = config.get('editor_auto_save', self._editor_auto_save)
                 # 加载完成提示音（绿点点亮时播放；'' = 静音）
-                self._notify_sound = config.get('notify_sound', 'Submarine')
+                self._notify_sound = config.get('notify_sound', self._notify_sound)
                 # 加载终端 scrollback 上限（进程级，影响之后新建的终端）
                 TerminalWidget.SCROLLBACK_LINES = self._clamp_scrollback(
                     config.get('terminal_scrollback', TerminalWidget.SCROLLBACK_LINES))
@@ -163,12 +173,12 @@ class ConfigMixin:
                 # 输出规则提醒：默认模式 + 用户自定义（进程级，装到终端类上）
                 TerminalWidget.set_output_alert_rules(
                     config.get('output_alert_patterns',
-                               _mw.MainWindow.DEFAULT_ALERT_PATTERNS),
+                               host_class(self).DEFAULT_ALERT_PATTERNS),
                     config.get('output_alert_enabled', True))
                 # 加载导航面板停靠方式（'float' / 'embed'，全局记忆）
                 _dock_mode = config.get('navigator_dock_mode', 'embed')
                 if _dock_mode in ('float', 'embed'):
-                    _mw.MainWindow._navigator_dock_mode = _dock_mode
+                    host_class(self)._navigator_dock_mode = _dock_mode
                 # 加载用户自定义快捷键覆盖
                 ks = config.get('keyboard_shortcuts', {})
                 if isinstance(ks, dict):
@@ -201,8 +211,8 @@ class ConfigMixin:
                 # 已有的实时共享值，避免用磁盘旧值覆盖别的窗口刚拖出的新宽度。
                 left_width = config.get('left_panel_width', None)
                 if (isinstance(left_width, int) and left_width > 0
-                        and None not in _mw.MainWindow._left_width_by_screen):
-                    _mw.MainWindow._left_width_by_screen[None] = left_width
+                        and None not in host_class(self)._left_width_by_screen):
+                    host_class(self)._left_width_by_screen[None] = left_width
                 git_commit_h = config.get('git_commit_height', None)
                 if isinstance(git_commit_h, int) and git_commit_h > 0:
                     self._saved_git_commit_height = git_commit_h
@@ -213,7 +223,7 @@ class ConfigMixin:
                 if isinstance(nav_list_h, int) and nav_list_h > 0:
                     self._saved_nav_list_height = nav_list_h
                 # 侧栏高度联动开关（全局记忆）
-                _mw.MainWindow._sidebar_height_sync = bool(
+                host_class(self)._sidebar_height_sync = bool(
                     config.get('sidebar_height_sync', False))
         except Exception:
             self.presets = []
@@ -374,18 +384,18 @@ class ConfigMixin:
             # 限制历史记录数量
             dir_history = self.working_dir_history if hasattr(self, 'working_dir_history') else []
             # 使用窗口级别的工作目录
-            last_cwd = self._window_cwd if hasattr(self, '_window_cwd') else os.getcwd()
+            last_cwd = self._window_cwd
 
             # 防止多窗口覆盖：如果本窗口没有修改预设，从磁盘加载最新的预设
             # 这样关闭窗口时不会覆盖其他窗口保存的预设
-            if getattr(self, '_presets_modified', False):
+            if self._presets_modified:
                 presets_to_save = self.presets
             else:
                 presets_to_save = existing_config.get('presets', self.presets)
 
             # 同理保护 LLM API 配置：本窗口没改过就用磁盘上的最新值，避免一个持有
             # 旧副本的窗口（不是最后关闭的那个）在退出时把别的窗口新存的 API 配置覆盖掉。
-            if getattr(self, '_llm_configs_modified', False):
+            if self._llm_configs_modified:
                 llm_configs_to_save = self.llm_configs
                 default_llm_to_save = self.default_llm_config
             else:
@@ -393,22 +403,22 @@ class ConfigMixin:
                 default_llm_to_save = existing_config.get('default_llm_config', self.default_llm_config)
 
             # 同理保护自定义快捷键：本窗口没改过就用磁盘最新值，避免覆盖其它窗口的改动
-            if getattr(self, '_shortcuts_modified', False):
-                shortcuts_to_save = getattr(self, '_custom_shortcuts', {})
+            if self._shortcuts_modified:
+                shortcuts_to_save = self._custom_shortcuts
             else:
                 shortcuts_to_save = existing_config.get('keyboard_shortcuts',
-                                                        getattr(self, '_custom_shortcuts', {}))
+                                                        self._custom_shortcuts)
 
             config = {
                 'presets': presets_to_save,
                 'last_preset_index': current_index,
                 'image_prefix_enabled': image_prefix,
                 'image_save_local': image_local,
-                'mouse_click_forward_enabled': getattr(self, '_mouse_click_forward_enabled', False),
+                'mouse_click_forward_enabled': self._mouse_click_forward_enabled,
                 'working_dir_history': dir_history,
                 'used_label_names': self._merged_label_names(existing_config),
-                'working_dir_freq': self._working_dir_freq if hasattr(self, '_working_dir_freq') else {},
-                'working_dir_removed': sorted(getattr(self, '_dir_history_removed', None) or set()),
+                'working_dir_freq': self._working_dir_freq,
+                'working_dir_removed': sorted(self._dir_history_removed),
                 'last_working_dir': last_cwd,
                 'theme': self.current_theme,  # 保存主题设置
                 'icon_tint': self._use_icon_tint,  # 保存图标蒙版设置
@@ -419,13 +429,13 @@ class ConfigMixin:
                 'gui_font_size': self._gui_font_size,  # 保存 GUI 字体大小
                 'pin_toolbar_row2': self._pin_toolbar_row2,  # 保存固定第二排工具栏
                 'window_opacity': self._window_opacity,  # 保存窗口透明度
-                'explorer_split_horizontal': getattr(self, '_explorer_split_horizontal', True),  # 保存左右分屏偏好
-                'remote_split_horizontal': getattr(self, '_remote_split_horizontal', False),  # Remote 左右分屏偏好
-                'spring_mode_enabled': getattr(self, '_spring_mode_enabled', False),  # 保存弹簧模式偏好
-                'ai_completion_enabled': getattr(self, '_ai_completion_enabled', False),  # 保存 AI 行内补全开关
-                'editor_word_wrap': getattr(self, '_editor_word_wrap', False),  # 保存编辑器自动换行开关
-                'editor_auto_save': getattr(self, '_editor_auto_save', True),  # 保存编辑器失焦自动保存开关
-                'notify_sound': getattr(self, '_notify_sound', 'Submarine'),  # 保存完成提示音
+                'explorer_split_horizontal': self._explorer_split_horizontal,  # 保存左右分屏偏好
+                'remote_split_horizontal': self._remote_split_horizontal,  # Remote 左右分屏偏好
+                'spring_mode_enabled': self._spring_mode_enabled,  # 保存弹簧模式偏好
+                'ai_completion_enabled': self._ai_completion_enabled,  # 保存 AI 行内补全开关
+                'editor_word_wrap': self._editor_word_wrap,  # 保存编辑器自动换行开关
+                'editor_auto_save': self._editor_auto_save,  # 保存编辑器失焦自动保存开关
+                'notify_sound': self._notify_sound,  # 保存完成提示音
                 'terminal_scrollback': TerminalWidget.SCROLLBACK_LINES,  # 保存终端 scrollback 上限
                 'parse_on_reader_thread': TerminalWidget.PARSE_ON_READER_THREAD,  # 保存"解析放后台线程"开关（旧键 parse_off_gui_thread 已废弃）
                 'output_alert_enabled': TerminalWidget.ALERT_RULES_ENABLED,
@@ -442,14 +452,14 @@ class ConfigMixin:
                 'explorer_main_splitter_sizes': getattr(self, '_saved_explorer_main_sizes', None),
                 'explorer_internal_splitter_sizes': getattr(self, '_saved_explorer_internal_sizes', None),
                 'remote_internal_splitter_sizes': getattr(self, '_saved_remote_internal_sizes', None),
-                'left_panel_width': getattr(self, '_saved_left_panel_width', None),
-                'git_commit_height': getattr(self, '_saved_git_commit_height', None),
+                'left_panel_width': self._saved_left_panel_width,
+                'git_commit_height': self._saved_git_commit_height,
                 'git_body_splitter_sizes': getattr(self, '_saved_git_body_sizes', None),
-                'nav_list_height': getattr(self, '_saved_nav_list_height', None),
-                'sidebar_height_sync': _mw.MainWindow._sidebar_height_sync,
+                'nav_list_height': self._saved_nav_list_height,
+                'sidebar_height_sync': host_class(self)._sidebar_height_sync,
             }
             # 保存窗口导航面板设置
-            nav = _mw.MainWindow._global_window_navigator
+            nav = host_class(self)._global_window_navigator
             if nav is not None and not sip.isdeleted(nav):
                 config['navigator_geometry'] = [nav.x(), nav.y(), nav.width(), nav.height()]
                 config['navigator_font_size'] = nav._font_size
@@ -466,10 +476,10 @@ class ConfigMixin:
             # 注意：此处已在 app_config 锁内，开关只能读 existing_config，
             # 不能调 read_config（非重入锁会死锁）；关闭级联中不刷新
             # （防止退出时快照逐窗缩水，同 _checkpoint_workspace 的约定）。
-            if (not getattr(self, '_closing_in_progress', False)
+            if (not self._closing_in_progress
                     and existing_config.get('workspace_restore_enabled', True)):
                 try:
-                    entries = _mw.MainWindow._collect_windows_snapshot()
+                    entries = host_class(self)._collect_windows_snapshot()
                     if entries:
                         import time as _time
                         config['workspace_snapshot'] = {

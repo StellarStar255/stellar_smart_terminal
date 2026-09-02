@@ -55,7 +55,15 @@ class TestDirHistoryBlacklist(unittest.TestCase):
 
         class _Fake:
             THEMES = MW.THEMES
+            DEFAULT_ALERT_PATTERNS = MW.DEFAULT_ALERT_PATTERNS
+            # host_class(self) 在假 self 上回退到本类：给它进程级共享属性的替身
+            _navigator_dock_mode = 'embed'
+            _left_width_by_screen = {}
+            _sidebar_height_sync = False
             _clamp_scrollback = staticmethod(MW._clamp_scrollback)
+            _init_config_state = MW._init_config_state
+            _init_explorer_state = MW._init_explorer_state
+            _init_remote_state = MW._init_remote_state
             _load_config = MW._load_config
             _merge_dir_history_for_save = MW._merge_dir_history_for_save
             _add_to_dir_history = MW._add_to_dir_history
@@ -67,6 +75,9 @@ class TestDirHistoryBlacklist(unittest.TestCase):
                 pass
 
         fake = _Fake()
+        # _load_config 读盘时用各 mixin 的默认值兜底，先按真实顺序初始化状态
+        fake._init_explorer_state()
+        fake._init_remote_state()
         # 指向临时配置：避免 _load_config 里的旧配置迁移逻辑碰真实 home 目录
         fake.CONFIG_FILE = self._cfg_path
         return fake

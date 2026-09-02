@@ -5,14 +5,13 @@
 import time
 
 from PyQt6.QtWidgets import (
-    QApplication, QCheckBox, QComboBox, QCompleter, QLineEdit, QMainWindow,
+    QApplication, QCheckBox, QComboBox, QCompleter, QLineEdit,
     QStyle, QStyledItemDelegate, QStyleOptionButton, QStyleOptionComboBox,
-    QStylePainter, QTabBar, QVBoxLayout, QWidget
+    QStylePainter, QTabBar, QWidget
 )
 from PyQt6.QtCore import Qt, QTimer, QEvent, QPoint, QRectF, QStringListModel, pyqtSignal
 from PyQt6.QtGui import QColor, QPainter, QPainterPath, QPalette, QPen
 
-from i18n import t
 from utils import parse_search_tokens, name_matches_tokens
 
 
@@ -446,76 +445,6 @@ class DetachableTabBar(QTabBar):
         if self._original_cursor:
             self.setCursor(self._original_cursor)
             self._original_cursor = None
-
-
-class DetachedWindow(QMainWindow):
-    """分离出的独立终端窗口"""
-
-    window_closed = pyqtSignal(object)  # 窗口关闭时发送信号，传递自身
-
-    def __init__(self, title, splitter, terminals, session, main_window, parent=None):
-        super().__init__(parent)
-
-        self.splitter = splitter
-        self.terminals = terminals
-        self.session = session
-        self.main_window = main_window
-
-        self.setWindowTitle(f"{title} - Smart Terminal")
-        self.setMinimumSize(600, 400)
-        self.resize(900, 650)  # 合理的默认大小
-
-        # 从主窗口复制图标
-        if main_window:
-            self.setWindowIcon(main_window.windowIcon())
-
-        self._setup_ui()
-        self._apply_style()
-
-    def _setup_ui(self):
-        # 设置中心部件
-        central = QWidget()
-        self.setCentralWidget(central)
-
-        layout = QVBoxLayout(central)
-        layout.setContentsMargins(0, 0, 0, 0)
-        layout.setSpacing(0)
-
-        # 将 splitter 添加到新窗口
-        if self.splitter:
-            self.splitter.setParent(central)
-            layout.addWidget(self.splitter)
-
-        # 底部状态栏
-        self.statusBar().showMessage(t("window.detached_status"))
-
-    def _apply_style(self, theme: dict = None):
-        t = theme or {}
-        self.setStyleSheet(f"""
-            QMainWindow {{
-                background-color: {t.get('bg_darkest', '#0f0f1a')};
-            }}
-            QWidget {{
-                background-color: {t.get('bg_dark', '#1a1a2e')};
-            }}
-            QStatusBar {{
-                background-color: {t.get('bg_medium', '#16213e')};
-                color: {t.get('text_dim', '#888')};
-                font-size: 12px;
-            }}
-        """)
-
-    def apply_theme(self, theme: dict):
-        self._apply_style(theme)
-
-    def closeEvent(self, event):
-        # 完整清理所有终端资源
-        for terminal in self.terminals:
-            terminal.cleanup()
-
-        # 发送关闭信号
-        self.window_closed.emit(self)
-        super().closeEvent(event)
 
 
 class _ToolbarCheckBox(QCheckBox):

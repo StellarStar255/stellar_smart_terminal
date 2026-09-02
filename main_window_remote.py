@@ -2,7 +2,7 @@
 
 面板搭建、显示/隐藏、主机连接、SSH 终端标签/新窗口、远程文件编辑。
 纯方法搬迁，行为不变；_open_ssh_in_new_window 构造新窗口/进程级窗口
-计数走 _mw.MainWindow。分屏布局管道方法留在主类。
+计数经 host_class(self) 落到 MainWindow。分屏布局管道方法留在主类。
 """
 from PyQt6 import sip
 from PyQt6.QtCore import QTimer, Qt
@@ -11,14 +11,19 @@ from app_logging import get_logger
 # RemoteExplorerPanel 在 _ensure_remote_panel 里按需 import：它的 import 链
 # 拉进 ssh_control → ssh_session → paramiko/cryptography，占启动 import 时间
 # 近三成，而远程面板默认隐藏、多数会话根本不打开。
-# 延迟引用宿主类：进程级共享类属性/构造新窗口须落在真 MainWindow，
-# 只在方法内访问，循环 import 安全。
-import main_window as _mw
+# 进程级共享类属性 / 构造新窗口经 window_host.host_class(self) 落到真 MainWindow
+from window_host import host_class
 
 logger = get_logger(__name__)
 
 
 class RemotePanelMixin:
+
+    def _init_remote_state(self):
+        """RemotePanelMixin 的实例状态（唯一默认值）"""
+        self._remote_split_horizontal = False   # 默认上下分屏（可被配置覆盖）
+        self._skip_auto_ssh_tab_once = False    # 连上后跳过一次"自动开 SSH tab"
+        self._remote_save_connections = {}      # {本地临时文件: 保存→上传 的槽}
 
     def _setup_remote_panel(self):
         """设置 Remote Explorer 面板（SSH/SFTP）"""
@@ -57,8 +62,6 @@ class RemotePanelMixin:
                 border: 1px solid #667eea; border-radius: 2px; background-color: #667eea;
             }
         """)
-        if not hasattr(self, '_remote_split_horizontal'):
-            self._remote_split_horizontal = False  # 默认上下分屏
         self._remote_split_checkbox.stateChanged.connect(self._on_remote_split_orientation_changed)
         rh_layout.addWidget(self._remote_split_checkbox)
 
@@ -178,7 +181,7 @@ class RemotePanelMixin:
         但「扩展远程终端到新窗口」时，被扩展的终端已经在新窗口里了，会先置
         _skip_auto_ssh_tab_once，让这一次只连 Remote 文件树、不再多开一个终端。
         """
-        if getattr(self, '_skip_auto_ssh_tab_once', False):
+        if self._skip_auto_ssh_tab_once:
             self._skip_auto_ssh_tab_once = False
             return
         self._open_ssh_terminal_tab(host_config, None)
@@ -327,11 +330,11 @@ class RemotePanelMixin:
         Remote Explorer（SFTP 文件浏览）和终端都是连着的，而不是只有终端。
         """
         alias = getattr(host_config, 'alias', '') or 'SSH'
-        _mw.MainWindow._window_counter += 1
+        host_class(self)._window_counter += 1
         window_title = (f"{t('remote.terminal_tab_name', host=alias)} "
-                        f"- Smart Terminal #{_mw.MainWindow._window_counter}")
+                        f"- Smart Terminal #{host_class(self)._window_counter}")
         # 不传 initial_tab_data → 新窗口自建一个空白（未启动）tab，待连上后复用它跑 ssh
-        new_window = _mw.MainWindow(window_title=window_title)
+        new_window = host_class(self)(window_title=window_title)
 
         # 自动配色，方便和其它窗口区分
         try:
@@ -404,8 +407,6 @@ class RemotePanelMixin:
         pane = self.editor_area.active_pane
         # 把编辑器的「已保存」信号转成上传调用（only this file）
         # 用一个一次性的连接，文件切换时自动清理
-        if not hasattr(self, '_remote_save_connections'):
-            self._remote_save_connections = {}
         # 断开旧的连接（如果有）
         old = self._remote_save_connections.pop(local_temp_path, None)
         if old:

@@ -18,13 +18,17 @@ import app_config
 from i18n import t
 
 
-# 延迟引用宿主类：进程级共享类属性（跨窗口导航器/停靠方式/一次性
-# 标志）必须落在真正的 MainWindow 上，而非 type(self)（对假 self /
-# 子类会取错）。只在方法内访问 .MainWindow，循环 import 安全。
-import main_window as _mw
+# 进程级一次性标志（_auto_update_check_done）经 window_host.host_class(self)
+# 落到真正的 MainWindow 上，不 import main_window。
+from window_host import host_class
 
 
 class UpdateMixin:
+
+    def _init_update_state(self):
+        """UpdateMixin 的实例状态（唯一默认值）"""
+        self._update_badge = None    # 状态栏「新版本可用」角标
+        self._update_checker = None  # 进行中的后台检查线程
     """应用内更新相关方法。依赖宿主类提供 self.statusbar、
     self._styled_message_box / _make_styled_message_box、
     self._stash_windows_for_restore。"""
@@ -41,14 +45,14 @@ class UpdateMixin:
         """
         import time
         import app_updater
-        if _mw.MainWindow._auto_update_check_done or sip.isdeleted(self):
+        if host_class(self)._auto_update_check_done or sip.isdeleted(self):
             return
         cfg = app_config.read_config()
         if not cfg.get('auto_update_check', True):
             return
         if time.time() - float(cfg.get('update_last_check_ts', 0)) < 24 * 3600:
             return
-        _mw.MainWindow._auto_update_check_done = True
+        host_class(self)._auto_update_check_done = True
         app_config.update_config({'update_last_check_ts': time.time()},
                                  description='auto update check throttle')
         checker = app_updater.UpdateChecker(self)
@@ -70,7 +74,7 @@ class UpdateMixin:
 
     def _show_update_badge(self, info: dict):
         """状态栏右侧挂「⬆ 新版本可用」角标，点击进入现有更新弹窗流程。"""
-        old = getattr(self, '_update_badge', None)
+        old = self._update_badge
         if old is not None and not sip.isdeleted(old):
             self.statusbar.removeWidget(old)
             old.deleteLater()
@@ -89,7 +93,7 @@ class UpdateMixin:
         self._update_badge = badge
 
     def _on_update_badge_clicked(self, info: dict):
-        badge = getattr(self, '_update_badge', None)
+        badge = self._update_badge
         if badge is not None and not sip.isdeleted(badge):
             self.statusbar.removeWidget(badge)
             badge.deleteLater()
@@ -99,7 +103,7 @@ class UpdateMixin:
     def _check_for_updates(self):
         """设置菜单「检查更新」：后台查 GitHub 最新 release，不阻塞 GUI。"""
         import app_updater
-        if getattr(self, '_update_checker', None) is not None \
+        if self._update_checker is not None \
                 and self._update_checker.isRunning():
             return   # 已在查了
         self.statusbar.showMessage(t("update.checking"), 0)

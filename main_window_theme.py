@@ -1,7 +1,7 @@
 """MainWindow 的主题/配色混入（从 main_window.py 拆出）。
 
 纯方法搬迁，行为不变；_apply_theme 里对类级 _global_window_navigator
-的引用走延迟 _mw.MainWindow（见下方 import 注释）。（大量 Qt 控件名只出现在 QSS 选择器字符串里、
+的引用经 host_class(self)。（大量 Qt 控件名只出现在 QSS 选择器字符串里、
 并非 Python 符号，故不 import。）
 """
 import re
@@ -111,16 +111,19 @@ def message_box_qss(theme: dict, check_image: str = "") -> str:
     return qss
 
 
-# 延迟引用宿主类：进程级共享类属性（跨窗口导航器/停靠方式/一次性
-# 标志）必须落在真正的 MainWindow 上，而非 type(self)（对假 self /
-# 子类会取错）。只在方法内访问 .MainWindow，循环 import 安全。
-import main_window as _mw
+# 进程级共享类属性（全局导航器）经 window_host.host_class(self) 落到真正的
+# MainWindow 上，不 import main_window。
+from window_host import host_class
 from app_logging import get_logger
 
 logger = get_logger(__name__)
 
 
 class ThemeMixin:
+
+    def _init_theme_state(self):
+        """ThemeMixin 的实例状态（唯一默认值）"""
+        self._color_picker_expanded = False  # 窗口颜色选择菜单是否展开更多颜色
 
     def _on_icon_tint_changed(self, state):
         """图标蒙版开关变更"""
@@ -946,7 +949,7 @@ class ThemeMixin:
         # 窗口导航面板：内嵌面板 + 全局浮动面板
         if getattr(self, 'nav_panel', None) is not None:
             self.nav_panel.apply_theme(t)
-        _global_nav = _mw.MainWindow._global_window_navigator
+        _global_nav = host_class(self)._global_window_navigator
         if _global_nav is not None:
             try:
                 if not sip.isdeleted(_global_nav):
@@ -982,7 +985,7 @@ class ThemeMixin:
             self._scale_gui_font_sizes(self._gui_font_size)
 
         # 样式变更后刷新 flow layout 高度
-        if hasattr(self, '_pinned_flow_toolbar') and self._pinned_flow_toolbar and self._pinned_flow_toolbar.isVisible():
+        if self._pinned_flow_toolbar is not None and self._pinned_flow_toolbar.isVisible():
             QTimer.singleShot(0, self._update_flow_toolbar_height)
 
     def _create_themed_icon(self, theme_color: str) -> QIcon:
@@ -1069,7 +1072,6 @@ class ThemeMixin:
             padding="12px", radius="10px"))
 
         # 状态记录
-        self._color_picker_expanded = getattr(self, '_color_picker_expanded', False)
 
         # 主容器
         main_widget = QWidget()

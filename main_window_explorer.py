@@ -13,6 +13,10 @@ from main_window_theme import menu_qss
 
 class ExplorerPanelMixin:
 
+    def _init_explorer_state(self):
+        """ExplorerPanelMixin 的实例状态（唯一默认值；_load_config 之后可能被配置覆盖）"""
+        self._explorer_split_horizontal = True  # 默认左右并排（side by side）
+
     def _setup_explorer_panel(self):
         """设置 Explorer 面板"""
         layout = QVBoxLayout(self.explorer_panel_container)
@@ -63,8 +67,6 @@ class ExplorerPanelMixin:
                 background-color: #667eea;
             }
         """)
-        if not hasattr(self, '_explorer_split_horizontal'):
-            self._explorer_split_horizontal = True  # 默认左右并排（side by side）
         self._explorer_split_checkbox.stateChanged.connect(self._on_explorer_split_orientation_changed)
         explorer_header_layout.addWidget(self._explorer_split_checkbox)
 

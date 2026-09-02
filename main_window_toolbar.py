@@ -2,7 +2,7 @@
 
 搭建主/浮动工具栏、固定项流式布局、工具栏配置的应用与持久化。纯方法
 搬迁，行为不变；对类级 _navigator_dock_mode / _global_window_navigator /
-_current_embed_enabled 的引用走延迟 _mw.MainWindow（见下方 import 注释）。（部分 Qt 控件名只出现在
+_current_embed_enabled 的引用经 host_class(self)。（部分 Qt 控件名只出现在
 QSS 字符串里、非符号，不 import；_make_git_tool_icon 在方法内局部导入。）
 """
 from PyQt6.QtCore import QSize, QTimer, Qt
@@ -21,13 +21,25 @@ from widgets import (
 )
 
 
-# 延迟引用宿主类：进程级共享类属性（跨窗口导航器/停靠方式/一次性
-# 标志）必须落在真正的 MainWindow 上，而非 type(self)（对假 self /
-# 子类会取错）。只在方法内访问 .MainWindow，循环 import 安全。
-import main_window as _mw
+# 进程级共享类属性（跨窗口导航器/停靠方式）经 window_host.host_class(self)
+# 落到真正的 MainWindow 上（对子类/假 self 都安全），不 import main_window。
+from window_host import host_class
 
 
 class ToolbarMixin:
+
+    def _init_toolbar_state(self):
+        """ToolbarMixin 的实例状态（唯一默认值；_setup_toolbar 只建控件不再赋默认）"""
+        # 固定模式下的流式布局工具栏（单个 QToolBar 内嵌 FlowLayout，自动换行）
+        self._pinned_flow_toolbar = None  # QToolBar
+        self._pinned_flow_widget = None   # QWidget (FlowLayout container)
+        self._flow_layout = None          # FlowLayout instance
+        self._flow_btn_widgets = {}       # btn_name -> widget (在 flow 中的按钮)
+        self._updating_flow_height = False  # 防止 resizeEvent 重入
+        self._core_toolbar_widgets = []    # 核心工具栏控件列表（用于 pin 时移到 flow）
+        # 所有工具栏按钮 / 动作的引用，用于显示/隐藏
+        self._toolbar_buttons = {}
+        self._toolbar_actions = {}
 
     def _setup_toolbar(self):
         """设置工具栏"""
@@ -42,13 +54,7 @@ class ToolbarMixin:
         self.main_toolbar.toggleViewAction().setVisible(False)  # 禁止右键隐藏
         toolbar = self.main_toolbar  # 保持向后兼容
 
-        # 固定模式下的流式布局工具栏（单个 QToolBar 内嵌 FlowLayout，自动换行）
-        self._pinned_flow_toolbar = None  # QToolBar
-        self._pinned_flow_widget = None   # QWidget (FlowLayout container)
-        self._flow_layout = None          # FlowLayout instance
-        self._flow_btn_widgets = {}       # btn_name -> widget (在 flow 中的按钮)
-        self._updating_flow_height = False  # 防止 resizeEvent 重入
-        self._core_toolbar_widgets = []    # 核心工具栏控件列表（用于 pin 时移到 flow）
+        # 流式工具栏 / 按钮引用等状态在 _init_toolbar_state 里初始化
 
         # 标题和颜色指示器（合并为一个容器，避免 QToolBar 在小控件间插入多余间距）
         self.title_label = QLabel(t("toolbar.title_label"))
@@ -296,12 +302,12 @@ class ToolbarMixin:
             }
         """)
         # 同步导航开关状态（新窗口与现有窗口联动）
-        if _mw.MainWindow._navigator_dock_mode == 'embed':
+        if host_class(self)._navigator_dock_mode == 'embed':
             # 内嵌模式：跟随其它窗口是否已启用导航条（stateChanged 尚未连接，不会触发回调）
-            enabled = _mw.MainWindow._current_embed_enabled()
+            enabled = host_class(self)._current_embed_enabled()
             self.nav_embed_enabled = enabled
             self.window_nav_checkbox.setChecked(enabled)
-        elif _mw.MainWindow._global_window_navigator is not None and _mw.MainWindow._global_window_navigator.isVisible():
+        elif host_class(self)._global_window_navigator is not None and host_class(self)._global_window_navigator.isVisible():
             self.window_nav_checkbox.setChecked(True)
         self.window_nav_checkbox.stateChanged.connect(self._on_window_nav_changed)
 
@@ -787,10 +793,6 @@ class ToolbarMixin:
         if not is_double_row:
             toolbar.addWidget(self.pin_row2_checkbox)
             toolbar.addWidget(self.toolbar_settings_btn)
-
-        # 保存所有工具栏按钮的引用，用于显示/隐藏
-        self._toolbar_buttons = {}
-        self._toolbar_actions = {}
 
         button_widgets = {
             "preset_combo": self._preset_combo_container,
@@ -1324,7 +1326,7 @@ class ToolbarMixin:
         """应用工具栏配置"""
         if not config:
             return
-        if not hasattr(self, '_toolbar_actions') or not self._toolbar_actions:
+        if not self._toolbar_actions:
             return
         visible_buttons = config.get("visible_buttons", {})
         # Row1 按钮通过 action 控制可见性
@@ -1336,7 +1338,7 @@ class ToolbarMixin:
             if btn_name in visible_buttons:
                 widget.setVisible(visible_buttons[btn_name])
         # 更新 flow toolbar 高度
-        if hasattr(self, '_pinned_flow_toolbar') and self._pinned_flow_toolbar and self._pinned_flow_toolbar.isVisible():
+        if self._pinned_flow_toolbar is not None and self._pinned_flow_toolbar.isVisible():
             QTimer.singleShot(0, self._update_flow_toolbar_height)
 
     def _get_toolbar_layout(self) -> str:

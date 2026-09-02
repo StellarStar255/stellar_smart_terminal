@@ -221,12 +221,21 @@ class MainWindow(ThemeMixin, ToolbarMixin, ConfigMixin, ExplorerPanelMixin,
         self._custom_window_title = window_title  # 自定义窗口标题
         self._macos_window_configured = False  # macOS 原生窗口标志（需在 showEvent 之前初始化）
 
+        # 各 mixin 的实例状态显式初始化（每个状态只在自己的 _init_*_state 里给默认值，
+        # 不再靠散落各处的 hasattr/getattr 兜底）；必须早于 _load_config / _setup_ui
+        self._init_window_state()
+        self._init_config_state()
+        self._init_explorer_state()
+        self._init_remote_state()
+        self._init_tabs_state()
+        self._init_theme_state()
+        self._init_toolbar_state()
+        self._init_update_state()
+
         self.session_manager = SessionManager()
         self.auto_save_timer = QTimer()
         self.command_history = []
         self.presets = []  # 预设命令列表
-        self._presets_modified = False  # 标记预设是否在本窗口中被修改（防止多窗口覆盖）
-        self._llm_configs_modified = False  # 标记 LLM API 配置是否在本窗口中被修改（防止多窗口覆盖）
         self.local_presets = []  # 本地快速命令列表（目录级别）
         self.pending_commands = []  # 待执行的命令队列
         self.current_theme = "午夜黑"  # 当前主题名称（初装默认：Midnight Black）
@@ -552,7 +561,7 @@ class MainWindow(ThemeMixin, ToolbarMixin, ConfigMixin, ExplorerPanelMixin,
             else:
                 # 切走前把编辑器的未保存改动落盘。焦点留在窗口内部时
                 # focusChanged 不会触发，切到别的应用只走这条路径。
-                if getattr(self, '_editor_auto_save', False):
+                if self._editor_auto_save:
                     area = getattr(self, 'editor_area', None)
                     if area is not None and not sip.isdeleted(area):
                         area.auto_save_all_dirty()
@@ -1409,7 +1418,7 @@ class MainWindow(ThemeMixin, ToolbarMixin, ConfigMixin, ExplorerPanelMixin,
     def _setup_shortcuts(self):
         """设置快捷键（数据驱动，可在「键盘快捷键」设置里自定义）"""
         self.shortcut_actions = {}
-        overrides = getattr(self, '_custom_shortcuts', None) or {}
+        overrides = self._custom_shortcuts or {}
         for action_id, default_seq, _label_key, slot_name in self._SHORTCUT_SPECS:
             seq = overrides.get(action_id, default_seq)
             action = QAction(self)
@@ -1538,7 +1547,7 @@ class MainWindow(ThemeMixin, ToolbarMixin, ConfigMixin, ExplorerPanelMixin,
 
     def _effective_shortcut(self, action_id, default_seq):
         """返回某操作当前生效的键序列（用户覆盖优先，否则默认）。"""
-        overrides = getattr(self, '_custom_shortcuts', None) or {}
+        overrides = self._custom_shortcuts or {}
         return overrides.get(action_id, default_seq)
 
     def _show_shortcut_settings(self):
@@ -2315,6 +2324,14 @@ class MainWindow(ThemeMixin, ToolbarMixin, ConfigMixin, ExplorerPanelMixin,
 
 
 
+    def _init_window_state(self):
+        """MainWindow 本体（非 mixin）的关窗/联动标志，唯一默认值"""
+        self._closing_in_progress = False       # closeEvent 已进入清理阶段（防重入）
+        self._force_closing = False             # 强制关闭路径：跳过确认弹窗
+        self._applying_shared_left_width = False  # 正在应用跨窗口同步的侧栏宽度
+        self._nav_attention = False             # 导航面板"需要注意"标记
+        self._nav_attention_source = None       # 触发注意标记的终端
+
     def _track_detached_window(self, win):
         """登记一个由本窗口派生的顶层窗口：持强引用防 GC，销毁后自动摘除。
 
@@ -2399,7 +2416,7 @@ class MainWindow(ThemeMixin, ToolbarMixin, ConfigMixin, ExplorerPanelMixin,
         terminal.image_prefix_enabled = self.image_prefix_enabled
         terminal.image_save_local = self.image_save_local
         terminal.set_mouse_click_forward_enabled(
-            getattr(self, '_mouse_click_forward_enabled', False))
+            self._mouse_click_forward_enabled)
 
         # 设置快速命令提供者回调
         terminal.quick_commands_provider = lambda: self.presets
@@ -2496,7 +2513,7 @@ class MainWindow(ThemeMixin, ToolbarMixin, ConfigMixin, ExplorerPanelMixin,
         elif event.type() == QEvent.Type.KeyPress:
             # 用户在点亮绿点的来源终端中按键 → 视为已响应该交互提示，清除绿点。
             # （来自其他终端/Git 面板的提醒不受影响，仍靠切窗口/切 tab 清除）
-            if obj is getattr(self, '_nav_attention_source', None):
+            if obj is self._nav_attention_source:
                 self._clear_nav_attention()
             # 标签页徽章：在该终端按键 = 已响应，挂起的橙/绿点回落
             if isinstance(obj, TerminalWidget):
@@ -3084,7 +3101,7 @@ class MainWindow(ThemeMixin, ToolbarMixin, ConfigMixin, ExplorerPanelMixin,
             return
         changed = (self._saved_left_panel_width != width)
         self._saved_left_panel_width = width
-        if changed and not getattr(self, '_applying_shared_left_width', False):
+        if changed and not self._applying_shared_left_width:
             # 拖拽期间不实时联动：所有窗口共用同一个 GUI 线程，周期性让其它
             # 5 个窗口同步整窗重排会堵死事件循环、拖拽掉帧（窗口越多越卡）。
             # 只挂起最新值，待拖拽流静默（_end_splitter_drag_fast_resize，
@@ -3300,7 +3317,7 @@ class MainWindow(ThemeMixin, ToolbarMixin, ConfigMixin, ExplorerPanelMixin,
 
     def _toggle_word_wrap(self):
         """Alt+Z：翻转全局自动换行（走与右键菜单相同的落盘/广播路径）。"""
-        self._on_word_wrap_toggled(not getattr(self, '_editor_word_wrap', False))
+        self._on_word_wrap_toggled(not self._editor_word_wrap)
 
     def _on_auto_save_toggled(self, enabled: bool):
         """切换编辑器失焦自动保存：应用到本窗口、广播、落盘。
@@ -3337,7 +3354,7 @@ class MainWindow(ThemeMixin, ToolbarMixin, ConfigMixin, ExplorerPanelMixin,
         只在「从编辑器内部移到编辑器外部」这一次跳变时保存：编辑器内部的
         焦点流转（编辑区↔查找框↔窗格间）不触发，避免高频写盘/上传。
         """
-        if not getattr(self, '_editor_auto_save', False):
+        if not self._editor_auto_save:
             return
         area = getattr(self, 'editor_area', None)
         if area is None or sip.isdeleted(area):
@@ -3418,12 +3435,12 @@ class MainWindow(ThemeMixin, ToolbarMixin, ConfigMixin, ExplorerPanelMixin,
             return
         # spring 自身动画期间 setSizes 会触发 splitterMoved → 误重入；合计宽度此时恒定，
         # 跳过即可，避免在动画帧里再调一次 setSizes。
-        if getattr(self, '_applying_spring', False):
+        if self._applying_spring:
             return
         # 被其它窗口同步左侧栏宽度期间也跳过：此刻翻转门控会启动 _animate_main_sizes
         # 的逐帧 setSizes 动画，与同步流叠加成重排风暴。同步结束由
         # _end_splitter_drag_fast_resize 按最终宽度补判一次。
-        if getattr(self, '_applying_shared_left_width', False):
+        if self._applying_shared_left_width:
             return
         ed_idx = self.main_splitter.indexOf(self.editor_area) if hasattr(self, 'editor_area') else -1
         term_idx = self.main_splitter.indexOf(getattr(self, '_main_content_stack', None))
@@ -3444,7 +3461,7 @@ class MainWindow(ThemeMixin, ToolbarMixin, ConfigMixin, ExplorerPanelMixin,
             term_cols = 1
         n_cols = max(1, ed_cols + term_cols)
         w = combined / n_cols   # 单列宽度
-        old_gate = getattr(self, '_spring_width_gate', True)
+        old_gate = self._spring_width_gate
         if old_gate:
             new_gate = w <= self.SPRING_PANE_DISABLE   # 单列宽于 DISABLE 才关闭
         else:
@@ -3453,7 +3470,7 @@ class MainWindow(ThemeMixin, ToolbarMixin, ConfigMixin, ExplorerPanelMixin,
             return
         self._spring_width_gate = new_gate
         # 仅当用户开了 spring 才需要联动布局
-        if not getattr(self, '_spring_mode_enabled', False):
+        if not self._spring_mode_enabled:
             return
         if new_gate:
             # 重新生效：按当前焦点展开一侧（_apply_spring 内部会再查 applicable）
@@ -3476,7 +3493,7 @@ class MainWindow(ThemeMixin, ToolbarMixin, ConfigMixin, ExplorerPanelMixin,
         共用同一个 editor_area / 同一条放置路径，故这里只看 splitter 归属即可，
         Explorer / Remote 两种来源都自动适用。
         """
-        if not getattr(self, '_spring_mode_enabled', False):
+        if not self._spring_mode_enabled:
             return False
         if not hasattr(self, 'editor_area') or not self.editor_area.isVisible():
             return False
@@ -3486,7 +3503,7 @@ class MainWindow(ThemeMixin, ToolbarMixin, ConfigMixin, ExplorerPanelMixin,
             return False
         # 窗口太宽时 spring 自动失效（两边都能舒服铺开）。门控值在 resize 时按滞回更新，
         # 这里只读，避免每次查询都重算/抖动。
-        if not getattr(self, '_spring_width_gate', True):
+        if not self._spring_width_gate:
             return False
         return True
 
@@ -3720,7 +3737,7 @@ class MainWindow(ThemeMixin, ToolbarMixin, ConfigMixin, ExplorerPanelMixin,
         main_splitter 本身也不在此处理（左侧栏与编辑器、终端同属它），
         编辑器↔终端仍由 _apply_spring 走专门逻辑。
         """
-        if not getattr(self, '_spring_mode_enabled', False):
+        if not self._spring_mode_enabled:
             return
         if self._defer_spring_while_mouse_down(
                 'inner', lambda: self._spring_expand_inner(widget)):
@@ -4143,7 +4160,7 @@ class MainWindow(ThemeMixin, ToolbarMixin, ConfigMixin, ExplorerPanelMixin,
         # 鼠标点击转发给 TUI（默认关闭，避免在 Claude Code 选项里误点）
         click_fwd_act = menu.addAction(t("settings.mouse_click_forward"))
         click_fwd_act.setCheckable(True)
-        click_fwd_act.setChecked(getattr(self, '_mouse_click_forward_enabled', False))
+        click_fwd_act.setChecked(self._mouse_click_forward_enabled)
         click_fwd_act.setToolTip(t("settings.mouse_click_forward_tooltip"))
         click_fwd_act.toggled.connect(self._set_mouse_click_forward)
         # 系统右键菜单：从文件管理器中「在 Stellar 终端中打开」目录
@@ -4264,7 +4281,7 @@ class MainWindow(ThemeMixin, ToolbarMixin, ConfigMixin, ExplorerPanelMixin,
 
     def _checkpoint_workspace(self):
         """限流刷新工作区快照（2s 合并窗口）。标签增删/切换等结构变化时调用。"""
-        if getattr(self, '_closing_in_progress', False) or not self.isVisible():
+        if self._closing_in_progress or not self.isVisible():
             return
         timer = getattr(self, '_ws_checkpoint_timer', None)
         if timer is None:
@@ -4276,7 +4293,7 @@ class MainWindow(ThemeMixin, ToolbarMixin, ConfigMixin, ExplorerPanelMixin,
         timer.start()
 
     def _write_workspace_snapshot(self):
-        if getattr(self, '_closing_in_progress', False):
+        if self._closing_in_progress:
             return
         if not MainWindow.workspace_restore_enabled():
             return
@@ -4551,7 +4568,7 @@ class MainWindow(ThemeMixin, ToolbarMixin, ConfigMixin, ExplorerPanelMixin,
 
     def _apply_mouse_click_forward_to_terminals(self):
         """把当前「点击转发」开关下发给本窗口所有已存在的终端。"""
-        enabled = getattr(self, '_mouse_click_forward_enabled', False)
+        enabled = self._mouse_click_forward_enabled
         for term in self.findChildren(TerminalWidget):
             term.set_mouse_click_forward_enabled(enabled)
 
@@ -4592,7 +4609,7 @@ class MainWindow(ThemeMixin, ToolbarMixin, ConfigMixin, ExplorerPanelMixin,
         from PyQt6.QtGui import QActionGroup
         group = QActionGroup(submenu)
         group.setExclusive(True)
-        current = getattr(self, '_notify_sound', '')
+        current = self._notify_sound
 
         def add(name, label):
             act = submenu.addAction(label)
@@ -4967,13 +4984,13 @@ class MainWindow(ThemeMixin, ToolbarMixin, ConfigMixin, ExplorerPanelMixin,
             saved_history = cfg.get('working_dir_history', []) or []
             saved_freq = cfg.get('working_dir_freq', {}) or {}
 
-            mem_removed = getattr(self, '_dir_history_removed', None) or set()
+            mem_removed = self._dir_history_removed
             disk_removed = set(cfg.get('working_dir_removed', []) or [])
-            readded = getattr(self, '_dir_history_readded', None) or set()
+            readded = self._dir_history_readded
             removals = (mem_removed | disk_removed) - readded
             self._dir_history_removed = removals
             mem_history = self.working_dir_history if hasattr(self, 'working_dir_history') else []
-            mem_freq = self._working_dir_freq if hasattr(self, '_working_dir_freq') else {}
+            mem_freq = self._working_dir_freq
 
             merged_freq = {}
             merged_history = []
@@ -5397,7 +5414,7 @@ class MainWindow(ThemeMixin, ToolbarMixin, ConfigMixin, ExplorerPanelMixin,
         app = QApplication.instance()
         if app is None:
             return
-        my_cwd = getattr(self, '_window_cwd', None)
+        my_cwd = self._window_cwd
         if not my_cwd:
             return
         for w in app.topLevelWidgets():
@@ -5422,7 +5439,7 @@ class MainWindow(ThemeMixin, ToolbarMixin, ConfigMixin, ExplorerPanelMixin,
         3. 把真正的 close() 推到下一个事件循环：避免 hide → close 与
            native NSWindow detach 同步重入。
         """
-        if getattr(self, '_force_closing', False):
+        if self._force_closing:
             return
         self._force_closing = True
 
@@ -5458,7 +5475,7 @@ class MainWindow(ThemeMixin, ToolbarMixin, ConfigMixin, ExplorerPanelMixin,
                 if not sip.isdeleted(self):
                     self.close()
             except RuntimeError:
-                pass
+                pass  # C++ 对象已在两拍之间被销毁：本就无需再 close
             except Exception as e:
                 logger.warning(f"[ForceClose] close failed: {e}")
         QTimer.singleShot(0, _do_close)
@@ -5467,12 +5484,12 @@ class MainWindow(ThemeMixin, ToolbarMixin, ConfigMixin, ExplorerPanelMixin,
         """窗口关闭事件"""
         # 防止重入：closeEvent 在 macOS 上可能因 native 事件链被多次触发，
         # 第二次触发时已经清理过的资源会再次被访问 → 段错误
-        if getattr(self, '_closing_in_progress', False):
+        if self._closing_in_progress:
             event.accept()
             return
 
         # 强制关闭路径：跳过确认弹窗（保存已在 force_close_with_save 中完成）
-        force_closing = getattr(self, '_force_closing', False)
+        force_closing = self._force_closing
 
         # 退出前保护编辑器里的未保存改动：逐个有改动的窗格弹 保存/丢弃/取消。
         # 取消则中止关闭。强制路径不在此弹窗（force_close_with_save 已刷自动保存）。
@@ -5570,7 +5587,7 @@ class MainWindow(ThemeMixin, ToolbarMixin, ConfigMixin, ExplorerPanelMixin,
             try:
                 MainWindow._broadcast_navigator_refresh(invalidate_cache=True)
             except RuntimeError:
-                pass
+                pass  # 导航面板已随最后一个窗口销毁：无需刷新
             except Exception as e:
                 logger.warning(f"[Close] navigator refresh failed: {e}")
         QTimer.singleShot(200, refresh_navigator)
@@ -5785,14 +5802,14 @@ class MainWindow(ThemeMixin, ToolbarMixin, ConfigMixin, ExplorerPanelMixin,
         「窗口不在前台」。source 记录点亮来源终端：用户在该终端按键即视为
         已响应并清除绿点（非终端来源传 None，只靠切窗口/切 tab 清除）。
         """
-        if getattr(self, '_nav_attention', False):
+        if self._nav_attention:
             return  # 已经在提醒，避免重复刷新
         self._nav_attention = True
         self._nav_attention_source = source
         # 完成提示音：每个提醒「点亮」时响一次（dedup 守卫保证不会连环响）。
         # 声音内容由设置里的「完成提示音」决定，'' 表示静音。
         try:
-            play_notify_sound(getattr(self, '_notify_sound', ''))
+            play_notify_sound(self._notify_sound)
         except Exception:
             logger.debug("_request_nav_attention: suppressed exception", exc_info=True)
         try:
@@ -5803,7 +5820,7 @@ class MainWindow(ThemeMixin, ToolbarMixin, ConfigMixin, ExplorerPanelMixin,
     def _clear_nav_attention(self):
         """清除本窗口的导航提醒小标（用户已查看）"""
         self._nav_attention_source = None
-        if getattr(self, '_nav_attention', False):
+        if self._nav_attention:
             self._nav_attention = False
             try:
                 MainWindow._broadcast_navigator_refresh(invalidate_cache=True)

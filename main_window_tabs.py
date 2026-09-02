@@ -3,7 +3,7 @@
 新建/关闭/切换标签、水平·垂直分屏、关闭·移动分屏、分离标签为新窗口
 (detach)及跟随动画、内联重命名、分屏布局管道(capture/place/resolve/
 orientation/drag)。纯方法搬迁，行为不变；detach 构造新窗口/进程级共享
-属性走 _mw.MainWindow。
+属性经 host_class(self) 落到 MainWindow。
 """
 import os
 from PyQt6 import sip
@@ -14,14 +14,17 @@ from dialogs import get_default_shell
 from i18n import t
 from widgets import InlineRenameEdit
 from app_logging import get_logger
-# 延迟引用宿主类：进程级共享类属性/构造新窗口须落在真 MainWindow，
-# 只在方法内访问，循环 import 安全。
-import main_window as _mw
+# 进程级共享类属性 / 构造新窗口经 window_host.host_class(self) 落到真 MainWindow
+from window_host import host_class
 
 logger = get_logger(__name__)
 
 
 class TabSplitMixin:
+
+    def _init_tabs_state(self):
+        """TabSplitMixin 的实例状态（唯一默认值）"""
+        self._tab_rename_editor = None  # 进行中的标签就地重命名编辑框
 
     @staticmethod
     def _ql_detach_modifier_held() -> bool:
@@ -802,7 +805,7 @@ class TabSplitMixin:
                 fx = new_window.x() + (target_geo.x() - cur.x())
                 fy = new_window.y() + (target_geo.y() - cur.y())
                 if (fx, fy) != (new_window.x(), new_window.y()):
-                    _mw.MainWindow._slide_window_to(new_window, fx, fy)
+                    host_class(new_window)._slide_window_to(new_window, fx, fy)
                     loop_delay = 160  # 等滑移（140ms）结束再开始校正
                 else:
                     new_window.setGeometry(target_geo)
@@ -814,7 +817,7 @@ class TabSplitMixin:
                 # 可靠，正是因为窗口先显示在别处、对齐时必然发生一次真实的
                 # 几何变化。这里模仿它：刻意偏移一点显示，让校正循环的首次
                 # setGeometry 成为真实变化。
-                ox, oy = _mw.MainWindow._clamp_window_pos(
+                ox, oy = host_class(new_window)._clamp_window_pos(
                     target_geo.x() + 24, target_geo.y() + 24,
                     target_geo.width(), target_geo.height(),
                     target_geo.center())
@@ -892,7 +895,7 @@ class TabSplitMixin:
         QTimer.singleShot(loop_delay, _realign)
 
     def _detach_tab(self, index, global_pos, follow_drag=True):
-        """将标签页分离为独立窗口（创建完整的 _mw.MainWindow）
+        """将标签页分离为独立窗口（创建完整的 host_class(self)）
 
         follow_drag=True 时新窗口跟随鼠标拖拽（拖出标签触发）；
         False 时直接在父窗口附近层叠展开（右键菜单触发）。
@@ -956,7 +959,7 @@ class TabSplitMixin:
                 # 如果获取不到，使用当前窗口的工作目录
                 tab_cwd = self._window_cwd
 
-        # 创建完整的新 _mw.MainWindow，传入 tab 数据
+        # 创建完整的新 host_class(self)，传入 tab 数据
         initial_tab_data = {
             'splitter': splitter,
             'terminals': terminals,
@@ -966,10 +969,10 @@ class TabSplitMixin:
         }
 
         # 生成唯一的窗口标题
-        _mw.MainWindow._window_counter += 1
-        window_title = f"{title} - Smart Terminal #{_mw.MainWindow._window_counter}"
+        host_class(self)._window_counter += 1
+        window_title = f"{title} - Smart Terminal #{host_class(self)._window_counter}"
 
-        new_window = _mw.MainWindow(initial_tab_data=initial_tab_data, window_title=window_title)
+        new_window = host_class(self)(initial_tab_data=initial_tab_data, window_title=window_title)
 
         # 自动为新窗口选择一个未使用的颜色，方便区分
         available_color = self._get_available_window_color()
@@ -1073,7 +1076,7 @@ class TabSplitMixin:
                     drag_state['moved'] = True
                     base_pos[0] = new_window.x() - dx
                     base_pos[1] = new_window.y() - dy
-                mx, my = _mw.MainWindow._clamp_window_pos(
+                mx, my = host_class(self)._clamp_window_pos(
                     base_pos[0] + dx, base_pos[1] + dy,
                     new_window.width(), new_window.height(), cursor_pos)
                 new_window.move(mx, my)
@@ -1106,7 +1109,7 @@ class TabSplitMixin:
                             if (not self.isMaximized()
                                     and new_window.size() != self.size()):
                                 new_window.resize(self.size())
-                                cx, cy = _mw.MainWindow._clamp_window_pos(
+                                cx, cy = host_class(self)._clamp_window_pos(
                                     new_window.x(), new_window.y(),
                                     self.width(), self.height(),
                                     new_window.frameGeometry().center())
@@ -1128,7 +1131,7 @@ class TabSplitMixin:
                                 nx = pf.x() - nf.width()
                             if (nx, ny) != (new_window.x(), new_window.y()):
                                 # 边缘贴齐同样用平滑滑移代替瞬移
-                                _mw.MainWindow._slide_window_to(new_window, nx, ny)
+                                host_class(self)._slide_window_to(new_window, nx, ny)
                     new_window.raise_()
                     new_window.activateWindow()
                     if new_window.active_terminal:
@@ -1197,9 +1200,9 @@ class TabSplitMixin:
         if not tab_cwd and terminals:
             tab_cwd = terminals[0].get_cwd()
         if not tab_cwd:
-            tab_cwd = getattr(self, '_window_cwd', None)
+            tab_cwd = self._window_cwd
         if tab_cwd and os.path.isdir(tab_cwd):
-            cwd_changed = (tab_cwd != getattr(self, '_window_cwd', None))
+            cwd_changed = (tab_cwd != self._window_cwd)
             self._window_cwd = tab_cwd
             if hasattr(self, 'current_dir_label'):
                 self.current_dir_label.setText(t("dir.current", cwd=tab_cwd))
@@ -1266,7 +1269,7 @@ class TabSplitMixin:
                 # 立即刷新导航面板，让列表项即时跟随当前激活的 tab（本地/远程），
                 # 不必等 5 秒轮询。
                 try:
-                    _mw.MainWindow._broadcast_navigator_refresh()
+                    host_class(self)._broadcast_navigator_refresh()
                 except Exception:
                     logger.debug("_update_window_title_from_tab: suppressed exception", exc_info=True)
 
@@ -1295,7 +1298,7 @@ class TabSplitMixin:
             return
 
         # 弹簧动画/程序性设置尺寸期间不记忆，避免把临时的偏置布局写进记忆值
-        if getattr(self, '_applying_spring', False):
+        if self._applying_spring:
             return
 
         editor_in_main = self.main_splitter.indexOf(self.editor_area) >= 0
@@ -1331,11 +1334,11 @@ class TabSplitMixin:
         等于 splitter 的实际宽度，才能让记忆的绝对像素值被原样还原。
         """
         log_width = 300 if self.log_panel_visible else 0
-        saved_left = getattr(self, '_saved_left_panel_width', None)
+        saved_left = self._saved_left_panel_width
         saved_left = saved_left if isinstance(saved_left, int) and saved_left > 0 else None
         total = max(self.main_splitter.width(), 1000)
 
-        saved = getattr(self, '_saved_explorer_main_sizes', None)
+        saved = self._saved_explorer_main_sizes
         if saved and len(saved) == 4 and saved[0] > 0 and saved[1] > 0 and saved[2] > 0:
             left = saved_left if saved_left is not None else saved[0]
             editor = saved[1]
@@ -1349,7 +1352,7 @@ class TabSplitMixin:
 
     def _resolve_explorer_splitter_sizes_with_editor(self):
         """计算编辑器在 explorer_splitter 中时的目标尺寸（优先使用记忆值）"""
-        saved = getattr(self, '_saved_explorer_internal_sizes', None)
+        saved = self._saved_explorer_internal_sizes
         if saved and len(saved) == 2 and saved[0] > 0 and saved[1] > 0:
             return list(saved)
         return [200, 400]
@@ -1454,7 +1457,7 @@ class TabSplitMixin:
         被其它窗口同步宽度时（_applying_shared_left_width）同样是连续 setSizes 流,
         正需要快速渲染，故不跳过。
         """
-        if getattr(self, '_applying_spring', False):
+        if self._applying_spring:
             return
         if not self._splitter_drag_active:
             self._splitter_drag_active = True
@@ -1468,7 +1471,7 @@ class TabSplitMixin:
         self._splitter_drag_active = False
         # 拖拽触发 spring 门控翻转时弹簧动画可能正在进行并已接管 fast_resize，
         # 让动画的 finished 回调去恢复，这里不抢着关。
-        if getattr(self, '_spring_anim', None) is None:
+        if self._spring_anim is None:
             self._set_terminals_fast_resize(False)
         # 拖拽期间挂起的左侧栏宽度在此一次性广播给其它窗口
         # （见 _set_left_panel_width：拖拽中不实时联动，避免堵死事件循环）
@@ -1480,7 +1483,7 @@ class TabSplitMixin:
 
     def _resolve_remote_splitter_sizes_with_editor(self):
         """计算编辑器在 remote_splitter 中时的目标尺寸（优先使用记忆值）"""
-        saved = getattr(self, '_saved_remote_internal_sizes', None)
+        saved = self._saved_remote_internal_sizes
         if saved and len(saved) == 2 and saved[0] > 0 and saved[1] > 0:
             return list(saved)
         return [200, 400]
@@ -1527,7 +1530,7 @@ class TabSplitMixin:
             or self.git_panel_visible
             or getattr(self, 'remote_panel_visible', False)
         )
-        saved_left = getattr(self, '_saved_left_panel_width', None)
+        saved_left = self._saved_left_panel_width
         saved_left = saved_left if isinstance(saved_left, int) and saved_left > 0 else None
         if left_visible:
             left_width = saved_left if saved_left is not None else 300
@@ -1723,7 +1726,7 @@ class TabSplitMixin:
 
     def _finish_inline_tab_rename(self, index, text):
         """就地编辑提交"""
-        ed = getattr(self, '_tab_rename_editor', None)
+        ed = self._tab_rename_editor
         self._tab_rename_editor = None
         if ed is not None:
             ed.deleteLater()
@@ -1731,7 +1734,7 @@ class TabSplitMixin:
 
     def _discard_inline_tab_rename(self):
         """取消就地编辑（Esc 或被新的编辑取代）"""
-        ed = getattr(self, '_tab_rename_editor', None)
+        ed = self._tab_rename_editor
         self._tab_rename_editor = None
         if ed is not None:
             ed.deleteLater()

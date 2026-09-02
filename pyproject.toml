@@ -93,6 +93,7 @@ py-modules = [
     "vscode_manager",
     "vscode_widget",
     "widgets",
+    "window_host",
     "window_navigator",
 ]
 
