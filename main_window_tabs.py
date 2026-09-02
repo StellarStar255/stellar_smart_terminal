@@ -65,49 +65,11 @@ class TabSplitMixin:
             # 重新设置 parent
             splitter.setParent(self.tab_widget)
 
-            # 重新连接 terminal 信号
+            # 重新连接 terminal 信号：先拆掉原窗口的全部接线，再按同一张表
+            # 接到本窗口（表在 MainWindow._TERMINAL_SIGNAL_NAMES，两处共用）
             for terminal in terminals:
-                # 断开旧连接（如果有的话）
-                try:
-                    terminal.input_recorded.disconnect()
-                    terminal.output_recorded.disconnect()
-                    terminal.session_ended.disconnect()
-                    terminal.image_pasted.disconnect()
-                    terminal.close_tab_requested.disconnect()
-                    terminal.new_tab_requested.disconnect()
-                    terminal.manage_presets_requested.disconnect()
-                    terminal.add_command_requested.disconnect()
-                    terminal.manage_local_presets_requested.disconnect()
-                    terminal.add_local_command_requested.disconnect()
-                    terminal.close_split_requested.disconnect()
-                    terminal.split_horizontal_requested.disconnect()
-                    terminal.split_vertical_requested.disconnect()
-                    terminal.rename_split_requested.disconnect()
-                    terminal.attention_requested.disconnect()
-                    terminal.interaction_requested.disconnect()
-                except (TypeError, RuntimeError):
-                    pass  # Signal may already be disconnected
-
-                # 重新连接到当前窗口
-                terminal.input_recorded.connect(self._on_input)
-                terminal.output_recorded.connect(self._on_output)
-                terminal.session_ended.connect(lambda t=terminal: self._on_terminal_ended(t))
-                terminal.image_pasted.connect(self._on_image_pasted)
-                terminal.close_tab_requested.connect(self._close_tab_or_window)
-                terminal.new_tab_requested.connect(self._add_new_tab)
-                terminal.manage_presets_requested.connect(self._manage_presets)
-                terminal.add_command_requested.connect(self._add_new_preset)
-                terminal.manage_local_presets_requested.connect(self._manage_local_presets)
-                terminal.add_local_command_requested.connect(self._add_new_local_preset)
-                terminal.close_split_requested.connect(self._close_current_split)
-                terminal.split_horizontal_requested.connect(lambda: self._split_current_tab(self._shift_held()))
-                terminal.split_vertical_requested.connect(lambda: self._split_vertical_current_terminal(self._shift_held()))
-                terminal.move_split_left_requested.connect(self._move_split_left)
-                terminal.move_split_up_requested.connect(self._move_split_up)
-                terminal.rename_split_requested.connect(lambda t=terminal: self._rename_split(t))
-                terminal.attention_requested.connect(lambda t=terminal: self._on_terminal_attention(t))
-                terminal.interaction_requested.connect(lambda t=terminal: self._on_terminal_interaction(t))
-                terminal.scrollback_pressure_changed.connect(lambda lv, t=terminal: self._on_scrollback_pressure(t))
+                self._unwire_terminal_signals(terminal)
+                self._wire_terminal_signals(terminal)
                 # 归属转移：务必走 _adopt_terminal（内部会摘掉原窗口的事件
                 # 过滤器），否则原窗口的 active_terminal 会被本窗口的终端污染
                 self._adopt_terminal(terminal)

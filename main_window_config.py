@@ -318,8 +318,31 @@ class ConfigMixin:
             ]
             self.default_llm_config = 0
 
+    # 高频动作（Cmd+±、透明度、GUI 字号）合并写盘的窗口
+    _CONFIG_SAVE_DEBOUNCE_MS = 400
+
+    def _save_config_debounced(self):
+        """请求保存配置：合并短时间内的连续调用，到期只落盘一次。
+
+        同步版 _save_config 每次都是两遍读 JSON + mkstemp + rename；连按
+        缩放/透明度快捷键时逐次写盘毫无意义。关窗/强制关窗走同步版，会先
+        取消挂起的定时器，不会丢。
+        """
+        timer = getattr(self, '_config_save_timer', None)
+        if timer is None:
+            from PyQt6.QtCore import QTimer
+            timer = QTimer(self)
+            timer.setSingleShot(True)
+            timer.setInterval(self._CONFIG_SAVE_DEBOUNCE_MS)
+            timer.timeout.connect(lambda: self._save_config())
+            self._config_save_timer = timer
+        timer.start()
+
     def _save_config(self):
         """保存配置（app_config 单点：进程间文件锁 + 原子写 + 失败可见）"""
+        timer = getattr(self, '_config_save_timer', None)
+        if timer is not None and timer.isActive():
+            timer.stop()  # 现在就写，挂起的防抖请求作废
         try:
             # 先把磁盘上其它窗口新增的目录历史并入本窗口，避免后写覆盖先写
             self._merge_dir_history_for_save()

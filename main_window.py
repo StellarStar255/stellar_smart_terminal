@@ -1652,6 +1652,7 @@ class MainWindow(ThemeMixin, ToolbarMixin, ConfigMixin, ExplorerPanelMixin,
             return
         self._gui_font_size = int(value)
         self._apply_gui_font_to_all_windows()
+        self._save_config_debounced()
 
     def _apply_gui_font_to_all_windows(self):
         """将当前 GUI 字号应用到所有 MainWindow 窗口。
@@ -1737,11 +1738,13 @@ class MainWindow(ThemeMixin, ToolbarMixin, ConfigMixin, ExplorerPanelMixin,
         """放大内容区字体（终端/编辑器/文件树）；界面字体只由 GUI Font 控制"""
         self._global_zoom_delta += 1
         self._apply_global_zoom()
+        self._save_config_debounced()
 
     def _global_zoom_out(self):
         """缩小内容区字体（终端/编辑器/文件树）；界面字体只由 GUI Font 控制"""
         self._global_zoom_delta -= 1
         self._apply_global_zoom()
+        self._save_config_debounced()
 
     def _opacity_increase(self):
         """增加窗口透明度（更不透明）"""
@@ -1750,7 +1753,7 @@ class MainWindow(ThemeMixin, ToolbarMixin, ConfigMixin, ExplorerPanelMixin,
         if hasattr(self, 'opacity_spin'):
             self._select_combo_value(self.opacity_spin, new_val)
         self._apply_opacity_to_all_windows()
-        self._save_config()
+        self._save_config_debounced()
 
     def _opacity_decrease(self):
         """减少窗口透明度（更透明）"""
@@ -1759,7 +1762,7 @@ class MainWindow(ThemeMixin, ToolbarMixin, ConfigMixin, ExplorerPanelMixin,
         if hasattr(self, 'opacity_spin'):
             self._select_combo_value(self.opacity_spin, new_val)
         self._apply_opacity_to_all_windows()
-        self._save_config()
+        self._save_config_debounced()
 
     def _apply_global_zoom(self):
         """应用字体设置：缩放偏移（Cmd+±）只动内容区（终端/编辑器/文件树），
@@ -1814,9 +1817,8 @@ class MainWindow(ThemeMixin, ToolbarMixin, ConfigMixin, ExplorerPanelMixin,
                 nav.apply_gui_font_scale(nav_scale)
             except Exception:
                 logger.debug("_apply_global_zoom: nav font scale failed", exc_info=True)
-
-        # 保存缩放偏移到配置
-        self._save_config()
+        # 不在这里落盘：__init__ 也会走到此处（那时几何/面板状态尚未恢复），
+        # 且 Cmd+± 连按会逐次写盘。持久化由各用户动作入口按防抖触发。
 
 
     def _current_gui_font_scale(self) -> float:
@@ -2319,6 +2321,69 @@ class MainWindow(ThemeMixin, ToolbarMixin, ConfigMixin, ExplorerPanelMixin,
 
 
 
+    # 终端 → 窗口的全部信号。新建终端（_create_terminal）与跨窗口接管
+    # （_add_new_tab 的 external 分支）必须走同一张表：以前两处各维护一份
+    # 列表，漏断的信号让旧窗口继续响应已转移的终端（分屏左移在两个窗口各
+    # 执行一次），漏接的信号（alert_matched）让输出提醒在接管后失效。
+    _TERMINAL_SIGNAL_NAMES = (
+        'input_recorded', 'output_recorded', 'session_ended', 'image_pasted',
+        'close_tab_requested', 'new_tab_requested',
+        'manage_presets_requested', 'add_command_requested',
+        'manage_local_presets_requested', 'add_local_command_requested',
+        'close_split_requested', 'split_horizontal_requested',
+        'split_vertical_requested', 'move_split_left_requested',
+        'move_split_up_requested', 'rename_split_requested',
+        'attention_requested', 'interaction_requested',
+        'alert_matched', 'scrollback_pressure_changed',
+    )
+
+    def _terminal_signal_slots(self, terminal):
+        """返回 {信号名: 槽} —— 唯一的接线真相源。"""
+        return {
+            'input_recorded': self._on_input,
+            'output_recorded': self._on_output,
+            'session_ended': lambda t=terminal: self._on_terminal_ended(t),
+            'image_pasted': self._on_image_pasted,
+            'close_tab_requested': self._close_tab_or_window,
+            'new_tab_requested': self._add_new_tab,
+            'manage_presets_requested': self._manage_presets,
+            'add_command_requested': self._add_new_preset,
+            'manage_local_presets_requested': self._manage_local_presets,
+            'add_local_command_requested': self._add_new_local_preset,
+            'close_split_requested': self._close_current_split,
+            'split_horizontal_requested':
+                lambda: self._split_current_tab(self._shift_held()),
+            'split_vertical_requested':
+                lambda: self._split_vertical_current_terminal(self._shift_held()),
+            'move_split_left_requested': self._move_split_left,
+            'move_split_up_requested': self._move_split_up,
+            'rename_split_requested': lambda t=terminal: self._rename_split(t),
+            'attention_requested': lambda t=terminal: self._on_terminal_attention(t),
+            'interaction_requested': lambda t=terminal: self._on_terminal_interaction(t),
+            'alert_matched': lambda pat, t=terminal: self._on_terminal_alert(t, pat),
+            'scrollback_pressure_changed':
+                lambda lv, t=terminal: self._on_scrollback_pressure(t),
+        }
+
+    def _wire_terminal_signals(self, terminal):
+        """把终端的全部信号接到本窗口。"""
+        slots = self._terminal_signal_slots(terminal)
+        assert set(slots) == set(self._TERMINAL_SIGNAL_NAMES)
+        for name in self._TERMINAL_SIGNAL_NAMES:
+            getattr(terminal, name).connect(slots[name])
+
+    def _unwire_terminal_signals(self, terminal):
+        """断开终端全部信号的所有接收者（接管前由新窗口调用）。
+
+        逐个信号各自 try：某个信号恰好没有连接时 disconnect() 抛 TypeError，
+        不能让它把后面的信号全部跳过。
+        """
+        for name in self._TERMINAL_SIGNAL_NAMES:
+            try:
+                getattr(terminal, name).disconnect()
+            except (TypeError, RuntimeError):
+                pass  # 该信号本就没有连接
+
     def _create_terminal(self) -> TerminalWidget:
         """创建一个新终端并连接信号"""
         terminal = TerminalWidget()
@@ -2345,27 +2410,8 @@ class MainWindow(ThemeMixin, ToolbarMixin, ConfigMixin, ExplorerPanelMixin,
                 t.get('cursor_color')
             )
 
-        # 连接信号
-        terminal.input_recorded.connect(self._on_input)
-        terminal.output_recorded.connect(self._on_output)
-        terminal.session_ended.connect(lambda t=terminal: self._on_terminal_ended(t))
-        terminal.image_pasted.connect(self._on_image_pasted)
-        terminal.close_tab_requested.connect(self._close_tab_or_window)
-        terminal.new_tab_requested.connect(self._add_new_tab)
-        terminal.manage_presets_requested.connect(self._manage_presets)
-        terminal.add_command_requested.connect(self._add_new_preset)
-        terminal.manage_local_presets_requested.connect(self._manage_local_presets)
-        terminal.add_local_command_requested.connect(self._add_new_local_preset)
-        terminal.close_split_requested.connect(self._close_current_split)
-        terminal.split_horizontal_requested.connect(lambda: self._split_current_tab(self._shift_held()))
-        terminal.split_vertical_requested.connect(lambda: self._split_vertical_current_terminal(self._shift_held()))
-        terminal.move_split_left_requested.connect(self._move_split_left)
-        terminal.move_split_up_requested.connect(self._move_split_up)
-        terminal.rename_split_requested.connect(lambda t=terminal: self._rename_split(t))
-        terminal.attention_requested.connect(lambda t=terminal: self._on_terminal_attention(t))
-        terminal.interaction_requested.connect(lambda t=terminal: self._on_terminal_interaction(t))
-        terminal.alert_matched.connect(lambda pat, t=terminal: self._on_terminal_alert(t, pat))
-        terminal.scrollback_pressure_changed.connect(lambda lv, t=terminal: self._on_scrollback_pressure(t))
+        # 连接信号（与跨窗口接管共用同一张表，见 _wire_terminal_signals）
+        self._wire_terminal_signals(terminal)
 
         # 设置工作目录（用于自动启动时）
         terminal.set_working_dir(self._window_cwd)
