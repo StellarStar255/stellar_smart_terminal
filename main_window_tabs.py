@@ -1024,8 +1024,8 @@ class TabSplitMixin:
         new_window.raise_()
         new_window.activateWindow()
 
-        # 添加到列表以跟踪
-        self.detached_windows.append(new_window)
+        # 添加到列表以跟踪（销毁后自动摘除）
+        self._track_detached_window(new_window)
 
         # 菜单触发时无拖拽，直接聚焦新窗口终端即可
         if not follow_drag:

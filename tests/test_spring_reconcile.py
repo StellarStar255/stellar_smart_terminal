@@ -313,7 +313,7 @@ class TestSpringInnerPanes(unittest.TestCase):
             w._toggle_explorer_panel()
         self.app.processEvents()
         before = {id(sp): sp.sizes() for sp in w.findChildren(QSplitter)}
-        for wdg in (w.explorer_panel.findChild(QTreeView),
+        for wdg in (w._ensure_explorer_panel().findChild(QTreeView),
                     getattr(w, 'nav_panel', None)):
             if wdg is not None:
                 w._spring_expand_inner(wdg)

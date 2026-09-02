@@ -244,7 +244,7 @@ class MainWindow(ThemeMixin, ToolbarMixin, ConfigMixin, ExplorerPanelMixin,
         self.tab_terminals = {}  # {tab_index: [terminal_list]} 映射
         self.tab_cwds = {}  # {tab_index: str} 每个标签页独立的工作目录
         self.active_terminal = None  # 当前活动的终端
-        self.detached_windows = []  # 分离出的独立窗口列表
+        self.detached_windows = []  # 分离出的独立窗口列表（见 _track_detached_window）
 
         # 分隔条拖拽期间的终端快速渲染：连续 splitterMoved 视为一次「拖拽流」，
         # 期间终端缩放旧缓存（与弹簧动画同一机制），静默 160ms 后恢复清晰渲染。
@@ -434,9 +434,10 @@ class MainWindow(ThemeMixin, ToolbarMixin, ConfigMixin, ExplorerPanelMixin,
         # 图标库初始化提前在后台做掉，使首次展开瞬开。若面板已恢复为打开状态则跳过。
         if not getattr(self, 'explorer_panel_visible', False):
             def _prewarm_explorer():
-                if sip.isdeleted(self) or not hasattr(self, 'explorer_panel'):
+                if sip.isdeleted(self):
                     return
-                self.explorer_panel.prewarm(getattr(self, '_window_cwd', None))
+                # 面板本体是懒建的：预热即在空闲时把它建出来并扫一遍目录
+                self._ensure_explorer_panel().prewarm(getattr(self, '_window_cwd', None))
             QTimer.singleShot(1200, _prewarm_explorer)
 
         # 启动 5s 后静默检查更新（每日最多一次、设置里可关；不打扰启动性能）。
@@ -1797,14 +1798,7 @@ class MainWindow(ThemeMixin, ToolbarMixin, ConfigMixin, ExplorerPanelMixin,
             self.editor_area.set_editor_font_size(target_size)
 
         # 4. 资源管理器文件树 (默认13pt, 范围8-28) — 跟随终端缩放，不受 GUI 字号影响
-        if hasattr(self, 'explorer_panel') and self.explorer_panel is not None:
-            target_size = max(8, min(28, 13 + delta))
-            if hasattr(self.explorer_panel, 'tree_view'):
-                tree = self.explorer_panel.tree_view
-                font = tree.font()
-                if font.pointSize() != target_size:
-                    font.setPointSize(target_size)
-                    tree.setFont(font)
+        self._apply_zoom_to_explorer_tree()
 
         # 5. Git 面板（diff 查看器 + 提交 graph，默认12pt, 范围6-32）
         self._apply_gui_font_to_git_panel()
@@ -2320,6 +2314,21 @@ class MainWindow(ThemeMixin, ToolbarMixin, ConfigMixin, ExplorerPanelMixin,
             self._save_config()
 
 
+
+    def _track_detached_window(self, win):
+        """登记一个由本窗口派生的顶层窗口：持强引用防 GC，销毁后自动摘除。
+
+        以前只 append 不 remove：WA_DeleteOnClose 删掉 C++ 侧后，Python
+        包装对象（连同其 SessionManager 线程池、日志缓冲）被本窗口永久持有。
+        """
+        self.detached_windows.append(win)
+        try:
+            win.destroyed.connect(lambda *_: self._forget_detached_window(win))
+        except Exception:
+            logger.debug("_track_detached_window: destroyed hook failed", exc_info=True)
+
+    def _forget_detached_window(self, win):
+        self.detached_windows = [w for w in self.detached_windows if w is not win]
 
     # 终端 → 窗口的全部信号。新建终端（_create_terminal）与跨窗口接管
     # （_add_new_tab 的 external 分支）必须走同一张表：以前两处各维护一份
@@ -4471,7 +4480,7 @@ class MainWindow(ThemeMixin, ToolbarMixin, ConfigMixin, ExplorerPanelMixin,
         win = MainWindow(initial_tab_data=initial)
         win._apply_restored_window_state(entry, apply_geometry=False)
         # 保持引用防 GC，与拖拽分离/远程新窗口同一跟踪列表
-        self.detached_windows.append(win)
+        self._track_detached_window(win)
 
         geo = entry.get('geometry')
         if isinstance(geo, (list, tuple)) and len(geo) == 4:

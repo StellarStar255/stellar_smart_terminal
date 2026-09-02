@@ -165,14 +165,9 @@ class ExplorerPanelMixin:
             }
         """)
 
-        # Explorer 面板内容
-        self.explorer_panel = ExplorerPanel(theme=current_theme)
-        self.explorer_splitter.addWidget(self.explorer_panel)
-
-        # 连接文件编辑请求信号
-        self.explorer_panel.file_edit_requested.connect(self._open_file_in_editor)
-        # 快捷方式增删后刷新 ★ 按钮提示（菜单本身每次打开都重读，故无需更多同步）
-        self.explorer_panel.favorites_changed.connect(self._on_explorer_favorites_changed)
+        # Explorer 面板内容（ExplorerPanel 本体）推迟到首次打开再建，见
+        # _ensure_explorer_panel：它要读两次配置、起 60s 定时器、扫目录，
+        # 而默认是隐藏的。容器/标题栏/splitter 照旧 eager，hasattr 守卫不变。
 
         # 内置文件编辑器（编辑器组：支持无限层级 split / v-split 并排查看不同文件）
         self.editor_area = EditorArea(theme=current_theme)
@@ -190,10 +185,6 @@ class ExplorerPanelMixin:
         self.editor_area.hide()  # 默认隐藏
         self.explorer_splitter.addWidget(self.editor_area)
 
-        # 连接资源管理器的保存信号到活动窗格
-        self.explorer_panel.save_file_requested.connect(self.editor_area.save_active)
-        self.explorer_panel.save_file_as_requested.connect(self.editor_area.save_active_as)
-
         # 设置初始比例（资源管理器占更多空间）
         self.explorer_splitter.setSizes([400, 0])
 
@@ -207,6 +198,7 @@ class ExplorerPanelMixin:
 
     def _show_explorer_settings_menu(self):
         """Explorer 齿轮按钮：弹出视图设置菜单（含"显示隐藏文件"开关）。"""
+        self._ensure_explorer_panel()
         if not hasattr(self, 'explorer_panel'):
             return
         menu = QMenu(self)
@@ -272,6 +264,52 @@ class ExplorerPanelMixin:
         menu.exec(self._explorer_settings_btn.mapToGlobal(
             self._explorer_settings_btn.rect().bottomLeft()
         ))
+
+    def _ensure_explorer_panel(self):
+        """首次需要时才构造 ExplorerPanel 并接线；之后直接返回已建实例。
+
+        懒建出来的面板要追平当前状态：主题/语言在构造时已按当前值取到，
+        缩放（树字号）要显式补一次。
+        """
+        panel = getattr(self, 'explorer_panel', None)
+        if panel is not None:
+            return panel
+        current_theme = self.THEMES.get(self.current_theme, self.THEMES["午夜黑"])
+        panel = ExplorerPanel(theme=current_theme)
+        self.explorer_panel = panel
+        self.explorer_splitter.insertWidget(0, panel)
+        if not (hasattr(self, 'editor_area') and self.editor_area.isVisible()):
+            self.explorer_splitter.setSizes([400, 0])
+        # 文件编辑请求 → 编辑器；快捷方式增删 → 刷新 ★ 按钮提示
+        panel.file_edit_requested.connect(self._open_file_in_editor)
+        panel.favorites_changed.connect(self._on_explorer_favorites_changed)
+        # 资源管理器的保存信号 → 活动窗格
+        panel.save_file_requested.connect(self.editor_area.save_active)
+        panel.save_file_as_requested.connect(self.editor_area.save_active_as)
+        # 树里改名/删除 → 编辑器同步换路径/标记已删除。以前编辑器对此一无所知：
+        # 改名后继续按旧路径自动保存，磁盘上就多出一份旧文件
+        for sig_name, hook_name in (('file_renamed', 'on_path_renamed'),
+                                    ('file_deleted', 'on_path_deleted')):
+            sig = getattr(panel, sig_name, None)
+            hook = getattr(self.editor_area, hook_name, None)
+            if sig is not None and hook is not None:
+                sig.connect(hook)
+        # 追平缩放：与 _apply_global_zoom 第 4 步一致
+        self._apply_zoom_to_explorer_tree()
+        self._on_explorer_favorites_changed()
+        return panel
+
+    def _apply_zoom_to_explorer_tree(self):
+        """文件树字号跟随终端缩放（默认 13pt，范围 8-28），不受 GUI 字号影响。"""
+        panel = getattr(self, 'explorer_panel', None)
+        tree = getattr(panel, 'tree_view', None) if panel is not None else None
+        if tree is None:
+            return
+        target_size = max(8, min(28, 13 + self._global_zoom_delta))
+        font = tree.font()
+        if font.pointSize() != target_size:
+            font.setPointSize(target_size)
+            tree.setFont(font)
 
     def _on_explorer_favorites_changed(self):
         """快捷方式增删后的钩子：★ 下拉每次打开都重读，这里仅刷新提示气泡。"""
@@ -396,6 +434,7 @@ class ExplorerPanelMixin:
                     self.remote_toggle_btn.setChecked(False)
                 self.remote_panel_container.hide()
 
+            self._ensure_explorer_panel()
             self.explorer_panel_container.show()
             self.left_panel_container.show()
             # 设置根目录为当前工作目录（路径未变时内部会跳过重扫描）

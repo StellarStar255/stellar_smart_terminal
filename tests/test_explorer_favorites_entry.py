@@ -132,7 +132,7 @@ class TestStarMenuOffersCurrentFolder(_Base):
             cls.app.processEvents()
 
     def test_star_menu_first_item_adds_current_folder(self):
-        self.win.explorer_panel.set_root_path(self.tmp)
+        self.win._ensure_explorer_panel().set_root_path(self.tmp)
         self.app.processEvents()
         menu = self.win._build_explorer_favorites_menu()
         label = self.t("explorer.favorite_add_current",

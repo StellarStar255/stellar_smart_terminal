@@ -71,28 +71,35 @@ class GitPanelMixin:
 
         layout.addWidget(self._git_header)
 
-        # 获取当前主题
-        current_theme = self.THEMES.get(self.current_theme, self.THEMES["午夜黑"])
+        # GitPanel 本体推迟到首次打开再建（见 _ensure_git_panel）：它会建
+        # GitManager、读配置、起 3 分钟 fetch 定时器，而默认是隐藏的。
 
-        # Git 面板内容
-        self.git_panel = GitPanel(theme=current_theme)
-        layout.addWidget(self.git_panel)
+    def _ensure_git_panel(self):
+        """首次需要时才构造 GitPanel 并接线；之后直接返回已建实例。"""
+        panel = getattr(self, 'git_panel', None)
+        if panel is not None:
+            return panel
+        current_theme = self.THEMES.get(self.current_theme, self.THEMES["午夜黑"])
+        panel = GitPanel(theme=current_theme)
+        self.git_panel = panel
+        self.git_panel_container.layout().addWidget(panel)
         # 面板默认按 12pt 初始化，但 GUI 字号可能已是别的值（启动时缩放已应用过）→
         # 创建后立刻按当前 GUI 字号重设 diff/graph，避免初始字号不联动。
         self._apply_gui_font_to_git_panel()
 
         # 持久化提交区高度 + body 各栏尺寸：拖拽时记下，加载配置时恢复
-        self.git_panel.commit_height_changed.connect(self._on_git_commit_height_changed)
-        self.git_panel.body_sizes_changed.connect(self._on_git_body_sizes_changed)
+        panel.commit_height_changed.connect(self._on_git_commit_height_changed)
+        panel.body_sizes_changed.connect(self._on_git_body_sizes_changed)
         if isinstance(self._saved_git_body_sizes, list) and self._saved_git_body_sizes:
-            self.git_panel.apply_body_sizes(self._saved_git_body_sizes)
+            panel.apply_body_sizes(self._saved_git_body_sizes)
         elif isinstance(self._saved_git_commit_height, int) and self._saved_git_commit_height > 0:
-            self.git_panel.apply_commit_height(self._saved_git_commit_height)
+            panel.apply_commit_height(self._saved_git_commit_height)
 
         # 双击文件查看 diff → 在右侧大空间显示左右并排对比（不挤在左面板里）
-        self.git_panel.diff_requested.connect(self._show_git_diff)
+        panel.diff_requested.connect(self._show_git_diff)
         # pull 完成 → 在右侧大空间显示 git 输出（进度 / fast-forward / 文件统计）
-        self.git_panel.output_requested.connect(self._show_git_output)
+        panel.output_requested.connect(self._show_git_output)
+        return panel
 
     def _on_git_commit_height_changed(self, height: int):
         """记住用户拖拽出的 Git 提交区高度（关闭时随配置一起落盘）。"""
@@ -111,7 +118,7 @@ class GitPanelMixin:
         file_path/staged 来自 GitPanel.diff_requested，连同 GitManager 一起
         交给 GitDiffView，使其支持 hunk 级暂存/取消暂存；为空则纯展示。
         """
-        if file_path:
+        if file_path and getattr(self, 'git_panel', None) is not None:
             self.git_diff_view.set_context(self.git_panel.git_manager, file_path, staged)
         else:
             self.git_diff_view.set_context(None, None, False)
@@ -158,6 +165,7 @@ class GitPanelMixin:
                 # 没有打开的文件：照旧收回默认家并隐藏
                 self._home_editor_hidden()
 
+            self._ensure_git_panel()
             self.git_panel_container.show()
             self.left_panel_container.show()
             # 设置仓库路径

@@ -8,8 +8,10 @@ import os
 from PyQt6 import sip
 from PyQt6.QtCore import QTimer, Qt
 from i18n import t
-from remote_explorer_widget import RemoteExplorerPanel
 from app_logging import get_logger
+# RemoteExplorerPanel 在 _ensure_remote_panel 里按需 import：它的 import 链
+# 拉进 ssh_control → ssh_session → paramiko/cryptography，占启动 import 时间
+# 近三成，而远程面板默认隐藏、多数会话根本不打开。
 # 延迟引用宿主类：进程级共享类属性/构造新窗口须落在真 MainWindow，
 # 只在方法内访问，循环 import 安全。
 import main_window as _mw
@@ -80,16 +82,7 @@ class RemotePanelMixin:
 
         layout.addWidget(self._remote_header)
 
-        current_theme = self.THEMES.get(self.current_theme, self.THEMES["午夜黑"])
-        self.remote_panel = RemoteExplorerPanel(theme=current_theme)
-        # 远程文件打开 → 注入到本地编辑器（透明处理远程保存）
-        self.remote_panel.file_open_requested.connect(self._open_remote_file_in_editor)
-        # 连接成功后自动开一个 SSH 终端 tab
-        self.remote_panel.host_connected.connect(self._on_remote_host_connected)
-        # 右键 "在此处打开终端" → 同样开一个 SSH tab，且 cd 进指定目录
-        self.remote_panel.open_terminal_at.connect(self._open_ssh_terminal_tab)
-        # 右键 "在新窗口中连接" → 新开一个独立窗口并 SSH 进该主机
-        self.remote_panel.open_in_new_window.connect(self._open_ssh_in_new_window)
+        # RemoteExplorerPanel 本体推迟到首次打开再建（见 _ensure_remote_panel）
 
         # 用竖直 QSplitter 包住远程树，以便上下分屏时把编辑器放到树下方
         # （编辑器 editor_area 为共享单例，按需在 remote_splitter / main_splitter 间移动）
@@ -99,10 +92,31 @@ class RemotePanelMixin:
             QSplitter::handle { background-color: #3d3d5c; }
             QSplitter::handle:hover { background-color: #667eea; }
         """)
-        self.remote_splitter.addWidget(self.remote_panel)
         self.remote_splitter.setSizes([400, 0])
         self.remote_splitter.splitterMoved.connect(lambda *_: self._capture_remote_layout())
         layout.addWidget(self.remote_splitter)
+
+    def _ensure_remote_panel(self):
+        """首次需要时才构造 RemoteExplorerPanel 并接线；之后直接返回已建实例。"""
+        panel = getattr(self, 'remote_panel', None)
+        if panel is not None:
+            return panel
+        from remote_explorer_widget import RemoteExplorerPanel
+        current_theme = self.THEMES.get(self.current_theme, self.THEMES["午夜黑"])
+        panel = RemoteExplorerPanel(theme=current_theme)
+        self.remote_panel = panel
+        self.remote_splitter.insertWidget(0, panel)
+        if not (hasattr(self, 'editor_area') and self.editor_area.isVisible()):
+            self.remote_splitter.setSizes([400, 0])
+        # 远程文件打开 → 注入到本地编辑器（透明处理远程保存）
+        panel.file_open_requested.connect(self._open_remote_file_in_editor)
+        # 连接成功后自动开一个 SSH 终端 tab
+        panel.host_connected.connect(self._on_remote_host_connected)
+        # 右键 "在此处打开终端" → 同样开一个 SSH tab，且 cd 进指定目录
+        panel.open_terminal_at.connect(self._open_ssh_terminal_tab)
+        # 右键 "在新窗口中连接" → 新开一个独立窗口并 SSH 进该主机
+        panel.open_in_new_window.connect(self._open_ssh_in_new_window)
+        return panel
 
     def _toggle_remote_panel(self):
         """切换 Remote Explorer 面板显示（与 Explorer / Git 互斥）"""
@@ -127,6 +141,7 @@ class RemotePanelMixin:
             # 先把编辑器收回默认家（避免它停在 explorer/main_splitter 里）
             self._home_editor_hidden()
 
+            self._ensure_remote_panel()
             self.remote_panel_container.show()
             self.left_panel_container.show()
 
@@ -176,8 +191,8 @@ class RemotePanelMixin:
         延迟到窗口初始化稳定后再连。"""
         # 把原窗口已缓存的密码带给新窗口，避免自动连 SFTP 时再弹一次密码框
         try:
-            pw = self.remote_panel.get_cached_password(host_config.alias)
-            new_window.remote_panel.prime_cached_password(host_config.alias, pw)
+            pw = self._ensure_remote_panel().get_cached_password(host_config.alias)
+            new_window._ensure_remote_panel().prime_cached_password(host_config.alias, pw)
         except Exception:
             logger.debug("_auto_connect_remote_in_window: suppressed exception", exc_info=True)
 
@@ -213,7 +228,7 @@ class RemotePanelMixin:
         # 环境注入与 cd 等 shell 出来后当用户输入补发。
         bastion = False
         try:
-            bastion = bool(self.remote_panel._is_mfa_host(alias))
+            bastion = bool(self._ensure_remote_panel()._is_mfa_host(alias))
         except Exception:
             logger.debug("_open_ssh_terminal_tab: mfa host probe failed",
                          exc_info=True)
@@ -250,7 +265,7 @@ class RemotePanelMixin:
         # 若用户刚在 Remote 面板里为该主机输入过密码，预置一次性自动回填，
         # 这样终端里的 ssh 密码提示就不用再输一遍。
         try:
-            cached_pw = self.remote_panel.get_cached_password(alias)
+            cached_pw = self._ensure_remote_panel().get_cached_password(alias)
             if cached_pw:
                 term.arm_password_autofill(cached_pw)
         except Exception:
@@ -330,8 +345,8 @@ class RemotePanelMixin:
         # 重合、且处于隐形对齐期，密码框会被盖住/吞掉，用户永远没法输入，后台
         # SSH 线程就一直卡在「Connecting…」。提前预置密码即可免去这次弹框。
         try:
-            pw = self.remote_panel.get_cached_password(alias)
-            new_window.remote_panel.prime_cached_password(alias, pw)
+            pw = self._ensure_remote_panel().get_cached_password(alias)
+            new_window._ensure_remote_panel().prime_cached_password(alias, pw)
         except Exception:
             # 预置失败不致命（新窗口会自行弹密码框），但要记日志：
             # 曾因静默吞异常导致「SSH 密码框死锁」难以定位
@@ -347,7 +362,7 @@ class RemotePanelMixin:
         self._align_child_with_parent_geometry(new_window)
         new_window.raise_()
         new_window.activateWindow()
-        self.detached_windows.append(new_window)
+        self._track_detached_window(new_window)
 
         # 等窗口初始化 / 首次显示稳定后再连接
         def _connect_after_init():
@@ -403,7 +418,7 @@ class RemotePanelMixin:
             if saved_path != local_temp_path:
                 return
             # 把本地临时文件 push 回远端
-            self.remote_panel.upload_after_save(local_temp_path)
+            self._ensure_remote_panel().upload_after_save(local_temp_path)
         pane.file_saved.connect(on_saved)
         self._remote_save_connections[local_temp_path] = on_saved
 
