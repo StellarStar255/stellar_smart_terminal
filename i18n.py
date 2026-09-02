@@ -461,6 +461,8 @@ TRANSLATIONS = {
     "explorer.favorite_add": {"zh": "添加到快捷方式", "en": "Add to Shortcuts"},
     "explorer.favorite_remove": {"zh": "从快捷方式移除", "en": "Remove from Shortcuts"},
     "explorer.favorite_add_current": {"zh": "把当前目录「{name}」添加到快捷方式", "en": "Add Current Folder “{name}” to Shortcuts"},
+    "git_mgr.git_not_found": {"zh": "找不到 git 命令：请先安装 Git 并确保它在 PATH 中", "en": "git command not found: install Git and make sure it is on PATH"},
+    "git_mgr.output_truncated": {"zh": "…（输出超过 {limit} 字符，已截断）", "en": "... (output exceeded {limit} characters, truncated)"},
     "explorer.favorite_remove_current": {"zh": "把当前目录「{name}」从快捷方式移除", "en": "Remove Current Folder “{name}” from Shortcuts"},
     "explorer.favorites_tooltip": {"zh": "快捷方式（文件夹→切换目录，文件→打开）", "en": "Shortcuts (folder → switch dir, file → open)"},
     "explorer.favorites_empty": {"zh": "（暂无快捷方式）", "en": "(No shortcuts yet)"},

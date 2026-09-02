@@ -229,6 +229,30 @@ def _mono_font(size: int = 12, *, pixel: bool = False) -> QFont:
     return f
 
 
+class _GitResultWorker(QThread):
+    """后台执行任意 GitManager 调用，把返回值原样带回 GUI 线程。
+
+    面板里"点一下就同步跑一次 git"的路径（diff / show / stage / discard /
+    revert …）与后台 5s 一次的 `git status` 撞上 index.lock 时，GitManager
+    的退避重试在 GUI 线程会累计睡 3s；大提交的 `git show --patch` 也是
+    秒级。统一挪到线程里，结果经 done 信号回到 GUI。
+    """
+    done = pyqtSignal(object, str)  # (返回值, kind)
+
+    def __init__(self, fn, kind: str, parent=None):
+        super().__init__(parent)
+        self._fn = fn
+        self._kind = kind
+
+    def run(self):
+        try:
+            result = self._fn()
+        except Exception:
+            logger.exception("git op '%s' failed", self._kind)
+            result = None
+        self.done.emit(result, self._kind)
+
+
 class GitFileItem(QWidget):
     """Git 文件列表项"""
 
@@ -1308,6 +1332,9 @@ class GitDiffView(QWidget):
         self._hunk_patches = []     # 每个 hunk 的原始文本（含 @@ 行）
         self._hunk_row_map = {}     # 显示行号(block) -> hunk 下标
         self._marker_offsets = {}   # 显示行号(block) -> 行内可点击标记起始列
+        # hunk 级 apply + 重取 diff 在后台线程跑；期间忽略再次点击
+        self._hunk_busy = False
+        self._hunk_workers = set()
         self._marker_label = None   # 标记文案（None=本 diff 不支持 hunk 操作）
         self._setup_ui()
 
@@ -1454,12 +1481,36 @@ class GitDiffView(QWidget):
             return
         if not (0 <= hunk_index < len(self._hunk_patches)):
             return
+        if self._hunk_busy:
+            return
         patch = '\n'.join(self._file_header + [self._hunk_patches[hunk_index]]) + '\n'
+        gm, path, staged = self._gm, self._ctx_path, self._ctx_staged
+
         # 暂存：patch 来自 index→worktree 的 diff，正向应用到 index；
         # 取消暂存：patch 来自 HEAD→index 的 diff，反向应用到 index。
-        if self._gm.apply_patch(patch, cached=True, reverse=self._ctx_staged):
-            new_diff = self._gm.get_diff(self._ctx_path, self._ctx_staged)
-            self.set_diff(self.title_label.text(), new_diff)
+        # 在后台线程执行，撞上 index.lock 时不会把 GUI 冻住。
+        def work():
+            if not gm.apply_patch(patch, cached=True, reverse=staged):
+                return None
+            return gm.get_diff(path, staged)
+
+        self._hunk_busy = True
+        # 不设 parent：视图先于线程销毁时 QThread 不能被连带删除（会 abort）；
+        # done 槽是本 QObject 的绑定方法，视图销毁后由 Qt 自动断开。
+        worker = _GitResultWorker(work, 'hunk')
+        worker.done.connect(
+            lambda new_diff, _k, p=path, st=staged: self._on_hunk_done(new_diff, p, st))
+        self._hunk_workers.add(worker)
+        worker.finished.connect(lambda w=worker: self._hunk_workers.discard(w))
+        worker.finished.connect(worker.deleteLater)
+        worker.start()
+
+    def _on_hunk_done(self, new_diff, path, staged):
+        self._hunk_busy = False
+        # 期间用户已切到别的文件/视图：结果作废
+        if new_diff is None or path != self._ctx_path or staged != self._ctx_staged:
+            return
+        self.set_diff(self.title_label.text(), new_diff)
 
     def _hunk_hit(self, edit, pos):
         """命中测试：pos 是否落在某个 hunk 头行的可点击标记上。"""
@@ -2637,11 +2688,11 @@ class GitPanel(QWidget):
         self.header.delete_branch_requested.connect(self._on_delete_branch)
 
         # 变更列表信号
-        self.changes_widget.stage_file.connect(self._git_manager.stage_file)
-        self.changes_widget.unstage_file.connect(self._git_manager.unstage_file)
+        self.changes_widget.stage_file.connect(self._on_stage_file)
+        self.changes_widget.unstage_file.connect(self._on_unstage_file)
         self.changes_widget.discard_file.connect(self._on_discard_file)
-        self.changes_widget.stage_all.connect(self._git_manager.stage_all)
-        self.changes_widget.unstage_all.connect(self._git_manager.unstage_all)
+        self.changes_widget.stage_all.connect(self._on_stage_all)
+        self.changes_widget.unstage_all.connect(self._on_unstage_all)
         self.changes_widget.view_diff.connect(self._show_diff)
         self.changes_widget.resolve_ours.connect(
             lambda path: self._on_resolve_conflict(path, 'ours'))
@@ -2686,11 +2737,15 @@ class GitPanel(QWidget):
             self.commit_widget.hide()
 
     def _on_commit_clicked(self, commit_hash: str):
-        """点击 graph 上的提交 → 在右侧大空间展示该提交详情（git show）。"""
-        text = self._git_manager.get_commit_show(commit_hash)
-        self.output_requested.emit(
-            t("git.commit_show_title", short=commit_hash[:7]), text
-        )
+        """点击 graph 上的提交 → 在右侧大空间展示该提交详情（git show）。
+
+        后台线程执行：大提交的 `git show --patch` 是秒级，且输出已由
+        GitManager 截到 MAX_DIFF_CHARS。
+        """
+        title = t("git.commit_show_title", short=commit_hash[:7])
+        self._run_git_async(
+            lambda: self._git_manager.get_commit_show(commit_hash), 'show',
+            lambda text, _k: self.output_requested.emit(title, text or ''))
 
     def _on_revert_commit(self, commit_hash: str):
         """右键菜单：撤销某次提交（git revert，安全、不改写历史）。"""
@@ -2704,8 +2759,9 @@ class GitPanel(QWidget):
         )
         if reply != QMessageBox.StandardButton.Yes:
             return
-        if self._git_manager.revert_commit(commit_hash):
-            self._refresh_all_async()
+        self._run_git_async(
+            lambda: self._git_manager.revert_commit(commit_hash), 'revert',
+            self._refresh_if_ok)
 
     def _on_reset_commit(self, commit_hash: str, mode: str):
         """右键菜单：重置当前分支到某次提交（git reset --<mode>，会改写本地历史）。"""
@@ -2724,8 +2780,9 @@ class GitPanel(QWidget):
         )
         if reply != QMessageBox.StandardButton.Yes:
             return
-        if self._git_manager.reset_to_commit(commit_hash, mode):
-            self._refresh_all_async()
+        self._run_git_async(
+            lambda: self._git_manager.reset_to_commit(commit_hash, mode), 'reset',
+            self._refresh_if_ok)
 
     def _on_copy_commit_hash(self, commit_hash: str):
         """右键菜单：复制提交完整哈希到剪贴板。"""
@@ -2866,8 +2923,8 @@ class GitPanel(QWidget):
         )
         if reply != QMessageBox.StandardButton.Yes:
             return
-        if self._git_manager.merge_abort():
-            self._refresh_all_async()
+        self._run_git_async(self._git_manager.merge_abort, 'merge_abort',
+                            self._refresh_if_ok)
 
     def _on_resolve_conflict(self, path: str, side: str):
         """冲突文件右键：整体采用我方/对方版本（checkout --ours/--theirs + add）。"""
@@ -2881,13 +2938,14 @@ class GitPanel(QWidget):
         )
         if reply != QMessageBox.StandardButton.Yes:
             return
-        if self._git_manager.resolve_conflict_with(path, side):
-            self._refresh_all_async()
+        self._run_git_async(
+            lambda: self._git_manager.resolve_conflict_with(path, side), 'resolve',
+            self._refresh_if_ok)
 
     def _on_mark_resolved(self, path: str):
         """冲突文件右键：标记为已解决（git add，假定用户已手工编辑掉冲突标记）。"""
-        if self._git_manager.stage_file(path):
-            self._refresh_all_async()
+        self._run_git_async(
+            lambda: self._git_manager.stage_file(path), 'stage', self._refresh_if_ok)
 
     def _on_refresh_clicked(self):
         """点击 ↻：刷新状态 + 强制抓取一次远程（更新可 pull 条数）"""
@@ -2908,8 +2966,9 @@ class GitPanel(QWidget):
         name = (text or '').strip()
         if not name:
             return
-        if self._git_manager.create_branch(name):
-            self._refresh_all_async()
+        self._run_git_async(
+            lambda: self._git_manager.create_branch(name), 'create_branch',
+            self._refresh_if_ok)
 
     def _on_delete_branch(self, name: str):
         """右键菜单确认删除本地分支。
@@ -2943,13 +3002,19 @@ class GitPanel(QWidget):
         if reply != QMessageBox.StandardButton.Yes:
             return
 
-        ok, output = self._git_manager.delete_branch(name, force=False)
+        self._run_git_async(
+            lambda: self._git_manager.delete_branch(name, force=False), 'delete_branch',
+            lambda res, _k: self._on_delete_branch_done(name, res, forced=False))
+
+    def _on_delete_branch_done(self, name: str, result, forced: bool):
+        """`git branch -d/-D` 的结果回到 GUI 线程：成功刷新；未合并则二次确认后强删。"""
+        ok, output = result if isinstance(result, tuple) else (False, '')
         if ok:
             self._refresh_all_async()
             return
 
         # 未合并 → 询问是否强制删除
-        if 'not fully merged' in (output or '').lower():
+        if not forced and 'not fully merged' in (output or '').lower():
             force_reply = QMessageBox.warning(
                 self,
                 t("git.delete_branch_title"),
@@ -2959,10 +3024,10 @@ class GitPanel(QWidget):
             )
             if force_reply != QMessageBox.StandardButton.Yes:
                 return
-            ok, output = self._git_manager.delete_branch(name, force=True)
-            if ok:
-                self._refresh_all_async()
-                return
+            self._run_git_async(
+                lambda: self._git_manager.delete_branch(name, force=True), 'delete_branch',
+                lambda res, _k: self._on_delete_branch_done(name, res, forced=True))
+            return
 
         QMessageBox.critical(
             self,
@@ -3462,7 +3527,40 @@ class GitPanel(QWidget):
             QMessageBox.StandardButton.No
         )
         if reply == QMessageBox.StandardButton.Yes:
-            self._git_manager.discard_changes(path)
+            self._run_git_async(
+                lambda: self._git_manager.discard_changes(path), 'discard')
+
+    def _run_git_async(self, fn, kind: str, on_done=None):
+        """在后台线程跑一个 GitManager 调用；on_done(result, kind) 在 GUI 线程收结果。
+
+        GitManager 的 error_occurred / status_changed 是 Qt 信号，跨线程自动
+        排队到 GUI 线程，所以失败弹窗与列表刷新照旧。
+        """
+        worker = _GitResultWorker(fn, kind, self)
+        if on_done is not None:
+            worker.done.connect(on_done)
+        self._register_worker(worker)
+        worker.start()
+        return worker
+
+    def _refresh_if_ok(self, ok, _kind: str = ''):
+        if ok:
+            self._refresh_all_async()
+
+    # stage / unstage：以前直连 GitManager 的方法在 GUI 线程同步跑 git add，
+    # 与后台 status 撞 index.lock 时会睡满退避梯子。文件列表刷新由
+    # GitManager.status_changed 驱动，这里不必再手动刷新。
+    def _on_stage_file(self, path: str):
+        self._run_git_async(lambda: self._git_manager.stage_file(path), 'stage')
+
+    def _on_unstage_file(self, path: str):
+        self._run_git_async(lambda: self._git_manager.unstage_file(path), 'unstage')
+
+    def _on_stage_all(self):
+        self._run_git_async(self._git_manager.stage_all, 'stage_all')
+
+    def _on_unstage_all(self):
+        self._run_git_async(self._git_manager.unstage_all, 'unstage_all')
 
     def _on_commit(self, message: str):
         """提交处理：仅在提交成功后才清空输入框，失败时保留用户已写的信息。
@@ -3515,15 +3613,11 @@ class GitPanel(QWidget):
     # ---------- ✨ 用大模型生成提交信息 ----------
 
     def _on_generate_message(self):
-        """根据当前改动调用大模型生成提交信息，填进输入框。"""
-        diff = self._collect_diff_for_message()
-        if not diff.strip():
-            QMessageBox.information(
-                self, t("git.generate_no_changes_title"),
-                t("git.generate_no_changes_msg")
-            )
-            return
+        """根据当前改动调用大模型生成提交信息，填进输入框。
 
+        先校验模型配置（不碰 git），再到后台线程收集 diff（三次 git 调用，
+        大仓库秒级），拿到后才启动生成线程。
+        """
         main_window = self._find_main_window()
         # 优先用「设为 Git 模型」指派的配置，否则回退默认配置
         config = None
@@ -3540,6 +3634,18 @@ class GitPanel(QWidget):
             return
 
         self.commit_widget.set_generating(True)
+        self._run_git_async(
+            self._collect_diff_for_message, 'collect_diff',
+            lambda diff, _k: self._on_diff_collected(config, diff or ''))
+
+    def _on_diff_collected(self, config: dict, diff: str):
+        if not diff.strip():
+            self.commit_widget.set_generating(False)
+            QMessageBox.information(
+                self, t("git.generate_no_changes_title"),
+                t("git.generate_no_changes_msg")
+            )
+            return
         worker = _CommitMessageWorker(config, diff, get_language(), self)
         worker.succeeded.connect(self._on_generate_done)
         worker.failed.connect(self._on_generate_failed)
@@ -3605,10 +3711,14 @@ class GitPanel(QWidget):
         return None
 
     def _show_diff(self, path: str, staged: bool):
-        """双击文件 → 交给主窗口在右侧大空间以左右并排方式显示 diff（不弹窗）"""
-        diff_content = self._git_manager.get_diff(path, staged)
+        """双击文件 → 交给主窗口在右侧大空间以左右并排方式显示 diff（不弹窗）
+
+        get_diff 在后台线程跑（撞 index.lock 时不冻 GUI；输出已截到上限）。
+        """
         title = path + (" (staged)" if staged else "")
-        self.diff_requested.emit(title, diff_content, path, staged)
+        self._run_git_async(
+            lambda: self._git_manager.get_diff(path, staged), 'diff',
+            lambda content, _k: self.diff_requested.emit(title, content or '', path, staged))
 
     def _on_op_output(self, kind: str, output: str):
         """pull 等操作的 git 输出 → 交给主窗口在右侧大空间展示（不弹窗）"""

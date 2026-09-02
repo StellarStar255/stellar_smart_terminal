@@ -4,6 +4,7 @@ Git 管理器后端
 """
 import os
 import re
+import shutil
 import signal
 import subprocess
 import sys
@@ -12,7 +13,8 @@ import time
 from enum import Enum
 from dataclasses import dataclass
 from typing import List, Tuple, Optional
-from PyQt6.QtCore import QObject, pyqtSignal, QFileSystemWatcher, QTimer
+from PyQt6.QtCore import (QObject, pyqtSignal, QFileSystemWatcher, QTimer,
+                          QCoreApplication, QThread)
 
 from i18n import t
 from app_logging import get_logger
@@ -35,6 +37,30 @@ SUBPROCESS_FLAGS = subprocess.CREATE_NO_WINDOW if sys.platform == "win32" else 0
 # 亚秒级释放，重试几次即可消化，避免动辄弹错误框。总计最多等 ~3s：
 # stage/unstage 在 GUI 线程执行，预算不能再大。
 _LOCK_RETRY_DELAYS = (0.2, 0.4, 0.8, 1.6)
+
+# diff / show 输出交给文本控件前的上限：依赖升级、生成物误提交这类大提交
+# `git show --patch` 能吐几十 MB，整段塞进 QTextEdit 会把窗口冻住几十秒。
+MAX_DIFF_CHARS = 2_000_000
+
+
+def _on_gui_thread() -> bool:
+    """当前是否在 Qt GUI 线程（无 QApplication 时按"是"处理，保守不睡）。"""
+    app = QCoreApplication.instance()
+    if app is None:
+        return True
+    return QThread.currentThread() == app.thread()
+
+
+def _lock_retry_delays() -> tuple:
+    """退避睡眠只许在工作线程里跑：GUI 线程上返回空梯子（最多立即重试一次）。"""
+    return () if _on_gui_thread() else _LOCK_RETRY_DELAYS
+
+
+def _cap_output(text: str, limit: int = MAX_DIFF_CHARS) -> str:
+    """超过上限就截断并加标记；未超过原样返回。"""
+    if text is None or len(text) <= limit:
+        return text
+    return text[:limit] + "\n" + t("git_mgr.output_truncated", limit=limit)
 
 
 def _is_lock_contention(msg: str) -> bool:
@@ -178,6 +204,7 @@ class GitManager(QObject):
         # 环境，覆盖 push/pull/fetch/clone/ls-remote 等所有走 HTTPS 的 git 操作。
         # 注意：对 SSH 协议的远端（git@host:repo.git）不生效；那种需要 ~/.ssh/config 配置。
         self._proxy: str = ''
+        self._git_missing_reported = False  # git 缺失只提示一次
 
     def set_proxy(self, url: str):
         """设置应用内 git 代理（仅影响本程序里的 git 子进程，不改全局 git config）。
@@ -204,6 +231,16 @@ class GitManager(QObject):
         if not git_dir:
             self._repo_path = None
             self._stop_watching()
+            return False
+
+        # git 不在 PATH：以前一路走到 _run_git 才报原始的
+        # "[Errno 2] No such file or directory: 'git'"，这里一次性给出明确提示
+        if shutil.which('git') is None:
+            self._repo_path = None
+            self._stop_watching()
+            if not self._git_missing_reported:
+                self._git_missing_reported = True
+                self.error_occurred.emit(t("git_mgr.git_not_found"))
             return False
 
         # 获取仓库根目录 (prefer git rev-parse for worktree correctness)
@@ -338,6 +375,14 @@ class GitManager(QObject):
         """
         env = dict(os.environ)
         env['GIT_TERMINAL_PROMPT'] = '0'
+        # GIT_TERMINAL_PROMPT 只管 git 自己的凭据提示，管不到 ssh 的口令 /
+        # host-key 确认：从终端启动本程序时子进程继承的 stdin 就是那个 tty，
+        # ssh 会挂在上面等输入，直到 GIT_NETWORK_TIMEOUT 才被杀。用户自己设了
+        # GIT_SSH_COMMAND / GIT_SSH（自定义 key、plink 等）则尊重用户配置。
+        if not env.get('GIT_SSH_COMMAND') and not env.get('GIT_SSH'):
+            env['GIT_SSH_COMMAND'] = 'ssh -oBatchMode=yes'
+        if stdin is None:
+            stdin = subprocess.DEVNULL
         if self._proxy:
             env['HTTPS_PROXY'] = self._proxy
             env['HTTP_PROXY'] = self._proxy
@@ -419,14 +464,18 @@ class GitManager(QObject):
         if not self._repo_path:
             return False, t("git_mgr.no_repo_path")
 
-        for attempt in range(len(_LOCK_RETRY_DELAYS) + 1):
+        # GUI 线程上撞锁最多立即重试一次、绝不 sleep（累计 3s 的梯子会把
+        # 整个窗口冻住）；工作线程保留完整退避。
+        delays = _lock_retry_delays()
+        attempts = len(delays) + 1 if delays else 2
+        for attempt in range(attempts):
             ok, output = self._run_git_once(list(args), check, timeout, input_text)
             if ok or not check or not _is_lock_contention(output):
                 return ok, output
-            if attempt < len(_LOCK_RETRY_DELAYS):
+            if attempt < len(delays):
                 logger.info("git %s hit lock contention, retry in %.1fs",
-                            args[0] if args else '?', _LOCK_RETRY_DELAYS[attempt])
-                time.sleep(_LOCK_RETRY_DELAYS[attempt])
+                            args[0] if args else '?', delays[attempt])
+                time.sleep(delays[attempt])
         return ok, output
 
     def _run_git_once(self, args: list, check: bool, timeout: int,
@@ -451,6 +500,8 @@ class GitManager(QObject):
             if check and proc.returncode != 0:
                 return False, (stderr or '').strip() or (stdout or '').strip()
             return True, stdout
+        except FileNotFoundError:
+            return False, t("git_mgr.git_not_found")
         except Exception as e:
             return False, str(e)
         finally:
@@ -891,7 +942,7 @@ class GitManager(QObject):
         if not success:
             return t("git_mgr.diff_failed", error=output)
 
-        return output
+        return _cap_output(output)
 
     def get_current_branch(self) -> str:
         """获取当前分支名
@@ -1173,14 +1224,16 @@ class GitManager(QObject):
         """
         if not self._repo_path:
             return False, t("git_mgr.no_repo_path")
-        for attempt in range(len(_LOCK_RETRY_DELAYS) + 1):
+        delays = _lock_retry_delays()
+        attempts = len(delays) + 1 if delays else 2
+        for attempt in range(attempts):
             ok, output = self._run_git_verbose_once(list(args), timeout)
             if ok or not _is_lock_contention(output):
                 return ok, output
-            if attempt < len(_LOCK_RETRY_DELAYS):
+            if attempt < len(delays):
                 logger.info("git %s hit lock contention, retry in %.1fs",
-                            args[0] if args else '?', _LOCK_RETRY_DELAYS[attempt])
-                time.sleep(_LOCK_RETRY_DELAYS[attempt])
+                            args[0] if args else '?', delays[attempt])
+                time.sleep(delays[attempt])
         return ok, output
 
     def _run_git_verbose_once(self, args: list, timeout: int) -> Tuple[bool, str]:
@@ -1200,6 +1253,8 @@ class GitManager(QObject):
             out = (stdout or '').strip()
             combined = "\n".join(p for p in (err, out) if p)
             return proc.returncode == 0, combined
+        except FileNotFoundError:
+            return False, t("git_mgr.git_not_found")
         except Exception as e:
             return False, str(e)
         finally:
@@ -1304,7 +1359,7 @@ class GitManager(QObject):
             check=False,
         )
         # check=False 时 _run_git 失败会把错误信息放进 out，直接回传即可
-        return out
+        return _cap_output(out)
 
     def refresh(self):
         """手动刷新状态"""

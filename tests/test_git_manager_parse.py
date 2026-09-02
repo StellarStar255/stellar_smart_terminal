@@ -246,14 +246,23 @@ class TestLockContentionRetry(unittest.TestCase):
         self.assertFalse(_is_lock_contention("error: could not lock config file"))
 
     def test_stage_all_retries_until_lock_released(self):
-        """持锁 ~0.5s 后释放：stage_all 应重试成功，不报错。"""
+        """持锁 ~0.5s 后释放：stage_all 应重试成功，不报错。
+
+        退避重试只在工作线程里睡（面板现在把 stage/unstage 都放到线程里跑；
+        GUI 线程上撞锁最多立即重试一次、绝不 sleep），所以这里也在线程里调。
+        """
         import threading, time
         with open(os.path.join(self._tmp, 'b.txt'), 'w') as f:
             f.write('new\n')
         open(self._lock, 'w').close()
         threading.Timer(0.5, lambda: os.path.exists(self._lock)
                         and os.remove(self._lock)).start()
-        self.assertTrue(self.gm.stage_all())
+        result = {}
+        th = threading.Thread(target=lambda: result.__setitem__('ok', self.gm.stage_all()))
+        th.start()
+        th.join(15)
+        self.app.processEvents()  # 让跨线程排队的 error_occurred 送达
+        self.assertTrue(result.get('ok'))
         self.assertEqual(self.errors, [])
         staged, _ = self.gm.get_status()
         self.assertIn('b.txt', [f.path for f in staged])
