@@ -46,7 +46,9 @@ class TestBreadcrumbSpacing(unittest.TestCase):
             a_text_right = a.x() + (a.width() + fm.horizontalAdvance(a.text())) // 2
             b_text_left = b.x() + (b.width() - fm.horizontalAdvance(b.text())) // 2
             gaps.append(b_text_left - a_text_right)
-        self.assertTrue(all(g <= 14 for g in gaps),
+        # 旧实现（QToolButton）在 mac 上是 22-25px；新实现 mac 约 10-11px、
+        # Linux CI 的字体下 12-15px（末段加粗、字宽估算偏差）。阈值取 18。
+        self.assertTrue(all(g <= 18 for g in gaps),
                         f"相邻目录名之间空白过宽: {gaps}px（含 '/' 字宽）")
         self.assertTrue(all(g >= 6 for g in gaps),
                         f"相邻目录名挤在一起了: {gaps}px")
