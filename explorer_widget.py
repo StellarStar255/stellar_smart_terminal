@@ -25,18 +25,17 @@ logger = get_logger(__name__)
 import app_config
 
 from PyQt6.QtWidgets import (
-    QWidget, QVBoxLayout, QHBoxLayout, QFrame, QLabel,
+    QWidget, QVBoxLayout, QHBoxLayout, QLabel,
     QPushButton, QTreeView, QMenu, QLineEdit, QMessageBox,
-    QAbstractItemView, QFileDialog, QApplication, QProgressDialog,
-    QStyledItemDelegate, QFileIconProvider, QListWidget, QListWidgetItem,
+    QAbstractItemView, QApplication, QStyledItemDelegate, QFileIconProvider, QListWidget, QListWidgetItem,
     QToolButton, QSizePolicy,
 )
 from PyQt6.QtCore import (
     Qt, QDir, QModelIndex, QPersistentModelIndex, pyqtSignal, QTimer, QPoint,
-    QEventLoop, QEvent, QSize, QFileInfo, QSortFilterProxyModel,
+    QEvent, QSize, QFileInfo, QSortFilterProxyModel,
 )
 from PyQt6.QtGui import (
-    QFileSystemModel, QAction, QDesktopServices, QCursor,
+    QFileSystemModel, QDesktopServices, QCursor,
     QShortcut, QKeySequence, QColor, QBrush,
     QIcon, QPixmap, QPainter, QPen, QFontMetrics,
 )
@@ -605,18 +604,81 @@ class _DotFileProxy(QSortFilterProxyModel):
         return self.sourceModel().fileName(self.mapToSource(proxy_index))
 
 
-def copy_local_entry(src: str, dst: str, move: bool = False) -> None:
+_COPY_CHUNK = 1024 * 1024
+_SIZE_SCAN_CAP = 50000     # 目录条目超过这个数就放弃精确统计（返回 0 = 未知）
+
+
+def local_entry_size(path: str) -> int:
+    """复制/移动前算总字节数，给进度条当分母；算不出（超大目录）返回 0。
+
+    文件跟随软链（复制也是跟随的）；目录内不进软链，与 copytree(symlinks=True)
+    一致。
+    """
+    try:
+        if os.path.isdir(path) and not os.path.islink(path):
+            total = 0
+            seen = 0
+            for root, dirs, files in os.walk(path, followlinks=False):
+                for f in files:
+                    fp = os.path.join(root, f)
+                    if os.path.islink(fp):
+                        continue
+                    try:
+                        total += os.path.getsize(fp)
+                    except OSError:
+                        pass
+                    seen += 1
+                    if seen > _SIZE_SCAN_CAP:
+                        return 0
+            return total
+        return os.path.getsize(path)
+    except OSError:
+        return 0
+
+
+def _copy_file_reporting(src: str, dst: str, report) -> None:
+    """copy2 的分块版：每写一块就上报增量字节，让单个大文件也有进度。"""
+    with open(src, 'rb') as fs, open(dst, 'wb') as fd:
+        while True:
+            buf = fs.read(_COPY_CHUNK)
+            if not buf:
+                break
+            fd.write(buf)
+            report(len(buf))
+    try:
+        shutil.copystat(src, dst)
+    except OSError:
+        pass
+
+
+def copy_local_entry(src: str, dst: str, move: bool = False,
+                     on_bytes=None) -> None:
     """在工作线程里执行的本地复制/移动（不碰任何 Qt 对象）。
 
     copytree 必须 symlinks=True：默认会跟随软链，目录里一个 `link -> ..`
     就一路复制到 ENAMETOOLONG 才停，指向 `/` 的软链会试图复制整块盘。
+
+    on_bytes(累计字节)：给出时按块上报进度（复制、跨设备移动）。同设备
+    移动是一次 rename，完成后直接报整个条目的大小。
     """
+    done = {"n": 0}
+
+    def _report(delta: int):
+        if on_bytes is not None:
+            done["n"] += delta
+            on_bytes(done["n"])
+
+    def _cf(s_, d_):
+        _copy_file_reporting(s_, d_, _report)
+
     if move:
-        shutil.move(src, dst)
+        shutil.move(src, dst, copy_function=_cf)
+        if on_bytes is not None and done["n"] == 0:
+            on_bytes(local_entry_size(dst))   # rename 快路径：一步到位
     elif os.path.isdir(src) and not os.path.islink(src):
-        shutil.copytree(src, dst, symlinks=True)
+        shutil.copytree(src, dst, symlinks=True, copy_function=_cf)
     else:
-        shutil.copy2(src, dst)
+        _cf(src, dst)
 
 
 class ExplorerPanel(QWidget, explorer_common.TransferJobHost):
@@ -1277,9 +1339,13 @@ class ExplorerPanel(QWidget, explorer_common.TransferJobHost):
                 errors.append(f"{os.path.basename(src)}: {e}")
         if pairs:
             pool = self._local_executor()
-            futures = [pool.submit(copy_local_entry, src, dst) for src, dst in pairs]
+            sizes = [local_entry_size(src) for src, _ in pairs]
+            live, on_bytes = self._local_byte_counter(len(pairs))
+            futures = [pool.submit(copy_local_entry, src, dst, False, on_bytes(i))
+                       for i, (src, dst) in enumerate(pairs)]
             try:
-                self._wait_future_with_progress(futures, t("explorer.pasting"))
+                self._wait_future_with_progress(
+                    futures, t("explorer.pasting"), sizes=sizes, live=live)
             except RuntimeError:
                 pass  # 逐个 future 归因到文件名
             for (src, _dst), fut in zip(pairs, futures):
@@ -2328,6 +2394,24 @@ class ExplorerPanel(QWidget, explorer_common.TransferJobHost):
                 t("explorer.delete_failed", error="\n".join(errors)),
             )
 
+    @staticmethod
+    def _local_byte_counter(n_entries: int):
+        """给 n 个并发的本地复制各发一个回调，把"进行中的字节"汇总进 live。
+
+        _wait_future_with_progress 的 live 只认一个计数；并发条目各自记自己
+        的进度，回调时重新求和写回，某条目完成被清零后下一次回调会把在途
+        条目的数字补回来。
+        """
+        live = {"bytes": 0}
+        inflight = [0] * max(1, n_entries)
+
+        def make(i):
+            def cb(total_so_far: int):
+                inflight[i] = total_so_far
+                live["bytes"] = sum(inflight)
+            return cb
+        return live, make
+
     def _local_executor(self) -> ThreadPoolExecutor:
         if self._local_pool is None:
             self._local_pool = ThreadPoolExecutor(
@@ -2530,9 +2614,12 @@ class ExplorerPanel(QWidget, explorer_common.TransferJobHost):
                             name = explorer_clipboard.next_free_name(name, local_name_exists)
                             dst = os.path.join(target_dir, name)
                     # 复制/移动在工作线程跑，这里只跑事件循环画进度
+                    size = local_entry_size(src)
+                    live, on_bytes = self._local_byte_counter(1)
                     fut = self._local_executor().submit(
-                        copy_local_entry, src, dst, move_mode)
-                    self._wait_future_with_progress([fut], t("explorer.pasting"))
+                        copy_local_entry, src, dst, move_mode, on_bytes(0))
+                    self._wait_future_with_progress(
+                        [fut], t("explorer.pasting"), sizes=[size], live=live)
                     self._finish_job_row(job, row)
 
                 elif kind == "remote":
@@ -2560,7 +2647,8 @@ class ExplorerPanel(QWidget, explorer_common.TransferJobHost):
                         else:  # keep
                             name = explorer_clipboard.next_free_name(name, local_name_exists)
                             dst = os.path.join(target_dir, name)
-                    self._download_remote_recursive(session, remote_path, dst)
+                    self._download_remote_recursive(
+                        session, remote_path, dst, label=t("explorer.pasting"))
                     self._finish_job_row(job, row)
                 else:
                     errors.append(f"Unknown clipboard item: {it!r}")
@@ -2582,134 +2670,6 @@ class ExplorerPanel(QWidget, explorer_common.TransferJobHost):
     def _resolve_paste_conflict(self, name: str, sticky: Optional[str]):
         """跨文件夹冲突时的三选一对话框（收敛到 explorer_common 单点维护）。"""
         return explorer_common.resolve_paste_conflict(self, name, sticky)
-
-    def _await_remote(self, session, fn, *args, label: str):
-        """提交单个远端操作，在事件循环等待中返回结果。
-
-        远端 → 本地粘贴流程里的 stat/listdir 一律走这里，
-        禁止直接 fut.result()——网络一慢就是整窗无限期冻结。
-        """
-        fut = session.submit(fn, *args)
-        self._wait_future_with_progress([fut], label, abort_sessions=[session])
-        return fut.result()
-
-    def _download_remote_recursive(self, session, remote_path: str, local_path: str):
-        """通过 SSH session 把远程文件 / 目录递归下载到 local_path（阻塞，含进度对话框）"""
-        # 先 stat 看是不是目录
-        entry = self._await_remote(session, session.stat, remote_path,
-                                   label=t("explorer.pasting"))
-        if not entry.is_dir:
-            fut = session.submit(session.download, remote_path, local_path)
-            self._wait_future_with_progress(
-                [fut], t("explorer.pasting"), abort_sessions=[session],
-            )
-            return
-        # 递归：先 mkdir，再列出，再为每个子项递归
-        os.makedirs(local_path, exist_ok=True)
-        children = self._await_remote(session, session.listdir, remote_path,
-                                      label=t("explorer.pasting"))
-        # 一层一层下载，文件并发用同一 session executor 排队即可
-        for child in children:
-            child_local = os.path.join(local_path, child.name)
-            if child.is_dir and not child.is_link:
-                self._download_remote_recursive(session, child.path, child_local)
-            else:
-                fut = session.submit(session.download, child.path, child_local)
-                self._wait_future_with_progress([fut], t("explorer.pasting"),
-                                                abort_sessions=[session])
-
-    def _wait_future_with_progress(self, futures: list, label: str,
-                                   abort_sessions: Optional[list] = None):
-        """阻塞等待 futures，但跑一个事件循环让 UI 不卡。
-
-        abort_sessions：给出时进度框带「取消」按钮，点击后 abort 这些
-        会话直接关 socket，让卡住的传输立刻失败返回。
-
-        批量粘贴期间 self._transfer_job 是那一批的统一进度窗口：这里就不再
-        新开 QProgressDialog，而是把阶段文案/比例画进窗口里当前那一行。
-        """
-        if not futures:
-            return
-        job = self._active_transfer_job()
-        progress = None
-        if job is not None:
-            job.set_stage(label)
-            self._register_job_abort(job, abort_sessions)
-        else:
-            cancel_text = t("remote.cancel_transfer") if abort_sessions else None
-            progress = QProgressDialog(label, cancel_text, 0, len(futures), self)
-            # 非模态：传输期间应用可继续正常使用（后台传输），与远程面板一致
-            progress.setWindowModality(Qt.WindowModality.NonModal)
-            progress.setMinimumDuration(300)
-            progress.setValue(0)
-            if abort_sessions:
-                def _on_cancel(_sessions=list(abort_sessions)):
-                    for s in _sessions:
-                        if s is not None:
-                            try:
-                                s.abort()
-                            except Exception:
-                                logger.debug("_on_cancel: suppressed exception", exc_info=True)
-                progress.canceled.connect(_on_cancel)
-        done = {"n": 0, "errors": []}
-
-        def make_cb(_):
-            def cb(f):
-                try:
-                    f.result()
-                except Exception as e:
-                    done["errors"].append(str(e))
-                done["n"] += 1
-            return cb
-
-        for fut in futures:
-            fut.add_done_callback(make_cb(fut))
-
-        loop = QEventLoop()
-        timer = QTimer()
-        timer.setInterval(80)
-        def tick():
-            # 父 widget 可能在等待期间被销毁（如用户关掉 panel/窗口），
-            # 此时 progress 也已 deleteLater'd → 任何访问都会段错误
-            try:
-                ui = progress if progress is not None else job
-                if sip.isdeleted(ui):
-                    # 面板在传输中被销毁：abort 会话让 pending futures 快速
-                    # 失败，否则调用方紧接着的 fut.result() 会在 GUI 线程上
-                    # 无限期阻塞（与 remote_explorer_widget 同一处理）
-                    for s in (abort_sessions or []):
-                        if s is not None:
-                            try:
-                                s.abort()
-                            except Exception:
-                                logger.debug("abort on progress deletion failed",
-                                             exc_info=True)
-                    timer.stop()
-                    loop.quit()
-                    return
-                if progress is not None:
-                    progress.setValue(done["n"])
-                else:
-                    # 统一窗口：进度按「已完成条目 + 当前条目比例」推进
-                    job.set_stage_progress(done["n"] / len(futures))
-                if done["n"] >= len(futures):
-                    timer.stop()
-                    loop.quit()
-            except RuntimeError:
-                timer.stop()
-                loop.quit()
-        timer.timeout.connect(tick)
-        timer.start()
-        loop.exec()
-        try:
-            if progress is not None and not sip.isdeleted(progress):
-                progress.setValue(len(futures))
-            elif progress is None and not sip.isdeleted(job):
-                job.set_stage_progress(1.0)
-        except RuntimeError:
-            pass
-        if done["errors"]:
-            raise RuntimeError("; ".join(done["errors"]))
 
     def _copy_path(self, file_path: str):
         """复制完整路径到剪贴板"""

@@ -115,10 +115,14 @@ class _Base(unittest.TestCase):
         self.jobs = jobs
         # 统一窗口由 explorer_common 的 mixin 构造（本地/远程面板共用）
         self.explorer_common = rew.explorer_common
-        self._orig_popup_cls = (rew.QProgressDialog, ew.QProgressDialog)
+        # 单条目进度框由 explorer_common 里共用的 _wait_future_with_progress 弹出；
+        # 两个面板模块已不再自己 import QProgressDialog，只 patch 仍持有它的模块
+        self._popup_mods = [m for m in (rew, ew, self.explorer_common)
+                            if hasattr(m, 'QProgressDialog')]
+        self._orig_popup_cls = [m.QProgressDialog for m in self._popup_mods]
         self._orig_job_cls = self.explorer_common.TransferProgressDialog
-        rew.QProgressDialog = _CountingProgressDialog
-        ew.QProgressDialog = _CountingProgressDialog
+        for m in self._popup_mods:
+            m.QProgressDialog = _CountingProgressDialog
         self.explorer_common.TransferProgressDialog = _RecordingJob
 
         self.warnings = []
@@ -129,7 +133,8 @@ class _Base(unittest.TestCase):
     def tearDown(self):
         import app_config
         app_config.get_config_path = self._orig_cfg_path
-        self.rew.QProgressDialog, self.ew.QProgressDialog = self._orig_popup_cls
+        for m, cls in zip(self._popup_mods, self._orig_popup_cls):
+            m.QProgressDialog = cls
         self.explorer_common.TransferProgressDialog = self._orig_job_cls
         self._qmessagebox.warning = self._orig_warning
 
@@ -638,7 +643,6 @@ class TestTopmostYieldsToModals(_Base):
         seen = {}
         orig_box = explorer_common.QMessageBox
 
-        outer = self
 
         class _Box(orig_box):
             def exec(self):               # noqa: A003 — 覆盖 Qt 接口

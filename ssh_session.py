@@ -651,6 +651,46 @@ class _PersistOnFirstUsePolicy(paramiko.MissingHostKeyPolicy):
         self.added = True
 
 
+def load_known_hosts_tolerant(client, path: str) -> tuple:
+    """逐行容错加载 known_hosts 到 client 的 HostKeys；返回 (加载数, 跳过数)。
+
+    不能用 client.load_host_keys / HostKeys.load：paramiko 5 遇到真实的
+    `@cert-authority` / `@revoked` 行会因字段错位抛 InvalidHostKey（不是被
+    跳过的 SSHException），整份文件报废 → _connect_client 走「主机密钥变更
+    拦截已降级」分支。用户主力机走 OpenSSH + CA，known_hosts 里几乎必然有
+    这种行，等于本后端永远在降级模式下跑。
+
+    这里注释/空行/`@` 标记行/未知密钥类型/坏行各自跳过，其余条目照常加载
+    （`|1|` 哈希行由 HostKeyEntry.from_line 处理，lookup 仍可命中）。
+    文件本身读不了（OSError）照旧向上抛，由调用方标记降级。
+    """
+    from paramiko.hostkeys import HostKeyEntry
+    hk = client.get_host_keys()
+    loaded = skipped = 0
+    with open(path, "r", encoding="utf-8", errors="replace") as fh:
+        for lineno, raw in enumerate(fh, 1):
+            line = raw.strip()
+            if not line or line.startswith("#"):
+                continue
+            if line.startswith("@"):
+                skipped += 1          # @cert-authority / @revoked：OpenSSH 才认
+                continue
+            try:
+                entry = HostKeyEntry.from_line(line, lineno)
+            except Exception:         # noqa: BLE001 — 坏行只跳过这一行
+                entry = None
+            if entry is None or entry.key is None:
+                skipped += 1
+                continue
+            for hostname in entry.hostnames:
+                hk.add(hostname, entry.key.get_name(), entry.key)
+            loaded += 1
+    if skipped:
+        logger.debug("known_hosts: loaded %d entries, skipped %d unsupported lines (%s)",
+                     loaded, skipped, path)
+    return loaded, skipped
+
+
 def _append_known_hosts(entries: list, path: Optional[str] = None) -> None:
     """把首次接受的主机密钥**追加**进 known_hosts，一条一行。
 
@@ -940,9 +980,9 @@ class SSHSession(QObject):
         known_hosts = os.path.expanduser("~/.ssh/known_hosts")
         try:
             if os.path.isfile(known_hosts):
-                client.load_host_keys(known_hosts)
+                load_known_hosts_tolerant(client, known_hosts)
         except Exception as e:
-            # known_hosts 损坏/不可读 → paramiko 拿不到历史指纹，主机密钥变更
+            # known_hosts 不可读 → paramiko 拿不到历史指纹，主机密钥变更
             # （典型 MITM 特征）不再被拦截。绝不能静默：记日志 + 标记降级，
             # 由 UI 提示用户，让"防护已失效"变得可见而非无声通过。
             self._host_key_degraded = True
@@ -1216,7 +1256,7 @@ class SSHSession(QObject):
         known_hosts = os.path.expanduser("~/.ssh/known_hosts")
         try:
             if os.path.isfile(known_hosts):
-                client.load_host_keys(known_hosts)
+                load_known_hosts_tolerant(client, known_hosts)
         except Exception:
             # 首次连接已发过降级提示，这里静默降级即可
             logger.debug("_new_kh_client: load_host_keys failed", exc_info=True)
