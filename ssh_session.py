@@ -643,10 +643,49 @@ class _PersistOnFirstUsePolicy(paramiko.MissingHostKeyPolicy):
 
     def __init__(self):
         self.added = False
+        self.entries: list = []      # [(hostname, key)]，写回 known_hosts 用
 
     def missing_host_key(self, client, hostname, key):
         client.get_host_keys().add(hostname, key.get_name(), key)
+        self.entries.append((hostname, key))
         self.added = True
+
+
+def _append_known_hosts(entries: list, path: Optional[str] = None) -> None:
+    """把首次接受的主机密钥**追加**进 known_hosts，一条一行。
+
+    不能用 client.save_host_keys：它把 paramiko 解析成功的条目整体重写回去，
+    注释、@cert-authority/@revoked 行、paramiko 不认识的密钥类型全部丢失——
+    用户主力机走 OpenSSH（ProxyJump/CA），第一次用本后端连新主机就会被静默
+    削掉。文件不存在时以 0600 创建；已有内容末尾缺换行先补上。
+    """
+    if not entries:
+        return
+    path = path or os.path.expanduser("~/.ssh/known_hosts")
+    os.makedirs(os.path.dirname(path), exist_ok=True)
+    from paramiko.hostkeys import HostKeyEntry
+    lines = []
+    for hostname, key in entries:
+        try:
+            lines.append(HostKeyEntry([hostname], key).to_line())
+        except Exception:
+            logger.debug("_append_known_hosts: to_line failed", exc_info=True)
+    if not lines:
+        return
+    need_nl = False
+    if os.path.isfile(path):
+        with open(path, "rb") as fh:
+            try:
+                fh.seek(-1, os.SEEK_END)
+                need_nl = fh.read(1) not in (b"\n", b"")
+            except OSError:
+                need_nl = False
+    fd = os.open(path, os.O_WRONLY | os.O_CREAT | os.O_APPEND, 0o600)
+    with os.fdopen(fd, "a", encoding="utf-8") as fh:
+        if need_nl:
+            fh.write("\n")
+        for line in lines:
+            fh.write(line if line.endswith("\n") else line + "\n")
 
 
 class _NoStdinTransport(paramiko.Transport):
@@ -1000,13 +1039,8 @@ class SSHSession(QObject):
                 logger.debug("_connect_client: suppressed exception", exc_info=True)
             raise
 
-        # 首次接受的未知主机 key 写回 known_hosts，让后续连接受 MITM 校验保护
-        if host_key_policy.added:
-            try:
-                os.makedirs(os.path.dirname(known_hosts), exist_ok=True)
-                client.save_host_keys(known_hosts)
-            except Exception:
-                logger.debug("_connect_client: suppressed exception", exc_info=True)
+        # 首次接受的未知主机 key 追加进 known_hosts，让后续连接受 MITM 校验保护
+        self._persist_new_host_key(client, host_key_policy)
 
         # 记住成功路径（未被交互路径标记过的记为 default），会话内重连时
         # 不再重复零凭据探测
@@ -1197,9 +1231,8 @@ class SSHSession(QObject):
         if not policy.added:
             return
         try:
-            known_hosts = os.path.expanduser("~/.ssh/known_hosts")
-            os.makedirs(os.path.dirname(known_hosts), exist_ok=True)
-            client.save_host_keys(known_hosts)
+            _append_known_hosts(list(policy.entries))
+            policy.entries.clear()
         except Exception:
             logger.debug("_persist_new_host_key: save failed", exc_info=True)
 
@@ -1404,8 +1437,11 @@ class SSHSession(QObject):
                 if transport is None:
                     raise paramiko.SSHException(
                         f"{t('ssh.jump_channel_failed')}: {hop_cfg.alias}")
+                # 跳板机接受了 channel-open 但对目标的 TCP 被黑洞时，默认
+                # timeout=None 会等到跳板机内核超时（约 2 分钟）且无法取消
                 sock = transport.open_channel(
-                    "direct-tcpip", dest, ("127.0.0.1", 0))
+                    "direct-tcpip", dest, ("127.0.0.1", 0),
+                    timeout=CONNECT_TIMEOUT)
             return clients, sock
         except Exception:
             self._close_clients(clients)

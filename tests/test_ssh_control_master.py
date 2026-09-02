@@ -52,10 +52,10 @@ class TestAskpassScript(unittest.TestCase):
             with open(p, 'w', encoding='utf-8') as fh:
                 fh.write(ssh_control._ASKPASS_SCRIPT)
             os.chmod(p, 0o700)
-            env = dict(os.environ,
-                       STELLAR_SSH_CODE=code, STELLAR_SSH_PASSWORD=password)
-            out = subprocess.run([p, prompt], env=env, stdout=subprocess.PIPE,
-                                 timeout=10)
+            # 答案走脚本同目录的 0600 文件（不再经环境变量）
+            ssh_control._write_secret_files(d, code, password)
+            out = subprocess.run([p, prompt], env=dict(os.environ),
+                                 stdout=subprocess.PIPE, timeout=10)
             return out.stdout.decode()
         finally:
             import shutil
@@ -143,13 +143,14 @@ class TestMfaLoginArgs(unittest.TestCase):
         self.assertIn('BatchMode=no', args)
         self.assertEqual(args[-1], 'bastion')
 
-    def test_code_travels_only_through_the_environment(self):
+    def test_code_never_in_argv_or_environment(self):
+        """码不能上命令行（ps 可见），也不能进环境（-f 转后台的主连接会带着
+        它活一整个 ControlPersist 周期，同用户可读）；只走 askpass 旁的私有文件。"""
         seen = self._run_login(code='123456', password='pw')
-        self.assertEqual(seen['env']['STELLAR_SSH_CODE'], '123456')
-        self.assertEqual(seen['env']['STELLAR_SSH_PASSWORD'], 'pw')
+        self.assertNotIn('STELLAR_SSH_CODE', seen['env'])
+        self.assertNotIn('STELLAR_SSH_PASSWORD', seen['env'])
         self.assertEqual(seen['env']['SSH_ASKPASS_REQUIRE'], 'force')
         self.assertTrue(seen['env'].get('DISPLAY'))
-        # 命令行上不能出现动态码（ps 能看到整条命令行）
         self.assertNotIn('123456', ' '.join(seen['args']))
         self.assertTrue(seen['askpass_exists'], 'askpass 在认证时必须存在')
 
@@ -540,6 +541,9 @@ class TestBastionTerminalWiring(unittest.TestCase):
         win = mock.MagicMock()
         win.remote_panel = mock.MagicMock()
         win.remote_panel._is_mfa_host.return_value = is_mfa
+        # 面板懒构建后 mixin 经 _ensure_remote_panel() 取面板：MagicMock 会返回
+        # 一个"永远为真"的新 mock，把普通主机也当成堡垒机——指回同一个面板
+        win._ensure_remote_panel = lambda: win.remote_panel
         win.remote_panel.get_cached_password.return_value = None
         win.tab_widget = mock.MagicMock()
         win.tab_widget.currentIndex.return_value = 0

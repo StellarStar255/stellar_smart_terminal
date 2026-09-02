@@ -244,13 +244,14 @@ class TestUniqueNewName(_Base):
 
 class TestTempLocalPath(_Base):
     def test_alias_sanitized_and_remote_dirs_mirrored(self):
+        import remote_explorer_widget as rew
         from remote_explorer_widget import RemoteExplorerPanel
         path = RemoteExplorerPanel._temp_local_path_for(
             None, "my host:1", "/var/log/app.log", "app.log")
-        expected_tail = os.path.join(
-            "smart_terminal_remote_my_host_1", "var", "log", "app.log")
+        # 根目录是进程级私有 mkdtemp（不再是可预测的 smart_terminal_remote_<alias>）
+        expected_tail = os.path.join("my_host_1", "var", "log", "app.log")
         self.assertTrue(path.endswith(expected_tail), path)
-        self.assertTrue(path.startswith(tempfile.gettempdir()))
+        self.assertTrue(path.startswith(rew._remote_cache_root() + os.sep), path)
         self.assertTrue(os.path.isdir(os.path.dirname(path)))
 
 

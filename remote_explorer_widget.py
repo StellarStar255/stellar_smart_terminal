@@ -9,9 +9,11 @@ UI 有两个状态：
 的模式（透明对编辑器），UI 这边通过 file_open_requested 信号把
 (host_config, remote_path, local_temp_path) 抛给主窗口。
 """
+import atexit
 import bisect
 import os
 import posixpath
+import shutil
 import tempfile
 import threading
 import time
@@ -38,7 +40,7 @@ import ssh_control
 from ssh_session import (
     HostConfig, RemoteEntry, SSHSession, parse_ssh_config, append_ssh_config_host,
     rename_ssh_config_host, remove_ssh_config_host, update_ssh_config_host,
-    looks_like_password_prompt,
+    looks_like_password_prompt, INTERACTIVE_AUTH_TIMEOUT,
 )
 from git_widget import _make_git_tool_icon  # 复用统一风格的矢量线条图标
 from utils import parse_search_tokens, name_matches_tokens
@@ -46,6 +48,29 @@ import app_config
 from app_logging import get_logger
 
 logger = get_logger(__name__)
+
+# 远端文件的本地缓存根目录：进程级 mkdtemp（0700），退出时整体删除。
+# 以前是 gettempdir()/smart_terminal_remote_<alias>：路径可预测、默认权限、
+# 永不清理——Linux 上 /tmp 是共享目录，下载的密钥/配置会以 umask 权限长期留盘。
+_REMOTE_CACHE_ROOT: Optional[str] = None
+_REMOTE_CACHE_LOCK = threading.Lock()
+
+
+def _remote_cache_root() -> str:
+    global _REMOTE_CACHE_ROOT
+    with _REMOTE_CACHE_LOCK:
+        if _REMOTE_CACHE_ROOT is None or not os.path.isdir(_REMOTE_CACHE_ROOT):
+            _REMOTE_CACHE_ROOT = tempfile.mkdtemp(prefix="stellar-remote-")
+            atexit.register(shutil.rmtree, _REMOTE_CACHE_ROOT, ignore_errors=True)
+        return _REMOTE_CACHE_ROOT
+
+
+def _remote_cache_dir(host_alias: str, *parts: str) -> str:
+    """<根>/<alias>/<parts…>，目录不存在则建（继承根目录的私有权限）。"""
+    safe_alias = "".join(c if c.isalnum() or c in '-._' else '_' for c in host_alias)
+    d = os.path.join(_remote_cache_root(), safe_alias, *parts)
+    os.makedirs(d, mode=0o700, exist_ok=True)
+    return d
 
 
 # 子项的 UserRole 数据键
@@ -1975,6 +2000,10 @@ class RemoteExplorerPanel(QWidget, explorer_common.TransferJobHost):
             return
         if self._session is not None:
             self._disconnect()   # 注意：会清掉 _pending_mfa，所以答案在它之后再放
+            # _disconnect 也清空了密码缓存——MFA 登录框刚收的密码要在这之后
+            # 再放进去，否则 SSH 终端标签自动回填 / 新窗口 prime 全部失效
+            if mfa_answers and mfa_answers.get('password'):
+                self._cached_passwords[host.alias] = mfa_answers['password']
 
         self._pending_mfa = mfa_answers
         if mfa_answers is None:
@@ -2253,20 +2282,44 @@ class RemoteExplorerPanel(QWidget, explorer_common.TransferJobHost):
 
     _password_prompt_signal = pyqtSignal(str)  # 在 UI 线程触发输入框
 
+    # 工作线程等 UI 答复的上限：与 paramiko 交互认证的放宽超时一致。以前是
+    # `while not done: sleep`，唯一出口是 UI 槽置位——面板断开/关闭后线程永久
+    # 自旋，Python 3.13 的 ThreadPoolExecutor worker 非 daemon，退出时 join 卡死。
+    _PROMPT_WAIT_SECS = INTERACTIVE_AUTH_TIMEOUT
+
+    def _new_prompt_holder(self, **extra) -> dict:
+        holder = {'done': threading.Event(), 'value': None}
+        holder.update(extra)
+        return holder
+
+    def _wait_prompt(self, holder: dict) -> Optional[str]:
+        if not holder['done'].wait(self._PROMPT_WAIT_SECS):
+            logger.warning("[RemoteExplorerPanel] auth prompt timed out (%ss)",
+                           self._PROMPT_WAIT_SECS)
+            return None
+        return holder['value']
+
+    def _cancel_pending_prompts(self):
+        """断开/关闭面板：让还在等答案的工作线程立刻拿到 None 返回。"""
+        for attr in ('_pending_password_request', '_pending_interactive_request'):
+            holder = getattr(self, attr, None)
+            if holder is not None:
+                holder['value'] = None
+                holder['done'].set()
+                setattr(self, attr, None)
+
     def _prompt_password(self, label: str) -> Optional[str]:
         # paramiko 回调在后台线程；用 QInputDialog 必须切回 UI 线程。
         # 这里通过自定义事件 + 信号触发，主线程显示对话框并把结果放回 holder。
-        result_holder: dict = {'done': False, 'value': None, 'label': label}
+        result_holder = self._new_prompt_holder(label=label)
         self._pending_password_request = result_holder
         try:
             self._password_prompt_signal.emit(label)
         except Exception as e:
             logger.warning(f"[RemoteExplorerPanel] password prompt emit failed: {e}")
             return None
-        # 不能在工作线程里 processEvents（会和主线程冲突），单纯轮询就行
-        while not result_holder['done']:
-            time.sleep(0.05)
-        return result_holder['value']
+        # 不能在工作线程里 processEvents（会和主线程冲突），带截止地等就行
+        return self._wait_prompt(result_holder)
 
     def _on_password_prompt(self, label: str):
         # 真正在 UI 线程里跑的输入框
@@ -2279,7 +2332,7 @@ class RemoteExplorerPanel(QWidget, explorer_common.TransferJobHost):
             QLineEdit.EchoMode.Password,
         )
         holder['value'] = text if ok else None
-        holder['done'] = True
+        holder['done'].set()
         # 缓存密码（仅密码认证、非 passphrase 提示）：label 即主机别名时才存，
         # 供同一主机的 SSH 终端 tab 一次性自动回填。
         if ok and text:
@@ -2294,16 +2347,14 @@ class RemoteExplorerPanel(QWidget, explorer_common.TransferJobHost):
         pre = self._take_pre_answer(alias, prompt)
         if pre is not None:
             return pre
-        result_holder: dict = {'done': False, 'value': None}
+        result_holder = self._new_prompt_holder()
         self._pending_interactive_request = result_holder
         try:
             self._interactive_prompt_signal.emit(alias, prompt, echo)
         except Exception as e:
             logger.warning(f"[RemoteExplorerPanel] interactive prompt emit failed: {e}")
             return None
-        while not result_holder['done']:
-            time.sleep(0.05)
-        return result_holder['value']
+        return self._wait_prompt(result_holder)
 
     def _on_interactive_prompt(self, alias: str, prompt: str, echo: bool):
         holder = getattr(self, '_pending_interactive_request', None)
@@ -2323,7 +2374,7 @@ class RemoteExplorerPanel(QWidget, explorer_common.TransferJobHost):
                 QLineEdit.EchoMode.Normal if echo else QLineEdit.EchoMode.Password,
             )
         holder['value'] = text if ok else None
-        holder['done'] = True
+        holder['done'].set()
         # 只有密码类回答按 alias 缓存（供 SSH 终端 tab 自动回填）；
         # OTP 验证码是一次性的，绝不缓存
         if ok and text and looks_like_password_prompt(prompt):
@@ -2393,6 +2444,11 @@ class RemoteExplorerPanel(QWidget, explorer_common.TransferJobHost):
             return
         self._clear_pending_mfa()
         self._idle_timer.stop()
+        # 丢弃的会话要真正关掉：否则每次失败留一个空闲 executor 线程和 QObject
+        try:
+            sess.disconnect()
+        except Exception:
+            logger.debug("_on_session_connect_failed: disconnect failed", exc_info=True)
         # 复用旧主连接的尝试失败（套接字是陈的/主连接已过期）→ 不报错，
         # 直接回到 MFA 登录框要一个新码，用户感知就是「该重新登录了」
         if getattr(self, '_mfa_reuse_attempt', False):
@@ -2423,6 +2479,9 @@ class RemoteExplorerPanel(QWidget, explorer_common.TransferJobHost):
         self._search_gen += 1
         self._search_timer.stop()
         self._exit_search()
+        # 还在等密码/动态码答复的工作线程先放走（它们没阻塞在 socket 上，
+        # 关 socket 对它们无效）
+        self._cancel_pending_prompts()
         if self._session is not None:
             try:
                 self._session.disconnect()
@@ -2451,10 +2510,10 @@ class RemoteExplorerPanel(QWidget, explorer_common.TransferJobHost):
         在 closeEvent 里阻塞会让窗口关闭看起来卡死。这里把 session 引用先摘下
         来交给一个 daemon 线程异步关闭。
         """
+        self._cancel_pending_prompts()
         if self._session is not None:
             sess = self._session
             self._session = None
-            import threading
             def _bg_disconnect():
                 try:
                     sess.disconnect()
@@ -3637,13 +3696,8 @@ class RemoteExplorerPanel(QWidget, explorer_common.TransferJobHost):
 
     def _temp_local_path_for(self, host_alias: str, remote_path: str, name: str) -> str:
         """与 _open_remote_file 共用的稳定 temp 路径：同一文件再被复制不会重复下载。"""
-        safe_alias = "".join(c if c.isalnum() or c in '-._' else '_' for c in host_alias)
-        local_dir = os.path.join(
-            tempfile.gettempdir(),
-            f"smart_terminal_remote_{safe_alias}",
-            *remote_path.strip("/").split("/")[:-1],
-        )
-        os.makedirs(local_dir, exist_ok=True)
+        local_dir = _remote_cache_dir(
+            host_alias, *remote_path.strip("/").split("/")[:-1])
         return os.path.join(local_dir, name)
 
     def _begin_clipboard_staging(self, payload: list, text_snapshot: str,
@@ -4313,14 +4367,9 @@ class RemoteExplorerPanel(QWidget, explorer_common.TransferJobHost):
         sess = self._session
         host_alias = sess.host_config.alias
 
-        # 下载到 临时目录 / host_alias / ...remote_path
-        safe_alias = "".join(c if c.isalnum() or c in '-._' else '_' for c in host_alias)
-        local_dir = os.path.join(
-            tempfile.gettempdir(),
-            f"smart_terminal_remote_{safe_alias}",
-            *entry.path.strip("/").split("/")[:-1],
-        )
-        os.makedirs(local_dir, exist_ok=True)
+        # 下载到 私有缓存根 / host_alias / ...remote_path
+        local_dir = _remote_cache_dir(
+            host_alias, *entry.path.strip("/").split("/")[:-1])
         local_path = os.path.join(local_dir, entry.name)
 
         # 缓存命中判定：本地存在 + 文件大小 + mtime 都和 entry 匹配 → 直接复用
@@ -5255,13 +5304,7 @@ class RemoteExplorerPanel(QWidget, explorer_common.TransferJobHost):
             if confirm != QMessageBox.StandardButton.Yes:
                 return []
 
-        safe_alias = "".join(c if c.isalnum() or c in '-._' else '_'
-                             for c in sess.host_config.alias)
-        local_dir = os.path.join(
-            tempfile.gettempdir(),
-            f"smart_terminal_remote_drag_{safe_alias}",
-        )
-        os.makedirs(local_dir, exist_ok=True)
+        local_dir = _remote_cache_dir(sess.host_config.alias, "_drag")
 
         progress = QProgressDialog(
             "Downloading for drag...", "Cancel", 0, len(entries), self

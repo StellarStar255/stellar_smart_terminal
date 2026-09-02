@@ -202,7 +202,11 @@ class MasterNotRunning(RuntimeError):
     """主连接不在了 —— 需要用户重新做一次 MFA 登录。"""
 
 
-def _login_env(code: str, password: str, askpass: str) -> dict:
+def _login_env(askpass: str) -> dict:
+    """登录那条 ssh 的环境。动态码/密码**不在**这里：`-f` 转后台的常驻主连接会
+    完整继承环境变量，同用户 `ps -E` / /proc/<pid>/environ 能读，且随
+    ControlPersist 活好几个小时。答案走 askpass 同目录下的 0600 文件
+    （见 _write_secret_files），登录一返回整个目录就删。"""
     env = dict(os.environ)
     env.update({
         # 老版本 ssh 没有 DISPLAY 就不调 askpass
@@ -210,19 +214,36 @@ def _login_env(code: str, password: str, askpass: str) -> dict:
         "SSH_ASKPASS": askpass,
         # 有/无 tty 都强制走 askpass（OpenSSH >= 8.4）
         "SSH_ASKPASS_REQUIRE": "force",
-        "STELLAR_SSH_CODE": code or "",
-        "STELLAR_SSH_PASSWORD": password or "",
     })
+    # 万一外层环境里残留了旧版的变量名，也别带进去
+    env.pop("STELLAR_SSH_CODE", None)
+    env.pop("STELLAR_SSH_PASSWORD", None)
     return env
+
+
+_SECRET_CODE_FILE = "code"
+_SECRET_PASSWORD_FILE = "password"
+
+
+def _write_secret_files(tmpdir: str, code: str, password: str) -> None:
+    """把动态码/密码写成 askpass 同目录下的 0600 文件（目录本身 0700）。"""
+    for name, value in ((_SECRET_CODE_FILE, code or ""),
+                        (_SECRET_PASSWORD_FILE, password or "")):
+        path = os.path.join(tmpdir, name)
+        fd = os.open(path, os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600)
+        with os.fdopen(fd, "w", encoding="utf-8") as fh:
+            fh.write(value)      # 不带换行：askpass 用 cat 原样吐出
 
 
 _ASKPASS_SCRIPT = """#!/bin/sh
 # ssh 没有 tty 时用这个程序取答案；$1 是服务器的提示语。
 # 认出「密码」类提示就回密码，其余（[MFA auth] / Verification code / 验证码…）
-# 一律回动态码。两个值只经环境变量传进来，不落盘。
+# 一律回动态码。两个值放在本脚本同目录的 0600 文件里（不走环境变量：转后台的
+# 主连接会把环境带走一整个 ControlPersist 周期），登录一结束整目录即删。
+d=$(dirname "$0")
 case "$1" in
-  *[Pp]assword*|*[Pp]assphrase*|*密码*|*口令*) printf %s "${STELLAR_SSH_PASSWORD}" ;;
-  *) printf %s "${STELLAR_SSH_CODE:-$STELLAR_SSH_PASSWORD}" ;;
+  *[Pp]assword*|*[Pp]assphrase*|*密码*|*口令*) cat "$d/password" ;;
+  *) if [ -s "$d/code" ]; then cat "$d/code"; else cat "$d/password"; fi ;;
 esac
 """
 
@@ -243,12 +264,13 @@ def mfa_login(cfg: HostConfig, code: str = "", password: str = "",
         raise RuntimeError("ControlPath 建不出来（临时目录路径太长）")
     if not code and not password:
         raise ValueError("没填动态码")
-    tmpdir = tempfile.mkdtemp(prefix="stellar-askpass-")
+    tmpdir = tempfile.mkdtemp(prefix="stellar-askpass-")   # mkdtemp 本身 0700
     askpass = os.path.join(tmpdir, "askpass.sh")
     try:
         with open(askpass, "w", encoding="utf-8") as fh:
             fh.write(_ASKPASS_SCRIPT)
         os.chmod(askpass, 0o700)
+        _write_secret_files(tmpdir, code, password)
         # hours=0 是「不自动断开」→ ControlPersist=yes（一直留着，直到被显式
         # 关掉或机器重启）；其余按小时数，上限 24h
         persist = "yes" if int(hours or 0) <= 0 else f"{min(24, int(hours))}h"
@@ -271,7 +293,7 @@ def mfa_login(cfg: HostConfig, code: str = "", password: str = "",
                 args += ["-o", f"IdentityFile={cfg.identity_file}"]
         args += ["-N", "-f", ssh_target(cfg)]
         proc = subprocess.run(
-            args, env=_login_env(code, password, askpass),
+            args, env=_login_env(askpass),
             stdin=subprocess.DEVNULL, stdout=subprocess.PIPE,
             stderr=subprocess.PIPE, timeout=LOGIN_TIMEOUT,
         )
@@ -572,10 +594,23 @@ class ControlMasterSession(QObject):
             # 只复用已有主连接，绝不自己去建（建了也过不了 MFA）
             "-o", "ControlMaster=no",
             "-o", f"ControlPath={ctl}",
+            # 主连接死了 OpenSSH 会**静默回落**成一次完整直连：BatchMode 只禁
+            # 交互提示，agent 里的公钥仍会逐个试——正是把堡垒机 MaxAuthTries
+            # 打满/被限速的场景。把所有认证方式关掉，回落连接零尝试即失败。
+            "-o", "PubkeyAuthentication=no",
+            "-o", "KbdInteractiveAuthentication=no",
+            "-o", "PasswordAuthentication=no",
         ]
+
+    _MASTER_GONE_MSG = "主连接已断开（connection lost）——请重新 MFA 登录"
 
     def _spawn(self, remote_cmd: str, stdin=subprocess.DEVNULL,
                stdout=subprocess.PIPE) -> subprocess.Popen:
+        ctl = control_path_for(self.host_config)
+        if not ctl or not os.path.exists(ctl):
+            # 套接字都没了就别起 ssh：省一次握手，也不给回落直连任何机会。
+            # 文案含 "connection lost"，面板据此走「重连」提示。
+            raise MasterNotRunning(self._MASTER_GONE_MSG)
         args = self._base_args() + [ssh_target(self.host_config), remote_cmd]
         proc = subprocess.Popen(args, stdin=stdin, stdout=stdout,
                                 stderr=subprocess.PIPE)
@@ -588,16 +623,22 @@ class ControlMasterSession(QObject):
             self._procs.discard(proc)
 
     @staticmethod
-    def _explain(stderr: str) -> str:
-        """把 ssh 的报错翻译成用户能行动的说法。"""
+    def _explain(stderr: str, returncode: Optional[int] = None) -> str:
+        """把 ssh 的报错翻译成用户能行动的说法。
+
+        returncode 是区分「ssh 自己失败」与「远端命令失败」的唯一可靠依据：
+        ssh 连接/认证层错误固定退出 255，远端命令的退出码原样透传（1/2…）。
+        以前只要 stderr 含 "permission denied" 就报"主连接已断开"，远端目录
+        无写权限做 mkdir/rm 也会逼用户重输动态码。
+        """
         low = (stderr or "").lower()
         if ("control socket connect" in low or "no such file or directory" in low
                 and "controlpath" in low) or "connection refused" in low:
             return "主连接已断开（connection lost）——请重新 MFA 登录"
-        if "permission denied" in low:
+        if "permission denied" in low and returncode == 255:
             return ("主连接已断开（connection lost）：ssh 又要认证了，"
                     "请重新 MFA 登录")
-        return stderr.strip()
+        return (stderr or "").strip()
 
     def _run(self, remote_cmd: str, timeout: int = CMD_TIMEOUT) -> str:
         """跑一条远端命令，返回 stdout；非零退出抛异常。"""
@@ -612,7 +653,7 @@ class ControlMasterSession(QObject):
             finally:
                 self._reap(proc)
         if proc.returncode != 0:
-            msg = self._explain((err or b"").decode("utf-8", "replace"))
+            msg = self._explain((err or b"").decode("utf-8", "replace"), proc.returncode)
             raise RuntimeError(msg or f"远端命令失败 (exit {proc.returncode})")
         return (out or b"").decode("utf-8", "replace")
 
@@ -695,7 +736,7 @@ class ControlMasterSession(QObject):
             finally:
                 self._reap(proc)
         if proc.returncode != 0:
-            raise RuntimeError(self._explain((err or b"").decode("utf-8", "replace")))
+            raise RuntimeError(self._explain((err or b"").decode("utf-8", "replace"), proc.returncode))
         return out or b""
 
     def write_file(self, path: str, content: bytes):
@@ -711,7 +752,7 @@ class ControlMasterSession(QObject):
             finally:
                 self._reap(proc)
         if proc.returncode != 0:
-            raise RuntimeError(self._explain((err or b"").decode("utf-8", "replace")))
+            raise RuntimeError(self._explain((err or b"").decode("utf-8", "replace"), proc.returncode))
         self.invalidate_cache(self._parent(path))
 
     def mkdir(self, path: str):
@@ -775,7 +816,7 @@ class ControlMasterSession(QObject):
                 self._reap(proc)
         if proc.returncode != 0:
             self._cleanup(tmp_path)
-            raise RuntimeError(self._explain(err) or f"下载失败 (exit {proc.returncode})")
+            raise RuntimeError(self._explain(err, proc.returncode) or f"下载失败 (exit {proc.returncode})")
         os.replace(tmp_path, local_path)
         return SimpleNamespace(st_size=st.size, st_mtime=st.mtime)
 
@@ -826,7 +867,7 @@ class ControlMasterSession(QObject):
                 self._run(f"rm -f -- {_qpath(tmp_remote)}")
             except Exception:
                 logger.debug("upload cleanup failed", exc_info=True)
-            raise RuntimeError(self._explain(err) or f"上传失败 (exit {proc.returncode})")
+            raise RuntimeError(self._explain(err, proc.returncode) or f"上传失败 (exit {proc.returncode})")
         self.invalidate_cache(self._parent(remote_path))
 
     def remote_has_tar(self) -> bool:
@@ -967,7 +1008,7 @@ class ControlMasterSession(QObject):
             finally:
                 self._reap(proc)
         if proc.returncode != 0:
-            raise RuntimeError(self._explain(err)
+            raise RuntimeError(self._explain(err, proc.returncode)
                                or f"上传失败 (exit {proc.returncode})")
         self.invalidate_cache(remote_dir)
         self.invalidate_cache(self._parent(remote_dir))
