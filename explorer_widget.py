@@ -37,7 +37,7 @@ from PyQt6.QtCore import (
 from PyQt6.QtGui import (
     QFileSystemModel, QAction, QDesktopServices, QCursor,
     QShortcut, QKeySequence, QColor, QBrush,
-    QIcon, QPixmap, QPainter,
+    QIcon, QPixmap, QPainter, QPen,
 )
 from PyQt6.QtCore import QUrl
 from PyQt6 import sip  # 用于检查 C++ 对象是否已被删除
@@ -53,6 +53,7 @@ class _LocalDropTreeView(QTreeView):
     def __init__(self, panel):
         super().__init__()
         self._panel = panel
+        self._indent_guide_color = None   # 由 _update_style 按主题设定
         self.setAcceptDrops(True)
         self.setDragEnabled(True)
         self.setDropIndicatorShown(True)
@@ -63,6 +64,49 @@ class _LocalDropTreeView(QTreeView):
         self._rename_timer = QTimer(self)
         self._rename_timer.setSingleShot(True)
         self._rename_timer.timeout.connect(self._fire_pending_rename)
+
+    def set_indent_guide_color(self, color):
+        """设置缩进参考线颜色（主题切换时重设；None = 不画）。"""
+        self._indent_guide_color = color
+        self.viewport().update()
+
+    def drawRow(self, painter, option, index):   # noqa: N802 — Qt 回调
+        """在每层缩进处画一条竖线。
+
+        深层目录光靠缩进量很难看出"这几个文件是同一层"，一眼望去就是一片
+        阶梯。参考线是 VS Code / IDEA 同款解法，成本只有一次画线。
+        """
+        super().drawRow(painter, option, index)
+        color = getattr(self, "_indent_guide_color", None)
+        if color is None:
+            return
+        xs = self.indent_guide_xs(index, option.rect.left())
+        if not xs:
+            return
+        rect = option.rect
+        painter.save()
+        pen = QPen(color)
+        pen.setWidth(1)
+        painter.setPen(pen)
+        for x in xs:
+            painter.drawLine(x, rect.top(), x, rect.bottom())
+        painter.restore()
+
+    def indent_guide_xs(self, index, left: int = 0) -> list:
+        """这一行要在哪些 x 上画参考线（每个祖先层一条）。
+
+        抽成纯计算是为了可测：直接测 drawRow 就得给 QTreeView.drawRow 打
+        类级 monkeypatch，那会污染 sip 的方法表，后面任何用到嵌套事件循环
+        的用例都会莫名 abort（实测踩过）。
+        """
+        depth = 0
+        parent = index.parent()
+        root = self.rootIndex()
+        while parent.isValid() and parent != root:
+            depth += 1
+            parent = parent.parent()
+        indent = self.indentation()
+        return [left + indent * level + indent // 2 for level in range(depth)]
 
     def dragEnterEvent(self, event):
         if event.mimeData().hasUrls():
@@ -329,21 +373,48 @@ class _DotFileProxy(QSortFilterProxyModel):
     dot-prefix 约定。此代理补充了 dot-prefix 过滤。
     """
 
+    # 系统/工具产生的垃圾条目：跟"隐藏文件"是两回事 —— 用户开着"显示隐藏
+    # 文件"是为了看 .gitignore、.env 这类真内容，不是为了看每个目录里的
+    # .DS_Store。所以这份名单独立过滤。
+    _JUNK_NAMES = frozenset({
+        '.DS_Store', '.AppleDouble', '.LSOverride', '.Spotlight-V100',
+        '.Trashes', '.fseventsd', '.DocumentRevisions-V100', '.TemporaryItems',
+        'Thumbs.db', 'ehthumbs.db', 'desktop.ini', '__pycache__',
+    })
+    _JUNK_SUFFIXES = ('.pyc', '.pyo')
+
+    @classmethod
+    def is_junk(cls, name: str) -> bool:
+        if name in cls._JUNK_NAMES:
+            return True
+        if name.startswith('._'):        # macOS AppleDouble 伴随文件
+            return True
+        return name.endswith(cls._JUNK_SUFFIXES)
+
     def __init__(self, parent=None):
         super().__init__(parent)
         self._hide_dot = False
+        self._hide_junk = True
 
     def set_hide_dot_files(self, hide: bool):
         if self._hide_dot != hide:
             self._hide_dot = hide
             self.invalidateFilter()
 
+    def set_hide_junk(self, hide: bool):
+        if self._hide_junk != bool(hide):
+            self._hide_junk = bool(hide)
+            self.invalidateFilter()
+
     def filterAcceptsRow(self, source_row, source_parent):
-        if not self._hide_dot:
-            return True
         model = self.sourceModel()
         idx = model.index(source_row, 0, source_parent)
-        return not model.fileName(idx).startswith('.')
+        name = model.fileName(idx)
+        if self._hide_junk and self.is_junk(name):
+            return False
+        if self._hide_dot and name.startswith('.'):
+            return False
+        return True
 
     # --- 便捷方法：透明代理到 QFileSystemModel，自动做 index 映射 ---
 
@@ -398,6 +469,8 @@ class ExplorerPanel(QWidget, explorer_common.TransferJobHost):
 
     # 配置文件里"是否显示隐藏文件"的键名（与 main_window 共用 .smart_terminal_config.json）
     CONFIG_KEY_SHOW_HIDDEN = 'explorer_show_hidden'
+    # 是否隐藏 .DS_Store / __pycache__ 这类系统垃圾（默认隐藏）
+    CONFIG_KEY_HIDE_JUNK = 'explorer_hide_junk'
     # 排序方式 / 升降序的键名
     CONFIG_KEY_SORT_KEY = 'explorer_sort_key'
     CONFIG_KEY_SORT_DESC = 'explorer_sort_desc'
@@ -412,6 +485,8 @@ class ExplorerPanel(QWidget, explorer_common.TransferJobHost):
         self._editing_file = None  # 当前正在编辑的文件路径
         # 是否显示隐藏文件（以点开头），从配置读取，默认显示
         self._show_hidden = self._load_show_hidden()
+        self._hide_junk = bool(app_config.read_config().get(
+            self.CONFIG_KEY_HIDE_JUNK, True))
         # 排序方式（默认按名称升序），从配置读取
         self._sort_key, self._sort_desc = self._load_sort()
 
@@ -501,6 +576,18 @@ class ExplorerPanel(QWidget, explorer_common.TransferJobHost):
     def is_showing_hidden(self) -> bool:
         return self._show_hidden
 
+    def is_hiding_junk(self) -> bool:
+        return self._hide_junk
+
+    def set_hide_junk(self, hide: bool):
+        """开关系统垃圾文件（.DS_Store 等）的显示，并持久化。"""
+        hide = bool(hide)
+        if hide == self._hide_junk:
+            return
+        self._hide_junk = hide
+        self._proxy.set_hide_junk(hide)
+        app_config.update_config({self.CONFIG_KEY_HIDE_JUNK: hide})
+
     def set_show_hidden(self, show: bool):
         """切换是否显示隐藏文件，并立即应用 + 持久化。"""
         show = bool(show)
@@ -575,6 +662,7 @@ class ExplorerPanel(QWidget, explorer_common.TransferJobHost):
         self._proxy = _DotFileProxy(self)
         self._proxy.setSourceModel(self.model)
         self._proxy.set_hide_dot_files(not self._show_hidden)
+        self._proxy.set_hide_junk(self._hide_junk)
 
         # 树形视图（自定义子类，支持把 file:// URL 拖入并复制）
         self.tree_view = _LocalDropTreeView(self)
@@ -600,7 +688,8 @@ class ExplorerPanel(QWidget, explorer_common.TransferJobHost):
         # 关闭展开/收起动画：动画会对所有新出现的行反复重新布局+重绘，
         # 大目录（几十个文件）展开/收起时明显卡顿；关掉后即时完成。
         self.tree_view.setAnimated(False)
-        self.tree_view.setIndentation(16)
+        # 12px：比默认窄，配合参考线仍然分得清层级，深层不至于挤出屏幕
+        self.tree_view.setIndentation(12)
 
         # 允许拖拽
         self.tree_view.setDragEnabled(True)
@@ -658,6 +747,11 @@ class ExplorerPanel(QWidget, explorer_common.TransferJobHost):
         text_dim = self.theme.get('text_dim', '#888888')
         border = self.theme.get('border', '#3d3d5c')
         accent = self.theme.get('accent', '#667eea')
+
+        # 缩进参考线：取边框色再压淡 —— 要能看出层级，又不能抢文件名的注意力
+        guide = QColor(border)
+        guide.setAlpha(140)
+        self.tree_view.set_indent_guide_color(guide)
 
         self.setStyleSheet(f"""
             QWidget {{
@@ -1350,6 +1444,11 @@ class ExplorerPanel(QWidget, explorer_common.TransferJobHost):
             return
 
         file_path = self._proxy.filePath(index)
+        if os.path.isdir(file_path):
+            # 双击目录 = 进到那一层去（换根），而不是把树越展越深 ——
+            # 六层缩进最好的解法是根本不用展开六层
+            self.set_root_path(file_path)
+            return
         if os.path.isfile(file_path):
             if self._editor_can_display(file_path):
                 # 发射信号请求在内置编辑器中打开（行号 0 = 不跳转）

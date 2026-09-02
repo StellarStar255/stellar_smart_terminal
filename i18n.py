@@ -479,6 +479,10 @@ TRANSLATIONS = {
     "paste.apply_to_all": {"zh": "对剩余冲突应用相同操作", "en": "Apply to all remaining conflicts"},
     "explorer.pasting": {"zh": "正在粘贴…", "en": "Pasting…"},
     "explorer.pasting_into": {"zh": "正在粘贴到 {dst}…", "en": "Pasting into {dst}…"},
+    "explorer.hide_junk_files": {
+        "zh": "隐藏系统垃圾文件（.DS_Store 等）",
+        "en": "Hide system clutter (.DS_Store, __pycache__, …)"
+    },
     "explorer.reveal_in_finder": {"zh": "在 Finder 中显示", "en": "Reveal in Finder"},
     "explorer.reveal_in_explorer": {"zh": "在资源管理器中显示", "en": "Reveal in Explorer"},
     "explorer.reveal_in_file_manager": {"zh": "在文件管理器中显示", "en": "Reveal in File Manager"},

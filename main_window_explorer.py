@@ -231,6 +231,11 @@ class ExplorerPanelMixin:
         act.setChecked(self.explorer_panel.is_showing_hidden())
         act.toggled.connect(self.explorer_panel.set_show_hidden)
 
+        act_junk = menu.addAction(t("explorer.hide_junk_files"))
+        act_junk.setCheckable(True)
+        act_junk.setChecked(self.explorer_panel.is_hiding_junk())
+        act_junk.toggled.connect(self.explorer_panel.set_hide_junk)
+
         # 排序方式子菜单（名称 / 修改日期 / 大小 / 类型 + 升/降序）
         menu.addSeparator()
         cur_key, cur_desc = self.explorer_panel.get_sort()
