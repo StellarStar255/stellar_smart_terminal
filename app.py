@@ -124,7 +124,7 @@ def install_global_excepthook():
     sys.excepthook = _hook
 
 
-def install_sigint_handler(app: QApplication):
+def install_sigint_handler(app: QApplication, notify=None, rearm_window: float = 4.0):
     """让在终端里运行时按 Ctrl+C (SIGINT) 能“两步退出”：
     第一次只提示，短时间内再按第二次才真正保存并退出。
 
@@ -139,19 +139,24 @@ def install_sigint_handler(app: QApplication):
     2. 信号处理器里【只做最小动作】——累加一个计数。绝不在信号上下文里写
        sys.stderr：缓冲流是带锁的，在信号上下文里写极易被截断（就是之前“只
        打印出一个 ⚠、后面文字全没了”的根因）；
-    3. 真正的提示文本 / 退出逻辑放进一个常驻 QTimer 回调，在正常事件循环上
-       下文中执行；这个定时器同时承担“周期性唤醒解释器让信号被及时处理”的
-       职责（Qt 事件循环在 C++ 层，不轮询就收不到信号）；
+    3. 唤醒解释器不再靠 120ms 常驻定时器轮询（空闲时每秒 8 次醒来）：
+       signal.set_wakeup_fd 让 C 层信号处理器往 socketpair 写一个字节，
+       QSocketNotifier 收到才把事件循环叫醒，在正常上下文里处理提示/退出；
+       “时间窗内未再按 → 复位”用单发 QTimer。set_wakeup_fd 不可用（非主线程
+       等罕见情形）才退回轮询定时器；
     4. 输出用底层无缓冲的 os.write(fd=2)，绕开 TextIOWrapper 的缓冲与锁，
        保证整行一次性、完整地打到终端。
+
+    notify / rearm_window 仅供测试注入：默认写 stderr、4 秒窗口。
     """
     import signal
-    import time
-    from PyQt6.QtCore import QTimer
+    import socket
+    from PyQt6.QtCore import QSocketNotifier, QTimer
 
-    # 信号处理器与定时器都在主线程、字节码边界执行，二者天然互斥，无需加锁
+    # 信号处理器与槽函数都在主线程、字节码边界执行，二者天然互斥，无需加锁
     pending = {"count": 0}
-    state = {"armed": False, "disarm_at": 0.0}
+    state = {"armed": False}
+    app._sigint_state = state
 
     def _handler(signum, frame):
         # 只记录“收到一次 Ctrl+C”，其余一概不做
@@ -160,6 +165,12 @@ def install_sigint_handler(app: QApplication):
     signal.signal(signal.SIGINT, _handler)
 
     def _notify(text: str):
+        if notify is not None:
+            try:
+                notify(text)
+            except Exception:
+                logger.debug("_notify: suppressed exception", exc_info=True)
+            return
         # 底层无缓冲写 stderr(fd=2)：和 ^C 回显同处，且不受缓冲/编码包装影响
         try:
             os.write(2, text.encode("utf-8", "replace"))
@@ -181,33 +192,91 @@ def install_sigint_handler(app: QApplication):
         # 兜底：无论保存/关闭是否成功，都确保事件循环退出
         QTimer.singleShot(300, app.quit)
 
+    # 超过时间窗仍未再次按下 → 复位，避免之后误触退出（单发，不常驻）
+    disarm_timer = QTimer()
+    disarm_timer.setSingleShot(True)
+    disarm_timer.setInterval(max(1, int(rearm_window * 1000)))
+
+    def _disarm():
+        state["armed"] = False
+
+    disarm_timer.timeout.connect(_disarm)
+    app._sigint_disarm_timer = disarm_timer
+
     def _on_sigint():
         if state["armed"]:
+            disarm_timer.stop()
             _notify("\n\033[1;32m正在退出 Smart Terminal…\033[0m\n")
             _graceful_quit()
         else:
             state["armed"] = True
-            state["disarm_at"] = time.monotonic() + 4.0
+            disarm_timer.start()
             # 醒目的黄色高亮提醒（终端不支持 ANSI 颜色时也能读出文字）
             _notify(
                 "\n\033[1;33m[!] 再按一次 Ctrl+C 退出程序 "
                 "(Press Ctrl+C again to quit)\033[0m\n"
             )
 
-    def _tick():
-        # 1) 处理累计到的 Ctrl+C（多次合并为一次处理即可）
+    def _process_pending():
+        # 处理累计到的 Ctrl+C（多次合并为一次处理即可）
         if pending["count"] > 0:
             pending["count"] = 0
             _on_sigint()
-        # 2) 超过时间窗仍未再次按下 → 复位，避免之后误触退出
-        if state["armed"] and time.monotonic() >= state["disarm_at"]:
-            state["armed"] = False
 
-    # 常驻定时器：既负责唤醒解释器及时收信号，又在正常上下文里处理提示/退出。
-    # 用属性持有引用，防止被垃圾回收。
-    app._sigint_timer = QTimer()
-    app._sigint_timer.timeout.connect(_tick)
-    app._sigint_timer.start(120)
+    # --- 零轮询唤醒：set_wakeup_fd + QSocketNotifier ---
+    try:
+        rsock, wsock = socket.socketpair()
+        rsock.setblocking(False)
+        wsock.setblocking(False)
+        old_fd = signal.set_wakeup_fd(wsock.fileno(), warn_on_full_buffer=False)
+    except Exception:
+        # 罕见：不在主线程 / 平台不支持 → 退回轮询定时器
+        logger.debug("set_wakeup_fd unavailable, falling back to polling", exc_info=True)
+        app._sigint_timer = QTimer()
+        app._sigint_timer.timeout.connect(_process_pending)
+        app._sigint_timer.start(120)
+        return
+
+    def _on_wakeup():
+        # 排干唤醒字节；信号处理器在进入本槽前就已在字节码边界执行过
+        try:
+            while True:
+                if not rsock.recv(4096):
+                    break
+        except (BlockingIOError, InterruptedError):
+            pass
+        except OSError:
+            logger.debug("_on_wakeup: suppressed exception", exc_info=True)
+        _process_pending()
+
+    notifier = QSocketNotifier(rsock.fileno(), QSocketNotifier.Type.Read)
+    notifier.activated.connect(lambda *_: _on_wakeup())
+    # 用属性持有引用，防止被垃圾回收
+    app._sigint_notifier = notifier
+    app._sigint_sockets = (rsock, wsock)
+    app._sigint_timer = None
+
+    def _cleanup():
+        """测试/重装时拆除：关通知器、还原 wakeup fd、关套接字。"""
+        try:
+            notifier.setEnabled(False)
+        except Exception:
+            logger.debug("_cleanup: suppressed exception", exc_info=True)
+        try:
+            if signal.set_wakeup_fd(-1) == wsock.fileno():
+                signal.set_wakeup_fd(old_fd)
+            else:
+                pass
+        except Exception:
+            logger.debug("_cleanup: suppressed exception", exc_info=True)
+        disarm_timer.stop()
+        for sk in (rsock, wsock):
+            try:
+                sk.close()
+            except Exception:
+                logger.debug("_cleanup: suppressed exception", exc_info=True)
+
+    app._sigint_cleanup = _cleanup
 
 
 def setup_app_style(app: QApplication):

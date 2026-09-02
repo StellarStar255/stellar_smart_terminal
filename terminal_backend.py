@@ -71,6 +71,36 @@ logger = get_logger(__name__)
 IS_WINDOWS = sys.platform == 'win32'
 
 
+def coalesce_reads(first: bytes, wait_more, read_more, *, window: float,
+                   max_bytes: int, still_running=lambda: True,
+                   clock=time.monotonic) -> bytes:
+    """按时间窗把陆续到达的小块攒成一块（两个后端共用的唯一实现）。
+
+    first      已读到的第一块（非空）
+    wait_more  (timeout) -> bool：timeout 秒内是否有更多数据可读
+    read_more  () -> bytes：再读一块；空 = EOF
+    语义：首块已达 max_bytes 直接交付；否则在 window 内反复"等→读"，累计达上限、
+    窗口耗尽、EOF 或后端停止即停。等待超时逐次缩短为剩余窗口。
+    """
+    if len(first) >= max_bytes:
+        return first
+    chunks = [first]
+    total = len(first)
+    deadline = clock() + window
+    while total < max_bytes and still_running():
+        remaining = deadline - clock()
+        if remaining <= 0:
+            break
+        if not wait_more(remaining):
+            break
+        more = read_more()
+        if not more:
+            break
+        chunks.append(more)
+        total += len(more)
+    return chunks[0] if len(chunks) == 1 else b''.join(chunks)
+
+
 class TerminalBackend(ABC):
     """终端后端抽象基类"""
 
@@ -86,6 +116,28 @@ class TerminalBackend(ABC):
         self.on_output: Optional[Callable[[bytes], None]] = None
         self.on_exit: Optional[Callable[[int], None]] = None
         self._running = False
+
+    def _pump_reads(self, read_first, wait_more, read_more,
+                    clock=time.monotonic) -> bool:
+        """读取循环的一次迭代：读首块 → 时间窗攒批 → 一次 on_output。
+
+        返回 False 表示 EOF（首块为空），调用方应退出循环。两个平台的
+        _read_loop 只需提供三个原语（首读 / 等更多 / 再读），攒批语义因此
+        完全一致——以前只有 Unix 攒批，Windows 每次 ReadFile 直接回调。
+        """
+        data = read_first()
+        if not data:
+            return False
+        payload = coalesce_reads(
+            data, wait_more, read_more,
+            window=self._READ_COALESCE_WINDOW,
+            max_bytes=self._READ_COALESCE_MAX,
+            still_running=lambda: self._running,
+            clock=clock)
+        callback = self.on_output
+        if callback:
+            callback(payload)
+        return True
 
     @abstractmethod
     def start(self, command: List[str], cwd: Optional[str] = None,
@@ -355,7 +407,6 @@ if IS_WINDOWS:
                 # 2. 创建 PseudoConsole（使用 PASSTHROUGH 标志）
                 size = COORD(cols, rows)
                 hpc = wintypes.HANDLE()
-                passthrough_ok = False
                 hr = kernel32.CreatePseudoConsole(
                     size,
                     wintypes.HANDLE(self._pipe_in_read),
@@ -364,7 +415,6 @@ if IS_WINDOWS:
                     ctypes.byref(hpc),
                 )
                 if hr == 0:
-                    passthrough_ok = True
                     logger.info("[WindowsBackend] *** ConPTY PASSTHROUGH mode enabled ***")
                 else:
                     # Passthrough 不可用，回退到普通模式
@@ -494,26 +544,47 @@ if IS_WINDOWS:
                 self._cleanup()
                 return False
 
-        def _read_loop(self):
-            """后台读取循环 - 从 ConPTY 输出管道读取"""
+        def _read_pipe_once(self) -> bytes:
+            """阻塞读一块；管道关闭（进程退出）或出错返回 b''。"""
             buf_size = 65536
             buf = ctypes.create_string_buffer(buf_size)
             bytes_read = wintypes.DWORD(0)
+            success = kernel32.ReadFile(
+                wintypes.HANDLE(self._pipe_out_read),
+                buf,
+                buf_size,
+                ctypes.byref(bytes_read),
+                None,
+            )
+            if not success:
+                return b''
+            return buf.raw[:bytes_read.value]
 
+        def _pipe_has_data(self, timeout: float) -> bool:
+            """timeout 秒内管道里是否有数据（PeekNamedPipe 非阻塞探测 + 短睡）。
+
+            ReadFile 没有超时，攒批的"等更多"只能靠探测；探测失败（管道已关）
+            返回 True 让紧接着的 ReadFile 去发现 EOF。
+            """
+            deadline = time.monotonic() + max(0.0, timeout)
+            avail = wintypes.DWORD(0)
+            while True:
+                ok = kernel32.PeekNamedPipe(
+                    wintypes.HANDLE(self._pipe_out_read), None, 0, None,
+                    ctypes.byref(avail), None)
+                if not ok or avail.value > 0:
+                    return True
+                if time.monotonic() >= deadline:
+                    return False
+                time.sleep(0.001)
+
+        def _read_loop(self):
+            """后台读取循环 - 从 ConPTY 输出管道读取（攒批逻辑在基类 _pump_reads）"""
             while self._running and self._pipe_out_read is not None:
                 try:
-                    success = kernel32.ReadFile(
-                        wintypes.HANDLE(self._pipe_out_read),
-                        buf,
-                        buf_size,
-                        ctypes.byref(bytes_read),
-                        None,
-                    )
-                    if success and bytes_read.value > 0:
-                        data = buf.raw[:bytes_read.value]
-                        if self.on_output:
-                            self.on_output(data)
-                    elif not success:
+                    if not self._pump_reads(self._read_pipe_once,
+                                            self._pipe_has_data,
+                                            self._read_pipe_once):
                         # 管道关闭（进程退出）
                         break
                 except Exception as e:
@@ -821,44 +892,29 @@ else:
             except Exception:
                 logger.debug("_set_pty_size: suppressed exception", exc_info=True)
 
+        def _read_master_once(self) -> bytes:
+            return os.read(self._master_fd, 65536)
+
+        def _master_has_data(self, timeout: float) -> bool:
+            r, _, _ = select.select([self._master_fd], [], [], max(0.0, timeout))
+            return bool(r)
+
         def _read_loop(self):
-            """后台读取循环"""
+            """后台读取循环（攒批逻辑在基类 _pump_reads）"""
             check_counter = 0  # 用于降低 waitpid 调用频率
             while self._running:
                 try:
                     ready, _, _ = select.select([self._master_fd], [], [], 0.1)
                     if ready:
                         try:
-                            data = os.read(self._master_fd, 65536)
-                            if not data:
+                            # 读取合并（按时间窗攒批）在基类 _pump_reads 里，与
+                            # Windows 后端共用同一实现
+                            if not self._pump_reads(
+                                    self._read_master_once,
+                                    self._master_has_data,
+                                    self._read_master_once):
                                 # EOF - 进程已退出
                                 break
-                            # 读取合并（按时间窗攒批，见 _READ_COALESCE_WINDOW）：在
-                            # 极短窗口内把陆续到达的小块攒成一次回调，显著减少 on_output
-                            # 次数 → 缓解远程高频输出造成的 GUI 事件洪流。
-                            if len(data) >= self._READ_COALESCE_MAX:
-                                chunks = None
-                            else:
-                                chunks = [data]
-                                total = len(data)
-                                deadline = time.monotonic() + self._READ_COALESCE_WINDOW
-                                while total < self._READ_COALESCE_MAX and self._running:
-                                    remaining = deadline - time.monotonic()
-                                    if remaining <= 0:
-                                        break
-                                    r2, _, _ = select.select(
-                                        [self._master_fd], [], [], remaining)
-                                    if not r2:
-                                        break
-                                    more = os.read(self._master_fd, 65536)
-                                    if not more:
-                                        break
-                                    chunks.append(more)
-                                    total += len(more)
-                            if self.on_output:
-                                self.on_output(data if chunks is None
-                                               else (chunks[0] if len(chunks) == 1
-                                                     else b''.join(chunks)))
                         except OSError:
                             break
                     else:
