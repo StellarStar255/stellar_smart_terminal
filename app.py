@@ -532,10 +532,31 @@ class SmartTerminalApplication(QApplication):
         return super().event(e)
 
 
+def _install_stack_dump_watchdog():
+    """诊断开关：STELLAR_STACK_DUMP=<文件> 时每隔 STELLAR_STACK_DUMP_SECS（默认 4）秒
+    把所有线程的调用栈追加写入该文件。
+
+    用途：界面"无响应/不断闪烁"这类 GUI 线程被占死的问题，靠日志根本看不出
+    在转什么；faulthandler 的周期性栈快照能直接指出循环所在。零开销：不设
+    环境变量时什么都不做。
+    """
+    path = os.environ.get('STELLAR_STACK_DUMP')
+    if not path:
+        return
+    try:
+        import faulthandler
+        secs = float(os.environ.get('STELLAR_STACK_DUMP_SECS', '4'))
+        fh = open(path, 'a')  # noqa: SIM115 —— 要活到进程结束
+        faulthandler.dump_traceback_later(secs, repeat=True, file=fh)
+    except Exception:
+        pass  # 诊断开关失败不影响启动
+
+
 def main():
     """主函数"""
     # 尽早初始化日志系统，保证后续所有模块的 logger 输出有处可去
     setup_logging()
+    _install_stack_dump_watchdog()
 
     # 尽早安装全局异常钩子：把 Qt 回调中的未捕获异常从“闪退(abort)”降级为
     # “记录日志并继续运行”，必须在创建 QApplication / 进入事件循环之前完成。
