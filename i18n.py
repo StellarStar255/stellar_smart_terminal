@@ -479,6 +479,11 @@ TRANSLATIONS = {
     "paste.apply_to_all": {"zh": "对剩余冲突应用相同操作", "en": "Apply to all remaining conflicts"},
     "explorer.pasting": {"zh": "正在粘贴…", "en": "Pasting…"},
     "explorer.pasting_into": {"zh": "正在粘贴到 {dst}…", "en": "Pasting into {dst}…"},
+    "explorer.go_up": {"zh": "上一级目录", "en": "Go to parent folder"},
+    "explorer.double_click_enter": {
+        "zh": "双击文件夹进入该目录（默认为展开）",
+        "en": "Double-click a folder to enter it (default: expand)"
+    },
     "explorer.hide_junk_files": {
         "zh": "隐藏系统垃圾文件（.DS_Store 等）",
         "en": "Hide system clutter (.DS_Store, __pycache__, …)"

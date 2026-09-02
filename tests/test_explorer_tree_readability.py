@@ -186,8 +186,29 @@ class TestIndentGuides(_Base):
 
 
 class TestDoubleClickEntersFolder(_Base):
-    def test_double_click_folder_changes_root(self):
+    """双击目录的行为可选；无论哪种模式，都必须有路回上一级。
+
+    用户实测：第一版默认换根、面板里又没有「上一级」，人直接被困在
+    子目录里出不来。
+    """
+
+    def test_expands_in_place_by_default(self):
         p = self._panel()
+        root = Path(self._tmp.name)
+        sub = root / "aiem-arranger"
+        sub.mkdir()
+        p.set_root_path(str(root))
+        self.app.processEvents()
+
+        self.assertFalse(p.is_double_click_enter(), "默认不换根")
+        idx = p._proxy.mapFromSource(p.model.index(str(sub)))
+        p._on_double_click(idx)
+        self.assertSamePath(p._current_path, root, "默认双击不该换根")
+        self.assertTrue(p.tree_view.isExpanded(idx), "默认双击应就地展开")
+
+    def test_double_click_folder_changes_root_when_enabled(self):
+        p = self._panel()
+        p.set_double_click_enter(True)
         root = Path(self._tmp.name)
         sub = root / "aiem-arranger"
         sub.mkdir()
@@ -197,7 +218,33 @@ class TestDoubleClickEntersFolder(_Base):
         idx = p._proxy.mapFromSource(p.model.index(str(sub)))
         p._on_double_click(idx)
         self.assertSamePath(p._current_path, sub,
-                            "双击目录该进到那一层，而不是继续往下展开")
+                            "开了开关才进到那一层")
+
+    def test_toggle_persists(self):
+        p = self._panel()
+        p.set_double_click_enter(True)
+        p2 = self._panel()
+        self.assertTrue(p2.is_double_click_enter(), "选择要记住")
+
+    def test_go_up_gets_out_of_a_subfolder(self):
+        p = self._panel()
+        p.set_double_click_enter(True)
+        root = Path(self._tmp.name)
+        sub = root / "aiem-arranger" / "src"
+        sub.mkdir(parents=True)
+        p.set_root_path(str(sub))
+        self.app.processEvents()
+
+        self.assertTrue(p.go_up())
+        self.assertSamePath(p._current_path, sub.parent, "得能退回上一级")
+        self.assertTrue(p.up_btn.isEnabled())
+
+    def test_up_button_disabled_at_filesystem_root(self):
+        p = self._panel()
+        p.set_root_path(os.path.abspath(os.sep))
+        self.app.processEvents()
+        self.assertFalse(p.go_up(), "已经在根上，没得可退")
+        self.assertFalse(p.up_btn.isEnabled(), "点了没反应的按钮该置灰")
 
     def test_double_click_file_still_opens_it(self):
         p = self._panel()

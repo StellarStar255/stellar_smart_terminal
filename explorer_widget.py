@@ -471,6 +471,9 @@ class ExplorerPanel(QWidget, explorer_common.TransferJobHost):
     CONFIG_KEY_SHOW_HIDDEN = 'explorer_show_hidden'
     # 是否隐藏 .DS_Store / __pycache__ 这类系统垃圾（默认隐藏）
     CONFIG_KEY_HIDE_JUNK = 'explorer_hide_junk'
+    # 双击目录是"进入那一层（换根）"还是"就地展开"。默认展开 —— 换根是
+    # 改变浏览方式的大动作，得用户自己选。
+    CONFIG_KEY_DBLCLICK_ENTER = 'explorer_double_click_enter'
     # 排序方式 / 升降序的键名
     CONFIG_KEY_SORT_KEY = 'explorer_sort_key'
     CONFIG_KEY_SORT_DESC = 'explorer_sort_desc'
@@ -487,6 +490,8 @@ class ExplorerPanel(QWidget, explorer_common.TransferJobHost):
         self._show_hidden = self._load_show_hidden()
         self._hide_junk = bool(app_config.read_config().get(
             self.CONFIG_KEY_HIDE_JUNK, True))
+        self._dblclick_enter = bool(app_config.read_config().get(
+            self.CONFIG_KEY_DBLCLICK_ENTER, False))
         # 排序方式（默认按名称升序），从配置读取
         self._sort_key, self._sort_desc = self._load_sort()
 
@@ -588,6 +593,36 @@ class ExplorerPanel(QWidget, explorer_common.TransferJobHost):
         self._proxy.set_hide_junk(hide)
         app_config.update_config({self.CONFIG_KEY_HIDE_JUNK: hide})
 
+    def go_up(self):
+        """回到上一级目录（已经在文件系统根就什么都不做）。"""
+        current = self._current_path or os.path.expanduser("~")
+        parent = os.path.dirname(current.rstrip(os.sep)) or os.sep
+        if parent and parent != current and os.path.isdir(parent):
+            self.set_root_path(parent)
+            return True
+        return False
+
+    def _sync_up_button(self):
+        """在文件系统根上就禁用「上一级」，免得点了没反应像是坏了。"""
+        btn = getattr(self, 'up_btn', None)
+        if btn is None:
+            return
+        current = self._current_path or ""
+        parent = os.path.dirname(current.rstrip(os.sep)) or os.sep
+        btn.setEnabled(bool(parent and parent != current
+                            and os.path.isdir(parent)))
+
+    def is_double_click_enter(self) -> bool:
+        return self._dblclick_enter
+
+    def set_double_click_enter(self, enabled: bool):
+        """双击目录：进入该目录（True）还是就地展开（False）。"""
+        enabled = bool(enabled)
+        if enabled == self._dblclick_enter:
+            return
+        self._dblclick_enter = enabled
+        app_config.update_config({self.CONFIG_KEY_DBLCLICK_ENTER: enabled})
+
     def set_show_hidden(self, show: bool):
         """切换是否显示隐藏文件，并立即应用 + 持久化。"""
         show = bool(show)
@@ -612,6 +647,16 @@ class ExplorerPanel(QWidget, explorer_common.TransferJobHost):
         search_bar = QHBoxLayout()
         search_bar.setContentsMargins(4, 4, 4, 4)
         search_bar.setSpacing(4)
+
+        # 「上一级」：换根之后必须有路可回。以前这个面板的根只由主窗口
+        # 路径栏驱动，所以没这个按钮；加了双击进入之后不给回路 = 把人困住。
+        self.up_btn = QToolButton()
+        self.up_btn.setText("↑")
+        self.up_btn.setToolTip(t("explorer.go_up"))
+        self.up_btn.setCursor(Qt.CursorShape.PointingHandCursor)
+        self.up_btn.setFocusPolicy(Qt.FocusPolicy.NoFocus)
+        self.up_btn.clicked.connect(self.go_up)
+        search_bar.addWidget(self.up_btn)
 
         self.search_mode_btn = QToolButton()
         self.search_mode_btn.setCheckable(True)
@@ -948,6 +993,7 @@ class ExplorerPanel(QWidget, explorer_common.TransferJobHost):
                 # 路径未变，无需重新加载
                 return
             self._current_path = path
+            self._sync_up_button()
             self.model.setRootPath(path)
             self.tree_view.setRootIndex(self._proxy.mapFromSource(self.model.index(path)))
             # 切换了根 → 重置自动刷新基线
@@ -1445,9 +1491,14 @@ class ExplorerPanel(QWidget, explorer_common.TransferJobHost):
 
         file_path = self._proxy.filePath(index)
         if os.path.isdir(file_path):
-            # 双击目录 = 进到那一层去（换根），而不是把树越展越深 ——
-            # 六层缩进最好的解法是根本不用展开六层
-            self.set_root_path(file_path)
+            if self._dblclick_enter:
+                # 进到那一层去（换根）。注意：进去之后必须有路可回，
+                # 见头部的「上一级」按钮 —— 否则用户就被困在里面了。
+                self.set_root_path(file_path)
+            else:
+                # 默认：就地展开/收起，跟以前一样
+                self.tree_view.setExpanded(index,
+                                           not self.tree_view.isExpanded(index))
             return
         if os.path.isfile(file_path):
             if self._editor_can_display(file_path):

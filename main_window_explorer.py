@@ -236,6 +236,11 @@ class ExplorerPanelMixin:
         act_junk.setChecked(self.explorer_panel.is_hiding_junk())
         act_junk.toggled.connect(self.explorer_panel.set_hide_junk)
 
+        act_enter = menu.addAction(t("explorer.double_click_enter"))
+        act_enter.setCheckable(True)
+        act_enter.setChecked(self.explorer_panel.is_double_click_enter())
+        act_enter.toggled.connect(self.explorer_panel.set_double_click_enter)
+
         # 排序方式子菜单（名称 / 修改日期 / 大小 / 类型 + 升/降序）
         menu.addSeparator()
         cur_key, cur_desc = self.explorer_panel.get_sort()
