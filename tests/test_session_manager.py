@@ -126,6 +126,7 @@ class TestRecording:
         manager.add_output('see /etc/hosts for details')
         session = manager.end_session()
         assert manager.current_session is None
+        manager.flush()  # 收尾（路径提取 + 落盘）在后台线程
         saved = json.loads(
             (tmp_path / f"{session.session_id}.json").read_text(encoding='utf-8'))
         assert saved['entries'][0]['content'] == 'see /etc/hosts for details'
@@ -172,6 +173,7 @@ class TestAutoSave:
         manager.auto_save()
         manager.add_output(' new')
         manager.end_session()
+        manager.flush()
         saved = json.loads(
             (tmp_path / f"{session.session_id}.json").read_text(encoding='utf-8'))
         assert saved['entries'][0]['content'] == 'old new'

@@ -83,6 +83,7 @@ class TestSessionTotalCap:
         for i in range(20):
             manager.add_input('w' * 200)
         manager.end_session()
+        manager.flush()  # 落盘在后台线程
         loaded = manager.load_session(
             json.loads(next(manager.sessions_dir.glob('*.json')).read_text())['session_id'])
         assert loaded.truncated is True

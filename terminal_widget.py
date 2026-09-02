@@ -11,6 +11,8 @@ import shutil
 import codecs
 import itertools
 import threading
+import functools
+from contextlib import contextmanager
 from collections import OrderedDict
 from typing import Optional, List
 from pathlib import Path
@@ -301,6 +303,21 @@ class _MarkScrollBar(QScrollBar):
         painter.end()
 
 
+def _history_gesture(method):
+    """一次用户手势（双击选词/三击选行/Cmd 悬停 URL）只拍一次历史快照。
+
+    这些手势内部逐行调用 _get_line_text / _is_row_soft_wrapped /
+    _row_count_total，每个都经 _get_history_top() 整拷 scrollback deque；
+    双击一次可达数百次 O(N) 拷贝。装饰后手势期间 _get_history_top 复用同一份
+    快照（历史行对象推入后不再 mutate，快照内容与实时一致）。
+    """
+    @functools.wraps(method)
+    def wrapper(self, *args, **kwargs):
+        with self._history_snapshot_scope():
+            return method(self, *args, **kwargs)
+    return wrapper
+
+
 class TerminalSignalBridge(QThread):
     """信号桥：将后端回调转换为 Qt 信号（线程安全）"""
     output_received = pyqtSignal(bytes)
@@ -343,6 +360,7 @@ class TerminalWidget(TerminalRenderMixin, QWidget):
     _history_grew = pyqtSignal(int)  # feed 新增历史行数：读取线程 marshal 回 GUI 线程做回滚位置补偿
     scrollback_pressure_changed = pyqtSignal(int)  # 回滚历史"卡顿压力"等级变化（0 无 / 1 琥珀 / 2 红）
     _reflow_finished = pyqtSignal(int, float)  # 后台 reflow 完成（行数, 毫秒）：worker 线程 marshal 回 GUI 收尾
+    _search_finished = pyqtSignal(int, object)  # 后台全历史搜索完成（序号, 匹配列表）
 
     # scrollback 压力：用"预测 reflow 耗时 = 历史行数 × 实测每行毫秒"判定，超阈值才提示，
     # 因此内容窄 / 机器快时即使顶到上限也不会误亮（避免按行数比例造成的常驻红点）。
@@ -360,6 +378,7 @@ class TerminalWidget(TerminalRenderMixin, QWidget):
     _ASYNC_REFLOW_ENABLED = os.environ.get('STELLAR_SYNC_REFLOW', '0') != '1'
     _reflow_executor = None            # 全类共享的单线程 executor（懒创建）
     _reflow_executor_lock = threading.Lock()
+    _search_executor = None            # 全历史搜索的单线程 executor（懒创建，与 reflow 分开排队）
 
     # 是否在后端读取线程上直接解析（feed），而不是 marshal 到 GUI 线程。
     # 默认 True（2026-07 起）：多个终端的 pyte 解析在各自读取线程并行，
@@ -443,6 +462,8 @@ class TerminalWidget(TerminalRenderMixin, QWidget):
     # 防止 Linux 上 shell 发送的 OSC 序列中的数字泄漏到显示缓冲区
     _RE_OSC_OTHER = re.compile(r'\x1b\]\d+;[^\x07\x1b]*(?:\x07|\x1b\\)')
     _RE_DA_QUERY = re.compile(r'\x1b\[0?c')
+    _RE_DA2_QUERY = re.compile(r'\x1b\[>0?c')        # Secondary DA 查询
+    _RE_XTVERSION_QUERY = re.compile(r'\x1b\[>\d*q')  # XTVERSION 查询
     # DCS (Device Control String): \x1bP ... ST — pyte 不支持，内容会泄漏到显示缓冲区
     # APC (Application Program Command): \x1b_ ... ST
     # PM (Privacy Message): \x1b^ ... ST
@@ -495,6 +516,11 @@ class TerminalWidget(TerminalRenderMixin, QWidget):
         # 用可重入锁(RLock)：同线程内嵌套读取(render→helper)不会自锁；后续把 feed
         # 挪到读取线程时，这把锁即提供真正的互斥。
         self._screen_lock = threading.RLock()
+        # 显示路径用的历史行数缓存：异步 reflow worker 持锁期间滚动条/滚轮
+        # 不必在锁上等（见 _get_history_count）
+        self._history_count_cached = 0
+        # 手势期间的历史快照（仅 GUI 线程，见 _history_gesture）
+        self._gesture_history = None
 
         # scrollback 压力指示：实测每行 reflow 毫秒（首次 resize 前用保守默认），
         # 与当前严重度等级。预测耗时 = 历史行数 × _reflow_ms_per_line。
@@ -504,6 +530,7 @@ class TerminalWidget(TerminalRenderMixin, QWidget):
         self._reflow_scaling = False    # paintEvent 是否走"旧缓存贴图"模式
         self._pending_shrink_rows = False  # 行数变小待处理（收尾时提示符归顶）
         self._reflow_finished.connect(self._on_reflow_finished)
+        self._search_finished.connect(self._on_search_finished)
         self._scrollback_level = 0
         self._scrollback_dot_btn = None  # 右上角"清空 scrollback"指示点（懒创建）
         self._scrollback_dot_shown_level = 0  # 指示点当前已渲染的等级（避免每帧重设样式）
@@ -752,6 +779,8 @@ class TerminalWidget(TerminalRenderMixin, QWidget):
         self._search_current_color = QColor(255, 165, 0, 180)  # 当前匹配项橙色
         # 全历史搜索：输入防抖 + 历史行文本提取缓存
         self._search_pending_text = ""
+        self._search_seq = 0            # 每次发起搜索 +1；worker 结果带回序号，过期即丢
+        self._search_cache_lock = threading.Lock()  # _search_line_cache 由 worker 写、GUI 清
         self._search_debounce_timer = QTimer()
         self._search_debounce_timer.setSingleShot(True)
         self._search_debounce_timer.timeout.connect(self._perform_search)
@@ -1078,6 +1107,7 @@ class TerminalWidget(TerminalRenderMixin, QWidget):
                 _t0 = time.perf_counter()
                 self.screen.resize(self.term_rows, self.term_cols)
                 reflow_ms = (time.perf_counter() - _t0) * 1000.0
+                self._history_count_cached = self._history_count_locked()
             self._finish_reflow(reflow_lines, reflow_ms)
 
     def _finish_reflow(self, reflow_lines: int, reflow_ms: float):
@@ -1094,7 +1124,8 @@ class TerminalWidget(TerminalRenderMixin, QWidget):
         # - 全历史搜索缓存按 id(line) 钉住旧行对象，全部失效，主动清空
         # - 回滚浏览位置 clamp 到新历史范围
         self._render_epoch += 1
-        self._search_line_cache.clear()
+        with self._search_cache_lock:
+            self._search_line_cache.clear()
         if self.scroll_offset > 0:
             self.scroll_offset = min(self.scroll_offset, self._get_history_count())
 
@@ -1148,6 +1179,7 @@ class TerminalWidget(TerminalRenderMixin, QWidget):
                     _t0 = time.perf_counter()
                     self.screen.resize(rows, cols)
                     reflow_ms = (time.perf_counter() - _t0) * 1000.0
+                self._history_count_cached = self._history_count_locked()
         except Exception:
             logger.exception("[Terminal] async reflow failed")
         finally:
@@ -1319,8 +1351,12 @@ class TerminalWidget(TerminalRenderMixin, QWidget):
             command: 要执行的命令
             cwd: 工作目录，如果为None则使用当前进程的工作目录
         """
-        if self._backend is not None and self._backend.is_running:
-            return
+        if self._backend is not None:
+            if self._backend.is_running:
+                return
+            # 已退出的旧后端：先 stop() 释放 master fd 与信号桥，否则每次
+            # "退出 → 再启动"都泄漏一个 fd（旧实例从未被清理）
+            self.stop_process()
 
         # 更新终端大小
         self._update_terminal_size()
@@ -1368,59 +1404,74 @@ class TerminalWidget(TerminalRenderMixin, QWidget):
             self._signal_bridge = None
 
     def _on_output(self, data: bytes):
-        """处理输出数据"""
+        """处理输出数据（读取线程或 GUI 线程，取决于 PARSE_ON_READER_THREAD）"""
         try:
             text = self._utf8_decoder.decode(data)
+            self._process_output_text(text)
+        except Exception as e:
+            logger.exception(f"Output error: {e}")
 
-            # ssh 密码提示一次性自动回填（Remote 面板里已输入过该主机密码）
-            if getattr(self, '_pending_ssh_password', None):
-                self._maybe_autofill_password(text)
+    def _process_output_text(self, text: str):
+        """过滤/应答终端查询并 feed 进 pyte。
 
-            # 发送原始输出信号（只有启用 API 服务器时才发射）
-            if self._api_output_enabled:
-                self.raw_output_received.emit(text)
-
-            # 诊断捕获：记录过滤前的原始文本
-            if self._debug_capture_enabled and self._debug_capture_file:
-                from datetime import datetime
-                ts = datetime.now().strftime('%H:%M:%S.%f')[:12]
-                self._debug_capture_file.write(f"\n{'='*60}\n")
-                self._debug_capture_file.write(f"[{ts}] RAW ({len(text)} chars):\n")
-                self._debug_capture_file.write(repr(text) + '\n')
-
-            # 响应光标位置查询 (DSR - Device Status Report)
-            # 当应用发送 \x1b[6n 时，终端应回复 \x1b[{row};{col}R
-            if '\x1b[6n' in text:
+        DSR（\x1b[6n）要按查询点**之前**已上屏的内容作答：把前缀先走完整条
+        流水线 feed 进去，再读光标回复，再处理剩余部分。以前用 feed 之前的
+        光标位置作答，"…text\x1b[6n" 同块到达时答的是旧行列，依赖 DSR 定位的
+        TUI（zsh/fish 提示框架、部分 Ink 应用）会错位。
+        """
+        if '\x1b[6n' in text:
+            head, _sep, tail = text.partition('\x1b[6n')
+            if head:
+                self._process_output_text(head)
+            with self._screen_lock:
                 row = self.screen.cursor.y + 1  # 1-based
                 col = self.screen.cursor.x + 1  # 1-based
-                response = f'\x1b[{row};{col}R'
-                self._write_to_backend(response.encode())
-                # 移除查询序列，不需要显示
-                text = text.replace('\x1b[6n', '')
+            self._write_to_backend(f'\x1b[{row};{col}R'.encode())
+            if not tail:
+                return
+            if '\x1b[6n' in tail:
+                self._process_output_text(tail)
+                return
+            text = tail
 
+        # ssh 密码提示一次性自动回填（Remote 面板里已输入过该主机密码）
+        if getattr(self, '_pending_ssh_password', None):
+            self._maybe_autofill_password(text)
+
+        # 发送原始输出信号（只有启用 API 服务器时才发射）
+        if self._api_output_enabled:
+            self.raw_output_received.emit(text)
+
+        # 诊断捕获：记录过滤前的原始文本
+        if self._debug_capture_enabled and self._debug_capture_file:
+            from datetime import datetime
+            ts = datetime.now().strftime('%H:%M:%S.%f')[:12]
+            self._debug_capture_file.write(f"\n{'='*60}\n")
+            self._debug_capture_file.write(f"[{ts}] RAW ({len(text)} chars):\n")
+            self._debug_capture_file.write(repr(text) + '\n')
+
+        # 没有 ESC 的纯文本块（大多数输出）直接跳过下面十几趟正则全扫
+        if '\x1b' in text:
             # 响应设备属性查询 (DA - Device Attributes)
             # \x1b[c 或 \x1b[0c 查询终端类型
             if '\x1b[c' in text or '\x1b[0c' in text:
                 # 回复为 VT220 兼容终端
-                response = '\x1b[?62;c'
-                self._write_to_backend(response.encode())
+                self._write_to_backend(b'\x1b[?62;c')
                 text = self._RE_DA_QUERY.sub('', text)
 
             # 响应 Secondary DA 查询 (\x1b[>c 或 \x1b[>0c)
             # Claude Code / Ink 用此检测终端类型和版本来决定渲染模式。
             # 不回复会导致超时→回退到精简布局（无 box-drawing 边框）。
-            if re.search(r'\x1b\[>0?c', text):
+            if self._RE_DA2_QUERY.search(text):
                 # 回复为 VT520 兼容 (65), 版本 100
-                response = '\x1b[>65;100;0c'
-                self._write_to_backend(response.encode())
+                self._write_to_backend(b'\x1b[>65;100;0c')
 
             # 响应 XTVERSION 查询 (\x1b[>q 或 \x1b[>0q)
             # XTVERSION 标准允许省略参数（默认 0），codex 用的 ratatui/crossterm
             # 走的就是裸 \x1b[>q 形式。Pp 任意数字都视为 XTVERSION 请求。
             # 不回复 → 上层 TUI 超时 → 降级渲染（box-drawing 边框丢失等症状）
-            if re.search(r'\x1b\[>\d*q', text):
-                response = '\x1bP>|SmartTerminal(1.0)\x1b\\'
-                self._write_to_backend(response.encode())
+            if self._RE_XTVERSION_QUERY.search(text):
+                self._write_to_backend(b'\x1bP>|SmartTerminal(1.0)\x1b\\')
 
             # 响应 DSR 操作状态查询 (\x1b[5n) — 回复 "OK"
             # crossterm 等库会用此查询来确认终端就绪
@@ -1441,13 +1492,14 @@ class TerminalWidget(TerminalRenderMixin, QWidget):
             text = self._RE_OSC_TITLE.sub('', text)         # OSC 0,1,2 标题
             text = self._RE_OSC_OTHER.sub('', text)         # 其他 OSC 序列 (7, 133 等)
 
-            # 终端响铃（BEL）：Claude Code / CLI 完成一轮或需要注意时常会响铃。
-            # 此时 OSC 序列里作为终止符的 BEL 已被上面剥掉，残留的 \x07 即真正的响铃。
-            # 响铃视为"需要用户操作"→ 发 interaction_requested，即使是正在看的
-            # 活动终端也点亮导航绿点（用户要求：需要指令时必提示，避免错过）。
-            if '\x07' in text:
-                self.interaction_requested.emit()
+        # 终端响铃（BEL）：Claude Code / CLI 完成一轮或需要注意时常会响铃。
+        # 此时 OSC 序列里作为终止符的 BEL 已被上面剥掉，残留的 \x07 即真正的响铃。
+        # 响铃视为"需要用户操作"→ 发 interaction_requested，即使是正在看的
+        # 活动终端也点亮导航绿点（用户要求：需要指令时必提示，避免错过）。
+        if '\x07' in text:
+            self.interaction_requested.emit()
 
+        if '\x1b' in text:
             # pyte 不支持的字符串序列（内容会泄漏到显示缓冲区）
             text = self._RE_DCS.sub('', text)               # DCS 设备控制字符串
             text = self._RE_APC.sub('', text)               # APC 应用程序命令
@@ -1461,69 +1513,70 @@ class TerminalWidget(TerminalRenderMixin, QWidget):
             if '\x1b[?1000l' in text or '\x1b[?1002l' in text or '\x1b[?1003l' in text or '\x1b[?1006l' in text:
                 self._mouse_mode = False
 
-            # 仅过滤纯噪声：UTF-8 解码失败产生的替换字符（不是程序真正输出的内容）
-            # 注意：不要过滤可显示的 Unicode 符号（如 ⏺ U+23FA），否则 codex /
-            # claude code 这类用 BMP 符号做行首/状态标记的工具会丢失关键信息。
+        # 仅过滤纯噪声：UTF-8 解码失败产生的替换字符（不是程序真正输出的内容）
+        # 注意：不要过滤可显示的 Unicode 符号（如 ⏺ U+23FA），否则 codex /
+        # claude code 这类用 BMP 符号做行首/状态标记的工具会丢失关键信息。
+        if '\uFFFD' in text:
             text = text.replace('\uFFFD', '')  # � (替换字符)
 
-            # 输出规则提醒：命中 Traceback/FAILED 等模式 → 标签橙点+导航提醒
-            if text and self.ALERT_RULES_ENABLED and self._ALERT_COMPILED:
-                try:
-                    self._scan_output_alerts(text)
-                except Exception:
-                    logger.debug("_scan_output_alerts: suppressed exception", exc_info=True)
+        # 输出规则提醒：命中 Traceback/FAILED 等模式 → 标签橙点+导航提醒
+        if text and self.ALERT_RULES_ENABLED and self._ALERT_COMPILED:
+            try:
+                self._scan_output_alerts(text)
+            except Exception:
+                logger.debug("_scan_output_alerts: suppressed exception", exc_info=True)
 
-            # 诊断捕获：记录过滤后的文本
-            if self._debug_capture_enabled and self._debug_capture_file:
-                self._debug_capture_file.write(f"FILTERED ({len(text)} chars):\n")
-                self._debug_capture_file.write(repr(text) + '\n')
-                self._debug_capture_file.flush()
+        # 诊断捕获：记录过滤后的文本
+        if self._debug_capture_enabled and self._debug_capture_file:
+            self._debug_capture_file.write(f"FILTERED ({len(text)} chars):\n")
+            self._debug_capture_file.write(repr(text) + '\n')
+            self._debug_capture_file.flush()
 
-            # feed 及其直接依赖的历史行数读取在锁内完成，保证与跨线程读取者
-            # （openai_server worker）互斥，不会读到 mutate 到一半的屏幕。
-            with self._screen_lock:
-                # 记录 feed 前的历史行数，用于滚动位置稳定化
-                old_total = self.screen._total_history_lines
+        # feed 及其直接依赖的历史行数读取在锁内完成，保证与跨线程读取者
+        # （openai_server worker）互斥，不会读到 mutate 到一半的屏幕。
+        with self._screen_lock:
+            # 记录 feed 前的历史行数，用于滚动位置稳定化
+            old_total = self.screen._total_history_lines
 
-                # 送入pyte处理（带错误恢复）
-                try:
-                    self.stream.feed(text)
-                except Exception as feed_err:
-                    # pyte 处理异常时尝试逐字符恢复，避免丢失整块数据
-                    logger.warning(f"[Terminal] stream.feed error: {feed_err}, attempting char-by-char recovery")
-                    if self._debug_capture_enabled and self._debug_capture_file:
-                        self._debug_capture_file.write(f"FEED ERROR: {feed_err}\n")
-                    for ch in text:
-                        try:
-                            self.stream.feed(ch)
-                        except Exception:
-                            logger.debug("_on_output: suppressed exception", exc_info=True)
+            # 送入pyte处理（带错误恢复）
+            try:
+                self.stream.feed(text)
+            except Exception as feed_err:
+                # pyte 处理异常时尝试逐字符恢复，避免丢失整块数据
+                logger.warning(f"[Terminal] stream.feed error: {feed_err}, attempting char-by-char recovery")
+                if self._debug_capture_enabled and self._debug_capture_file:
+                    self._debug_capture_file.write(f"FEED ERROR: {feed_err}\n")
+                for ch in text:
+                    try:
+                        self.stream.feed(ch)
+                    except Exception:
+                        logger.debug("_on_output: suppressed exception", exc_info=True)
 
-                new_total = self.screen._total_history_lines
-                lines_added = new_total - old_total
+            new_total = self.screen._total_history_lines
+            lines_added = new_total - old_total
+            # 顺手刷新显示用的历史行数缓存（len() 一次，几乎免费）
+            self._history_count_cached = self._history_count_locked()
 
-            # 滚动位置稳定化：用户回滚浏览时新输出不应让显示内容跳动。补偿逻辑
-            # 改 scroll_offset，而 scroll_offset 由 GUI 线程独占读写——读取线程
-            # 经信号 marshal 回 GUI 执行（同线程直连、跨线程排队），避免并发改。
-            # 常见情形（在底部 scroll_offset==0）不发信号，零开销。
-            if lines_added > 0 and self.scroll_offset > 0:
-                self._history_grew.emit(lines_added)
+        # 滚动位置稳定化：用户回滚浏览时新输出不应让显示内容跳动。补偿逻辑
+        # 改 scroll_offset，而 scroll_offset 由 GUI 线程独占读写——读取线程
+        # 经信号 marshal 回 GUI 执行（同线程直连、跨线程排队），避免并发改。
+        # 常见情形（在底部 scroll_offset==0）不发信号，零开销。
+        if lines_added > 0 and self.scroll_offset > 0:
+            self._history_grew.emit(lines_added)
 
-            # 标记内容已变化，让定时器统一处理重绘（避免高频输出时的重绘风暴）
-            self._content_dirty = True
+        # 标记内容已变化，让定时器统一处理重绘（避免高频输出时的重绘风暴）
+        self._content_dirty = True
 
-            # 缓冲输出，由定时器统一发送（避免高频输出时的信号风暴）
-            with self._output_buffer_lock:
-                self._output_buffer.append(text)
+        # 缓冲输出，由定时器统一发送（避免高频输出时的信号风暴）
+        with self._output_buffer_lock:
+            self._output_buffer.append(text)
 
-            # 记录输出活动并重置空闲计时器：停顿超过阈值即视为本轮执行完毕。
-            # _activity_idle_timer 是 QTimer，只能在 GUI 线程操作；当本方法跑在读取
-            # 线程时(PARSE_ON_READER_THREAD)，经 _output_activity 信号 marshal 回 GUI。
-            # 同线程发射时是直连(等价于原地调用)，无额外延迟。
-            if text:
-                self._output_activity.emit(len(text))
-        except Exception as e:
-            logger.exception(f"Output error: {e}")
+        # 记录输出活动并重置空闲计时器：停顿超过阈值即视为本轮执行完毕。
+        # _activity_idle_timer 是 QTimer，只能在 GUI 线程操作；当本方法跑在读取
+        # 线程时(PARSE_ON_READER_THREAD)，经 _output_activity 信号 marshal 回 GUI。
+        # 同线程发射时是直连(等价于原地调用)，无额外延迟。
+        if text:
+            self._output_activity.emit(len(text))
 
     def _on_output_activity(self, n: int):
         """GUI 线程：标记有输出活动并重置“执行完毕”空闲计时器。"""
@@ -1829,6 +1882,23 @@ class TerminalWidget(TerminalRenderMixin, QWidget):
         """获取屏幕历史（避免重复 hasattr 检查）"""
         return getattr(self.screen, 'history', None)
 
+    @contextmanager
+    def _history_snapshot_scope(self):
+        """手势级历史快照：作用域内 _get_history_top() 复用同一份拷贝。
+
+        只在 GUI 线程生效（快照存放在实例上，跨线程读取者仍各自持锁拷贝）；
+        嵌套进入直接复用外层快照。
+        """
+        if (self._gesture_history is not None
+                or threading.current_thread() is not threading.main_thread()):
+            yield
+            return
+        self._gesture_history = self._get_history_top()
+        try:
+            yield
+        finally:
+            self._gesture_history = None
+
     def _get_history_top(self):
         """获取历史记录顶部的【快照列表】（备用屏幕不显示主屏历史）。
 
@@ -1836,7 +1906,11 @@ class TerminalWidget(TerminalRenderMixin, QWidget):
         feed（未来在读取线程）追加/淘汰会移动元素、令调用方迭代时索引错位甚至越界。
         拷贝是浅拷贝——行对象本身不变（历史里的旧行 pyte 不再 mutate，id 稳定，
         软换行判定仍有效），只把 deque 的并发变动隔离掉。持锁拍快照。
+        手势作用域内（_history_gesture）直接返回已拍的快照，不再拷贝。
         """
+        snap = self._gesture_history
+        if snap is not None and threading.current_thread() is threading.main_thread():
+            return snap
         with self._screen_lock:
             if self.screen._in_alt_screen:
                 return []
@@ -1860,15 +1934,30 @@ class TerminalWidget(TerminalRenderMixin, QWidget):
                 return []
             return list(itertools.islice(history.top, start, stop))
 
+    def _history_count_locked(self) -> int:
+        """历史行数（显示语义：备用屏幕为 0）。调用方须持 _screen_lock。"""
+        if self.screen._in_alt_screen:
+            return 0
+        history = self._screen_history
+        return len(history.top) if history else 0
+
     def _get_history_count(self) -> int:
-        """获取历史记录行数（避免重复 hasattr 检查）
-        备用屏幕上不显示主屏幕的历史记录。
+        """获取历史记录行数（显示语义：备用屏幕上不显示主屏幕的历史记录）。
+
+        非阻塞：锁空闲时精确计算并刷新缓存；锁被别的线程持有（典型：异步
+        reflow worker 持锁 100~200ms）时直接返回上次缓存值。滚动条重绘、
+        滚轮、dirty tick 都走这里，以前会在锁上排队，把"异步化后全程不冻结"
+        的承诺打回原形。缓存在 feed / reflow / 清空历史处顺手刷新。
         """
-        with self._screen_lock:
-            if self.screen._in_alt_screen:
-                return 0
-            history = self._screen_history
-            return len(history.top) if history else 0
+        lock = self._screen_lock
+        if not lock.acquire(blocking=False):
+            return self._history_count_cached
+        try:
+            n = self._history_count_locked()
+            self._history_count_cached = n
+            return n
+        finally:
+            lock.release()
 
     def _raw_history_count(self) -> int:
         """真实历史行数——不做备用屏幕掩蔽。
@@ -1896,7 +1985,9 @@ class TerminalWidget(TerminalRenderMixin, QWidget):
         with self._screen_lock:
             screen.clear_scrollback()
             self.scroll_offset = 0
-        self._search_line_cache.clear()
+            self._history_count_cached = self._history_count_locked()
+        with self._search_cache_lock:
+            self._search_line_cache.clear()
         self._invalidate_render_cache()
         self._update_scrollback_level()  # 历史归零 → 压力等级降回 0，指示点消失
 
@@ -3554,6 +3645,18 @@ class TerminalWidget(TerminalRenderMixin, QWidget):
             self._output_buffer_timer.deleteLater()
             self._output_buffer_timer = None
 
+        # resize 防抖与"执行完毕"空闲计时器：不停的话销毁后仍会触发
+        # _do_resize_update → 给已清理的 widget 提交 reflow 任务
+        for name in ('_resize_timer', '_activity_idle_timer'):
+            timer = getattr(self, name, None)
+            if timer is not None:
+                try:
+                    timer.stop()
+                except RuntimeError:
+                    pass
+        # 在途的搜索 worker 结果作废
+        self._search_seq += 1
+
         # 刷新并清空输出缓冲区
         if hasattr(self, '_output_buffer') and self._output_buffer:
             self._flush_output_buffer()
@@ -3570,7 +3673,8 @@ class TerminalWidget(TerminalRenderMixin, QWidget):
             self._search_debounce_timer.deleteLater()
             self._search_debounce_timer = None
         if hasattr(self, '_search_line_cache'):
-            self._search_line_cache.clear()
+            with self._search_cache_lock:
+                self._search_line_cache.clear()
 
         # 清空缓存
         if hasattr(self, '_color_cache'):
@@ -4239,7 +4343,9 @@ if (hasFileURL) {{
             self._search_debounce_timer.stop()
             self._search_matches = []
             self._current_match_index = -1
-            self._search_line_cache.clear()  # 释放被钉住的历史行引用
+            self._search_seq += 1  # 在途的 worker 结果作废
+            with self._search_cache_lock:
+                self._search_line_cache.clear()  # 释放被钉住的历史行引用
             self.setFocus()
             self.update()
 
@@ -4333,16 +4439,18 @@ if (hasFileURL) {{
 
         self._search_debounce_timer.start(300)
 
-    def _extract_search_line(self, buffer_line) -> tuple:
+    def _extract_search_line(self, buffer_line, columns: int = None) -> tuple:
         """提取单行用于搜索的 (text, col_map)。
 
         text 中宽字符只占 1 个字符（跳过 pyte 的 stub 格），col_map[i] 为
         text[i] 对应的 buffer 列号，用于把匹配的字符串下标映射回高亮列区间。
+        columns 显式传入时不碰 self.screen（worker 线程调用）。
         """
         # 完全空行（无任何已写入格子）直接短路，避免 2 万行历史逐格扫描
         if not buffer_line:
             return "", ()
-        columns = self.screen.columns
+        if columns is None:
+            columns = self.screen.columns
         try:
             columns = max(columns, max(buffer_line.keys()) + 1)
         except (ValueError, AttributeError, TypeError):
@@ -4368,9 +4476,28 @@ if (hasFileURL) {{
                 col += 1
         return ''.join(chars), tuple(cols)
 
+    @classmethod
+    def _get_search_executor(cls):
+        """全类共享的搜索单线程 executor（懒创建）。与 reflow 分开排队：
+        一次几万行的搜索不该把窗口缩放的 reflow 卡在后面。"""
+        with cls._reflow_executor_lock:
+            if cls._search_executor is None:
+                from concurrent.futures import ThreadPoolExecutor
+                cls._search_executor = ThreadPoolExecutor(
+                    max_workers=1, thread_name_prefix='search')
+            return cls._search_executor
+
     def _perform_search(self):
-        """执行全量搜索：全部 history 行 + 当前屏幕行（匹配为搜索时刻的快照）"""
+        """发起全量搜索：全部 history 行 + 当前屏幕行（匹配为搜索时刻的快照）。
+
+        逐格提取 + 匹配是纯 Python 循环，2 万行 × 120 列就是数百万次迭代，
+        以前在 GUI 线程同步跑，搜索一次冻结秒级。现在：GUI 线程持锁拍快照
+        （历史行列表 + 当前屏幕行的提取结果），匹配交给 worker，结果经
+        _search_finished 回 GUI；期间查询变了（序号不符）结果直接丢弃。
+        """
         text = self._search_pending_text
+        self._search_seq += 1
+        seq = self._search_seq
         self._search_matches = []
         self._current_match_index = -1
 
@@ -4379,13 +4506,44 @@ if (hasFileURL) {{
             self.update()
             return
 
-        # 限制搜索结果数量，防止内存暴涨
-        MAX_SEARCH_RESULTS = 5000
+        history = self._get_history_top()
+        with self._screen_lock:
+            columns = self.screen.columns
+            buffer = self.screen.buffer
+            # 当前屏幕行可变：提取必须在锁内完成；历史行已冻结，交给 worker
+            screen_lines = [
+                self._extract_search_line(buffer[row], columns)
+                for row in range(self.term_rows)
+            ]
+        TerminalWidget._get_search_executor().submit(
+            self._search_worker, seq, text, history, screen_lines, columns,
+            self.term_rows, self.scroll_offset)
 
+    # 限制搜索结果数量，防止内存暴涨
+    _MAX_SEARCH_RESULTS = 5000
+
+    def _search_worker(self, seq, text, history, screen_lines, columns,
+                       term_rows, scroll_offset):
+        """后台线程：在快照上匹配，结果带序号发回 GUI。"""
+        matches = []
+        try:
+            matches = self._match_search_snapshot(
+                text, history, screen_lines, columns,
+                lambda: self._search_seq != seq)
+        except Exception:
+            logger.exception("[Terminal] search worker failed")
+        try:
+            self._search_finished.emit(seq, matches)
+        except RuntimeError:
+            pass  # widget 已销毁
+
+    def _match_search_snapshot(self, text, history, screen_lines, columns,
+                               is_stale) -> list:
         search_lower = text.lower()
         qlen = len(search_lower)
         is_wide = self._is_wide_char
-        matches = self._search_matches
+        matches = []
+        limit = self._MAX_SEARCH_RESULTS
 
         def find_in_line(line_text, col_map, abs_row):
             line_lower = line_text.lower()
@@ -4400,48 +4558,55 @@ if (hasFileURL) {{
                 start_col = col_map[idx]
                 end_col = col_map[last_i] + (2 if is_wide(line_text[last_i]) else 1)
                 matches.append((abs_row, start_col, end_col - start_col))
-                if len(matches) >= MAX_SEARCH_RESULTS:
+                if len(matches) >= limit:
                     return
                 pos = idx + 1
 
         # 1) 历史行：行对象推入历史后内容不再变化，可按 id 缓存提取结果。
         #    缓存值中保留行对象引用，钉住对象保证 id 在缓存有效期内不被复用。
         cache = self._search_line_cache
-        history = self._get_history_top()
+        cache_lock = self._search_cache_lock
         for abs_row, line in enumerate(history):
+            if (abs_row & 1023) == 0 and is_stale():
+                return []
             key = id(line)
-            cached = cache.get(key)
-            if cached is not None and cached[0] is line:
-                cache.move_to_end(key)
-                line_text, col_map = cached[1], cached[2]
-            else:
-                line_text, col_map = self._extract_search_line(line)
-                cache[key] = (line, line_text, col_map)
-                if len(cache) > self._SEARCH_LINE_CACHE_MAX:
-                    cache.popitem(last=False)
+            with cache_lock:
+                cached = cache.get(key)
+                if cached is not None and cached[0] is line:
+                    cache.move_to_end(key)
+                    line_text, col_map = cached[1], cached[2]
+                    cached_hit = True
+                else:
+                    cached_hit = False
+            if not cached_hit:
+                line_text, col_map = self._extract_search_line(line, columns)
+                with cache_lock:
+                    cache[key] = (line, line_text, col_map)
+                    if len(cache) > self._SEARCH_LINE_CACHE_MAX:
+                        cache.popitem(last=False)
             if line_text:
                 find_in_line(line_text, col_map, abs_row)
-                if len(matches) >= MAX_SEARCH_RESULTS:
-                    break
+                if len(matches) >= limit:
+                    return matches
 
-        # 2) 当前屏幕行（可变，不缓存）。读取线程的 feed 会并发改这些行
-        #    dict，提取必须持锁；历史行已冻结，上面那段不需要。
+        # 2) 当前屏幕行（已在 GUI 线程持锁提取好）
         history_count = len(history)
-        if len(matches) < MAX_SEARCH_RESULTS:
-            with self._screen_lock:
-                buffer = self.screen.buffer
-                screen_lines = [
-                    self._extract_search_line(buffer[row])
-                    for row in range(self.term_rows)
-                ]
-            for row, (line_text, col_map) in enumerate(screen_lines):
-                if line_text:
-                    find_in_line(line_text, col_map, history_count + row)
-                    if len(matches) >= MAX_SEARCH_RESULTS:
-                        break
+        for row, (line_text, col_map) in enumerate(screen_lines):
+            if line_text:
+                find_in_line(line_text, col_map, history_count + row)
+                if len(matches) >= limit:
+                    break
+        return matches
 
+    def _on_search_finished(self, seq: int, matches: list):
+        """GUI 线程：worker 结果到达。序号过期（查询已变/搜索栏已关）则丢弃。"""
+        if seq != self._search_seq or getattr(self, '_cleaned_up', False):
+            return
+        self._search_matches = matches
+        self._current_match_index = -1
         if matches:
             # 初始选中：离当前可见区域中心最近的匹配，避免每次都跳到最顶部
+            history_count = self._get_history_count()
             total_lines = history_count + self.term_rows
             display_start = max(0, total_lines - self.term_rows - self.scroll_offset)
             center = display_start + self.term_rows // 2
@@ -4501,7 +4666,9 @@ if (hasFileURL) {{
         """更新匹配计数标签"""
         total = len(self._search_matches)
         current = self._current_match_index + 1 if total > 0 else 0
-        self._match_label.setText(f"{current}/{total}")
+        label = getattr(self, '_match_label', None)
+        if label is not None:
+            label.setText(f"{current}/{total}")
 
     # ==================== 字体缩放 ====================
 
@@ -4563,6 +4730,7 @@ if (hasFileURL) {{
         except Exception:
             return False
 
+    @_history_gesture
     def _local_wrap_width(self, abs_row: int) -> int:
         """估算 abs_row 所在「连续非空、非软换行行块」的应用层折行宽度（块内最大内容列+1）。
 
@@ -4612,6 +4780,7 @@ if (hasFileURL) {{
     # 所以三击 /home/huangqiliang 或 huangqiliang@host 只选中其中一个 huangqiliang。
     _WORD_CHARS_NARROW = set('abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789_')
 
+    @_history_gesture
     def _select_word_at(self, cell: tuple, word_chars: set = None):
         """选中指定位置的单词。
 
@@ -4687,6 +4856,7 @@ if (hasFileURL) {{
         self._selection_end = (end_row, end_col)
         self._is_selecting = False
 
+    @_history_gesture
     def _select_line_at(self, cell: tuple):
         """选中整条逻辑行。
 
@@ -4749,6 +4919,7 @@ if (hasFileURL) {{
 
     # ==================== URL检测和打开 ====================
 
+    @_history_gesture
     def _get_url_at_pos(self, cell: tuple) -> str:
         """获取指定位置的URL
 
@@ -4876,19 +5047,6 @@ if (hasFileURL) {{
                 if shutil.which(shell):
                     return shell
             return 'sh'
-
-    def _execute_command(self, command: str):
-        """执行单个命令"""
-        if self._backend is None or not self._backend.is_running:
-            # 终端未运行，先启动终端再执行命令
-            self._start_and_execute([command])
-            return
-        # 发送命令并加换行
-        data = (command + '\n').encode('utf-8')
-        if self._write_to_backend(data):
-            # 记录输入
-            if command.strip():
-                self.input_recorded.emit(command)
 
     def _execute_commands(self, commands: list):
         """执行多个命令（依次执行）"""

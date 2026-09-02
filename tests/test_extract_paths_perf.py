@@ -58,6 +58,7 @@ class TestExtractPathsPerformance(unittest.TestCase):
             entry = sm.add_input(f"{blob} {real}")
             self.assertEqual(entry.files, [])  # 录入时跳过
             sm.end_session()
+            sm.flush()  # 补提取在后台线程完成
             self.assertIn(real, entry.files)
         finally:
             sm._save_executor.shutdown(wait=False)

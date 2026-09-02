@@ -256,22 +256,44 @@ class SessionManager:
         return entry
 
     def end_session(self) -> Optional[Session]:
-        """结束当前会话并保存"""
-        if not self.current_session:
+        """结束当前会话；路径补提取与落盘在后台线程完成。
+
+        以前在调用线程（GUI）同步对全部条目跑 extract_file_paths（会话上限
+        50MB）再 json.dump 整份文件，关掉跑了一整天的 tab 会冻结数秒。
+        现在调用线程只做 to_dict 快照（C 级 join），worker 负责：
+        补齐未提取的 files（同时写回快照 dict 与活的 entry.files——列表
+        赋值是原子的）→ 原子写文件。单 worker executor 保证与在途的
+        auto_save 按提交顺序落盘，旧快照不会覆盖新数据。
+        需要等落盘完成（测试/退出前）调用 flush()。
+        """
+        session = self.current_session
+        if not session:
             return None
 
-        self.current_session.end_time = format_timestamp()
-
-        # 延迟处理：会话结束时统一补齐未提取的文件路径
-        # （输出条目一律延迟；输入条目仅超长的那些延迟，见 _INLINE_PATH_SCAN_MAX）
-        for entry in self.current_session.entries:
-            if not entry.files:
-                entry.files = list(extract_file_paths(entry.content))
-
-        self.save_session(self.current_session)
-        session = self.current_session
+        session.end_time = format_timestamp()
+        data = session.to_dict()
+        # 输出条目一律延迟提取；输入条目仅超长的那些延迟（见 _INLINE_PATH_SCAN_MAX）
+        pending = [(entry, d) for entry, d in zip(session.entries, data['entries'])
+                   if not entry.files]
+        self._last_saved_sig = self._session_signature(session)
+        self._pending_save = self._save_executor.submit(
+            self._finalize_in_background, data, pending, session.session_id)
         self.current_session = None
         return session
+
+    def _finalize_in_background(self, data: dict, pending: list, session_id: str):
+        try:
+            for entry, d in pending:
+                files = list(extract_file_paths(d['content']))
+                d['files'] = files
+                entry.files = files
+            self._write_session_data(data, session_id)
+        except Exception as e:
+            logger.warning(f"session finalize failed: {e}")
+
+    def flush(self, timeout: float = 30.0):
+        """等待在途的后台保存/收尾完成（退出前、测试里用）。"""
+        self._wait_pending_save(timeout)
 
     _SESSION_ID_RE = re.compile(r'^[\w\-]+$')
 
