@@ -59,6 +59,14 @@ class _Base(unittest.TestCase):
         self._panels.append(p)
         return p
 
+    def assertSamePath(self, a, b, msg=None):   # noqa: N802 — 与 unittest 同风格
+        """路径比较必须归一化：Windows 上 Qt 给的是正斜杠长路径，而 Python
+        的 tempfile 给的是反斜杠 + RUNNER~1 这种 8.3 短名，直接比必然不等
+        （CI 上实翻过）。realpath 负责展开短名，normcase 抹平大小写。"""
+        def norm(x):
+            return os.path.normcase(os.path.realpath(str(x))).replace("\\", "/")
+        self.assertEqual(norm(a), norm(b), msg)
+
 
 class TestJunkFilter(_Base):
     def _proxy(self):
@@ -188,8 +196,8 @@ class TestDoubleClickEntersFolder(_Base):
 
         idx = p._proxy.mapFromSource(p.model.index(str(sub)))
         p._on_double_click(idx)
-        self.assertEqual(p._current_path, str(sub),
-                         "双击目录该进到那一层，而不是继续往下展开")
+        self.assertSamePath(p._current_path, sub,
+                            "双击目录该进到那一层，而不是继续往下展开")
 
     def test_double_click_file_still_opens_it(self):
         p = self._panel()
@@ -203,8 +211,9 @@ class TestDoubleClickEntersFolder(_Base):
         p.file_edit_requested.connect(lambda path, line: opened.append(path))
         idx = p._proxy.mapFromSource(p.model.index(str(f)))
         p._on_double_click(idx)
-        self.assertEqual(opened, [str(f)])
-        self.assertEqual(p._current_path, str(root), "打开文件不该换根")
+        self.assertEqual(len(opened), 1)
+        self.assertSamePath(opened[0], f)
+        self.assertSamePath(p._current_path, root, "打开文件不该换根")
 
 
 if __name__ == "__main__":
