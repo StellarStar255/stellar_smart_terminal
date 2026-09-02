@@ -460,6 +460,8 @@ TRANSLATIONS = {
     "explorer.copy_relative_path": {"zh": "复制相对路径", "en": "Copy Relative Path"},
     "explorer.favorite_add": {"zh": "添加到快捷方式", "en": "Add to Shortcuts"},
     "explorer.favorite_remove": {"zh": "从快捷方式移除", "en": "Remove from Shortcuts"},
+    "explorer.favorite_add_current": {"zh": "把当前目录「{name}」添加到快捷方式", "en": "Add Current Folder “{name}” to Shortcuts"},
+    "explorer.favorite_remove_current": {"zh": "把当前目录「{name}」从快捷方式移除", "en": "Remove Current Folder “{name}” from Shortcuts"},
     "explorer.favorites_tooltip": {"zh": "快捷方式（文件夹→切换目录，文件→打开）", "en": "Shortcuts (folder → switch dir, file → open)"},
     "explorer.favorites_empty": {"zh": "（暂无快捷方式）", "en": "(No shortcuts yet)"},
     "explorer.favorites_clear": {"zh": "清空快捷方式", "en": "Clear Shortcuts"},

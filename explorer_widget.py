@@ -31,7 +31,7 @@ from PyQt6.QtWidgets import (
     QToolButton, QSizePolicy,
 )
 from PyQt6.QtCore import (
-    Qt, QDir, QModelIndex, QPersistentModelIndex, pyqtSignal, QTimer,
+    Qt, QDir, QModelIndex, QPersistentModelIndex, pyqtSignal, QTimer, QPoint,
     QEventLoop, QEvent, QSize, QFileInfo, QSortFilterProxyModel,
 )
 from PyQt6.QtGui import (
@@ -376,6 +376,9 @@ class _BreadcrumbBar(QWidget):
 
     path_selected = pyqtSignal(str)
     edit_requested = pyqtSignal()
+    # 右键某一段（或空白处 = 当前目录）：(该段完整路径, 全局坐标)。
+    # 由面板接管弹菜单——"把这个路径加成快捷方式"的入口就在这里。
+    segment_context_requested = pyqtSignal(str, QPoint)
 
     def __init__(self, parent=None):
         super().__init__(parent)
@@ -476,6 +479,12 @@ class _BreadcrumbBar(QWidget):
         # 双击空白处 → 切到可编辑的路径框（手敲路径跳转）
         self.edit_requested.emit()
 
+    def contextMenuEvent(self, event):        # noqa: N802 — Qt 回调
+        # 右键空白处（或分隔符）→ 当前目录的路径菜单
+        if self._path:
+            self.segment_context_requested.emit(self._path, event.globalPos())
+            event.accept()
+
     def resizeEvent(self, event):             # noqa: N802 — Qt 回调
         super().resizeEvent(event)
         self._rebuild()
@@ -514,6 +523,10 @@ class _BreadcrumbBar(QWidget):
                 btn.setText(name)
                 btn.clicked.connect(
                     lambda _=False, pth=full: self.path_selected.emit(pth))
+                btn.setContextMenuPolicy(Qt.ContextMenuPolicy.CustomContextMenu)
+                btn.customContextMenuRequested.connect(
+                    lambda pos, b=btn, pth=full:
+                        self.segment_context_requested.emit(pth, b.mapToGlobal(pos)))
             prev_was_root = bool(name) and name in (os.sep, "/", full)
             last = (i == len(shown) - 1)
             color = self._text if last else self._dim
@@ -917,6 +930,7 @@ class ExplorerPanel(QWidget, explorer_common.TransferJobHost):
         self.breadcrumb.setToolTip(self._current_path)
         self.breadcrumb.path_selected.connect(self.set_root_path)
         self.breadcrumb.edit_requested.connect(self._begin_path_edit)
+        self.breadcrumb.segment_context_requested.connect(self._show_path_context_menu)
 
         # 手敲路径用的输入框：平时藏着，双击面包屑才露出来
         self.path_edit = QLineEdit()
@@ -1866,12 +1880,9 @@ class ExplorerPanel(QWidget, explorer_common.TransferJobHost):
         except Exception as e:
             QMessageBox.warning(self, t("explorer.error"), t("explorer.run_failed", error=e))
 
-    def _show_context_menu(self, position):
-        """显示右键菜单"""
-        index = self.tree_view.indexAt(position)
-
-        menu = QMenu(self)
-        menu.setStyleSheet(f"""
+    def _menu_qss(self) -> str:
+        """右键菜单统一样式（文件树、面包屑路径菜单共用，跟随主题）"""
+        return f"""
             QMenu {{
                 background-color: {self.theme.get('bg_medium', '#16213e')};
                 color: {self.theme.get('text', '#eaeaea')};
@@ -1891,7 +1902,48 @@ class ExplorerPanel(QWidget, explorer_common.TransferJobHost):
                 background-color: {self.theme.get('border', '#3d3d5c')};
                 margin: 4px 10px;
             }}
-        """)
+        """
+
+    def _add_favorite_action(self, menu, path: str, current: bool = False):
+        """往菜单里加"添加到/从快捷方式移除"一项。current=True 用"当前目录"文案。"""
+        name = os.path.basename(path.rstrip(os.sep)) or path
+        if explorer_favorites.is_favorite(path):
+            key = "explorer.favorite_remove_current" if current else "explorer.favorite_remove"
+            act = menu.addAction(t(key, name=name))
+            act.triggered.connect(
+                lambda checked=False, p=path: self._toggle_favorite(p, add=False))
+        else:
+            key = "explorer.favorite_add_current" if current else "explorer.favorite_add"
+            act = menu.addAction(t(key, name=name))
+            act.triggered.connect(
+                lambda checked=False, p=path: self._toggle_favorite(p, add=True))
+        return act
+
+    def _build_path_context_menu(self, path: str) -> QMenu:
+        """面包屑某一段（或当前目录）的右键菜单：收藏 + 复制路径。"""
+        menu = QMenu(self)
+        menu.setStyleSheet(self._menu_qss())
+        self._add_favorite_action(menu, path)
+        menu.addSeparator()
+        copy_action = menu.addAction(t("explorer.copy_path"))
+        copy_action.triggered.connect(lambda checked=False, p=path: self._copy_path(p))
+        return menu
+
+    def _show_path_context_menu(self, path: str, global_pos):
+        menu = self._build_path_context_menu(path)
+        menu.exec(global_pos)
+
+    def _show_context_menu(self, position):
+        """显示右键菜单"""
+        menu = self._build_context_menu(position)
+        menu.exec(QCursor.pos())
+
+    def _build_context_menu(self, position) -> QMenu:
+        """构造文件树右键菜单（不弹出，便于测试）。position 无效 = 空白处。"""
+        index = self.tree_view.indexAt(position)
+
+        menu = QMenu(self)
+        menu.setStyleSheet(self._menu_qss())
 
         if index.isValid():
             file_path = self._proxy.filePath(index)
@@ -1974,14 +2026,7 @@ class ExplorerPanel(QWidget, explorer_common.TransferJobHost):
             menu.addSeparator()
 
             # 快捷方式（收藏）：文件夹点了切换目录、文件点了在编辑器打开（见 ★ 下拉）
-            if explorer_favorites.is_favorite(file_path):
-                fav_action = menu.addAction(t("explorer.favorite_remove"))
-                fav_action.triggered.connect(
-                    lambda checked=False, p=file_path: self._toggle_favorite(p, add=False))
-            else:
-                fav_action = menu.addAction(t("explorer.favorite_add"))
-                fav_action.triggered.connect(
-                    lambda checked=False, p=file_path: self._toggle_favorite(p, add=True))
+            self._add_favorite_action(menu, file_path)
 
             menu.addSeparator()
 
@@ -2023,6 +2068,9 @@ class ExplorerPanel(QWidget, explorer_common.TransferJobHost):
 
             menu.addSeparator()
 
+            # 当前目录本身不是树里的一项，收藏它的入口只能放在这里和面包屑上
+            self._add_favorite_action(menu, self._current_path, current=True)
+
             copy_current_path_action = menu.addAction(t("explorer.copy_current_path"))
             copy_current_path_action.triggered.connect(
                 lambda: self._copy_path(self._current_path)
@@ -2038,7 +2086,7 @@ class ExplorerPanel(QWidget, explorer_common.TransferJobHost):
             refresh_action = menu.addAction(t("explorer.refresh"))
             refresh_action.triggered.connect(self.refresh)
 
-        menu.exec(QCursor.pos())
+        return menu
 
     def _toggle_favorite(self, path: str, add: bool):
         """把文件/文件夹加入或移出快捷方式（收藏）。落盘即生效，跨窗口共享。"""

@@ -282,7 +282,13 @@ class ExplorerPanelMixin:
                 f"{tip} ({n})" if n else tip)
 
     def _show_explorer_favorites_menu(self):
-        """Explorer ★ 按钮：下拉列出所有快捷方式。
+        menu = self._build_explorer_favorites_menu()
+        menu.exec(self._explorer_favorites_btn.mapToGlobal(
+            self._explorer_favorites_btn.rect().bottomLeft()
+        ))
+
+    def _build_explorer_favorites_menu(self):
+        """Explorer ★ 按钮：顶部是"把当前目录添加到快捷方式"，下面列出所有快捷方式。
 
         文件夹 → 切换工作目录（Explorer 根目录随之移动，且不会被后续 cwd 同步撤销）；
         文件 → 在内置编辑器打开。底部可一键清空。
@@ -313,6 +319,13 @@ class ExplorerPanelMixin:
             }
         """)
 
+        # 当前目录的收藏开关放最上面：用户"就在这个目录、想收藏它"时最顺手
+        panel = getattr(self, 'explorer_panel', None)
+        current = getattr(panel, '_current_path', None) if panel is not None else None
+        if current:
+            panel._add_favorite_action(menu, current, current=True)
+            menu.addSeparator()
+
         entries = explorer_favorites.list_all()
         if not entries:
             empty = menu.addAction(t("explorer.favorites_empty"))
@@ -333,9 +346,7 @@ class ExplorerPanelMixin:
             clear_act = menu.addAction(t("explorer.favorites_clear"))
             clear_act.triggered.connect(self._clear_explorer_favorites)
 
-        menu.exec(self._explorer_favorites_btn.mapToGlobal(
-            self._explorer_favorites_btn.rect().bottomLeft()
-        ))
+        return menu
 
     def _open_explorer_favorite(self, path: str):
         """打开一个快捷方式：文件夹切换工作目录，文件在编辑器打开。"""
