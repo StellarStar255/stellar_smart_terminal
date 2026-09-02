@@ -11,6 +11,10 @@
 - 未签名应用的换包不会再触发 Gatekeeper：quarantine 标记只在浏览器等
   声明了 LSFileQuarantineEnabled 的进程下载时添加，应用自身进程下载的
   文件没有该标记；换包脚本再补一次 `xattr -dr` 兜底。
+- 来源与完整性三道闸（2026-09）：下载 URL 必须钉在官方仓库的
+  releases/download/ 下（is_trusted_asset_url）；API 给了 sha256 digest
+  就流式校验（不符即丢弃、不重试）；macOS 解包后与换包脚本里各验一次
+  codesign + Team ID（MAC_TEAM_ID），不是本项目证书签的包一律不装。
 - 解压用 /usr/bin/ditto 而不是 zipfile：后者会丢符号链接和可执行位，
   解出来的 .app 起不来。
 - macOS 打包版一键换包（zip 解包 + 分阶段换装）；Windows 打包版一键
@@ -19,6 +23,8 @@
 - 打包版的版本号来源：mac 读 Info.plist，Windows/Linux 读随包携带的
   pyproject.toml（spec datas 已包含），发版仍零额外维护。
 """
+import hashlib
+import hmac
 import http.client
 import os
 import plistlib
@@ -27,6 +33,7 @@ import ssl
 import subprocess
 import sys
 import tempfile
+import urllib.parse
 import urllib.request
 from pathlib import Path
 
@@ -40,6 +47,86 @@ REPO = "StellarStar255/stellar_smart_terminal"
 LATEST_API = f"https://api.github.com/repos/{REPO}/releases/latest"
 RELEASES_PAGE = f"https://github.com/{REPO}/releases/latest"
 _TIMEOUT = 15
+# 发版签名证书的 Team ID（Developer ID Application: … (3QCL9WNFBB)），与
+# release.yml 的 NOTARY_TEAM_ID 一致；换包前核对它，别人签的包一律不装
+MAC_TEAM_ID = "3QCL9WNFBB"
+# 官方 release 产物的固定路径前缀；下载 URL 不在这下面的一律不碰
+_ASSET_PATH_PREFIX = f"/{REPO}/releases/download/"
+
+
+def is_trusted_asset_url(url) -> bool:
+    """下载 URL 是否钉在官方仓库的 release 产物路径上。
+
+    URL 来自 GitHub API 的响应，而不是我们自己拼的：企业代理 CA、账号被盗
+    后的恶意 release、被劫持的 API 都能改它。这里只认
+    https://github.com/<REPO>/releases/download/…，主机名精确匹配（防
+    github.com.evil / user@ 伪装），路径规范化后不得逃出前缀（防 ..）。
+    只校验起始 URL：github.com 到 objects.githubusercontent.com 的跳转由
+    urllib 在 TLS 下完成，不受 API 响应控制。
+    """
+    if not isinstance(url, str) or not url:
+        return False
+    try:
+        parts = urllib.parse.urlsplit(url)
+    except ValueError:
+        return False
+    if parts.scheme != "https":
+        return False
+    # hostname 已去掉 userinfo 与端口；显式端口一律拒绝（官方 URL 没有）
+    if parts.hostname != "github.com" or parts.port is not None:
+        return False
+    if parts.username is not None or parts.password is not None:
+        return False
+    path = urllib.parse.unquote(parts.path)
+    if "\\" in path:
+        return False
+    normalized = os.path.normpath(path).replace(os.sep, "/")
+    if not normalized.startswith(_ASSET_PATH_PREFIX):
+        return False
+    # 前缀之后必须还有 <tag>/<file>，且任何一段都不是 .. / .
+    rest = normalized[len(_ASSET_PATH_PREFIX):].split("/")
+    if len(rest) < 2 or any(seg in ("", ".", "..") for seg in rest):
+        return False
+    return True
+
+
+_SHA256_HEX = re.compile(r"^[0-9a-f]{64}$")
+
+
+def parse_sha256_digest(digest) -> str | None:
+    """GitHub asset 的 `digest` 字段（'sha256:<hex>'）→ 小写 hex；
+    缺失/不是 sha256/格式不对返回 None（旧 release 没有这个字段，
+    不能因此把升级堵死）。"""
+    if not isinstance(digest, str):
+        return None
+    algo, sep, hexdigest = digest.strip().partition(":")
+    if not sep or algo.lower() != "sha256":
+        return None
+    hexdigest = hexdigest.lower()
+    return hexdigest if _SHA256_HEX.match(hexdigest) else None
+
+
+def verify_mac_app_signature(app_path: str) -> str | None:
+    """解包出的 .app 必须是我们自己签的：codesign 验签通过且 Team ID 匹配。
+    返回 None 表示通过，否则返回可展示的失败原因。codesign 不存在或调用
+    失败一律按不通过处理——这里装的是可执行代码，宁可不升级。"""
+    try:
+        r = subprocess.run(
+            ['/usr/bin/codesign', '--verify', '--deep', '--strict', app_path],
+            capture_output=True, timeout=120)
+        if r.returncode != 0:
+            return ("codesign verification failed: "
+                    + (r.stderr or b'').decode('utf-8', 'replace').strip())
+        r = subprocess.run(
+            ['/usr/bin/codesign', '-dv', '--verbose=2', app_path],
+            capture_output=True, timeout=60)
+        # codesign 把详情打到 stderr；这里 stdout/stderr 都看
+        info = ((r.stdout or b'') + (r.stderr or b'')).decode('utf-8', 'replace')
+        if f"TeamIdentifier={MAC_TEAM_ID}" not in info:
+            return f"unexpected signer (TeamIdentifier != {MAC_TEAM_ID})"
+        return None
+    except Exception as e:
+        return f"codesign unavailable: {e}"
 
 
 def _ssl_context() -> ssl.SSLContext:
@@ -198,15 +285,25 @@ class _IncompleteDownload(Exception):
     """落盘字节数不足权威大小：包被截断，绝不能交给安装器。"""
 
 
+class _DigestMismatch(Exception):
+    """落盘内容的 sha256 与 API 声明不符：被篡改或损坏，不重试、不安装。"""
+
+
 class UpdateDownloader(QThread):
     """下载 zip 并用 ditto 解出 .app。finished 携带解压出的 .app 路径。"""
     progress = pyqtSignal(int, int)          # done_bytes, total_bytes
     finished_ok = pyqtSignal(str)
     error = pyqtSignal(str)
 
-    def __init__(self, url: str, expected_size: int = 0, parent=None):
+    def __init__(self, url: str, expected_size: int = 0, parent=None,
+                 digest: str | None = None):
         super().__init__(parent)
         self._url = url
+        # GitHub API 给的 'sha256:<hex>'；有就必须对上，没有只记 warning
+        self._sha256 = parse_sha256_digest(digest)
+        if digest and self._sha256 is None:
+            logger.warning("unsupported asset digest %r, skipping hash check",
+                           digest)
         # GitHub release asset 的权威字节数（API 给的，非代理转发的
         # Content-Length）。>0 时用它校验落盘是否完整；0 表示未知，
         # 退回 Content-Length 校验。
@@ -228,6 +325,7 @@ class UpdateDownloader(QThread):
             expected = self._expected_size or int(
                 resp.headers.get('Content-Length') or 0)
             done = 0
+            hasher = hashlib.sha256() if self._sha256 else None
             while True:
                 if self._cancelled:
                     return
@@ -235,6 +333,8 @@ class UpdateDownloader(QThread):
                 if not chunk:
                     break
                 out.write(chunk)
+                if hasher is not None:
+                    hasher.update(chunk)
                 done += len(chunk)
                 self.progress.emit(done, expected)
         if self._cancelled:
@@ -245,11 +345,22 @@ class UpdateDownloader(QThread):
         # corrupted」。不足即抛，交由 run 的重试/清理处理，绝不交出残包。
         if expected and done != expected:
             raise _IncompleteDownload(f"got {done} of {expected} bytes")
+        # 完整性：字节数对了不代表内容对。API 声明了 sha256 就必须一致，
+        # 否则是篡改或损坏——不重试，由 run 的 finally 清掉残包
+        if hasher is not None and not hmac.compare_digest(
+                hasher.hexdigest(), self._sha256):
+            raise _DigestMismatch(
+                f"sha256 mismatch: expected {self._sha256[:12]}…, "
+                f"got {hasher.hexdigest()[:12]}…")
 
     def run(self):
         workdir = None
         keep = False  # 只有成功发出 finished_ok 时保留（安装步骤要用里面的文件）
         try:
+            # 来源闸：URL 来自 API 响应，不在官方 release 路径下的绝不下载
+            if not is_trusted_asset_url(self._url):
+                raise ValueError(
+                    f"refusing to download update from untrusted URL: {self._url}")
             workdir = tempfile.mkdtemp(prefix='stellar_update_')
             # Windows 安装包 / Linux deb 本身就是安装载体，落盘即用；
             # 只有 macOS 的 zip 需要解包
@@ -299,6 +410,11 @@ class UpdateDownloader(QThread):
                 raise RuntimeError("no .app found in downloaded zip")
             if self._cancelled:
                 return
+            # 签名闸：解出来的 .app 必须是本项目证书签的，换包脚本里还会
+            # 再验一次（这里先验是为了能弹出明确的错误而不是静默不装）
+            reason = verify_mac_app_signature(str(apps[0]))
+            if reason:
+                raise RuntimeError(f"update package rejected: {reason}")
             keep = True
             self.finished_ok.emit(str(apps[0]))
         except Exception as e:
@@ -313,8 +429,10 @@ class UpdateDownloader(QThread):
                 shutil.rmtree(workdir, ignore_errors=True)
 
 
-# 分阶段换包：等待退出 → 去 quarantine → 暂存旧包 → 换入新包 → 删暂存；
-# 任何一步失败把旧包挪回来，保证不出现「没有可用 app」的中间态
+# 分阶段换包：等待退出 → 验签+核对 Team ID → 去 quarantine → 暂存旧包 →
+# 换入新包 → 删暂存；任何一步失败把旧包挪回来，保证不出现「没有可用 app」
+# 的中间态。验签放在剥 quarantine 之前：剥掉后 Gatekeeper 不再评估新包，
+# 所以这里必须自己把关——不是我们证书签的包一律不装、拉起旧包退出。
 _UPDATER_SCRIPT = """#!/bin/bash
 PID={pid}
 BUNDLE="{bundle}"
@@ -325,6 +443,12 @@ for _ in $(seq 1 120); do
 done
 # 60s 后应用仍未退出（用户取消了关闭等）→ 放弃本次换包，绝不动运行中的包
 kill -0 "$PID" 2>/dev/null && exit 1
+if ! /usr/bin/codesign --verify --deep --strict "$NEW_APP" 2>/dev/null \\
+   || ! /usr/bin/codesign -dv --verbose=2 "$NEW_APP" 2>&1 | grep -q "TeamIdentifier={team_id}"; then
+  rm -rf "$NEW_APP"
+  open "$BUNDLE"
+  exit 1
+fi
 xattr -dr com.apple.quarantine "$NEW_APP" 2>/dev/null
 STAGE="$BUNDLE.updating.$$"
 rm -rf "$STAGE"
@@ -338,7 +462,8 @@ open "$BUNDLE"
 
 
 def build_updater_script(pid: int, bundle: str, new_app: str) -> str:
-    return _UPDATER_SCRIPT.format(pid=pid, bundle=bundle, new_app=new_app)
+    return _UPDATER_SCRIPT.format(pid=pid, bundle=bundle, new_app=new_app,
+                                  team_id=MAC_TEAM_ID)
 
 
 # Windows：等应用退出 → 静默跑 Inno 安装包原地升级 → 重启应用。

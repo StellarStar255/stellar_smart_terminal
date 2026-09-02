@@ -13,6 +13,9 @@ sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
 import app_updater
 
+# 下载器只认官方 release 路径下的 URL（见 test_app_updater_verify.py）
+_TRUSTED = f"https://github.com/{app_updater.REPO}/releases/download/v9.9.9/"
+
 
 class TestVersionParse(unittest.TestCase):
     def test_parse(self):
@@ -264,7 +267,7 @@ class TestDownloadCancel(unittest.TestCase):
             app_updater._urlopen = orig
 
     def test_cancel_mid_download_emits_nothing_and_cleans_up(self):
-        dl = app_updater.UpdateDownloader("https://example.com/x.zip")
+        dl = app_updater.UpdateDownloader(_TRUSTED + "x.zip")
         events = []
         dl.finished_ok.connect(lambda p: events.append(('ok', p)))
         dl.error.connect(lambda e: events.append(('err', e)))
@@ -277,14 +280,14 @@ class TestDownloadCancel(unittest.TestCase):
         import glob
         import tempfile as _tf
         before = set(glob.glob(os.path.join(_tf.gettempdir(), 'stellar_update_*')))
-        dl = app_updater.UpdateDownloader("https://example.com/x.zip")
+        dl = app_updater.UpdateDownloader(_TRUSTED + "x.zip")
         dl.progress.connect(lambda done, total: dl.cancel())
         self._run_downloader(dl, [b'a' * 1024, b'b' * 1024])
         after = set(glob.glob(os.path.join(_tf.gettempdir(), 'stellar_update_*')))
         self.assertEqual(after - before, set())
 
     def test_uncancelled_download_still_completes(self):
-        dl = app_updater.UpdateDownloader("https://example.com/setup-Setup.exe")
+        dl = app_updater.UpdateDownloader(_TRUSTED + "setup-Setup.exe")
         events = []
         dl.finished_ok.connect(lambda p: events.append(('ok', p)))
         dl.error.connect(lambda e: events.append(('err', e)))
@@ -352,7 +355,7 @@ class TestDownloadWorkdirCleanup(unittest.TestCase):
         from unittest import mock
         created = {}
         errors = []
-        dl = app_updater.UpdateDownloader('https://example.invalid/pkg.zip')
+        dl = app_updater.UpdateDownloader(_TRUSTED + 'pkg.zip')
         dl.error.connect(errors.append)
         with mock.patch.object(app_updater.tempfile, 'mkdtemp',
                                self._tracking_mkdtemp(created)), \
@@ -383,7 +386,7 @@ class TestDownloadWorkdirCleanup(unittest.TestCase):
         created = {}
         results = []
         # .exe 走安装包分支：不解包直接 finished_ok
-        dl = app_updater.UpdateDownloader('https://example.invalid/setup.exe')
+        dl = app_updater.UpdateDownloader(_TRUSTED + 'setup.exe')
         dl.finished_ok.connect(results.append)
         with mock.patch.object(app_updater.tempfile, 'mkdtemp',
                                self._tracking_mkdtemp(created)), \
@@ -440,7 +443,7 @@ class TestDownloadTruncation(unittest.TestCase):
         errors, results = [], []
         # 权威大小 1000，实际每趟只吐 100 → 三次都不足
         dl = app_updater.UpdateDownloader(
-            'https://example.invalid/x-setup.exe', 1000)
+            _TRUSTED + 'x-setup.exe', 1000)
         dl.error.connect(errors.append)
         dl.finished_ok.connect(results.append)
         with mock.patch.object(app_updater, '_urlopen',
@@ -470,7 +473,7 @@ class TestDownloadTruncation(unittest.TestCase):
                      self._short_response(b'a' * 1000)()]
         results, errors = [], []
         dl = app_updater.UpdateDownloader(
-            'https://example.invalid/x-setup.exe', 1000)
+            _TRUSTED + 'x-setup.exe', 1000)
         dl.finished_ok.connect(results.append)
         dl.error.connect(errors.append)
         with mock.patch.object(app_updater.tempfile, 'mkdtemp',
