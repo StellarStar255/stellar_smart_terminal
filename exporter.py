@@ -478,7 +478,6 @@ class Exporter:
 
     def _filter_echo_entries(self, entries) -> list:
         """过滤掉终端回显的OUTPUT条目"""
-        from utils import strip_ansi
 
         if not entries:
             return entries
@@ -571,7 +570,6 @@ class Exporter:
     def _clean_whitespace(self, text: str) -> str:
         """清理多余的空白和重复内容"""
         import re
-        from utils import strip_ansi
 
         lines = text.split('\n')
         cleaned_lines = []

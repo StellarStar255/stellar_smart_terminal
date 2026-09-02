@@ -68,7 +68,9 @@ class TestScreenLockConcurrency(unittest.TestCase):
                         w._select_all_mode = True
                         w._get_selected_text()
                         w._select_all_mode = False
-                    time.sleep(0)  # 让出 GIL，避免读取线程饿死 feeder
+                    # 必须真让出：读取侧每圈都持锁整拷历史（O(N)），sleep(0) 在 macOS 上
+                    # 不换线程且 RLock 不公平，feeder 会被饿死几十秒（join 超时误报死锁）
+                    time.sleep(0.002)
             except Exception as e:  # noqa: BLE001
                 errors.append((tag, repr(e)))
 
@@ -117,7 +119,8 @@ class TestScreenLockConcurrency(unittest.TestCase):
                     k += 1
                     with w._screen_lock:
                         w.screen.resize(w.term_rows, w.term_cols)
-                    time.sleep(0)
+                    # 同上：每次 resize 是持锁的 O(历史) reflow，必须真让出
+                    time.sleep(0.005)
             except Exception as e:  # noqa: BLE001
                 errors.append(("reflower", repr(e)))
 

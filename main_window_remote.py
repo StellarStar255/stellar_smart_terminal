@@ -4,7 +4,6 @@
 纯方法搬迁，行为不变；_open_ssh_in_new_window 构造新窗口/进程级窗口
 计数走 _mw.MainWindow。分屏布局管道方法留在主类。
 """
-import os
 from PyQt6 import sip
 from PyQt6.QtCore import QTimer, Qt
 from i18n import t

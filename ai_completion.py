@@ -11,7 +11,7 @@
 import json
 import re
 
-from PyQt6.QtCore import Qt, QObject, QThread, QTimer, pyqtSignal
+from PyQt6.QtCore import QObject, QThread, QTimer, pyqtSignal
 from PyQt6.QtGui import QColor, QTextCursor
 
 from app_logging import get_logger

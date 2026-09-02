@@ -8,7 +8,7 @@ import sys
 import json
 import shutil
 from dataclasses import dataclass
-from typing import List, Optional, Tuple
+from typing import List, Optional
 from PyQt6.QtCore import QObject, pyqtSignal, QThread
 import urllib.request
 import urllib.parse

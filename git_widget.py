@@ -2,16 +2,14 @@
 Git 面板 UI 组件
 提供类似 Cursor IDE 的 Git 管理界面
 """
-import json
 import math
-from pathlib import Path
 
 from PyQt6.QtWidgets import (
     QWidget, QVBoxLayout, QHBoxLayout, QFrame, QLabel,
     QPushButton, QComboBox, QScrollArea, QListWidget,
     QListWidgetItem, QPlainTextEdit, QSizePolicy,
-    QAbstractItemView, QMessageBox, QDialog, QTextEdit, QSplitter,
-    QLineEdit, QDialogButtonBox, QMenu, QInputDialog
+    QMessageBox, QDialog, QTextEdit, QSplitter,
+    QLineEdit, QMenu, QInputDialog
 )
 from PyQt6.QtCore import (
     Qt, pyqtSignal, QSize, QThread, QTimer, QPoint, QRect, QPointF, QRectF,
@@ -3407,11 +3405,11 @@ class GitPanel(QWidget):
                 )
                 if reply != QMessageBox.StandardButton.Yes:
                     return
-                ok = self._git_manager.stash_drop(idx)
+                self._git_manager.stash_drop(idx)
             elif op == 'pop':
-                ok = self._git_manager.stash_pop(idx)
+                self._git_manager.stash_pop(idx)
             else:
-                ok = self._git_manager.stash_apply(idx)
+                self._git_manager.stash_apply(idx)
             # pop/apply 失败（如产生冲突）时 stash 仍在，错误已弹窗；
             # 无论成败都重载列表 + 刷新面板，保证 UI 与仓库实际状态一致。
             reload_list()

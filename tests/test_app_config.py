@@ -6,7 +6,6 @@
 以及关键的多进程并发读-改-写不丢更新（进程间文件锁）。
 """
 import json
-import os
 import subprocess
 import sys
 from pathlib import Path

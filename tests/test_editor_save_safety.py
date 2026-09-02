@@ -85,7 +85,6 @@ class TestAtomicSave(_Base):
         self.assertNotEqual(os.stat(p).st_ino, ino)
 
     def test_failed_write_keeps_original_and_cleans_tmp(self):
-        import file_editor
         area, pane, p = self._area_with_file("keepme\n")
         orig_bytes = open(p, "rb").read()
         pane.editor.setPlainText("should not land\n")
@@ -316,7 +315,6 @@ class TestAutoSaveNeverWipes(_Base):
 
     def test_loading_window_does_not_wipe_file(self):
         """模拟装载中途（基准已换、缓冲区未填）触发自动保存。"""
-        from file_editor import EditorArea
         area, pane, p = self._area_with_file("REAL CONTENT\n")
         # 手工制造装载中途状态
         pane._loading = True

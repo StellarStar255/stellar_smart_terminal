@@ -15,7 +15,7 @@ from PyQt6.QtWidgets import (
     QWidget, QVBoxLayout, QHBoxLayout, QPlainTextEdit,
     QPushButton, QLabel, QFrame, QMessageBox,
     QSplitter, QLineEdit, QTextEdit, QTextBrowser, QStackedWidget, QScrollArea,
-    QSizePolicy, QMenu, QFileDialog, QApplication, QTabBar,
+    QSizePolicy, QMenu, QFileDialog, QTabBar,
 )
 from PyQt6.QtCore import (
     Qt, pyqtSignal, QRect, QSize, QFileSystemWatcher, QTimer, QEvent, QUrl,
@@ -1787,7 +1787,6 @@ class _SearchBar(QFrame):
         # 正则模式下编译失败给出红色边框提示
         if query and self.regex_btn.isChecked() and pattern is None:
             invalid_color = self.theme.get('error', '#ef4444')
-            border = self.theme.get('border', '#3d3d5c')
             self.input.setStyleSheet(
                 f"QLineEdit {{ border: 1px solid {invalid_color}; }}"
                 f"QLineEdit:focus {{ border: 1px solid {invalid_color}; }}"

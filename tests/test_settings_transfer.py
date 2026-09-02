@@ -21,7 +21,6 @@ from pathlib import Path
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
 import utils
-import settings_transfer
 from settings_transfer import PORTABLE_KEYS, export_settings, import_settings
 
 

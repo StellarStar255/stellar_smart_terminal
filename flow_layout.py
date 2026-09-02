@@ -2,8 +2,8 @@
 FlowLayout - 自动换行的流式布局
 根据容器宽度自动将子控件排列为多行
 """
-from PyQt6.QtWidgets import QLayout, QSizePolicy
-from PyQt6.QtCore import Qt, QRect, QSize, QPoint
+from PyQt6.QtWidgets import QLayout
+from PyQt6.QtCore import QRect, QSize, QPoint
 
 
 class FlowLayout(QLayout):

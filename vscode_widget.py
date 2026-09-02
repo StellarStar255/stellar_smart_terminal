@@ -4,13 +4,9 @@ VS Code 扩展面板 UI 组件
 """
 from PyQt6.QtWidgets import (
     QWidget, QVBoxLayout, QHBoxLayout, QFrame, QLabel,
-    QPushButton, QLineEdit, QScrollArea, QListWidget,
-    QListWidgetItem, QTabWidget, QMessageBox, QSizePolicy,
-    QProgressBar
+    QPushButton, QLineEdit, QScrollArea, QTabWidget, QMessageBox, QProgressBar
 )
-from PyQt6.QtCore import Qt, pyqtSignal, QSize, QTimer
-from PyQt6.QtGui import QFont, QPixmap
-import urllib.request
+from PyQt6.QtCore import Qt, pyqtSignal, QTimer
 
 from vscode_manager import VSCodeManager, VSCodeExtension
 
@@ -100,7 +96,7 @@ class ExtensionItemWidget(QWidget):
         if self.extension.rating > 0:
             stars = "★" * int(self.extension.rating) + "☆" * (5 - int(self.extension.rating))
             rating_label = QLabel(f"{stars} {self.extension.rating:.1f}")
-            rating_label.setStyleSheet(f"color: #f9a825; font-size: 10px;")
+            rating_label.setStyleSheet("color: #f9a825; font-size: 10px;")
             stats_layout.addWidget(rating_label)
 
         version_label = QLabel(f"v{self.extension.version}")

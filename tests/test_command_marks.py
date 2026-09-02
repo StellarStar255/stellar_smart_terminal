@@ -100,7 +100,7 @@ class TestCommandMarks(unittest.TestCase):
         # 造两条命令标记，中间隔开足够多行
         _feed_lines(w, rows + 10)
         w._record_command_mark()
-        first = w._current_mark_positions()[0]
+        w._current_mark_positions()[0]
         _feed_lines(w, rows + 20)
         w._record_command_mark()
         _feed_lines(w, rows)  # 命令后再有输出

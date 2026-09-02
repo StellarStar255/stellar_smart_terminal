@@ -7,11 +7,11 @@ Command Palette
 
 设计原则：完全独立，不依赖具体业务；只依赖 PyQt6。
 """
-from dataclasses import dataclass, field
+from dataclasses import dataclass
 from typing import Callable, List, Optional
 
-from PyQt6.QtCore import Qt, QEvent, QPoint, QRect, QObject, pyqtSignal, QTimer
-from PyQt6.QtGui import QKeyEvent, QFont
+from PyQt6.QtCore import Qt, QEvent, QPoint, QRect, QObject, QTimer
+from PyQt6.QtGui import QKeyEvent
 from PyQt6.QtWidgets import (
     QWidget, QLineEdit, QListWidget, QListWidgetItem, QVBoxLayout, QLabel,
     QHBoxLayout, QFrame, QApplication

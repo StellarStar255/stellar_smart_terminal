@@ -14,13 +14,13 @@ import re
 import socket
 import os
 from pathlib import Path
-from http.server import HTTPServer, ThreadingHTTPServer, BaseHTTPRequestHandler
-from typing import Optional, Dict, List, Set
+from http.server import ThreadingHTTPServer, BaseHTTPRequestHandler
+from typing import Optional, Dict, List
 from dataclasses import dataclass, field
 from queue import Queue, Empty
 from datetime import datetime
 
-from PyQt6.QtCore import QObject, pyqtSignal, QThread, QTimer
+from PyQt6.QtCore import QObject, pyqtSignal, QThread
 
 from app_logging import get_logger
 
@@ -285,14 +285,14 @@ def extract_response_from_screen(screen_content: str, input_text: str = "") -> s
             return result
 
     # 备用方法：从底部向上找到最后一个响应标记，然后提取
-    logger.debug(f"[Extract] Trying marker-based extraction")
+    logger.debug("[Extract] Trying marker-based extraction")
     last_marker_line = _find_last_marker_line(lines)
     if last_marker_line >= 0:
         result = _extract_marker_based_response(lines, last_marker_line)
         if result is not None:
             return result
 
-    logger.debug(f"[Extract] No response found")
+    logger.debug("[Extract] No response found")
     return ""
 
 
@@ -422,7 +422,7 @@ class TerminalBridge(QObject):
                 logger.debug(f"[TerminalBridge] Rate limit reached ({self._rate_limit_count} requests), pausing for {pause_time}s...")
                 time.sleep(pause_time)
                 self._rate_limit_count = 0  # 重置计数器
-                logger.debug(f"[TerminalBridge] Rate limit pause completed, resuming")
+                logger.debug("[TerminalBridge] Rate limit pause completed, resuming")
 
         # 在锁外执行清空操作（避免死锁）
         cleared = 0
@@ -539,7 +539,7 @@ class TerminalBridge(QObject):
             self._screen_cache = result
             self._screen_cache_time = current_time
             return result
-        except Exception as e:
+        except Exception:
             return self._screen_cache if self._screen_cache else ""
 
     def get_screen_diff(self) -> str:
@@ -1203,7 +1203,7 @@ class OpenAIRequestHandler(BaseHTTPRequestHandler):
         has_new_content = False  # 是否有新内容（相对于初始屏幕）
         iteration_count = 0  # 迭代计数，防止无限循环
 
-        logger.debug(f"[OpenAI Server] Starting to collect response...")
+        logger.debug("[OpenAI Server] Starting to collect response...")
         logger.debug(f"[OpenAI Server] Initial screen length: {initial_screen_len}")
 
         # 保存确认完成时的屏幕内容，用于提取响应
@@ -1260,7 +1260,7 @@ class OpenAIRequestHandler(BaseHTTPRequestHandler):
             if self.parser.is_stuck_thinking(current_screen):
                 if stuck_thinking_start is None:
                     stuck_thinking_start = current_time
-                    logger.debug(f"[OpenAI Server] Detected stuck thinking (0 tokens)...")
+                    logger.debug("[OpenAI Server] Detected stuck thinking (0 tokens)...")
                 else:
                     stuck_duration = current_time - stuck_thinking_start
                     # 如果卡住超过 60 秒，发送 Escape 中断
@@ -1274,13 +1274,13 @@ class OpenAIRequestHandler(BaseHTTPRequestHandler):
                             logger.warning(f"[OpenAI Server] Failed to send interrupt: {e}")
                     # 如果发送中断后还是卡住超过 90 秒，强制结束
                     if stuck_duration > 90:
-                        logger.debug(f"[OpenAI Server] Claude still stuck after interrupt, forcing end...")
+                        logger.debug("[OpenAI Server] Claude still stuck after interrupt, forcing end...")
                         confirmed_screen = current_screen
                         break
             else:
                 # 不再卡住，重置计时器
                 if stuck_thinking_start is not None:
-                    logger.debug(f"[OpenAI Server] No longer stuck, resuming normal operation")
+                    logger.debug("[OpenAI Server] No longer stuck, resuming normal operation")
                 stuck_thinking_start = None
 
             # 主要检测：通过提示符判断响应是否完成
@@ -1299,7 +1299,7 @@ class OpenAIRequestHandler(BaseHTTPRequestHandler):
                         # 检查是否是新请求开始（屏幕内容增加且有 thinking 状态）
                         if len(check_screen) > len(first_complete_screen) or self.parser.is_thinking_status(check_screen):
                             # 新请求开始了，使用之前保存的内容
-                            logger.debug(f"[OpenAI Server] Response complete (new request started)")
+                            logger.debug("[OpenAI Server] Response complete (new request started)")
                             confirmed_screen = first_complete_screen
                             break
                         # 屏幕还在更新，更新保存的内容并继续确认
@@ -1318,7 +1318,7 @@ class OpenAIRequestHandler(BaseHTTPRequestHandler):
                     break
 
                 if confirm_count >= 1:
-                    logger.debug(f"[OpenAI Server] Response complete (confirmed)")
+                    logger.debug("[OpenAI Server] Response complete (confirmed)")
                     confirmed_screen = first_complete_screen
                     break
 
@@ -1326,7 +1326,7 @@ class OpenAIRequestHandler(BaseHTTPRequestHandler):
             if has_new_content and idle_time > self.config.idle_timeout:
                 # 再次确认是否真的完成
                 if self.parser.is_response_complete(current_screen):
-                    logger.debug(f"[OpenAI Server] Response complete (idle + prompt)")
+                    logger.debug("[OpenAI Server] Response complete (idle + prompt)")
                     confirmed_screen = current_screen  # 保存确认时的屏幕内容
                     break
                 logger.debug(f"[OpenAI Server] Idle timeout after receiving new content: {idle_time:.1f}s")
@@ -1341,7 +1341,7 @@ class OpenAIRequestHandler(BaseHTTPRequestHandler):
 
             # 如果还没收到新内容，使用更长的等待时间（等待 AI 开始响应）
             if not has_new_content and idle_time > 30.0:
-                logger.debug(f"[OpenAI Server] No new content received after 30s, giving up")
+                logger.debug("[OpenAI Server] No new content received after 30s, giving up")
                 confirmed_screen = current_screen
                 break
 
@@ -1523,7 +1523,7 @@ class OpenAIRequestHandler(BaseHTTPRequestHandler):
                 if self.parser.is_stuck_thinking(current_screen):
                     if stuck_thinking_start is None:
                         stuck_thinking_start = current_time
-                        logger.debug(f"[OpenAI Server] Stream: Detected stuck thinking (0 tokens)...")
+                        logger.debug("[OpenAI Server] Stream: Detected stuck thinking (0 tokens)...")
                     else:
                         stuck_duration = current_time - stuck_thinking_start
                         # 如果卡住超过 60 秒，发送 Escape 中断
@@ -1537,13 +1537,13 @@ class OpenAIRequestHandler(BaseHTTPRequestHandler):
                                 logger.warning(f"[OpenAI Server] Stream: Failed to send interrupt: {e}")
                         # 如果发送中断后还是卡住超过 90 秒，强制结束
                         if stuck_duration > 90:
-                            logger.debug(f"[OpenAI Server] Stream: Claude still stuck after interrupt, forcing end...")
+                            logger.debug("[OpenAI Server] Stream: Claude still stuck after interrupt, forcing end...")
                             confirmed_screen = current_screen
                             break
                 else:
                     # 不再卡住，重置计时器
                     if stuck_thinking_start is not None:
-                        logger.debug(f"[OpenAI Server] Stream: No longer stuck, resuming")
+                        logger.debug("[OpenAI Server] Stream: No longer stuck, resuming")
                     stuck_thinking_start = None
 
                 # 主要检测：通过提示符判断响应是否完成
@@ -1562,7 +1562,7 @@ class OpenAIRequestHandler(BaseHTTPRequestHandler):
                             # 检查是否是新请求开始（屏幕内容增加且有 thinking 状态）
                             if len(check_screen) > len(first_complete_screen) or self.parser.is_thinking_status(check_screen):
                                 # 新请求开始了，使用之前保存的内容
-                                logger.debug(f"[OpenAI Server] Stream response complete (new request started)")
+                                logger.debug("[OpenAI Server] Stream response complete (new request started)")
                                 confirmed_screen = first_complete_screen
                                 break
                             # 屏幕还在更新，更新保存的内容并继续确认
@@ -1581,7 +1581,7 @@ class OpenAIRequestHandler(BaseHTTPRequestHandler):
                         break
 
                     if confirm_count >= 1:
-                        logger.debug(f"[OpenAI Server] Stream response complete (confirmed)")
+                        logger.debug("[OpenAI Server] Stream response complete (confirmed)")
                         confirmed_screen = first_complete_screen
                         break
 
@@ -1589,7 +1589,7 @@ class OpenAIRequestHandler(BaseHTTPRequestHandler):
                 if has_new_content and idle_time > self.config.idle_timeout:
                     # 再次确认是否真的完成
                     if self.parser.is_response_complete(current_screen):
-                        logger.debug(f"[OpenAI Server] Stream response complete (idle + prompt)")
+                        logger.debug("[OpenAI Server] Stream response complete (idle + prompt)")
                         confirmed_screen = current_screen  # 保存确认时的屏幕内容
                         break
                     logger.debug(f"[OpenAI Server] Stream idle timeout after new content: {idle_time:.1f}s")
@@ -1604,7 +1604,7 @@ class OpenAIRequestHandler(BaseHTTPRequestHandler):
 
                 # 如果还没收到新内容，使用更长的等待时间
                 if not has_new_content and idle_time > 30.0:
-                    logger.debug(f"[OpenAI Server] Stream: No new content after 30s")
+                    logger.debug("[OpenAI Server] Stream: No new content after 30s")
                     confirmed_screen = current_screen
                     break
 

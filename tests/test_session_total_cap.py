@@ -8,14 +8,13 @@
 """
 import json
 import sys
-import time
 from pathlib import Path
 
 import pytest
 
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
-from session_manager import Session, SessionEntry, SessionManager
+from session_manager import Session, SessionManager
 
 
 @pytest.fixture

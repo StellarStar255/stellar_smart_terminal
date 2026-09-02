@@ -26,7 +26,6 @@ import posixpath
 import re
 import shlex
 import shutil
-import stat as stat_mod
 import subprocess
 import sys
 import tempfile

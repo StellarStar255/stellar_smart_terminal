@@ -5,10 +5,9 @@
 from PyQt6.QtWidgets import (
     QDialog, QVBoxLayout, QHBoxLayout, QLabel, QPushButton,
     QGroupBox, QRadioButton, QButtonGroup,
-    QScrollArea, QWidget, QFrame, QListWidget, QListWidgetItem,
-    QAbstractItemView
+    QScrollArea, QWidget, QFrame
 )
-from PyQt6.QtCore import Qt, pyqtSignal, QPropertyAnimation, QEasingCurve, QSize, pyqtProperty, QMimeData
+from PyQt6.QtCore import Qt, pyqtSignal, QPropertyAnimation, QEasingCurve, pyqtProperty, QMimeData
 from PyQt6.QtGui import QPainter, QColor, QPainterPath, QDrag
 from i18n import t
 

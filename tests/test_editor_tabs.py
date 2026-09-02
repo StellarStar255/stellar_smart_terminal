@@ -247,7 +247,6 @@ class TestTabContextMenu(_Base):
 
         exec 会阻塞，所以把它替成"记下菜单、返回 None"。
         """
-        from PyQt6.QtCore import QPoint, Qt as QtCore_Qt
         from PyQt6.QtGui import QContextMenuEvent
         from PyQt6.QtWidgets import QMenu
 

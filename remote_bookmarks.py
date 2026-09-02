@@ -9,7 +9,6 @@ immediately so cross-window state stays consistent.
 """
 import json
 import threading
-from pathlib import Path
 from typing import Optional
 
 from utils import get_data_dir

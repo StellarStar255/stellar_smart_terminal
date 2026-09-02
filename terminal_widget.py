@@ -23,7 +23,8 @@ from pyte.screens import wcwidth
 
 # screen 层已拆到 terminal_screen（此处再导出，保持既有 import 路径可用）
 from terminal_screen import (
-    CompatibleHistoryScreen, reflow_rows, map_reflow_position, _cell_is_blank
+    CompatibleHistoryScreen,
+    reflow_rows, map_reflow_position,  # noqa: F401 —— 再导出：测试与旧代码从这里导入
 )
 
 from terminal_render import TerminalRenderMixin
@@ -259,15 +260,15 @@ def merge_extracted_lines(rows, columns: int,
 # 把屏幕+历史中的软换行物理行拼回逻辑行，按新宽度重新折行。
 
 from PyQt6.QtWidgets import (
-    QWidget, QVBoxLayout, QApplication, QMenu, QLineEdit,
+    QWidget, QApplication, QMenu, QLineEdit,
     QHBoxLayout, QPushButton, QLabel, QFileDialog, QSizePolicy, QScrollBar
 )
-from PyQt6.QtCore import QThread, pyqtSignal, Qt, QTimer, QEvent, QPoint, QUrl, QMimeData
+from PyQt6.QtCore import QThread, pyqtSignal, Qt, QTimer, QEvent, QPoint, QUrl
 from PyQt6.QtGui import (
     QFont, QColor, QPainter, QPen, QFontMetrics, QFontMetricsF, QFontInfo,
-    QKeyEvent, QResizeEvent, QShortcut, QKeySequence,
+    QKeyEvent, QResizeEvent, QKeySequence,
     QMouseEvent, QAction, QActionGroup, QDesktopServices, QDragEnterEvent,
-    QDropEvent, QPixmap, QImage
+    QDropEvent, QPixmap
 )
 
 
@@ -1804,7 +1805,7 @@ class TerminalWidget(TerminalRenderMixin, QWidget):
             return lines
 
         with open(dump_path, 'w', encoding='utf-8') as f:
-            f.write(f"=== PYTE BUFFER DUMP ===\n")
+            f.write("=== PYTE BUFFER DUMP ===\n")
             f.write(f"term_cols={self.term_cols}, term_rows={self.term_rows}\n")
             f.write(f"screen.columns={self.screen.columns}, screen.lines={self.screen.lines}\n")
             f.write(f"char_width={self.char_width}, char_height={self.char_height}\n")
@@ -4111,7 +4112,6 @@ if (hasFileURL) {{
 
             elif output.startswith("FILES:"):
                 file_paths = output[6:].split('\n')
-                handled_any = False
                 for fp in file_paths:
                     fp = fp.strip()
                     if not fp:
@@ -4128,7 +4128,6 @@ if (hasFileURL) {{
                     data = path_text.encode('utf-8')
                     if self._write_paste(data):
                         self.input_buffer += path_text
-                        handled_any = True
                         if is_media:
                             self.image_pasted.emit(fp)
                 # 只要 JXA 检测到 file-url，就算处理完毕（即使写入失败也不应
@@ -4171,7 +4170,6 @@ if (hasFileURL) {{
                 image = None
             if image is not None and not image.isNull():
                 from datetime import datetime
-                import tempfile
 
                 timestamp = datetime.now().strftime("%Y%m%d_%H%M%S_%f")
                 # 目录解析统一走 _image_save_dir：终端真实 cwd + 失败兜底

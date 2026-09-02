@@ -251,7 +251,7 @@ class TestLockContentionRetry(unittest.TestCase):
         退避重试只在工作线程里睡（面板现在把 stage/unstage 都放到线程里跑；
         GUI 线程上撞锁最多立即重试一次、绝不 sleep），所以这里也在线程里调。
         """
-        import threading, time
+        import threading
         with open(os.path.join(self._tmp, 'b.txt'), 'w') as f:
             f.write('new\n')
         open(self._lock, 'w').close()
