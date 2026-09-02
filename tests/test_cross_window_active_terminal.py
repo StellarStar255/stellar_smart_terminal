@@ -48,8 +48,14 @@ class _CrossWindowBase(unittest.TestCase):
 
     @classmethod
     def tearDownClass(cls):
+        from PyQt6.QtGui import QCloseEvent
         for w in (cls.win_a, cls.win_b):
-            w.close()
+            # 未显示过的窗口 close() 不派发 closeEvent → 分屏时起的 shell 不会被
+            # cleanup，读取线程带着已销毁控件的队列信号活到后面的测试里 → 段错误
+            # 走强制关闭路径：有 shell 在跑时普通 closeEvent 会弹模态确认框，
+            # 离屏下 exec 直接把测试卡死
+            w._force_closing = True
+            QApplication.sendEvent(w, QCloseEvent())
             w.deleteLater()
         del cls.win_a, cls.win_b
         for _ in range(5):
