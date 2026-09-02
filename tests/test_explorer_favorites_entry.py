@@ -22,7 +22,7 @@ sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 os.environ.setdefault('QT_QPA_PLATFORM', 'offscreen')
 
 from PyQt6.QtCore import QEvent, QPoint
-from PyQt6.QtWidgets import QApplication, QToolButton
+from PyQt6.QtWidgets import QApplication
 
 
 def _action(menu, text):
@@ -79,7 +79,7 @@ class TestBreadcrumbContextMenu(_Base):
         self.panel.breadcrumb.segment_context_requested.connect(
             lambda p, pos: got.append(p))
         name = os.path.basename(self.tmp)
-        btns = [b for b in self.panel.breadcrumb.findChildren(QToolButton)
+        btns = [b for b in self.panel.breadcrumb.findChildren(self.ew._CrumbLabel)
                 if b.text() == name]
         self.assertTrue(btns, "面包屑里找不到当前目录那一段")
         btns[0].customContextMenuRequested.emit(QPoint(1, 1))

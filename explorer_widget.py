@@ -366,6 +366,29 @@ class FilteredFileSystemModel(QFileSystemModel):
         return result
 
 
+class _CrumbLabel(QLabel):
+    """面包屑里的一段：可点击的 QLabel。
+
+    不用 QToolButton：它在 macOS 样式下有 10px 的固定额外宽度（padding 调到 0
+    也去不掉），加上分隔符两侧的留白，相邻两个目录名之间空出 25px，看着松。
+    QLabel 没有这个底线，间距完全由样式表里的 padding 决定。
+    """
+    clicked = pyqtSignal()
+
+    def __init__(self, text: str = "", parent=None):
+        super().__init__(text, parent)
+        # 样式表一设 padding，QLabel 就按"有边框"处理，自动再加约 6px 的
+        # indent——这正是间距压不下去的原因；明确设为 0，留白只由 padding 决定
+        self.setIndent(0)
+
+    def mousePressEvent(self, event):         # noqa: N802 — Qt 回调
+        if event.button() == Qt.MouseButton.LeftButton:
+            self.clicked.emit()
+            event.accept()
+            return
+        super().mousePressEvent(event)
+
+
 class _BreadcrumbBar(QWidget):
     """当前目录的面包屑：`… / aiem-arranger / src / main / resources`。
 
@@ -428,14 +451,18 @@ class _BreadcrumbBar(QWidget):
         实测而不是拍脑袋：QToolButton 自己的内边距/边框跟样式表、平台都
         有关，估小了布局就会把每段挤成 "aie…ger" 那种谁也认不出的样子。
         """
-        sample = QToolButton(self)
-        sample.setStyleSheet(self._btn_qss(self._dim, "400"))
-        sample.setText("W")
+        # 样本控件不能以本控件为父：父控件可见时它们会在 deleteLater 生效前
+        # 被画在左上角（曾在最左边多出一个 "/"）。无父对象的隐藏控件不会显示。
+        sample = _CrumbLabel("W")
+        sample.setFont(self.font())
+        sample.setStyleSheet(self._seg_qss(self._dim, "400"))
         overhead = max(0, sample.sizeHint().width()
                        - QFontMetrics(self.font()).horizontalAdvance("W"))
         sample.deleteLater()
-        sep = QLabel("/", self)
-        sep.setStyleSheet(f"color: {self._dim}; padding: 0 3px;")
+        sep = QLabel("/")
+        sep.setFont(self.font())
+        sep.setIndent(0)
+        sep.setStyleSheet(self._sep_qss())
         sep_w = sep.sizeHint().width()
         sep.deleteLater()
         return overhead + sep_w
@@ -468,9 +495,22 @@ class _BreadcrumbBar(QWidget):
             return [(None, None)] + kept     # 开头放折叠标记
         return kept
 
+    # 段与分隔符的留白：段两侧各 2px + "/" 两侧各 1px → 相邻目录名间约 10px
+    _SEG_PAD_PX = 2
+    _SEP_PAD_PX = 1
+
+    def _seg_qss(self, color: str, weight: str) -> str:
+        return (f"QLabel {{ background: transparent; color: {color};"
+                f" font-weight: {weight}; padding: 0 {self._SEG_PAD_PX}px; margin: 0; }}"
+                f"QLabel:hover {{ color: {self._text}; text-decoration: underline; }}")
+
+    def _sep_qss(self) -> str:
+        return f"color: {self._dim}; padding: 0 {self._SEP_PAD_PX}px; margin: 0;"
+
     def _btn_qss(self, color: str, weight: str) -> str:
+        """折叠标记 "…" 仍是 QToolButton（要挂菜单），只把留白压到最小"""
         return (f"QToolButton {{ border: none; background: transparent;"
-                f" color: {color}; font-weight: {weight}; padding: 1px 2px; }}"
+                f" color: {color}; font-weight: {weight}; padding: 0; margin: 0; }}"
                 f"QToolButton:hover {{ color: {self._text};"
                 f" text-decoration: underline; }}"
                 f"QToolButton::menu-indicator {{ image: none; width: 0; }}")
@@ -505,7 +545,8 @@ class _BreadcrumbBar(QWidget):
             # 就成了 "/ / var"，难看
             if i and not prev_was_root:
                 sep = QLabel("/")
-                sep.setStyleSheet(f"color: {self._dim}; padding: 0 3px;")
+                sep.setIndent(0)   # 同 _CrumbLabel：不设的话 QSS padding 会额外带 indent
+                sep.setStyleSheet(self._sep_qss())
                 self._layout.addWidget(sep)
             if name is None:
                 btn = QToolButton()
@@ -519,10 +560,9 @@ class _BreadcrumbBar(QWidget):
                         lambda _=False, pth=h_full: self.path_selected.emit(pth))
                 btn.setMenu(menu)
             else:
-                btn = QToolButton()
-                btn.setText(name)
+                btn = _CrumbLabel(name)
                 btn.clicked.connect(
-                    lambda _=False, pth=full: self.path_selected.emit(pth))
+                    lambda pth=full: self.path_selected.emit(pth))
                 btn.setContextMenuPolicy(Qt.ContextMenuPolicy.CustomContextMenu)
                 btn.customContextMenuRequested.connect(
                     lambda pos, b=btn, pth=full:
@@ -537,7 +577,8 @@ class _BreadcrumbBar(QWidget):
             # 每段名字挤成 "aie…ger" 那种谁也认不出的样子
             btn.setSizePolicy(QSizePolicy.Policy.Fixed,
                               QSizePolicy.Policy.Preferred)
-            btn.setStyleSheet(self._btn_qss(color, weight))
+            btn.setStyleSheet(self._btn_qss(color, weight) if name is None
+                              else self._seg_qss(color, weight))
             self._layout.addWidget(btn)
         self._layout.addStretch(1)
         self._layout.invalidate()
