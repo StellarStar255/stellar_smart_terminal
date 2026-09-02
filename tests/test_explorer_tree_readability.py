@@ -239,6 +239,19 @@ class TestDoubleClickEntersFolder(_Base):
         self.assertSamePath(p._current_path, sub.parent, "得能退回上一级")
         self.assertTrue(p.up_btn.isEnabled())
 
+    def test_parent_dir_stops_at_the_filesystem_root(self):
+        """根的判定要在两个平台都对：Windows 上 "C:\\" 先 rstrip 再 dirname
+        会得到空串，把根当成还能再往上退（CI 实翻过）。"""
+        from explorer_widget import ExplorerPanel
+        fs_root = os.path.abspath(os.sep)
+        self.assertIsNone(ExplorerPanel._parent_dir(fs_root))
+        self.assertIsNone(ExplorerPanel._parent_dir(""))
+        # 带尾分隔符的普通目录仍应正常回退，且不会退到自己
+        d = os.path.join(self._tmp.name, "sub")
+        os.makedirs(d, exist_ok=True)
+        self.assertSamePath(ExplorerPanel._parent_dir(d + os.sep),
+                            self._tmp.name)
+
     def test_up_button_disabled_at_filesystem_root(self):
         p = self._panel()
         p.set_root_path(os.path.abspath(os.sep))

@@ -593,24 +593,36 @@ class ExplorerPanel(QWidget, explorer_common.TransferJobHost):
         self._proxy.set_hide_junk(hide)
         app_config.update_config({self.CONFIG_KEY_HIDE_JUNK: hide})
 
+    @staticmethod
+    def _parent_dir(path: str):
+        """上一级目录；已经在文件系统根则返回 None。
+
+        不能先 rstrip 掉分隔符再取 dirname：Windows 上 "C:\\" 会变成 "C:"，
+        dirname("C:") 是空串，于是"根"被当成还能再往上退（CI 实翻）。
+        normpath 之后直接 dirname，根目录的 dirname 就是它自己。
+        """
+        if not path:
+            return None
+        current = os.path.normpath(os.path.abspath(path))
+        parent = os.path.dirname(current)
+        if not parent or parent == current or not os.path.isdir(parent):
+            return None
+        return parent
+
     def go_up(self):
         """回到上一级目录（已经在文件系统根就什么都不做）。"""
-        current = self._current_path or os.path.expanduser("~")
-        parent = os.path.dirname(current.rstrip(os.sep)) or os.sep
-        if parent and parent != current and os.path.isdir(parent):
-            self.set_root_path(parent)
-            return True
-        return False
+        parent = self._parent_dir(self._current_path or os.path.expanduser("~"))
+        if parent is None:
+            return False
+        self.set_root_path(parent)
+        return True
 
     def _sync_up_button(self):
         """在文件系统根上就禁用「上一级」，免得点了没反应像是坏了。"""
         btn = getattr(self, 'up_btn', None)
         if btn is None:
             return
-        current = self._current_path or ""
-        parent = os.path.dirname(current.rstrip(os.sep)) or os.sep
-        btn.setEnabled(bool(parent and parent != current
-                            and os.path.isdir(parent)))
+        btn.setEnabled(self._parent_dir(self._current_path or "") is not None)
 
     def is_double_click_enter(self) -> bool:
         return self._dblclick_enter
