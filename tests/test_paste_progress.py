@@ -617,19 +617,26 @@ class TestTopmostYieldsToModals(_Base):
         self.assertFalse(dlg.isVisible(), "用户收起的窗口不该被模态框流程弹回来")
 
     def test_modal_state_drives_it(self):
-        from PyQt6.QtWidgets import QApplication, QDialog
+        """_sync_with_modals 只看 QApplication.activeModalWidget()。
+
+        以前这里真开一个模态 QDialog（open()）再改传输窗口的显隐，离屏平台
+        上原生窗口的模态状态切换不稳定，CI 的 macOS/Linux 都段错误过
+        （v1.25.0 发版时 macOS job 又在这里崩了一次）。被测逻辑只读
+        activeModalWidget，直接桩掉它即可，不碰原生模态。
+        """
+        from unittest import mock
+        from PyQt6.QtWidgets import QApplication, QWidget
         dlg = self._dialog()
         self.assertTrue(dlg._modal_watch.isActive(),
                         "得有个定时器盯着模态状态，不然没人去让位")
-        modal = QDialog()
-        modal.setModal(True)
-        modal.open()                       # 非阻塞地进入模态
-        QApplication.processEvents()
-        dlg._sync_with_modals()            # 定时器到点时做的事
+        fake_modal = QWidget()
+        with mock.patch.object(QApplication, 'activeModalWidget',
+                               return_value=fake_modal):
+            dlg._sync_with_modals()            # 定时器到点时做的事
         self.assertFalse(dlg.isVisible(), "模态框弹着的时候不能压在它上面")
-        modal.close()
-        QApplication.processEvents()
-        dlg._sync_with_modals()
+        with mock.patch.object(QApplication, 'activeModalWidget',
+                               return_value=None):
+            dlg._sync_with_modals()
         self.assertTrue(dlg.isVisible(), "模态框关掉要回来")
 
     def test_conflict_dialog_suspends_the_transfer_window(self):
