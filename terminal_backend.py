@@ -705,85 +705,15 @@ else:
                 self._child_pid = os.fork()
 
                 if self._child_pid == 0:
-                    # 子进程
-                    os.close(self._master_fd)
-                    os.setsid()
-
-                    fcntl.ioctl(slave_fd, termios.TIOCSCTTY, 0)
-
-                    os.dup2(slave_fd, 0)
-                    os.dup2(slave_fd, 1)
-                    os.dup2(slave_fd, 2)
-
-                    if slave_fd > 2:
-                        os.close(slave_fd)
-
-                    # 切换工作目录
-                    if cwd and os.path.isdir(cwd):
-                        os.chdir(cwd)
-
-                    # 设置环境变量
-                    env = scrub_packaging_env(os.environ.copy())
-                    env['TERM'] = 'xterm-256color'
-                    env['COLORTERM'] = 'truecolor'
-                    env['COLUMNS'] = str(cols)
-                    env['LINES'] = str(rows)
-                    # TUI 类工具（codex / claude code / ink 等）会检查 TERM_PROGRAM
-                    # 来决定是否启用完整的 Unicode box-drawing 渲染。如果不存在或
-                    # 是未知值，会降级为 ASCII 字符 (|、_) 画框。
-                    # 这里冒充 VS Code 集成终端，是公认支持完整渲染的现代终端。
-                    env['TERM_PROGRAM'] = 'vscode'
-                    env['TERM_PROGRAM_VERSION'] = '1.96.0'
-                    env['FORCE_COLOR'] = '3'  # 强制 24-bit 颜色支持
-                    # Claude Code 2.x 默认进备用屏幕（1049）+ 内部虚拟滚动 +
-                    # 鼠标上报："跨页"的历史都在 claude 进程内部，终端侧没有
-                    # scrollback，拖选到边缘无从滚动 → 无法跨页复制。禁用备用
-                    # 屏幕让 claude 回到内联渲染，输出进入本终端的 scrollback，
-                    # 现有的拖选自动滚动/跨页复制即可用。setdefault：用户在外部
-                    # 或 shell 里显式设置的值优先。
-                    env.setdefault('CLAUDE_CODE_DISABLE_ALTERNATE_SCREEN', '1')
-                    # 用单独的变量标识 "运行在 Smart Terminal 里"。TERM_PROGRAM
-                    # 不能改（会破坏 TUI 渲染兼容），所以另起一个。
-                    # 配合 ~/.claude/scripts/claude-stop-notify.sh：用户点击
-                    # 通知 → 用 SMART_TERMINAL_PID 把对应那个 Smart Terminal
-                    # 窗口（Python 进程）拉到前台。
-                    env['SMART_TERMINAL'] = '1'
-                    env['SMART_TERMINAL_PID'] = str(smart_terminal_pid)
-                    # 清除其他终端的标识，避免冲突的检测
-                    for stale in ('LC_TERMINAL', 'LC_TERMINAL_VERSION'):
-                        env.pop(stale, None)
-
-                    # 确保 UTF-8 编码支持（修复中文等 Unicode 字符显示乱码问题）
-                    if 'LANG' not in env or 'UTF-8' not in env.get('LANG', ''):
-                        env['LANG'] = 'en_US.UTF-8'
-                    if 'LC_ALL' not in env:
-                        env['LC_ALL'] = env['LANG']
-
-                    # 清除 macOS Terminal.app 的会话恢复相关环境变量
-                    # 这些变量会导致 zsh 尝试恢复之前的会话状态，
-                    # 产生 "Restored session" 消息和控制字符乱码
-                    session_vars = [
-                        'TERM_SESSION_ID',           # Terminal.app 会话ID
-                        'SHELL_SESSION_DID_INIT',    # Shell 会话已初始化标记
-                        'SHELL_SESSION_FILE',        # Shell 会话文件路径
-                        'SHELL_SESSION_HISTFILE',    # Shell 会话历史文件
-                        'SHELL_SESSION_HISTFILE_NEW', # 新会话历史文件
-                        'SHELL_SESSION_HISTORY',     # Shell 会话历史
-                        'SHELL_SESSION_DIR',         # Shell 会话目录
-                        'SECURITYSESSIONID',         # Security 会话ID
-                        'ITERM_SESSION_ID',          # iTerm2 会话ID（如果有）
-                        'ITERM_PROFILE',             # iTerm2 配置文件（避免被识别为 iTerm）
-                    ]
-                    for var in session_vars:
-                        env.pop(var, None)
-
+                    # 子进程。整个分支必须兜底 os._exit：setsid/ioctl/dup2/chdir
+                    # 任一处抛异常若逃到父进程的 except，子进程就会带着 Qt
+                    # 事件循环继续跑——变成第二个 GUI 实例，共享父进程的 fd。
                     try:
-                        os.execvpe(command[0], command, env)
-                    except Exception:
-                        # execvpe failed — must exit the forked child immediately
-                        # to avoid running a duplicate of the parent process.
-                        # Use os._exit (not sys.exit) to avoid flushing parent's buffers.
-                        os._exit(127)
+                        self._child_exec(slave_fd, command, cwd, cols, rows,
+                                         smart_terminal_pid)
+                    except BaseException:
+                        pass
+                    os._exit(127)
 
                 else:
                     # 父进程
@@ -805,6 +735,83 @@ else:
                 return False
 
             return False
+
+        def _child_exec(self, slave_fd, command, cwd, cols, rows,
+                        smart_terminal_pid):
+            """fork 之后的子进程：接管 PTY、设环境、exec。只会以 exec 或异常结束。"""
+            os.close(self._master_fd)
+            os.setsid()
+
+            fcntl.ioctl(slave_fd, termios.TIOCSCTTY, 0)
+
+            os.dup2(slave_fd, 0)
+            os.dup2(slave_fd, 1)
+            os.dup2(slave_fd, 2)
+
+            if slave_fd > 2:
+                os.close(slave_fd)
+
+            # 切换工作目录
+            if cwd and os.path.isdir(cwd):
+                os.chdir(cwd)
+
+            # 设置环境变量
+            env = scrub_packaging_env(os.environ.copy())
+            env['TERM'] = 'xterm-256color'
+            env['COLORTERM'] = 'truecolor'
+            env['COLUMNS'] = str(cols)
+            env['LINES'] = str(rows)
+            # TUI 类工具（codex / claude code / ink 等）会检查 TERM_PROGRAM
+            # 来决定是否启用完整的 Unicode box-drawing 渲染。如果不存在或
+            # 是未知值，会降级为 ASCII 字符 (|、_) 画框。
+            # 这里冒充 VS Code 集成终端，是公认支持完整渲染的现代终端。
+            env['TERM_PROGRAM'] = 'vscode'
+            env['TERM_PROGRAM_VERSION'] = '1.96.0'
+            env['FORCE_COLOR'] = '3'  # 强制 24-bit 颜色支持
+            # Claude Code 2.x 默认进备用屏幕（1049）+ 内部虚拟滚动 +
+            # 鼠标上报："跨页"的历史都在 claude 进程内部，终端侧没有
+            # scrollback，拖选到边缘无从滚动 → 无法跨页复制。禁用备用
+            # 屏幕让 claude 回到内联渲染，输出进入本终端的 scrollback，
+            # 现有的拖选自动滚动/跨页复制即可用。setdefault：用户在外部
+            # 或 shell 里显式设置的值优先。
+            env.setdefault('CLAUDE_CODE_DISABLE_ALTERNATE_SCREEN', '1')
+            # 用单独的变量标识 "运行在 Smart Terminal 里"。TERM_PROGRAM
+            # 不能改（会破坏 TUI 渲染兼容），所以另起一个。
+            # 配合 ~/.claude/scripts/claude-stop-notify.sh：用户点击
+            # 通知 → 用 SMART_TERMINAL_PID 把对应那个 Smart Terminal
+            # 窗口（Python 进程）拉到前台。
+            env['SMART_TERMINAL'] = '1'
+            env['SMART_TERMINAL_PID'] = str(smart_terminal_pid)
+            # 清除其他终端的标识，避免冲突的检测
+            for stale in ('LC_TERMINAL', 'LC_TERMINAL_VERSION'):
+                env.pop(stale, None)
+
+            # 确保 UTF-8 编码支持（修复中文等 Unicode 字符显示乱码问题）
+            if 'LANG' not in env or 'UTF-8' not in env.get('LANG', ''):
+                env['LANG'] = 'en_US.UTF-8'
+            if 'LC_ALL' not in env:
+                env['LC_ALL'] = env['LANG']
+
+            # 清除 macOS Terminal.app 的会话恢复相关环境变量
+            # 这些变量会导致 zsh 尝试恢复之前的会话状态，
+            # 产生 "Restored session" 消息和控制字符乱码
+            session_vars = [
+                'TERM_SESSION_ID',           # Terminal.app 会话ID
+                'SHELL_SESSION_DID_INIT',    # Shell 会话已初始化标记
+                'SHELL_SESSION_FILE',        # Shell 会话文件路径
+                'SHELL_SESSION_HISTFILE',    # Shell 会话历史文件
+                'SHELL_SESSION_HISTFILE_NEW', # 新会话历史文件
+                'SHELL_SESSION_HISTORY',     # Shell 会话历史
+                'SHELL_SESSION_DIR',         # Shell 会话目录
+                'SECURITYSESSIONID',         # Security 会话ID
+                'ITERM_SESSION_ID',          # iTerm2 会话ID（如果有）
+                'ITERM_PROFILE',             # iTerm2 配置文件（避免被识别为 iTerm）
+            ]
+            for var in session_vars:
+                env.pop(var, None)
+
+            # execvpe 失败会抛异常，由调用方统一 os._exit(127)
+            os.execvpe(command[0], command, env)
 
         def _set_pty_size(self, fd: int, cols: int, rows: int):
             """设置 PTY 大小"""
@@ -874,10 +881,13 @@ else:
                 except ChildProcessError:
                     break
                 except Exception:
+                    # 以前静默 break：on_output 回调里逃逸的异常会让读取线程
+                    # 悄悄死掉，终端看起来"卡死"却没有任何日志
+                    logger.exception("[UnixBackend] reader thread aborted")
                     break
 
             # Reap the child process to avoid zombies (EOF or error path)
-            self._reap_child()
+            self._reap_child(wait=True)
 
         @staticmethod
         def _decode_wait_status(status: int) -> int:
@@ -888,20 +898,41 @@ else:
                 return -os.WTERMSIG(status)
             return -1
 
-        def _reap_child(self):
-            """Reap the child process to prevent zombies."""
+        def _reap_child(self, wait: bool = False):
+            """Reap the child process to prevent zombies.
+
+            wait=True（读取线程 EOF 路径）：PTY 的 EOF 往往比内核完成子进程
+            退出早一点点，单次 WNOHANG 可能拿到 0，于是 on_exit 永不触发、
+            _running 永远 True。这里有界轮询最多 ~1s；仍未退出也按"会话已
+            结束"处理（PTY 已经没了，终端侧无事可做），并记日志。
+            """
             if self._child_pid is None:
                 return
+            attempts = 50 if wait else 1
             try:
-                pid, status = os.waitpid(self._child_pid, os.WNOHANG)
-                if pid != 0:
-                    self._running = False
-                    exit_code = self._decode_wait_status(status)
-                    exit_callback = self.on_exit
-                    if exit_callback:
-                        exit_callback(exit_code)
+                for i in range(attempts):
+                    pid, status = os.waitpid(self._child_pid, os.WNOHANG)
+                    if pid != 0:
+                        self._running = False
+                        exit_code = self._decode_wait_status(status)
+                        exit_callback = self.on_exit
+                        if exit_callback:
+                            exit_callback(exit_code)
+                        return
+                    if i + 1 < attempts:
+                        time.sleep(0.02)
             except ChildProcessError:
-                pass
+                if wait:
+                    self._running = False
+                return
+            if wait and self._running:
+                logger.warning("[UnixBackend] PTY closed but child %s not "
+                               "reaped after 1s; treating session as ended",
+                               self._child_pid)
+                self._running = False
+                exit_callback = self.on_exit
+                if exit_callback:
+                    exit_callback(-1)
 
         def write(self, data: bytes) -> bool:
             if self._master_fd is None:

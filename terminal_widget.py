@@ -1176,6 +1176,12 @@ class TerminalWidget(TerminalRenderMixin, QWidget):
         screen = self.screen
         if getattr(screen, '_in_alt_screen', False):
             return
+        # 整段（扫描 + 删行）都在锁内：读取线程的 feed 会往行 dict 插键，
+        # 无锁迭代 buf[r].values() 会抛 "dictionary changed size during iteration"
+        with self._screen_lock:
+            self._reflow_idle_prompt_to_top_locked(screen)
+
+    def _reflow_idle_prompt_to_top_locked(self, screen):
         buf = screen.buffer
         lines = screen.lines
         cy = screen.cursor.y
@@ -4418,12 +4424,17 @@ if (hasFileURL) {{
                 if len(matches) >= MAX_SEARCH_RESULTS:
                     break
 
-        # 2) 当前屏幕行（可变，不缓存）
+        # 2) 当前屏幕行（可变，不缓存）。读取线程的 feed 会并发改这些行
+        #    dict，提取必须持锁；历史行已冻结，上面那段不需要。
         history_count = len(history)
         if len(matches) < MAX_SEARCH_RESULTS:
-            buffer = self.screen.buffer
-            for row in range(self.term_rows):
-                line_text, col_map = self._extract_search_line(buffer[row])
+            with self._screen_lock:
+                buffer = self.screen.buffer
+                screen_lines = [
+                    self._extract_search_line(buffer[row])
+                    for row in range(self.term_rows)
+                ]
+            for row, (line_text, col_map) in enumerate(screen_lines):
                 if line_text:
                     find_in_line(line_text, col_map, history_count + row)
                     if len(matches) >= MAX_SEARCH_RESULTS:
