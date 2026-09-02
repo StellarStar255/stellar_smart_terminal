@@ -1133,6 +1133,8 @@ TRANSLATIONS = {
     "tab.switch_to_path_unavailable": {"zh": "无法获取当前终端路径", "en": "Cannot determine terminal path"},
     "tab.close": {"zh": "关闭标签页", "en": "Close Tab"},
     "tab.close_others": {"zh": "关闭其他标签页", "en": "Close Other Tabs"},
+    "tab.close_left": {"zh": "关闭左侧所有标签页", "en": "Close Tabs to the Left"},
+    "tab.close_right": {"zh": "关闭右侧所有标签页", "en": "Close Tabs to the Right"},
 
     # ===== 快速启动菜单 =====
     "quick_launch.manage": {"zh": "✏️ 管理路径...", "en": "✏️ Manage Paths..."},

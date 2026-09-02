@@ -1921,6 +1921,9 @@ class _PaneTabBar(QTabBar):
     列表与索引脱节踩过「串页」的坑，这里从设计上避开）。
     """
 
+    # 右键菜单请求关闭一批标签（按路径，不按索引）
+    close_paths_requested = pyqtSignal(list)
+
     def __init__(self, parent=None):
         super().__init__(parent)
         self.setExpanding(False)
@@ -1955,6 +1958,46 @@ class _PaneTabBar(QTabBar):
                 self.tabCloseRequested.emit(idx)
                 return
         super().mouseReleaseEvent(event)
+
+    def contextMenuEvent(self, event):     # noqa: N802 — Qt 回调
+        """标签右键菜单：关闭 / 关闭其他 / 关闭左侧 / 关闭右侧。
+
+        发的是**路径**而不是索引：批量关闭时索引会随着每次删除往前挪，
+        按索引做必然错位；tabData 里的路径是这条标签栏的唯一事实来源
+        （拖动重排时 Qt 让 tabData 跟着标签走）。
+        """
+        idx = self.tabAt(event.pos())
+        if idx < 0:
+            super().contextMenuEvent(event)
+            return
+        paths = [self.tabData(i) for i in range(self.count())]
+        menu = QMenu(self)
+        act_close = menu.addAction(t("tab.close"))
+        act_others = menu.addAction(t("tab.close_others"))
+        menu.addSeparator()
+        act_left = menu.addAction(t("tab.close_left"))
+        act_right = menu.addAction(t("tab.close_right"))
+
+        left = [p for p in paths[:idx] if p]
+        right = [p for p in paths[idx + 1:] if p]
+        others = left + right
+        act_others.setEnabled(bool(others))
+        act_left.setEnabled(bool(left))
+        act_right.setEnabled(bool(right))
+
+        chosen = menu.exec(event.globalPos())
+        if chosen is None:
+            return
+        if chosen is act_close:
+            target = [paths[idx]] if paths[idx] else []
+        elif chosen is act_others:
+            target = others
+        elif chosen is act_left:
+            target = left
+        else:
+            target = right
+        if target:
+            self.close_paths_requested.emit(target)
 
 
 class FileEditorWidget(QWidget):
@@ -2114,6 +2157,7 @@ class FileEditorWidget(QWidget):
         self.tab_bar.setVisible(False)
         self.tab_bar.currentChanged.connect(self._on_file_tab_changed)
         self.tab_bar.tabCloseRequested.connect(self._on_file_tab_close_requested)
+        self.tab_bar.close_paths_requested.connect(self._close_tab_paths)
         layout.addWidget(self.tab_bar)
 
         # 编辑器
@@ -2964,6 +3008,18 @@ class FileEditorWidget(QWidget):
         # 非当前标签没有内存态（只有当前文件可能有未保存改动），直接摘掉
         if path:
             self._remove_tab_by_path(path)
+
+    def _close_tab_paths(self, paths: list):
+        """按路径批量关闭标签（右键菜单的关闭其他/左侧/右侧走这里）。
+
+        当前文件放最后关：它可能有未保存改动要弹提示，而且关掉它会连带
+        切换/收起窗格 —— 先把其它标签摘干净，语义最直观。
+        """
+        current = self._current_file
+        for path in [p for p in paths if p and p != current]:
+            self._remove_tab_by_path(path)
+        if current and current in paths:
+            self._close_editor()
 
     def _set_md_support(self, supported: bool):
         """标记当前文件是否支持 Markdown 预览，并同步按钮可见性。"""

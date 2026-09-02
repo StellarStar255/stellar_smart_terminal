@@ -222,3 +222,110 @@ class TestEditorAreaWithTabs(unittest.TestCase):
 
 if __name__ == '__main__':
     unittest.main()
+
+
+class TestTabContextMenu(_Base):
+    """标签右键菜单：关闭 / 关闭其他 / 关闭左侧 / 关闭右侧。
+
+    批量关闭按**路径**做，不按索引 —— 每关掉一个，后面的索引就往前挪，
+    按索引删必然错位关错文件。
+    """
+
+    def _four_files(self):
+        paths = []
+        for name in ("t0.txt", "t1.txt", "t2.txt", "t3.txt"):
+            p = str(Path(self._tmp.name) / name)
+            Path(p).write_text(name, encoding='utf-8')
+            paths.append(p)
+        for p_ in paths:
+            self.pane.open_file(p_)
+            self.app.processEvents()
+        return paths
+
+    def _menu_actions(self, tab_index):
+        """在第 tab_index 个标签上模拟右键，返回 {动作文案: QAction}。
+
+        exec 会阻塞，所以把它替成"记下菜单、返回 None"。
+        """
+        from PyQt6.QtCore import QPoint, Qt as QtCore_Qt
+        from PyQt6.QtGui import QContextMenuEvent
+        from PyQt6.QtWidgets import QMenu
+
+        seen = {}
+        orig_exec = QMenu.exec
+
+        def fake_exec(menu, *a, **k):
+            seen["menu"] = menu
+            seen["actions"] = {act.text(): act for act in menu.actions()}
+            return None
+        QMenu.exec = fake_exec
+        try:
+            bar = self.pane.tab_bar
+            rect = bar.tabRect(tab_index)
+            ev = QContextMenuEvent(QContextMenuEvent.Reason.Mouse,
+                                   rect.center(),
+                                   bar.mapToGlobal(rect.center()))
+            bar.contextMenuEvent(ev)
+        finally:
+            QMenu.exec = orig_exec
+        return seen.get("actions", {}), seen.get("menu")
+
+    def _trigger(self, tab_index, key):
+        """真按下菜单里的某一项（不是直接调内部方法）。"""
+        from i18n import t
+        from PyQt6.QtWidgets import QMenu
+        label = t(key)
+        orig_exec = QMenu.exec
+
+        def fake_exec(menu, *a, **k):
+            for act in menu.actions():
+                if act.text() == label:
+                    return act
+            return None
+        QMenu.exec = fake_exec
+        try:
+            from PyQt6.QtGui import QContextMenuEvent
+            bar = self.pane.tab_bar
+            rect = bar.tabRect(tab_index)
+            ev = QContextMenuEvent(QContextMenuEvent.Reason.Mouse,
+                                   rect.center(),
+                                   bar.mapToGlobal(rect.center()))
+            bar.contextMenuEvent(ev)
+        finally:
+            QMenu.exec = orig_exec
+        self.app.processEvents()
+
+    def test_close_others_keeps_only_the_clicked_tab(self):
+        paths = self._four_files()
+        self._trigger(1, "tab.close_others")
+        self.assertEqual(self._paths(), [paths[1]])
+
+    def test_close_to_the_left(self):
+        paths = self._four_files()
+        self._trigger(2, "tab.close_left")
+        self.assertEqual(self._paths(), paths[2:])
+
+    def test_close_to_the_right(self):
+        paths = self._four_files()
+        self._trigger(1, "tab.close_right")
+        self.assertEqual(self._paths(), paths[:2])
+
+    def test_close_single_tab(self):
+        paths = self._four_files()
+        self._trigger(0, "tab.close")
+        self.assertEqual(self._paths(), paths[1:])
+
+    def test_closing_left_of_the_first_tab_is_disabled(self):
+        self._four_files()
+        actions, _menu = self._menu_actions(0)
+        from i18n import t
+        self.assertFalse(actions[t("tab.close_left")].isEnabled(),
+                         "第一个标签左边没东西可关")
+        self.assertTrue(actions[t("tab.close_right")].isEnabled())
+
+    def test_close_others_survives_index_shifting(self):
+        """关掉 3 个的过程中索引一直在挪：按路径做才不会关错。"""
+        paths = self._four_files()
+        self._trigger(3, "tab.close_others")
+        self.assertEqual(self._paths(), [paths[3]])
+        self.assertEqual(self.pane._current_file, paths[3])
