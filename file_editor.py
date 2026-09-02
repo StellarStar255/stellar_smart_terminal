@@ -5,6 +5,7 @@
 import hashlib
 import json
 import os
+import sys
 import re
 import tempfile
 import time
@@ -86,6 +87,18 @@ def _decode_with_fallback(raw: bytes) -> tuple[str, str]:
     return _norm(raw.decode('latin-1')), 'latin-1'
 
 
+def _detect_eol(raw: bytes) -> str:
+    """判断文件原始行尾：CRLF 多于 LF 则为 "\r\n"，否则 "\n"（无换行/平局 → LF）。
+
+    编辑器缓冲区一律 LF（见 _decode_with_fallback），保存时按这里记下的
+    行尾写回——否则 Windows 项目 / .bat / autocrlf 仓库里改一行，git diff
+    就变成整个文件。
+    """
+    crlf = raw.count(b'\r\n')
+    lf = raw.count(b'\n') - crlf
+    return '\r\n' if crlf > lf else '\n'
+
+
 # AI 补全：文件扩展名 → 语言名（用于给模型的提示词上下文）
 _AI_LANG_BY_EXT = {
     '.py': 'python', '.js': 'javascript', '.jsx': 'javascript',
@@ -106,7 +119,7 @@ from app_logging import get_logger
 logger = get_logger(__name__)
 
 
-# OneDark 调色板（与现有 PythonHighlighter / MarkdownHighlighter 一致）
+# OneDark 调色板（与 MarkdownHighlighter 一致）
 _COLOR_KEYWORD = "#c678dd"
 _COLOR_STRING = "#98c379"
 _COLOR_COMMENT = "#5c6370"
@@ -127,139 +140,6 @@ def _make_format(color, bold=False, italic=False, underline=False):
     if underline:
         f.setFontUnderline(True)
     return f
-
-
-class PythonHighlighter(QSyntaxHighlighter):
-    """Python 语法高亮器"""
-
-    KEYWORDS = [
-        'and', 'as', 'assert', 'async', 'await', 'break', 'class', 'continue',
-        'def', 'del', 'elif', 'else', 'except', 'finally', 'for', 'from',
-        'global', 'if', 'import', 'in', 'is', 'lambda', 'nonlocal', 'not',
-        'or', 'pass', 'raise', 'return', 'try', 'while', 'with', 'yield',
-        'True', 'False', 'None'
-    ]
-
-    def __init__(self, document, theme=None):
-        super().__init__(document)
-        self.theme = theme or {}
-        self._init_formats()
-
-    def _init_formats(self):
-        """初始化格式"""
-        # 关键字格式
-        self.keyword_format = QTextCharFormat()
-        self.keyword_format.setForeground(QColor("#c678dd"))
-        self.keyword_format.setFontWeight(QFont.Weight.Bold)
-
-        # 字符串格式
-        self.string_format = QTextCharFormat()
-        self.string_format.setForeground(QColor("#98c379"))
-
-        # 注释格式
-        self.comment_format = QTextCharFormat()
-        self.comment_format.setForeground(QColor("#5c6370"))
-        self.comment_format.setFontItalic(True)
-
-        # 数字格式
-        self.number_format = QTextCharFormat()
-        self.number_format.setForeground(QColor("#d19a66"))
-
-        # 函数名格式
-        self.function_format = QTextCharFormat()
-        self.function_format.setForeground(QColor("#61afef"))
-
-        # 类名格式
-        self.class_format = QTextCharFormat()
-        self.class_format.setForeground(QColor("#e5c07b"))
-
-        # 装饰器格式
-        self.decorator_format = QTextCharFormat()
-        self.decorator_format.setForeground(QColor("#e06c75"))
-
-    def highlightBlock(self, text):
-        """高亮一行文本"""
-        import re
-
-        # 高亮关键字
-        for keyword in self.KEYWORDS:
-            pattern = rf'\b{keyword}\b'
-            for match in re.finditer(pattern, text):
-                self.setFormat(match.start(), match.end() - match.start(), self.keyword_format)
-
-        # 高亮装饰器
-        for match in re.finditer(r'@\w+', text):
-            self.setFormat(match.start(), match.end() - match.start(), self.decorator_format)
-
-        # 高亮函数定义
-        for match in re.finditer(r'\bdef\s+(\w+)', text):
-            self.setFormat(match.start(1), match.end(1) - match.start(1), self.function_format)
-
-        # 高亮类定义
-        for match in re.finditer(r'\bclass\s+(\w+)', text):
-            self.setFormat(match.start(1), match.end(1) - match.start(1), self.class_format)
-
-        # 高亮数字
-        for match in re.finditer(r'\b\d+\.?\d*\b', text):
-            self.setFormat(match.start(), match.end() - match.start(), self.number_format)
-
-        # 高亮字符串（简单处理，不处理跨行字符串）
-        in_string = False
-        string_char = None
-        string_start = 0
-
-        i = 0
-        while i < len(text):
-            char = text[i]
-
-            if not in_string:
-                if char in '"\'':
-                    # 检查是否是三引号
-                    if text[i:i+3] in ('"""', "'''"):
-                        in_string = True
-                        string_char = text[i:i+3]
-                        string_start = i
-                        i += 3
-                        continue
-                    else:
-                        in_string = True
-                        string_char = char
-                        string_start = i
-            else:
-                if len(string_char) == 3:
-                    if text[i:i+3] == string_char:
-                        self.setFormat(string_start, i + 3 - string_start, self.string_format)
-                        in_string = False
-                        i += 3
-                        continue
-                elif char == string_char and (i == 0 or text[i-1] != '\\'):
-                    self.setFormat(string_start, i + 1 - string_start, self.string_format)
-                    in_string = False
-
-            i += 1
-
-        # 如果字符串延续到行尾
-        if in_string:
-            self.setFormat(string_start, len(text) - string_start, self.string_format)
-
-        # 高亮注释（在字符串处理之后，避免高亮字符串中的 #）
-        comment_start = -1
-        in_str = False
-        str_char = None
-        for i, char in enumerate(text):
-            if not in_str:
-                if char in '"\'':
-                    in_str = True
-                    str_char = char
-                elif char == '#':
-                    comment_start = i
-                    break
-            else:
-                if char == str_char and (i == 0 or text[i-1] != '\\'):
-                    in_str = False
-
-        if comment_start >= 0:
-            self.setFormat(comment_start, len(text) - comment_start, self.comment_format)
 
 
 class MarkdownHighlighter(QSyntaxHighlighter):
@@ -658,8 +538,11 @@ def _ini_rules():
 
 
 def _python_rules():
-    """Python 的规则表版本（供 markdown 预览代码块用；编辑器仍用
-    PythonHighlighter——其命令式字符串/注释处理更精细，行为保持不变）。"""
+    """Python 规则表：编辑器里的 .py 与 markdown 预览代码块共用。
+
+    以前编辑器用一个逐关键字 35 次正则、且没有跨行状态的 PythonHighlighter：
+    大文件打开慢，多行 docstring 第二行起不是字符串色、里面的 # 被当注释。
+    GenericHighlighter 的 block_rules 用 blockState 维持三引号状态。"""
     kw = _make_format(_COLOR_KEYWORD, bold=True)
     st = _make_format(_COLOR_STRING)
     cm = _make_format(_COLOR_COMMENT, italic=True)
@@ -2018,6 +1901,15 @@ class FileEditorWidget(QWidget):
         self.theme = theme or {}
         self._current_file = None
         self._original_content = ""  # 保存原始内容用于比较
+        # is_modified 的增量判定：基准 revision（装载/保存时的 document().revision()）
+        # + 按 revision 缓存的比较结果，避免每次击键都 toPlainText() 整份缓冲区
+        self._baseline_revision = -1
+        self._mod_cache = (-1, False)
+        # 文件原始行尾（"\n" / "\r\n"），保存时按此写回；新建文件 LF
+        self._file_eol = "\n"
+        # 文件树里被删除（on_path_deleted 通知）：标题打标记，不弹模态；
+        # 缓冲区保留，下次保存重建
+        self._file_missing = False
         # 正在装载文件：此期间 _original_content 已指向新文件、而缓冲区尚未填好，
         # 任何自动保存都必须让路（否则会把空/旧内容写进新文件）。见 open_file。
         self._loading = False
@@ -2895,16 +2787,22 @@ class FileEditorWidget(QWidget):
         try:
             self._current_file = file_path
             self._file_encoding = encoding
+            self._file_eol = _detect_eol(raw)
+            self._file_missing = False
             self._original_content = content  # 保存原始内容用于比较
+            # 先挂高亮器再填内容：否则旧高亮器先扫一遍、新高亮器再全量重扫
+            self._setup_highlighter(file_path)
             # 崩溃恢复：存在更新的自动保存备份 → 询问是否恢复（恢复后为「已修改」态）
             restored = self._maybe_restore_autosave(file_path, content)
             if restored is not None:
                 self.editor.setPlainText(restored)
                 self._last_autosave_hash = hashlib.sha1(
                     restored.encode('utf-8')).hexdigest()
+                self._mark_baseline(dirty=True)
             else:
                 self.editor.setPlainText(content)
                 self._last_autosave_hash = None
+                self._mark_baseline()
         finally:
             self._loading = False
         # 启动周期性自动保存（崩溃恢复）
@@ -2913,9 +2811,6 @@ class FileEditorWidget(QWidget):
         # 切换文件时关闭已打开的查找栏（旧文件的高亮已无意义）
         if hasattr(self, 'search_bar') and not self.search_bar.isHidden():
             self.search_bar.close_search()
-
-        # 根据文件类型设置语法高亮
-        self._setup_highlighter(file_path)
 
         # Markdown 文件默认进渲染预览（Typora 式阅读视图），点 ◎ 切回源码编辑；
         # HTML 文件复用同一个 ◎ 按钮，但走系统浏览器预览（Qt 富文本渲染不了
@@ -4082,7 +3977,8 @@ class FileEditorWidget(QWidget):
         doc = self.editor.document()
 
         if ext == '.py':
-            self._highlighter = PythonHighlighter(doc, self.theme)
+            rules, blocks = _python_rules()
+            self._highlighter = GenericHighlighter(doc, rules, blocks, self.theme)
         elif ext in ('.md', '.markdown'):
             self._highlighter = MarkdownHighlighter(doc, self.theme)
         elif ext in ('.sh', '.bash', '.zsh', '.ksh', '.fish') or \
@@ -4121,7 +4017,10 @@ class FileEditorWidget(QWidget):
         临时文件与目标同目录，确保 os.replace 是同一文件系统内的原子 rename。
         保存后由 _refresh_known_mtime 重新挂监听（replace 会换 inode）。
         """
-        d = os.path.dirname(os.path.abspath(path)) or '.'
+        # 软链（~/.zshrc -> ~/dotfiles/zshrc 这类）必须写到真实目标：对链接
+        # 本身 os.replace 会把链接换成普通文件，dotfiles 仓库里的文件纹丝不动
+        target = os.path.realpath(path)
+        d = os.path.dirname(target) or '.'
         fd, tmp = tempfile.mkstemp(dir=d, prefix='.', suffix='.tmp')
         try:
             with os.fdopen(fd, 'wb') as f:
@@ -4130,11 +4029,23 @@ class FileEditorWidget(QWidget):
                 os.fsync(f.fileno())
             # 尽量保留原文件权限位
             try:
-                if os.path.exists(path):
-                    os.chmod(tmp, os.stat(path).st_mode & 0o777)
+                if os.path.exists(target):
+                    os.chmod(tmp, os.stat(target).st_mode & 0o777)
             except OSError:
                 pass
-            os.replace(tmp, path)
+            try:
+                os.replace(tmp, target)
+            except PermissionError:
+                # 仅 Windows：目标被别的进程占用时 replace 会拒绝 → 退回就地写
+                # （非原子，但总比不保存强）。POSIX 上 replace 失败必须原样抛出，
+                # 原文件保持原封不动（见 test_failed_write_keeps_original）。
+                if sys.platform != 'win32' or not os.path.exists(target):
+                    raise
+                with open(target, 'wb') as f:
+                    f.write(data)
+                    f.flush()
+                    os.fsync(f.fileno())
+                os.unlink(tmp)
         except Exception:
             try:
                 os.unlink(tmp)
@@ -4201,12 +4112,15 @@ class FileEditorWidget(QWidget):
 
             # 用打开时检测到的编码写回（utf-8-sig 自动带 BOM）；新建文件默认 utf-8
             encoding = self._file_encoding or 'utf-8'
+            # 缓冲区恒为 LF；按打开时记下的行尾写回（CRLF 文件保持 CRLF）
+            eol = self._file_eol or '\n'
+            out_text = content if eol == '\n' else content.replace('\n', eol)
             try:
-                data = content.encode(encoding)
+                data = out_text.encode(encoding)
             except (UnicodeEncodeError, LookupError):
                 # 新输入的字符旧编码放不下（如往 latin-1 文件里打中文）→ 升级 utf-8
                 encoding = 'utf-8'
-                data = content.encode(encoding)
+                data = out_text.encode(encoding)
                 self._file_encoding = encoding
             # 记下我们写下的字节指纹：watcher 据此识别"这是我自己的保存"，而不是
             # 用一个 1.5s 时间窗盲目吞掉这期间的所有事件（那会漏掉真实的外部改动）。
@@ -4215,6 +4129,8 @@ class FileEditorWidget(QWidget):
             self._atomic_write_bytes(self._current_file, data)
             # 更新原始内容，这样 is_modified() 会返回 False
             self._original_content = content
+            self._mark_baseline()
+            self._file_missing = False
             # 保存成功 → 崩溃恢复备份已无意义，删掉
             self._remove_autosave_backup()
             self._refresh_known_mtime()
@@ -4280,15 +4196,22 @@ class FileEditorWidget(QWidget):
         if self._current_file:
             file_name = os.path.basename(self._current_file)
             enc = (self._file_encoding or 'utf-8').lower()
+            parts = [file_name]
+            tips = []
             if not self._in_image_mode and enc != 'utf-8':
                 # 非 utf-8 编码：标题后缀 + tooltip 提示保存时按此编码写回
-                self.file_label.setText(f"{file_name}  ·  {enc.upper()}")
-                self.file_label.setToolTip(
-                    t("editor.encoding_tooltip", encoding=enc.upper())
-                )
-            else:
-                self.file_label.setText(file_name)
-                self.file_label.setToolTip("")
+                parts.append(enc.upper())
+                tips.append(t("editor.encoding_tooltip", encoding=enc.upper()))
+            if not self._in_image_mode and self._file_eol == '\r\n':
+                # CRLF 文件：与编码同款提示，保存时按 CRLF 写回
+                parts.append('CRLF')
+                tips.append('CRLF')
+            if self._file_missing:
+                # 文件树里已被删除：标记而不弹窗，缓冲区保留，下次保存重建
+                parts[0] = f"{file_name} ⚠"
+                tips.append(t("editor.file_deleted_msg", name=file_name))
+            self.file_label.setText("  ·  ".join(parts))
+            self.file_label.setToolTip("\n".join(tips))
             # 通过比较内容判断是否修改
             self.modified_label.setText("●" if self.is_modified() else "")
         else:
@@ -4296,13 +4219,41 @@ class FileEditorWidget(QWidget):
             self.file_label.setToolTip("")
             self.modified_label.setText("")
 
+    def _mark_baseline(self, dirty: bool = False):
+        """装载/保存后把当前 document revision 记为"干净"基准。
+
+        dirty=True（恢复了崩溃备份）：内容与磁盘不同，基准留在 -1 让
+        is_modified 走内容比较（结果必然为 True）。
+        """
+        doc = self.editor.document()
+        self._baseline_revision = -1 if dirty else doc.revision()
+        self._mod_cache = (-1, False)
+        doc.setModified(dirty)
+
     def is_modified(self) -> bool:
-        """检查文件是否已修改（通过比较内容）"""
+        """检查文件是否已修改。
+
+        语义仍是"内容与基准不同"（删掉又敲回同样内容 → 未修改），但不再每次
+        击键都 toPlainText() 整份缓冲区：revision 等于基准 → 未修改；长度不同
+        → 已修改；只有长度相同时才做一次内容比较，且按 revision 缓存。
+        """
         if not self._current_file:
             return False
         if self._in_image_mode:
             return False  # 图片只读，不参与 modified 判定
-        return self.editor.toPlainText() != self._original_content
+        doc = self.editor.document()
+        rev = doc.revision()
+        if rev == self._baseline_revision:
+            return False
+        if rev == self._mod_cache[0]:
+            return self._mod_cache[1]
+        # characterCount 含末尾段落符；段落分隔符与 toPlainText 的 \n 一一对应
+        if doc.characterCount() - 1 != len(self._original_content):
+            val = True
+        else:
+            val = self.editor.toPlainText() != self._original_content
+        self._mod_cache = (rev, val)
+        return val
 
     # ---- 自动保存（崩溃恢复）----
     def _backup_identity(self, path: str) -> str:
@@ -4509,13 +4460,17 @@ class FileEditorWidget(QWidget):
         if not path or self._in_image_mode:
             return
 
-        # 文件被删除：保留缓冲区，下次 save 会重建；不再重复弹
+        # 文件被删除：保留缓冲区，下次 save 会重建；不再重复弹。
+        # 文件树里删的（on_path_deleted 已打标记）不再弹模态。
         if not os.path.isfile(path):
-            QMessageBox.warning(
-                self,
-                t("editor.file_changed_title"),
-                t("editor.file_deleted_msg", name=os.path.basename(path)),
-            )
+            if not self._file_missing:
+                QMessageBox.warning(
+                    self,
+                    t("editor.file_changed_title"),
+                    t("editor.file_deleted_msg", name=os.path.basename(path)),
+                )
+                self._file_missing = True
+                self._update_title()
             self._known_mtime = None
             return
 
@@ -4578,6 +4533,8 @@ class FileEditorWidget(QWidget):
         self.editor.setPlainText(new_content)
         self._original_content = new_content
         self._file_encoding = new_encoding
+        self._file_eol = _detect_eol(raw)
+        self._mark_baseline()
         self._known_mtime = new_mtime
         # 重载后已与磁盘一致，本地修改的崩溃恢复备份不再有意义
         self._remove_autosave_backup()
@@ -4675,6 +4632,8 @@ class FileEditorWidget(QWidget):
         self._refresh_tab_strip_visibility()
         self._current_file = None
         self._file_encoding = "utf-8"
+        self._file_eol = "\n"
+        self._file_missing = False
         self._original_content = ""
         self.editor.clear()
         # 复位图片预览与 Markdown 预览
@@ -4685,6 +4644,70 @@ class FileEditorWidget(QWidget):
         self._stack.setCurrentIndex(0)
         self._update_title()
         self.editor_closed.emit()
+
+    # ---- 文件树改名/删除联动（由 EditorArea.on_path_renamed/on_path_deleted 调用）----
+    @staticmethod
+    def _map_renamed(path: str, old: str, new: str) -> str | None:
+        """path 等于 old 或在 old 目录之下 → 映射到 new 之下；否则 None。"""
+        if not path:
+            return None
+        if path == old:
+            return new
+        prefix = old.rstrip(os.sep) + os.sep
+        if path.startswith(prefix):
+            return os.path.join(new, path[len(prefix):])
+        return None
+
+    def _apply_path_renamed(self, old: str, new: str):
+        """文件树里改名/移动后把本窗格的路径换过去：不重载缓冲区、不改脏状态。"""
+        # 1) 标签条：tabData 是唯一事实来源，逐个映射
+        self._tab_guard = True
+        try:
+            for i in range(self.tab_bar.count()):
+                mapped = self._map_renamed(self.tab_bar.tabData(i), old, new)
+                if mapped is None:
+                    continue
+                self.tab_bar.setTabData(i, mapped)
+                self.tab_bar.setTabText(i, os.path.basename(mapped))
+                self.tab_bar.setTabToolTip(i, mapped)
+        finally:
+            self._tab_guard = False
+        # 2) 当前文件
+        cur = self._current_file
+        mapped = self._map_renamed(cur, old, new)
+        if mapped is None:
+            return
+        # 视图位置记录随路径迁移
+        state = _VIEW_STATE_REGISTRY.pop(os.path.abspath(cur), None)
+        if state is not None:
+            _VIEW_STATE_REGISTRY[os.path.abspath(mapped)] = state
+        # 崩溃恢复备份：键含路径，旧键作废；有未保存改动就按新键立即重写一份
+        had_backup = self._last_autosave_hash is not None
+        self._remove_autosave_backup(cur)
+        self._current_file = mapped
+        self._file_missing = False
+        if had_backup and not self._in_image_mode and self.is_modified():
+            content = self.editor.toPlainText()
+            self._write_autosave_backup(
+                content, hashlib.sha1(content.encode('utf-8')).hexdigest())
+        # 监听换到新路径（_known_mtime 随之刷新）
+        if not self._in_image_mode:
+            self._start_watching(mapped)
+        self._update_title()
+
+    def _apply_path_deleted(self, path: str):
+        """文件树里删除后：当前文件打标记（不弹窗，缓冲区保留），其它标签直接摘掉。"""
+        prefix = path.rstrip(os.sep) + os.sep
+        cur = self._current_file
+        for tab_path in list(self._tab_paths()):
+            if tab_path == cur:
+                continue
+            if tab_path == path or (tab_path and tab_path.startswith(prefix)):
+                self._remove_tab_by_path(tab_path)
+        if cur and (cur == path or cur.startswith(prefix)):
+            self._file_missing = True
+            self._known_mtime = None
+            self._update_title()
 
     def get_current_file(self) -> str:
         """获取当前打开的文件路径"""
@@ -5078,6 +5101,31 @@ class EditorArea(QWidget):
         pane.editor.setFocus()
 
     # ---------- 窗格级便捷转发 ----------
+
+    # ---------- 文件树联动 ----------
+
+    def on_path_renamed(self, old_path: str, new_path: str):
+        """文件树改名/移动了 old_path（文件或目录）→ 所有窗格里指向它（或其下）
+        的文件换到 new_path，不重载缓冲区、不改脏状态。否则编辑器会继续按旧路径
+        自动保存，在旧位置重建出第二份文件。"""
+        old_path = os.path.abspath(old_path)
+        new_path = os.path.abspath(new_path)
+        if old_path == new_path:
+            return
+        for pane in list(self._panes):
+            try:
+                pane._apply_path_renamed(old_path, new_path)
+            except RuntimeError:
+                pass  # 窗格已销毁
+
+    def on_path_deleted(self, path: str):
+        """文件树删除了 path（文件或目录）→ 相关窗格打"已删除"标记，不弹模态。"""
+        path = os.path.abspath(path)
+        for pane in list(self._panes):
+            try:
+                pane._apply_path_deleted(path)
+            except RuntimeError:
+                pass
 
     def open_file_in_active(self, file_path: str) -> bool:
         if self._active is None:
