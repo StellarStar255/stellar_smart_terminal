@@ -782,7 +782,7 @@ else:
                     try:
                         self._child_exec(slave_fd, command, cwd, cols, rows,
                                          smart_terminal_pid)
-                    except BaseException:
+                    except BaseException:  # 子进程内任何异常都只能走 os._exit
                         pass
                     os._exit(127)
 
@@ -1035,7 +1035,7 @@ else:
                     except (ProcessLookupError, PermissionError):
                         try:
                             os.kill(self._child_pid, signal.SIGWINCH)
-                        except ProcessLookupError:
+                        except ProcessLookupError:  # 子进程已退出
                             pass
                 return True
             except Exception as e:
@@ -1053,7 +1053,7 @@ else:
             if self._child_pid:
                 try:
                     os.kill(self._child_pid, signal.SIGTERM)
-                except ProcessLookupError:
+                except ProcessLookupError:  # 子进程已退出
                     pass
 
             self._cleanup()
@@ -1077,7 +1077,7 @@ else:
             if self._child_pid is not None:
                 try:
                     os.waitpid(self._child_pid, os.WNOHANG)
-                except ChildProcessError:
+                except ChildProcessError:  # 已被回收
                     pass
                 self._child_pid = None
 

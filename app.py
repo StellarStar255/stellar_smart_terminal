@@ -243,7 +243,7 @@ def install_sigint_handler(app: QApplication, notify=None, rearm_window: float =
             while True:
                 if not rsock.recv(4096):
                     break
-        except (BlockingIOError, InterruptedError):
+        except (BlockingIOError, InterruptedError):  # 已排干
             pass
         except OSError:
             logger.debug("_on_wakeup: suppressed exception", exc_info=True)

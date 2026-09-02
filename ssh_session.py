@@ -209,6 +209,7 @@ def parse_ssh_config(path: Optional[str] = None) -> list[HostConfig]:
         with config_path.open("r", encoding="utf-8", errors="replace") as fh:
             cfg.parse(fh)
     except Exception:
+        logger.warning("parse_ssh_config: cannot read ssh config", exc_info=True)
         return []
 
     hosts: list[HostConfig] = []
@@ -276,7 +277,7 @@ def append_ssh_config_host(
     config_path.parent.mkdir(parents=True, exist_ok=True)
     try:
         os.chmod(config_path.parent, 0o700)
-    except OSError:
+    except OSError:  # 尽力而为，失败不影响主流程
         pass
 
     existing = _existing_aliases(config_path)
@@ -311,7 +312,7 @@ def append_ssh_config_host(
         fh.write(block)
     try:
         os.chmod(config_path, 0o600)
-    except OSError:
+    except OSError:  # 尽力而为，失败不影响主流程
         pass
 
     return HostConfig(
@@ -367,7 +368,7 @@ def rename_ssh_config_host(old_alias: str, new_alias: str,
             fh.writelines(lines)
         try:
             os.chmod(config_path, 0o600)
-        except OSError:
+        except OSError:  # 尽力而为，失败不影响主流程
             pass
     return changed
 
@@ -451,7 +452,7 @@ def remove_ssh_config_host(alias: str, path: Optional[str] = None) -> bool:
         fh.writelines(lines)
     try:
         os.chmod(config_path, 0o600)
-    except OSError:
+    except OSError:  # 尽力而为，失败不影响主流程
         pass
     return True
 
@@ -503,7 +504,7 @@ def update_ssh_config_host(alias: str, hostname: str, user: str = "",
         fh.writelines(lines)
     try:
         os.chmod(config_path, 0o600)
-    except OSError:
+    except OSError:  # 尽力而为，失败不影响主流程
         pass
     return True
 
@@ -1410,7 +1411,7 @@ class SSHSession(QObject):
             try:
                 port = int(p)
                 host = h
-            except ValueError:
+            except ValueError:  # 非法值按未提供处理
                 pass
         return user, host, port
 
@@ -1792,7 +1793,7 @@ class SSHSession(QObject):
                 # 回退到「先删目标再 rename」。目标不存在的删除失败忽略。
                 try:
                     sftp.remove(remote_path)
-                except OSError:
+                except OSError:  # 尽力而为，失败不影响主流程
                     pass
                 sftp.rename(tmp_path, remote_path)
         except Exception:

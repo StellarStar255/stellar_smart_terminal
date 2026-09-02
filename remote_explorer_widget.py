@@ -1111,7 +1111,7 @@ class _RemoteItemDelegate(QStyledItemDelegate):
             def _apply():
                 try:
                     editor.setSelection(0, sel_len)
-                except RuntimeError:
+                except RuntimeError:  # Qt 对象已销毁（窗口/面板已关）
                     pass
 
             # 推到事件队列末尾，避免被 Qt item-view 内部的 show/focus 流程覆盖
@@ -2811,7 +2811,7 @@ class RemoteExplorerPanel(QWidget, explorer_common.TransferJobHost):
         finally:
             try:
                 self._tree.setUpdatesEnabled(True)
-            except RuntimeError:
+            except RuntimeError:  # Qt 对象已销毁（窗口/面板已关）
                 pass
         # 刚新建的条目若已进树 → 直接进入原地重命名
         self._maybe_start_pending_edit()
@@ -3174,7 +3174,7 @@ class RemoteExplorerPanel(QWidget, explorer_common.TransferJobHost):
         finally:
             try:
                 self._tree.setUpdatesEnabled(True)
-            except RuntimeError:
+            except RuntimeError:  # Qt 对象已销毁（窗口/面板已关）
                 pass
         # 刚新建的条目若已进树 → 直接进入原地重命名
         self._maybe_start_pending_edit()
@@ -3719,7 +3719,7 @@ class RemoteExplorerPanel(QWidget, explorer_common.TransferJobHost):
                 txt = t("remote.clipboard_preparing",
                         done=self._stage_done, total=self._stage_total)
             self._subtitle_label.setText(txt)
-        except RuntimeError:
+        except RuntimeError:  # Qt 对象已销毁（窗口/面板已关）
             pass
 
     def _on_clipboard_stage_finalize(self):
@@ -3730,7 +3730,7 @@ class RemoteExplorerPanel(QWidget, explorer_common.TransferJobHost):
                                                      self._stage_text)
             if self._session is not None:
                 self._subtitle_label.setText(self._session.host_config.alias)
-        except RuntimeError:
+        except RuntimeError:  # Qt 对象已销毁（窗口/面板已关）
             pass
 
     @staticmethod
@@ -3937,6 +3937,7 @@ class RemoteExplorerPanel(QWidget, explorer_common.TransferJobHost):
                                          label=t("remote.pasting_progress", dst=path))
             return {e.name: e for e in entries}
         except Exception:
+            logger.warning("_remote_listing_entries: listdir failed, treating as empty", exc_info=True)
             return {}
 
     @staticmethod
@@ -3975,6 +3976,7 @@ class RemoteExplorerPanel(QWidget, explorer_common.TransferJobHost):
         try:
             entry: RemoteEntry = self._await_remote(sess, sess.stat, path, label=label)
         except Exception:
+            logger.warning("_remote_remove: stat failed, nothing removed", exc_info=True)
             return
         if entry.is_dir and not entry.is_link:
             self._await_remote(sess, sess.remove_tree, path, label=label)
@@ -4002,7 +4004,7 @@ class RemoteExplorerPanel(QWidget, explorer_common.TransferJobHost):
                 for fname in files:
                     try:
                         total += os.path.getsize(os.path.join(root, fname))
-                    except OSError:
+                    except OSError:  # 尽力而为，失败不影响主流程
                         pass
             live = {"bytes": 0}
             fut = sess.submit(sess.upload_dir_tar, local_dir, remote_dir,
@@ -4152,7 +4154,7 @@ class RemoteExplorerPanel(QWidget, explorer_common.TransferJobHost):
                 if attr is not None and attr.st_mtime:
                     os.utime(local_path, (float(attr.st_mtime), float(attr.st_mtime)))
             except OSError:
-                pass
+                logger.debug("_open_remote_file: sync mtime failed", exc_info=True)
             self._open_session_map[local_path] = sess
             self._file_ready.emit(host_alias, remote_path, local_path)
         fut.add_done_callback(on_done)
@@ -4342,7 +4344,7 @@ class RemoteExplorerPanel(QWidget, explorer_common.TransferJobHost):
                 self._tree.setCurrentItem(item)
                 self._tree.scrollToItem(item)
                 self._tree.editItem(item, 0)
-            except RuntimeError:
+            except RuntimeError:  # Qt 对象已销毁（窗口/面板已关）
                 pass
 
         QTimer.singleShot(0, go)
@@ -4593,6 +4595,7 @@ class RemoteExplorerPanel(QWidget, explorer_common.TransferJobHost):
         try:
             return bool(fut.result())
         except Exception:
+            logger.debug("_remote_supports_tar: probe failed", exc_info=True)
             return False
 
     def _upload_batch_tar(self, sess, local_paths: list, target_dir: str,
@@ -4605,12 +4608,12 @@ class RemoteExplorerPanel(QWidget, explorer_common.TransferJobHost):
                     for fname in files:
                         try:
                             total_bytes += os.path.getsize(os.path.join(root, fname))
-                        except OSError:
+                        except OSError:  # 尽力而为，失败不影响主流程
                             pass
             else:
                 try:
                     total_bytes += os.path.getsize(p)
-                except OSError:
+                except OSError:  # 尽力而为，失败不影响主流程
                     pass
         live = {"bytes": 0}
         fut = sess.submit(sess.upload_files_tar, list(local_paths), target_dir,
@@ -4849,7 +4852,7 @@ class RemoteExplorerPanel(QWidget, explorer_common.TransferJobHost):
         try:
             if not sip.isdeleted(progress):
                 progress.setValue(bar_max)   # 收尾拉满（关闭对话框）
-        except RuntimeError:
+        except RuntimeError:  # Qt 对象已销毁（窗口/面板已关）
             pass
 
         if done_counter["errors"]:
@@ -4858,7 +4861,7 @@ class RemoteExplorerPanel(QWidget, explorer_common.TransferJobHost):
                     self, t("remote.op_failed_title"),
                     "\n".join(done_counter["errors"]),
                 )
-            except RuntimeError:
+            except RuntimeError:  # Qt 对象已销毁（窗口/面板已关）
                 pass
         self._refresh_upload_target(target_item, target_dir)
 
@@ -4966,7 +4969,7 @@ class RemoteExplorerPanel(QWidget, explorer_common.TransferJobHost):
         try:
             if not sip.isdeleted(progress):
                 progress.setValue(total)
-        except RuntimeError:
+        except RuntimeError:  # Qt 对象已销毁（窗口/面板已关）
             pass
 
         if done_counter["errors"]:
@@ -4975,7 +4978,7 @@ class RemoteExplorerPanel(QWidget, explorer_common.TransferJobHost):
                     self, t("remote.op_failed_title"),
                     "\n".join(done_counter["errors"]),
                 )
-            except RuntimeError:
+            except RuntimeError:  # Qt 对象已销毁（窗口/面板已关）
                 pass
 
         # 4) 刷新受影响的所有父目录（源们 + 目标）
@@ -4984,7 +4987,7 @@ class RemoteExplorerPanel(QWidget, explorer_common.TransferJobHost):
                 sess.invalidate_cache(p)
             # 简单粗暴：整树重刷一次，省得逐个找 item
             self._populate_tree_root()
-        except RuntimeError:
+        except RuntimeError:  # Qt 对象已销毁（窗口/面板已关）
             pass
 
     def _sync_download_for_drag(self, entries: list[RemoteEntry]) -> list[str]:
@@ -5058,7 +5061,7 @@ class RemoteExplorerPanel(QWidget, explorer_common.TransferJobHost):
         try:
             if not sip.isdeleted(progress):
                 progress.setValue(len(entries))
-        except RuntimeError:
+        except RuntimeError:  # Qt 对象已销毁（窗口/面板已关）
             pass
 
         if done_counter["errors"]:
@@ -5095,7 +5098,7 @@ class RemoteExplorerPanel(QWidget, explorer_common.TransferJobHost):
         # 强制展开
         try:
             self._tree.expandItem(item)
-        except RuntimeError:
+        except RuntimeError:  # Qt 对象已销毁（窗口/面板已关）
             pass
 
     # ---------- utils ----------

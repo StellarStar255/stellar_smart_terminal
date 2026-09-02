@@ -238,7 +238,7 @@ def _macos_install_toolbar() -> tuple:
                 try:
                     shutil.copyfile(icon, dest)
                 except OSError:
-                    pass
+                    logger.debug("_macos_install_toolbar: icon copy failed", exc_info=True)
         return True, str(app)
     except (OSError, subprocess.SubprocessError) as e:
         logger.warning(f"install toolbar launcher failed: {e}")
@@ -306,7 +306,7 @@ def _win_uninstall() -> tuple:
             for sub in (base + r"\command", base):
                 try:
                     winreg.DeleteKey(winreg.HKEY_CURRENT_USER, sub)
-                except FileNotFoundError:
+                except FileNotFoundError:  # 本就不存在
                     pass
         return True, ""
     except OSError as e:
@@ -401,7 +401,7 @@ def _launch(dir_path):
             stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
             start_new_session=True)
     except Exception:
-        pass
+        logger.warning("_launch: failed to start app", exc_info=True)
 
 
 class StellarOpenTerminal(GObject.GObject, Nautilus.MenuProvider):

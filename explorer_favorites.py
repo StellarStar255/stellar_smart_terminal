@@ -16,6 +16,8 @@ import threading
 from typing import Optional
 
 from utils import get_data_dir
+from app_logging import get_logger
+logger = get_logger(__name__)
 
 
 _PATH = get_data_dir() / ".smart_terminal_explorer_favorites.json"
@@ -51,7 +53,7 @@ def _save() -> None:
         with _PATH.open("w", encoding="utf-8") as fh:
             json.dump(_cache, fh, indent=2, ensure_ascii=False)
     except OSError:
-        pass
+        logger.warning("explorer favorites not saved", exc_info=True)
 
 
 def list_all() -> list[str]:

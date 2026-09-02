@@ -625,7 +625,7 @@ def local_entry_size(path: str) -> int:
                         continue
                     try:
                         total += os.path.getsize(fp)
-                    except OSError:
+                    except OSError:  # 尽力而为，失败不影响主流程
                         pass
                     seen += 1
                     if seen > _SIZE_SCAN_CAP:
@@ -648,7 +648,7 @@ def _copy_file_reporting(src: str, dst: str, report) -> None:
     try:
         shutil.copystat(src, dst)
     except OSError:
-        pass
+        logger.debug("_copy_file_reporting: copystat failed", exc_info=True)
 
 
 def copy_local_entry(src: str, dst: str, move: bool = False,
@@ -675,7 +675,12 @@ def copy_local_entry(src: str, dst: str, move: bool = False,
         shutil.move(src, dst, copy_function=_cf)
         if on_bytes is not None and done["n"] == 0:
             on_bytes(local_entry_size(dst))   # rename 快路径：一步到位
-    elif os.path.isdir(src) and not os.path.islink(src):
+    elif os.path.islink(src):
+        # 软链本身（文件或目录链接）：复制链接而不是跟随，与 copytree(symlinks=True)
+        # 口径一致；跟随的话指向大目录/上级的链接会把目标整个拷一遍
+        os.symlink(os.readlink(src), dst)
+        _report(0)
+    elif os.path.isdir(src):
         shutil.copytree(src, dst, symlinks=True, copy_function=_cf)
     else:
         _cf(src, dst)
@@ -1625,6 +1630,7 @@ class ExplorerPanel(QWidget, explorer_common.TransferJobHost):
                 text=True, errors='replace',
             )
         except Exception:
+            logger.debug("_run_content_search_rg: rg unavailable", exc_info=True)
             return False
         try:
             for line in proc.stdout:
@@ -1835,7 +1841,7 @@ class ExplorerPanel(QWidget, explorer_common.TransferJobHost):
             try:
                 if not sip.isdeleted(_self):
                     _self._fingerprints_ready.emit(fresh)
-            except RuntimeError:
+            except RuntimeError:  # Qt 对象已销毁（窗口/面板已关）
                 pass
         fut.add_done_callback(done)
 
@@ -1931,6 +1937,7 @@ class ExplorerPanel(QWidget, explorer_common.TransferJobHost):
                         subprocess.Popen([editor_path, file_path])
                         return
                     except Exception:
+                        logger.debug("_open_for_editing: launch failed, trying next editor", exc_info=True)
                         continue
             # 尝试 which 查找
             for cmd in ['cursor', 'code']:
@@ -1940,6 +1947,7 @@ class ExplorerPanel(QWidget, explorer_common.TransferJobHost):
                         subprocess.Popen([cmd_path, file_path])
                         return
                     except Exception:
+                        logger.debug("_open_for_editing: launch failed, trying next editor", exc_info=True)
                         continue
         else:
             # 其他平台尝试 cursor 或 code 命令
@@ -1950,6 +1958,7 @@ class ExplorerPanel(QWidget, explorer_common.TransferJobHost):
                         subprocess.Popen([cmd_path, file_path])
                         return
                     except Exception:
+                        logger.debug("_open_for_editing: launch failed, trying next editor", exc_info=True)
                         continue
         # 如果都失败了，使用系统默认应用
         self._open_file(file_path)
@@ -2379,7 +2388,7 @@ class ExplorerPanel(QWidget, explorer_common.TransferJobHost):
         fut = self._local_executor().submit(self._send_to_trash_batch, list(valid))
         try:
             self._wait_future_with_progress([fut], t("explorer.delete") + "…")
-        except RuntimeError:
+        except RuntimeError:  # Qt 对象已销毁（窗口/面板已关）
             pass
         exc = fut.exception() if fut.done() else None
         errors: list[str] = [str(exc)] if exc is not None else list(fut.result())
@@ -2416,7 +2425,24 @@ class ExplorerPanel(QWidget, explorer_common.TransferJobHost):
         if self._local_pool is None:
             self._local_pool = ThreadPoolExecutor(
                 max_workers=2, thread_name_prefix="explorer-local")
+            # 面板销毁后线程池不能悬着：C++ 对象没了 lambda 也不再引用 self，
+            # 只抓住池对象本身，wait=False 让在途任务自然结束
+            pool = self._local_pool
+            try:
+                self.destroyed.connect(lambda *_: pool.shutdown(wait=False))
+            except RuntimeError:  # Qt 对象已销毁（窗口/面板已关）
+                pass
         return self._local_pool
+
+    def shutdown(self):
+        """释放本地工作线程池（关窗/关面板时调用；幂等）。"""
+        pool = self._local_pool
+        if pool is not None:
+            pool.shutdown(wait=False)
+
+    def closeEvent(self, event):
+        self.shutdown()
+        super().closeEvent(event)
 
     @staticmethod
     def _applescript_trash_script(paths: list) -> str:

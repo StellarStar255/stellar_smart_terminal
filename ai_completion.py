@@ -288,7 +288,7 @@ class InlineCompletionController(QObject):
         """
         try:
             self._timer.stop()
-        except RuntimeError:
+        except RuntimeError:  # Qt 对象已销毁（窗口/面板已关）
             pass
         self._active_worker = None
         for w in list(self._workers):
@@ -301,7 +301,7 @@ class InlineCompletionController(QObject):
                 try:
                     if w.isRunning():
                         w.wait(wait_ms)
-                except RuntimeError:
+                except RuntimeError:  # Qt 对象已销毁（窗口/面板已关）
                     pass
 
     # ---------- 开关 / 外观 ----------
@@ -460,7 +460,7 @@ class InlineCompletionController(QObject):
     def _reap(self, worker):
         try:
             self._workers.remove(worker)
-        except ValueError:
+        except ValueError:  # 非法值按未提供处理
             pass
         worker.deleteLater()
 

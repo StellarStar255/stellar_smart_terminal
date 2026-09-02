@@ -815,7 +815,7 @@ class TerminalRenderMixin:
                 try:
                     int(color, 16)
                     return QColor(f'#{color}')
-                except ValueError:
+                except ValueError:  # 非法值按未提供处理
                     pass
 
             # 标准颜色名

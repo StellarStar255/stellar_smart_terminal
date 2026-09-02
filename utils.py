@@ -11,6 +11,8 @@ import tempfile
 from datetime import datetime
 from pathlib import Path
 from typing import List, Set
+from app_logging import get_logger
+logger = get_logger(__name__)
 
 # 支持的文件扩展名
 IMAGE_EXTENSIONS = {'.png', '.jpg', '.jpeg', '.gif', '.bmp', '.webp', '.svg', '.ico'}
@@ -365,7 +367,7 @@ def atomic_write_json(file_path: Path, data) -> bool:
         # 防止旧文件残留的宽松权限或宽 umask 导致同机其它用户读取。
         try:
             file_path.chmod(0o600)
-        except OSError:
+        except OSError:  # 尽力而为，失败不影响主流程
             pass
         return True
     except OSError:
@@ -375,7 +377,7 @@ def atomic_write_json(file_path: Path, data) -> bool:
                 json.dump(data, f, ensure_ascii=False, indent=2)
             try:
                 file_path.chmod(0o600)
-            except OSError:
+            except OSError:  # 尽力而为，失败不影响主流程
                 pass
             return True
         except OSError:
@@ -404,7 +406,7 @@ def list_notify_sounds() -> List[str]:
         try:
             for f in d.glob("*.aiff"):
                 names.add(f.stem)
-        except OSError:
+        except OSError:  # 尽力而为，失败不影响主流程
             pass
     return sorted(names)
 
@@ -434,7 +436,7 @@ def play_notify_sound(name: str) -> None:
             stderr=subprocess.DEVNULL,
         )
     except OSError:
-        pass
+        logger.debug("play_notify_sound: afplay failed", exc_info=True)
 
 
 # ---------- 全局勾选框对勾图标 ----------

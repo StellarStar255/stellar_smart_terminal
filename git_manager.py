@@ -1310,7 +1310,7 @@ class GitManager(QObject):
         if len(parts) == 2:
             try:
                 return (int(parts[1]), int(parts[0]))  # ahead, behind
-            except ValueError:
+            except ValueError:  # 非法值按未提供处理
                 pass
         return (0, 0)
 

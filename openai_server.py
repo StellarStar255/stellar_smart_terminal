@@ -368,7 +368,7 @@ class TerminalBridge(QObject):
                 try:
                     self.terminal.raw_output_received.disconnect(self.on_output)
                     self.terminal._api_output_enabled = False
-                except (TypeError, RuntimeError):
+                except (TypeError, RuntimeError):  # 已断开或已销毁
                     pass
                 self._connected = False
             self.is_collecting = False
@@ -401,7 +401,7 @@ class TerminalBridge(QObject):
             try:
                 self.terminal._write_to_backend(text.encode('utf-8'))
             except (OSError, AttributeError):
-                pass
+                logger.warning("_do_send_input: write to terminal failed", exc_info=True)
 
     def start_request(self) -> bool:
         """开始新请求，返回是否成功"""
@@ -540,6 +540,7 @@ class TerminalBridge(QObject):
             self._screen_cache_time = current_time
             return result
         except Exception:
+            logger.debug("get_screen_content: failed, serving cache", exc_info=True)
             return self._screen_cache if self._screen_cache else ""
 
     def get_screen_diff(self) -> str:
@@ -926,7 +927,7 @@ class OpenAIRequestHandler(BaseHTTPRequestHandler):
             try:
                 host = urlparse(origin).hostname
             except Exception:
-                return False
+                return False  # 畸形 Origin 一律拒绝
             if host not in ('localhost', '127.0.0.1', '::1'):
                 return False
         return True
@@ -1031,7 +1032,7 @@ class OpenAIRequestHandler(BaseHTTPRequestHandler):
             else:
                 self._handle_blocking_response(input_text, request)
 
-        except BrokenPipeError:
+        except BrokenPipeError:  # 客户端已断开
             pass
         except Exception as e:
             logger.error(f"[OpenAI Server] Error: {e}")
@@ -1773,7 +1774,7 @@ class OpenAIRequestHandler(BaseHTTPRequestHandler):
                 self.send_header('Access-Control-Allow-Origin', cors_origin)
             self.end_headers()
             self.wfile.write(json.dumps(data, ensure_ascii=False).encode('utf-8'))
-        except BrokenPipeError:
+        except BrokenPipeError:  # 客户端已断开
             pass
 
     def _send_error(self, status: int, message: str):

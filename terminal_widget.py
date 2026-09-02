@@ -291,6 +291,7 @@ class _MarkScrollBar(QScrollBar):
         try:
             fractions = provider()
         except Exception:
+            logger.debug("paintEvent: mark provider failed", exc_info=True)
             return
         if not fractions:
             return
@@ -1270,6 +1271,7 @@ class TerminalWidget(TerminalRenderMixin, QWidget):
         try:
             ok = self._backend.write(data)
         except Exception:
+            logger.warning("_write_to_backend: write failed", exc_info=True)
             return False
         # 用户提交了命令（回车/换行）→ 此后第一次输出停顿才视为"执行完毕"。
         # 自动应答（设备属性、光标位置上报等）不含换行，不会误触发；
@@ -1638,6 +1640,7 @@ class TerminalWidget(TerminalRenderMixin, QWidget):
             with self._screen_lock:
                 lines = self.screen.display[-15:]
         except Exception:
+            logger.debug("_detect_interaction_prompt: snapshot failed", exc_info=True)
             return None
         matched = [
             line.strip() for line in lines
@@ -2354,7 +2357,7 @@ class TerminalWidget(TerminalRenderMixin, QWidget):
                 self.input_buffer += commit_string
                 # 提交后清除预编辑文本
                 self._preedit_string = ""
-            except OSError:
+            except OSError:  # 尽力而为，失败不影响主流程
                 pass
         event.accept()
 
@@ -3455,7 +3458,7 @@ class TerminalWidget(TerminalRenderMixin, QWidget):
                     if (line_text.endswith(' ') and col_end >= term_cols - 1
                             and (term_cols - 1) not in buffer_line):
                         line_text = line_text[:-1]
-                except TypeError:
+                except TypeError:  # 非 dict 行对象
                     pass
             else:
                 line_text = ''.join(selected_chars).rstrip()
@@ -3565,7 +3568,7 @@ class TerminalWidget(TerminalRenderMixin, QWidget):
                 try:
                     if text.endswith(' ') and (columns - 1) not in buffer_line:
                         text = text[:-1]
-                except TypeError:
+                except TypeError:  # 非 dict 行对象
                     pass
             else:
                 text = ''.join(char_list).rstrip()
@@ -3653,7 +3656,7 @@ class TerminalWidget(TerminalRenderMixin, QWidget):
             if timer is not None:
                 try:
                     timer.stop()
-                except RuntimeError:
+                except RuntimeError:  # Qt 对象已销毁（窗口/面板已关）
                     pass
         # 在途的搜索 worker 结果作废
         self._search_seq += 1
@@ -4451,7 +4454,7 @@ if (hasFileURL) {{
             columns = self.screen.columns
         try:
             columns = max(columns, max(buffer_line.keys()) + 1)
-        except (ValueError, AttributeError, TypeError):
+        except (ValueError, AttributeError, TypeError):  # 空行/异常行按屏宽
             pass
         is_wide = self._is_wide_char
         chars = []

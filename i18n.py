@@ -1308,7 +1308,7 @@ def t(key: str, **kwargs) -> str:
     if kwargs:
         try:
             text = text.format(**kwargs)
-        except (KeyError, IndexError):
+        except (KeyError, IndexError):  # 占位符与参数不匹配时原样返回
             pass
     return text
 

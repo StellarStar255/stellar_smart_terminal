@@ -73,7 +73,7 @@ def _decode_with_fallback(raw: bytes) -> tuple[str, str]:
     if raw.startswith(b'\xef\xbb\xbf'):
         try:
             return _norm(raw.decode('utf-8-sig')), 'utf-8-sig'
-        except UnicodeDecodeError:
+        except UnicodeDecodeError:  # 尝试下一种编码
             pass
     # 注：曾尝试用 charset_normalizer 做"更准"的检测以避免 gb18030/latin-1 误判，
     # 但实测它在短文本上极不可靠（把 GB 编码的中文判成 big5 → 乱码），对以中文
@@ -714,6 +714,7 @@ class CodeEditor(QPlainTextEdit):
         try:
             return getter()
         except Exception:
+            logger.debug("ai_get_config: provider failed", exc_info=True)
             return None
 
     def ai_get_language(self) -> str:
@@ -2716,7 +2717,7 @@ class FileEditorWidget(QWidget):
         """布局完成后的延迟滚动恢复；窗格可能已销毁，静默忽略。"""
         try:
             self.editor.verticalScrollBar().setValue(value)
-        except RuntimeError:
+        except RuntimeError:  # Qt 对象已销毁（窗口/面板已关）
             pass
 
     def open_file(self, file_path: str) -> bool:
@@ -4030,7 +4031,7 @@ class FileEditorWidget(QWidget):
             try:
                 if os.path.exists(target):
                     os.chmod(tmp, os.stat(target).st_mode & 0o777)
-            except OSError:
+            except OSError:  # 尽力而为，失败不影响主流程
                 pass
             try:
                 os.replace(tmp, target)
@@ -4048,7 +4049,7 @@ class FileEditorWidget(QWidget):
         except Exception:
             try:
                 os.unlink(tmp)
-            except OSError:
+            except OSError:  # 尽力而为，失败不影响主流程
                 pass
             raise
 
@@ -4337,7 +4338,7 @@ class FileEditorWidget(QWidget):
             try:
                 os.remove(p)
             except OSError:
-                pass
+                logger.debug("_remove_autosave_backup: remove failed", exc_info=True)
         self._last_autosave_hash = None
 
     def _maybe_restore_autosave(self, file_path: str, disk_content: str) -> str | None:
@@ -4372,7 +4373,7 @@ class FileEditorWidget(QWidget):
                 backup_ts = float(ts)
                 ts_text = time.strftime(
                     '%Y-%m-%d %H:%M:%S', time.localtime(backup_ts))
-        except (OSError, ValueError, TypeError):
+        except (OSError, ValueError, TypeError):  # 备份元数据损坏：按无备份处理
             pass
 
         # 磁盘文件是否比备份更新：若是，恢复旧备份会覆盖较新的磁盘内容（数据丢失）。
@@ -4385,7 +4386,7 @@ class FileEditorWidget(QWidget):
                 disk_newer = True
                 disk_ts_text = time.strftime(
                     '%Y-%m-%d %H:%M:%S', time.localtime(disk_mtime))
-        except OSError:
+        except OSError:  # 尽力而为，失败不影响主流程
             pass
 
         if disk_newer:
@@ -5123,7 +5124,7 @@ class EditorArea(QWidget):
         for pane in list(self._panes):
             try:
                 pane._apply_path_deleted(path)
-            except RuntimeError:
+            except RuntimeError:  # Qt 对象已销毁（窗口/面板已关）
                 pass
 
     def open_file_in_active(self, file_path: str) -> bool:
