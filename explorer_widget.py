@@ -28,16 +28,16 @@ from PyQt6.QtWidgets import (
     QPushButton, QTreeView, QMenu, QLineEdit, QMessageBox,
     QAbstractItemView, QFileDialog, QApplication, QProgressDialog,
     QStyledItemDelegate, QFileIconProvider, QListWidget, QListWidgetItem,
-    QToolButton,
+    QToolButton, QSizePolicy,
 )
 from PyQt6.QtCore import (
     Qt, QDir, QModelIndex, QPersistentModelIndex, pyqtSignal, QTimer,
-    QEventLoop, QSize, QFileInfo, QSortFilterProxyModel,
+    QEventLoop, QEvent, QSize, QFileInfo, QSortFilterProxyModel,
 )
 from PyQt6.QtGui import (
     QFileSystemModel, QAction, QDesktopServices, QCursor,
     QShortcut, QKeySequence, QColor, QBrush,
-    QIcon, QPixmap, QPainter, QPen,
+    QIcon, QPixmap, QPainter, QPen, QFontMetrics,
 )
 from PyQt6.QtCore import QUrl
 from PyQt6 import sip  # 用于检查 C++ 对象是否已被删除
@@ -366,6 +366,172 @@ class FilteredFileSystemModel(QFileSystemModel):
         return result
 
 
+class _BreadcrumbBar(QWidget):
+    """当前目录的面包屑：`… / aiem-arranger / src / main / resources`。
+
+    比一行小字路径好在两点：当前目录名是亮色、一眼能认；上级各段可以点，
+    直接跳回去。宽度不够时从**左边**开始折叠成 `…`（点它列出被折叠的
+    上级）——要保留的永远是右边那几段，那才是"我在哪"。
+    """
+
+    path_selected = pyqtSignal(str)
+    edit_requested = pyqtSignal()
+
+    def __init__(self, parent=None):
+        super().__init__(parent)
+        self._path = ""
+        self._dim = "#888888"
+        self._text = "#eaeaea"
+        self._layout = QHBoxLayout(self)
+        self._layout.setContentsMargins(6, 0, 6, 0)
+        self._layout.setSpacing(0)
+        self.setMinimumHeight(22)
+        self.setToolTip("")
+
+    def set_colors(self, text: str, dim: str):
+        self._text, self._dim = text, dim
+        self._rebuild()
+
+    def set_path(self, path: str):
+        self._path = path or ""
+        self.setToolTip(self._path)
+        self._rebuild()
+
+    def path(self) -> str:
+        return self._path
+
+    def segments(self) -> list:
+        """[(显示名, 该段对应的完整路径), …]，从根到当前目录。"""
+        if not self._path:
+            return []
+        parts = []
+        cur = os.path.normpath(self._path)
+        while True:
+            parent = os.path.dirname(cur)
+            name = os.path.basename(cur)
+            if not name:                     # 到根了（/ 或 C:\）
+                parts.append((cur, cur))
+                break
+            parts.append((name, cur))
+            if parent == cur:
+                break
+            cur = parent
+        parts.reverse()
+        return parts
+
+    def _seg_overhead(self) -> int:
+        """一个段按钮除文字之外要占的像素（按钮内边距 + 分隔符）。
+
+        实测而不是拍脑袋：QToolButton 自己的内边距/边框跟样式表、平台都
+        有关，估小了布局就会把每段挤成 "aie…ger" 那种谁也认不出的样子。
+        """
+        sample = QToolButton(self)
+        sample.setStyleSheet(self._btn_qss(self._dim, "400"))
+        sample.setText("W")
+        overhead = max(0, sample.sizeHint().width()
+                       - QFontMetrics(self.font()).horizontalAdvance("W"))
+        sample.deleteLater()
+        sep = QLabel("/", self)
+        sep.setStyleSheet(f"color: {self._dim}; padding: 0 3px;")
+        sep_w = sep.sizeHint().width()
+        sep.deleteLater()
+        return overhead + sep_w
+
+    def visible_segments(self, width: int = -1, seg_overhead: int = -1) -> list:
+        """按可用宽度算出真正显示哪几段；折叠掉的用开头的 None 占位。"""
+        segs = self.segments()
+        if not segs:
+            return []
+        if width < 0:
+            width = self.width()
+        margins = self._layout.contentsMargins()
+        avail = max(0, width - margins.left() - margins.right())
+        if seg_overhead < 0:
+            seg_overhead = self._seg_overhead()
+        fm = QFontMetrics(self.font())
+        # 从右往左塞，塞不下就停 —— 右边的段（当前目录）永远优先保留。
+        # 折叠标记 "…" 自己也要占一格。
+        ellipsis_w = fm.horizontalAdvance("…") + seg_overhead
+        kept, used = [], 0
+        for i, (name, full) in enumerate(reversed(segs)):
+            w = fm.horizontalAdvance(name) + seg_overhead
+            reserve = 0 if i == len(segs) - 1 else ellipsis_w
+            if kept and used + w + reserve > avail:
+                break
+            kept.append((name, full))
+            used += w
+        kept.reverse()
+        if len(kept) < len(segs):
+            return [(None, None)] + kept     # 开头放折叠标记
+        return kept
+
+    def _btn_qss(self, color: str, weight: str) -> str:
+        return (f"QToolButton {{ border: none; background: transparent;"
+                f" color: {color}; font-weight: {weight}; padding: 1px 2px; }}"
+                f"QToolButton:hover {{ color: {self._text};"
+                f" text-decoration: underline; }}"
+                f"QToolButton::menu-indicator {{ image: none; width: 0; }}")
+
+    def mouseDoubleClickEvent(self, event):   # noqa: N802 — Qt 回调
+        # 双击空白处 → 切到可编辑的路径框（手敲路径跳转）
+        self.edit_requested.emit()
+
+    def resizeEvent(self, event):             # noqa: N802 — Qt 回调
+        super().resizeEvent(event)
+        self._rebuild()
+
+    def _rebuild(self):
+        while self._layout.count():
+            item = self._layout.takeAt(0)
+            w = item.widget()
+            if w is not None:
+                w.setParent(None)      # 先摘干净：只 deleteLater 的话
+                w.deleteLater()        # 布局缓存不失效，整行高度会塌成 0
+        shown = self.visible_segments()
+        hidden = [seg for seg in self.segments()
+                  if seg not in [s for s in shown if s[0] is not None]]
+        prev_was_root = False
+        for i, (name, full) in enumerate(shown):
+            # 根那一段本身就是 "/"（Windows 上是 "C:\\"），后面再补一个分隔符
+            # 就成了 "/ / var"，难看
+            if i and not prev_was_root:
+                sep = QLabel("/")
+                sep.setStyleSheet(f"color: {self._dim}; padding: 0 3px;")
+                self._layout.addWidget(sep)
+            if name is None:
+                btn = QToolButton()
+                btn.setText("…")
+                btn.setToolTip(self._path)
+                btn.setPopupMode(QToolButton.ToolButtonPopupMode.InstantPopup)
+                menu = QMenu(btn)
+                for h_name, h_full in hidden:
+                    act = menu.addAction(h_name)
+                    act.triggered.connect(
+                        lambda _=False, pth=h_full: self.path_selected.emit(pth))
+                btn.setMenu(menu)
+            else:
+                btn = QToolButton()
+                btn.setText(name)
+                btn.clicked.connect(
+                    lambda _=False, pth=full: self.path_selected.emit(pth))
+            prev_was_root = bool(name) and name in (os.sep, "/", full)
+            last = (i == len(shown) - 1)
+            color = self._text if last else self._dim
+            weight = "600" if last else "400"
+            btn.setCursor(Qt.CursorShape.PointingHandCursor)
+            btn.setFocusPolicy(Qt.FocusPolicy.NoFocus)
+            # 不许被布局压扁：宁可少显示几段（左边折叠成 …），也不要把
+            # 每段名字挤成 "aie…ger" 那种谁也认不出的样子
+            btn.setSizePolicy(QSizePolicy.Policy.Fixed,
+                              QSizePolicy.Policy.Preferred)
+            btn.setStyleSheet(self._btn_qss(color, weight))
+            self._layout.addWidget(btn)
+        self._layout.addStretch(1)
+        self._layout.invalidate()
+        self._layout.activate()
+        self.updateGeometry()
+
+
 class _DotFileProxy(QSortFilterProxyModel):
     """在 Windows 上过滤以 '.' 开头的隐藏文件/文件夹。
 
@@ -609,6 +775,27 @@ class ExplorerPanel(QWidget, explorer_common.TransferJobHost):
             return None
         return parent
 
+    def eventFilter(self, obj, event):        # noqa: N802 — Qt 回调
+        """路径编辑框里按 Esc = 放弃编辑，退回面包屑。"""
+        if (obj is getattr(self, 'path_edit', None)
+                and event.type() == QEvent.Type.KeyPress
+                and event.key() == Qt.Key.Key_Escape):
+            self._end_path_edit()
+            return True
+        return super().eventFilter(obj, event)
+
+    def _begin_path_edit(self):
+        """双击面包屑 → 换成可编辑的路径框，全选好直接改。"""
+        self.breadcrumb.hide()
+        self.path_edit.setText(self._current_path)
+        self.path_edit.show()
+        self.path_edit.setFocus()
+        self.path_edit.selectAll()
+
+    def _end_path_edit(self):
+        self.path_edit.hide()
+        self.breadcrumb.show()
+
     def _on_path_edited(self):
         """路径栏回车：目录存在就跳过去，否则把文字还原（不静默吞掉）。"""
         text = (self.path_edit.text() or "").strip()
@@ -617,6 +804,8 @@ class ExplorerPanel(QWidget, explorer_common.TransferJobHost):
             self.set_root_path(path)
         else:
             self._sync_path_edit()
+        if self.path_edit.isVisible():
+            self._end_path_edit()
 
     def _sync_path_edit(self):
         """把路径栏文字/提示同步成当前根目录。"""
@@ -629,6 +818,9 @@ class ExplorerPanel(QWidget, explorer_common.TransferJobHost):
         # 那才是"我在哪"的关键信息；开头的 /Users/xxx 反而没用
         edit.setCursorPosition(len(self._current_path or ""))
         edit.setToolTip(self._current_path)
+        crumb = getattr(self, 'breadcrumb', None)
+        if crumb is not None:
+            crumb.set_path(self._current_path)
 
     def go_up(self):
         """回到上一级目录（已经在文件系统根就什么都不做）。"""
@@ -721,14 +913,24 @@ class ExplorerPanel(QWidget, explorer_common.TransferJobHost):
         # 当前所在目录：这个面板以前从不显示自己的路径（根只由主窗口顶部
         # 那条路径栏驱动），侧边栏嵌入模式下根本看不见，进到深层就不知道
         # 自己在哪。可编辑，回车跳转，与远程面板一致。
+        self.breadcrumb = _BreadcrumbBar()
+        self.breadcrumb.setToolTip(self._current_path)
+        self.breadcrumb.path_selected.connect(self.set_root_path)
+        self.breadcrumb.edit_requested.connect(self._begin_path_edit)
+
+        # 手敲路径用的输入框：平时藏着，双击面包屑才露出来
         self.path_edit = QLineEdit()
         self.path_edit.setPlaceholderText(t("explorer.path_placeholder"))
         self.path_edit.setText(self._current_path)
         self.path_edit.setToolTip(self._current_path)
         self.path_edit.returnPressed.connect(self._on_path_edited)
+        self.path_edit.installEventFilter(self)   # Esc 取消编辑
+        self.path_edit.hide()
+
         path_bar = QHBoxLayout()
-        path_bar.setContentsMargins(4, 0, 4, 4)
-        path_bar.setSpacing(4)
+        path_bar.setContentsMargins(0, 0, 0, 4)
+        path_bar.setSpacing(0)
+        path_bar.addWidget(self.breadcrumb, 1)
         path_bar.addWidget(self.path_edit, 1)
         layout.addLayout(path_bar)
 
@@ -840,6 +1042,7 @@ class ExplorerPanel(QWidget, explorer_common.TransferJobHost):
         border = self.theme.get('border', '#3d3d5c')
         accent = self.theme.get('accent', '#667eea')
 
+        self.breadcrumb.set_colors(text, text_dim)
         self.path_edit.setStyleSheet(
             f"QLineEdit {{ background: transparent; border: none;"
             f" color: {text_dim}; padding: 0 2px; font-size: 11px; }}"

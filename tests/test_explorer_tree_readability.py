@@ -280,9 +280,78 @@ if __name__ == "__main__":
     unittest.main()
 
 
+class TestBreadcrumb(_Base):
+    """面包屑：当前目录亮色、上级可点、宽度不够从左边折叠。
+
+    第一版是一行 11px 暗字长路径，用户评价"根本看不清、很难看"。
+    """
+
+    def _deep_panel(self):
+        p = self._panel()
+        root = Path(self._tmp.name)
+        deep = root / "aiem-arranger" / "src" / "main" / "java" / "com"
+        deep.mkdir(parents=True)
+        p.setFixedWidth(430)
+        p.set_root_path(str(deep))
+        for _ in range(10):
+            self.app.processEvents()
+        return p, deep
+
+    def test_segments_end_at_the_current_folder(self):
+        p, deep = self._deep_panel()
+        names = [n for n, _ in p.breadcrumb.segments()]
+        self.assertEqual(names[-5:],
+                         ["aiem-arranger", "src", "main", "java", "com"])
+
+    def test_narrow_panel_collapses_from_the_left(self):
+        p, _deep = self._deep_panel()
+        shown = p.breadcrumb.visible_segments(200)
+        self.assertIsNone(shown[0][0], "放不下时开头要有折叠标记")
+        self.assertEqual(shown[-1][0], "com", "当前目录永远保留")
+        wide = [n for n, _ in p.breadcrumb.visible_segments(900)]
+        self.assertGreater(len(wide), len(shown), "宽了就该多露几段")
+
+    def test_every_shown_segment_keeps_its_full_name(self):
+        """宁可少显示几段，也不要把名字挤成 aie…ger 那种认不出的样子。"""
+        from PyQt6.QtGui import QFontMetrics
+        p, _deep = self._deep_panel()
+        cb = p.breadcrumb
+        fm = QFontMetrics(cb.font())
+        shown = cb.visible_segments(430)
+        total = sum(fm.horizontalAdvance(n or "…") + cb._seg_overhead()
+                    for n, _ in shown)
+        self.assertLessEqual(total, 430, "算进去的段宽必须真的放得下")
+
+    def test_clicking_a_segment_navigates_there(self):
+        p, deep = self._deep_panel()
+        target = None
+        for name, full in p.breadcrumb.segments():
+            if name == "src":
+                target = full
+        p.breadcrumb.path_selected.emit(target)
+        self.app.processEvents()
+        self.assertSamePath(p._current_path, target, "点上级段要跳过去")
+
+    def test_full_path_in_tooltip(self):
+        p, deep = self._deep_panel()
+        self.assertSamePath(p.breadcrumb.toolTip(), deep)
+
+
 class TestPathBar(_Base):
-    """面板要能显示自己在哪 —— 侧边栏嵌入模式下看不到主窗口那条路径栏，
-    进到深层目录就完全失去方位（用户实测提出）。"""
+    """手敲路径仍然可用：双击面包屑切成输入框，回车跳转、Esc 取消。"""
+
+    def test_double_click_switches_to_edit(self):
+        p = self._panel()
+        p.set_root_path(self._tmp.name)
+        self.app.processEvents()
+        # 面板本身没 show，子控件的 isVisible() 恒为 False —— 看显隐状态用
+        # isHidden()（这个坑前面在传输窗口的按钮上踩过一次）
+        p._begin_path_edit()
+        self.assertFalse(p.path_edit.isHidden())
+        self.assertTrue(p.breadcrumb.isHidden())
+        p._end_path_edit()
+        self.assertTrue(p.path_edit.isHidden())
+        self.assertFalse(p.breadcrumb.isHidden())
 
     def test_shows_current_folder(self):
         p = self._panel()
@@ -292,8 +361,8 @@ class TestPathBar(_Base):
         p.set_root_path(str(sub))
         self.app.processEvents()
         self.assertSamePath(p.path_edit.text(), sub)
-        self.assertSamePath(p.path_edit.toolTip(), sub,
-                            "完整路径要能在 tooltip 里看到（栏太窄会截断）")
+        self.assertSamePath(p.breadcrumb.toolTip(), sub,
+                            "完整路径要能在 tooltip 里看到（栏太窄会折叠）")
 
     def test_follows_navigation(self):
         p = self._panel()
@@ -305,6 +374,8 @@ class TestPathBar(_Base):
         p.go_up()
         self.assertSamePath(p.path_edit.text(), sub.parent,
                             "退上一级后路径栏要跟着变")
+        self.assertEqual(p.breadcrumb.segments()[-1][0], sub.parent.name,
+                         "面包屑也要跟着变")
 
     def test_enter_navigates_to_a_typed_path(self):
         p = self._panel()
