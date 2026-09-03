@@ -137,9 +137,43 @@ class _Base(unittest.TestCase):
             m.QProgressDialog = cls
         self.explorer_common.TransferProgressDialog = self._orig_job_cls
         self._qmessagebox.warning = self._orig_warning
+        # 测试期间由被测代码构造的进度框/统一窗口同样要销毁（同 _track 的理由）
+        for w in list(self.popups) + list(self.jobs):
+            self._dispose(w)
+
+    def _track(self, widget):
+        """登记测试造出来的顶层控件，用例结束时真正销毁。
+
+        以前这些对话框/面板一律不回收：跑完本文件还有 19 个活着的顶层控件，
+        其中 9 个是带 SSH 线程池的 RemoteExplorerPanel。Python 在任意时刻回收
+        其中一个（线程还在跑）就会让 Qt qFatal —— 整个 pytest 进程在**随机位置**
+        硬中止（Windows 0xC0000409，macOS/Linux abort），正是 v1.26.2 的
+        Windows 发版 job 崩在本文件的原因。
+        """
+        self.addCleanup(self._dispose, widget)
+        return widget
+
+    @staticmethod
+    def _dispose(widget):
+        from PyQt6 import sip
+        from PyQt6.QtCore import QEvent
+        from PyQt6.QtGui import QCloseEvent
+        from PyQt6.QtWidgets import QApplication
+        app = QApplication.instance()
+        if widget is None or app is None or sip.isdeleted(widget):
+            return
+        try:
+            # 走真实关窗路径：面板的 closeEvent 会断连接、停线程池
+            QApplication.sendEvent(widget, QCloseEvent())
+        except RuntimeError:
+            pass  # 控件已被销毁
+        widget.deleteLater()
+        for _ in range(3):
+            app.sendPostedEvents(None, QEvent.Type.DeferredDelete)
+            app.processEvents()
 
     def _panel(self, sess):
-        panel = self.rew.RemoteExplorerPanel(theme={})
+        panel = self._track(self.rew.RemoteExplorerPanel(theme={}))
         panel._session = sess
         panel._current_path = "/dst"
         panel._populate_tree_root = lambda: None
@@ -418,8 +452,8 @@ class TestPerRowBytes(_Base):
 
     def _dialog(self, rows=("a", "b", "c")):
         from transfer_progress import TransferProgressDialog
-        return TransferProgressDialog(list(rows), delay_ms=0,
-                                      header="正在粘贴到 /dst…")
+        return self._track(TransferProgressDialog(list(rows), delay_ms=0,
+                                      header="正在粘贴到 /dst…"))
 
     def test_batch_detail_never_lands_on_every_row(self):
         from i18n import t
@@ -518,7 +552,7 @@ class TestHideAndReopen(_Base):
 
     def _dialog(self, rows=("a", "b")):
         from transfer_progress import TransferProgressDialog
-        return TransferProgressDialog(list(rows), delay_ms=0)
+        return self._track(TransferProgressDialog(list(rows), delay_ms=0))
 
     def test_window_stays_on_top(self):
         from PyQt6.QtCore import Qt
@@ -589,7 +623,7 @@ class TestTopmostYieldsToModals(_Base):
 
     def _dialog(self, rows=("a", "b")):
         from transfer_progress import TransferProgressDialog
-        return TransferProgressDialog(list(rows), delay_ms=0)
+        return self._track(TransferProgressDialog(list(rows), delay_ms=0))
 
     def _is_topmost(self, dlg):
         from PyQt6.QtCore import Qt
@@ -713,7 +747,7 @@ class TestGracefulCancel(_Base):
 
     def _dialog(self, rows=("a", "b")):
         from transfer_progress import TransferProgressDialog
-        return TransferProgressDialog(list(rows), delay_ms=0)
+        return self._track(TransferProgressDialog(list(rows), delay_ms=0))
 
     def test_first_press_is_graceful_second_is_force(self):
         from i18n import t
@@ -783,7 +817,7 @@ class TestDialogLifecycle(_Base):
 
     def _dialog(self, rows=("a", "b")):
         from transfer_progress import TransferProgressDialog
-        return TransferProgressDialog(list(rows), delay_ms=0)
+        return self._track(TransferProgressDialog(list(rows), delay_ms=0))
 
     def test_all_done_closes_itself(self):
         dlg = self._dialog()
