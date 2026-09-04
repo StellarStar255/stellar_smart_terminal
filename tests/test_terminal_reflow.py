@@ -563,6 +563,23 @@ class TestScreenModuleSplit(unittest.TestCase):
                           getattr(mixin, name))
             self.assertEqual(getattr(mixin, name).__module__, 'terminal_render')
 
+    def test_mouse_mixin_split(self):
+        # 鼠标/选区层拆到 terminal_mouse.TerminalMouseMixin（第三刀），守卫同上
+        import terminal_mouse
+        import terminal_widget
+        mixin = terminal_mouse.TerminalMouseMixin
+        self.assertTrue(issubclass(terminal_widget.TerminalWidget, mixin))
+        for name in ('mousePressEvent', 'mouseMoveEvent', 'mouseReleaseEvent',
+                     'contextMenuEvent', 'dropEvent', '_select_word_at',
+                     '_get_selected_text_locked', '_get_all_content_locked',
+                     '_get_url_at_pos', '_auto_scroll_tick'):
+            self.assertIs(getattr(terminal_widget.TerminalWidget, name),
+                          getattr(mixin, name))
+            self.assertEqual(getattr(mixin, name).__module__, 'terminal_mouse')
+        # 一次手势只拍一次快照的装饰器随手势方法一起搬走，且仍然生效
+        self.assertEqual(terminal_widget.TerminalWidget._select_word_at.__wrapped__.__name__,
+                         '_select_word_at')
+
     def test_terminal_screen_is_qt_free(self):
         # 子进程冷启动检查：单独 import terminal_screen 不得拉起 PyQt6
         import subprocess
