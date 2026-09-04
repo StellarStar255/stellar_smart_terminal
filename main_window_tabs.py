@@ -7,9 +7,10 @@ orientation/drag)。纯方法搬迁，行为不变；detach 构造新窗口/进�
 """
 import os
 from PyQt6 import sip
-from PyQt6.QtCore import QTimer, Qt
+from PyQt6.QtCore import QPoint, QRect, QTimer, Qt
 from PyQt6.QtGui import QCursor
-from PyQt6.QtWidgets import QApplication, QMenu, QMessageBox, QPushButton, QSplitter, QTabBar
+from PyQt6.QtWidgets import (QApplication, QMenu, QMessageBox, QPushButton,
+                             QSplitter, QTabBar, QWidget)
 from dialogs import get_default_shell
 from i18n import t
 from widgets import InlineRenameEdit
@@ -900,64 +901,23 @@ class TabSplitMixin:
         follow_drag=True 时新窗口跟随鼠标拖拽（拖出标签触发）；
         False 时直接在父窗口附近层叠展开（右键菜单触发）。
         """
-        # 至少保留一个标签页
+        # 唯一的标签页拆不出新窗口，但拖它 = 拖着整个窗口走：松手落在别的
+        # 窗口标签栏上就并过去（把拆出去的标签拖回原窗口正是这条路）。
         if self.tab_widget.count() <= 1:
+            if follow_drag and self.isVisible():
+                self._start_carry_window_drag(index)
             return
 
         # 获取标签页标题
         title = self.tab_widget.tabText(index)
 
-        # 获取相关数据
-        splitter = self.tab_splitters.get(index)
-        terminals = self.tab_terminals.get(index, [])
-        session = self.tab_sessions.get(index)
-        # 优先使用存储的工作目录（在删除映射之前获取）
-        tab_cwd = self.tab_cwds.get(index)
-
-        if not splitter or not terminals:
+        taken = self._take_tab_out(index)
+        if taken is None:
             return
-
-        # 停止 OpenAI API 服务器（如果有）
-        if self.openai_server_manager.is_running(index):
-            self.openai_server_manager.stop_server(index)
-
-        # 在移除 tab 前，暂停所有终端的绘制更新，防止过渡期间在零尺寸 widget 上触发 paintEvent 导致 segfault
-        for terminal in terminals:
-            terminal.setUpdatesEnabled(False)
-            terminal._cache_valid = False
-            terminal._cache_pixmap = None
-
-        # 从标签页移除（但不销毁内容）
-        self.tab_widget.removeTab(index)
-
-        # 清理映射
-        if index in self.tab_splitters:
-            del self.tab_splitters[index]
-        if index in self.tab_terminals:
-            del self.tab_terminals[index]
-        if index in self.tab_sessions:
-            del self.tab_sessions[index]
-        if index in self.tab_cwds:
-            del self.tab_cwds[index]
-
-        # 重建映射
-        self._rebuild_tab_mappings()
-
-        # removeTab 触发的 currentChanged 发生在重建映射「之前」，那时读到的是错位的
-        # tab_cwds（可能正好读成被分离标签的目录）。这里按重建后的正确索引再同步一次，
-        # 让残留窗口的 Directory 输入框与 Current 标签都回到真正的当前标签目录。
-        cur_idx = self.tab_widget.currentIndex()
-        if cur_idx >= 0:
-            self._on_tab_changed(cur_idx)
-
-        # 如果没有存储的工作目录，尝试从终端获取或使用窗口默认值
-        if not tab_cwd:
-            if terminals:
-                # 尝试从第一个 terminal 获取当前工作目录
-                tab_cwd = terminals[0].get_cwd()
-            if not tab_cwd:
-                # 如果获取不到，使用当前窗口的工作目录
-                tab_cwd = self._window_cwd
+        splitter = taken['splitter']
+        terminals = taken['terminals']
+        session = taken['session']
+        tab_cwd = taken['cwd']
 
         # 创建完整的新 host_class(self)，传入 tab 数据
         initial_tab_data = {
@@ -1080,6 +1040,9 @@ class TabSplitMixin:
                     base_pos[0] + dx, base_pos[1] + dy,
                     new_window.width(), new_window.height(), cursor_pos)
                 new_window.move(mx, my)
+                # 悬在别的窗口标签栏上：那边高亮、这边半透明，提示「松手即并入」
+                self._set_tab_drop_hover(
+                    new_window, self._tab_drop_target_at(cursor_pos, exclude=new_window))
             else:
                 # 鼠标释放，停止拖拽跟随
                 drag_timer.stop()
@@ -1090,6 +1053,11 @@ class TabSplitMixin:
                         new_window.activateWindow()
                         if new_window.active_terminal:
                             new_window.active_terminal.setFocus()
+                        return
+                    # 松手落在别的窗口（含父窗口）的标签栏上 → 标签并过去，
+                    # 刚拆出来的空窗口随之关闭。要先于吸附判断：吸附的
+                    # 「大面积叠在父窗口上」和「落在父窗口标签栏」是会重叠的。
+                    if self._finish_tab_drag_drop(new_window, 0):
                         return
                     # 吸附对齐：松手时若与父窗口的边缘只差一点（肉眼想对齐但差
                     # 几十像素），自动贴齐父窗口，消除"差一丁点错位"。
@@ -1138,6 +1106,247 @@ class TabSplitMixin:
                         new_window.active_terminal.setFocus()
 
         drag_timer.timeout.connect(_follow_mouse)
+        drag_timer.start()
+
+    def _take_tab_out(self, index):
+        """把第 index 页从本窗口摘下来（不销毁内容），返回它的全部随身数据。
+
+        拆成新窗口（_detach_tab）与并入别的窗口（_adopt_tab_from）共用这一段：
+        摘下后本窗口的映射已重建、目录栏已同步，终端处于暂停绘制状态，由
+        接收方的 _add_new_tab（external 分支）恢复。摘不出来返回 None。
+        """
+        # 映射错位时 tab_terminals[index] 是别的标签页的终端，先校正
+        self._synced_tab_splitter(index)
+        splitter = self.tab_splitters.get(index)
+        terminals = self.tab_terminals.get(index, [])
+        session = self.tab_sessions.get(index)
+        # 优先使用存储的工作目录（在删除映射之前获取）
+        tab_cwd = self.tab_cwds.get(index)
+        if not splitter or not terminals:
+            return None
+
+        # 停止 OpenAI API 服务器（如果有）
+        if self.openai_server_manager.is_running(index):
+            self.openai_server_manager.stop_server(index)
+
+        # 在移除 tab 前，暂停所有终端的绘制更新，防止过渡期间在零尺寸 widget 上触发 paintEvent 导致 segfault
+        for terminal in terminals:
+            terminal.setUpdatesEnabled(False)
+            terminal._cache_valid = False
+            terminal._cache_pixmap = None
+
+        # 从标签页移除（但不销毁内容）
+        self.tab_widget.removeTab(index)
+
+        # 清理映射
+        for mapping in (self.tab_splitters, self.tab_terminals,
+                        self.tab_sessions, self.tab_cwds):
+            mapping.pop(index, None)
+
+        # 重建映射
+        self._rebuild_tab_mappings()
+
+        # removeTab 触发的 currentChanged 发生在重建映射「之前」，那时读到的是错位的
+        # tab_cwds（可能正好读成被分离标签的目录）。这里按重建后的正确索引再同步一次，
+        # 让残留窗口的 Directory 输入框与 Current 标签都回到真正的当前标签目录。
+        cur_idx = self.tab_widget.currentIndex()
+        if cur_idx >= 0:
+            self._on_tab_changed(cur_idx)
+
+        # 如果没有存储的工作目录，尝试从终端获取或使用窗口默认值
+        if not tab_cwd:
+            tab_cwd = terminals[0].get_cwd() or self._window_cwd
+
+        return {'splitter': splitter, 'terminals': terminals,
+                'session': session, 'cwd': tab_cwd}
+
+    # ---------- 跨窗口移动标签页：拖到另一个窗口的标签栏上松手即并入 ----------
+
+    # 标签栏那一条的最小命中高度：标签本身只有二十几像素，拖着一整个窗口
+    # 瞄准太费劲，放宽一点
+    _TAB_DROP_STRIP_MIN_H = 40
+
+    def _tab_drop_strip_rect(self) -> QRect:
+        """本窗口标签栏那一整行（全局坐标）：拖着标签松手落在这里就并进来。"""
+        tw = self.tab_widget
+        bar = tw.tabBar()
+        origin = tw.mapToGlobal(QPoint(0, 0))
+        bar_top = bar.mapToGlobal(QPoint(0, 0)).y()
+        h = max(bar.height(), self._TAB_DROP_STRIP_MIN_H)
+        return QRect(origin.x(), bar_top, tw.width(), h)
+
+    def _tab_drop_target_at(self, global_pos, exclude=None):
+        """global_pos 落在哪个（别的）主窗口的标签栏上；没有则 None。"""
+        app = QApplication.instance()
+        if app is None:
+            return None
+        cls = host_class(self)
+        for w in app.topLevelWidgets():
+            if not isinstance(w, cls) or w is exclude:
+                continue
+            try:
+                if (sip.isdeleted(w) or not w.isVisible() or w.isMinimized()
+                        or getattr(w, '_closing_in_progress', False)):
+                    continue
+                if w._tab_drop_strip_rect().contains(global_pos):
+                    return w
+            except RuntimeError:
+                continue   # C++ 对象已销毁
+        return None
+
+    def _tab_insert_index_at(self, global_pos):
+        """按光标横向位置算插入位置：落在某个标签的左半边插它前面，右半边插它
+        后面；不在任何标签上则追加到末尾（None）。"""
+        bar = self.tab_widget.tabBar()
+        local = bar.mapFromGlobal(global_pos)
+        i = bar.tabAt(local)
+        if i < 0:
+            return None
+        return i if local.x() < bar.tabRect(i).center().x() else i + 1
+
+    def _show_tab_drop_hint(self):
+        """标签栏上盖一层半透明高亮：有标签正拖到本窗口上方。"""
+        hint = getattr(self, '_tab_drop_hint', None)
+        if hint is None or sip.isdeleted(hint):
+            hint = QWidget(self.tab_widget)
+            hint.setAttribute(Qt.WidgetAttribute.WA_TransparentForMouseEvents)
+            hint.setAttribute(Qt.WidgetAttribute.WA_StyledBackground, True)
+            hint.setStyleSheet(
+                "background-color: rgba(102, 126, 234, 0.35);"
+                "border: 2px solid #667eea;")
+            self._tab_drop_hint = hint
+        strip = self._tab_drop_strip_rect()
+        top_left = self.tab_widget.mapFromGlobal(strip.topLeft())
+        hint.setGeometry(top_left.x(), top_left.y(), strip.width(), strip.height())
+        hint.show()
+        hint.raise_()
+
+    def _hide_tab_drop_hint(self):
+        hint = getattr(self, '_tab_drop_hint', None)
+        if hint is not None and not sip.isdeleted(hint):
+            hint.hide()
+
+    @staticmethod
+    def _set_tab_drop_hover(dragged, target):
+        """更新拖拽悬停态：目标窗口标签栏高亮、被拖的窗口半透明（让人看得见
+        底下的目标）；离开时复原。target=None 表示不在任何目标上。"""
+        prev = getattr(dragged, '_tab_drop_target', None)
+        if prev is target:
+            return
+        if prev is not None and not sip.isdeleted(prev):
+            prev._hide_tab_drop_hint()
+        dragged._tab_drop_target = target
+        try:
+            if target is not None:
+                target._show_tab_drop_hint()
+                dragged.setWindowOpacity(0.55)
+            else:
+                dragged.setWindowOpacity(1.0)
+        except RuntimeError:
+            pass
+
+    def _finish_tab_drag_drop(self, dragged, index) -> bool:
+        """拖拽松手：光标在别的窗口标签栏上就把 dragged 的第 index 页并过去。
+        返回是否发生了并入。无论如何都清掉悬停态。"""
+        cursor_pos = QCursor.pos()
+        self._set_tab_drop_hover(dragged, None)
+        if sip.isdeleted(dragged):
+            return False
+        target = self._tab_drop_target_at(cursor_pos, exclude=dragged)
+        if target is None:
+            return False
+        insert_at = target._tab_insert_index_at(cursor_pos)
+        idx = target._adopt_tab_from(dragged, index, insert_at)
+        if idx < 0:
+            return False
+        target.raise_()
+        target.activateWindow()
+        if target.active_terminal:
+            target.active_terminal.setFocus()
+        return True
+
+    def _adopt_tab_from(self, src, src_index, insert_index=None):
+        """把 src 窗口的第 src_index 页整个搬进本窗口（终端不重建、shell 不断）。
+
+        返回并入后的索引，失败 -1。src 因此空了就把它关掉——它唯一的标签
+        已经在这儿了，留个空壳没意义（没有终端在跑，关闭不会弹确认）。
+        """
+        if src is None or src is self:
+            return -1
+        title = src.tab_widget.tabText(src_index)
+        taken = src._take_tab_out(src_index)
+        if taken is None:
+            return -1
+        idx = self._add_new_tab(
+            external_splitter=taken['splitter'],
+            external_terminals=taken['terminals'],
+            external_session=taken['session'],
+            tab_name=title,
+            tab_cwd=taken['cwd'],
+        )
+        if insert_index is not None and 0 <= insert_index < idx:
+            # tabMoved → _on_tab_moved 会重建映射
+            self.tab_widget.tabBar().moveTab(idx, insert_index)
+            idx = insert_index
+        if src.tab_widget.count() == 0:
+            src._close_emptied_window()
+        else:
+            src._checkpoint_workspace()
+        return idx
+
+    def _close_emptied_window(self):
+        """标签全被搬走后的窗口：不留空壳。推迟到下一轮事件循环，别在拖拽计
+        时器的回调里同步销毁自己。"""
+        self._checkpoint_workspace()
+
+        def _close():
+            if sip.isdeleted(self):
+                return
+            # 关闭被拒（编辑器里有未保存改动、用户点了取消）→ 别留一个零标签
+            # 的死壳，补一个空白标签让窗口还能用
+            if not self.close() and self.tab_widget.count() == 0:
+                self._add_new_tab()
+                self._update_running_state(False)
+
+        QTimer.singleShot(0, _close)
+
+    def _start_carry_window_drag(self, index):
+        """拖唯一的标签 = 拖着整个窗口走。松手落在别的窗口标签栏上就并过去；
+        否则窗口就留在松手的位置。跟随方式同 _start_detach_drag_follow。"""
+        start_cursor = QCursor.pos()
+        off_x = self.x() - start_cursor.x()
+        off_y = self.y() - start_cursor.y()
+        DRAG_THRESH = 8
+        moved = [False]
+        drag_timer = QTimer()
+        drag_timer.setInterval(16)
+        self._carry_drag_timer = drag_timer  # prevent GC
+
+        def _tick():
+            if sip.isdeleted(self):
+                drag_timer.stop()
+                return
+            if QApplication.mouseButtons() & Qt.MouseButton.LeftButton:
+                cursor_pos = QCursor.pos()
+                if not moved[0]:
+                    if (abs(cursor_pos.x() - start_cursor.x()) <= DRAG_THRESH
+                            and abs(cursor_pos.y() - start_cursor.y()) <= DRAG_THRESH):
+                        return
+                    moved[0] = True
+                mx, my = host_class(self)._clamp_window_pos(
+                    off_x + cursor_pos.x(), off_y + cursor_pos.y(),
+                    self.width(), self.height(), cursor_pos)
+                self.move(mx, my)
+                self._set_tab_drop_hover(
+                    self, self._tab_drop_target_at(cursor_pos, exclude=self))
+                return
+            drag_timer.stop()
+            if moved[0]:
+                self._finish_tab_drag_drop(self, index)
+            else:
+                self._set_tab_drop_hover(self, None)
+
+        drag_timer.timeout.connect(_tick)
         drag_timer.start()
 
     def _rebuild_tab_mappings(self):

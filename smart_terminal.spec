@@ -124,8 +124,8 @@ if sys.platform == "darwin":
         info_plist={
             "CFBundleName": APP_DISPLAY_NAME,
             "CFBundleDisplayName": APP_DISPLAY_NAME,
-            "CFBundleShortVersionString": "1.26.2",
-            "CFBundleVersion": "1.26.2",
+            "CFBundleShortVersionString": "1.27.0",
+            "CFBundleVersion": "1.27.0",
             # 捆绑的 Qt 6 库以 macOS 13 为最低部署目标（otool -l QtCore →
             # LC_BUILD_VERSION minos 13.0），不声明的话系统按主程序的 11.0 放行，
             # Big Sur / Monterey 上会在 dyld 加载 Qt 时直接崩而不是友好提示。
