@@ -580,6 +580,20 @@ class TestScreenModuleSplit(unittest.TestCase):
         self.assertEqual(terminal_widget.TerminalWidget._select_word_at.__wrapped__.__name__,
                          '_select_word_at')
 
+    def test_input_mixin_split(self):
+        # 键盘/输入法/粘贴层拆到 terminal_input.TerminalInputMixin（第四刀），守卫同上
+        import terminal_input
+        import terminal_widget
+        mixin = terminal_input.TerminalInputMixin
+        self.assertTrue(issubclass(terminal_widget.TerminalWidget, mixin))
+        for name in ('keyPressEvent', 'event', 'inputMethodEvent', 'inputMethodQuery',
+                     'focusInEvent', 'focusOutEvent', 'send_text',
+                     '_paste_from_clipboard', '_write_paste', '_prepare_paste_text',
+                     '_maybe_autofill_password'):
+            self.assertIs(getattr(terminal_widget.TerminalWidget, name),
+                          getattr(mixin, name))
+            self.assertEqual(getattr(mixin, name).__module__, 'terminal_input')
+
     def test_terminal_screen_is_qt_free(self):
         # 子进程冷启动检查：单独 import terminal_screen 不得拉起 PyQt6
         import subprocess
