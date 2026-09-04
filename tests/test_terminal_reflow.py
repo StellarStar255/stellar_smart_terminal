@@ -594,6 +594,23 @@ class TestScreenModuleSplit(unittest.TestCase):
                           getattr(mixin, name))
             self.assertEqual(getattr(mixin, name).__module__, 'terminal_input')
 
+    def test_scroll_search_mixin_split(self):
+        # 滚动/命令标记/搜索层拆到 terminal_scroll.TerminalScrollSearchMixin（第五刀），守卫同上
+        import terminal_scroll
+        import terminal_widget
+        mixin = terminal_scroll.TerminalScrollSearchMixin
+        self.assertTrue(issubclass(terminal_widget.TerminalWidget, mixin))
+        for name in ('wheelEvent', '_wheel_lines', '_sync_scrollbar', 'scroll_to_bottom',
+                     '_record_command_mark', '_jump_to_command_mark',
+                     '_update_scrollback_level', 'eventFilter', '_create_search_bar',
+                     '_perform_search', '_match_search_snapshot', '_scroll_to_match'):
+            self.assertIs(getattr(terminal_widget.TerminalWidget, name),
+                          getattr(mixin, name))
+            self.assertEqual(getattr(mixin, name).__module__, 'terminal_scroll')
+        # classmethod 经子类调用时 cls 仍是 TerminalWidget（进程级缓存/executor 挂在主类上）
+        self.assertIs(terminal_widget.TerminalWidget._get_search_executor.__func__,
+                      mixin._get_search_executor.__func__)
+
     def test_terminal_screen_is_qt_free(self):
         # 子进程冷启动检查：单独 import terminal_screen 不得拉起 PyQt6
         import subprocess

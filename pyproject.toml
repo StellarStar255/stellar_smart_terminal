@@ -86,6 +86,7 @@ py-modules = [
     "terminal_render",
     "terminal_mouse",
     "terminal_input",
+    "terminal_scroll",
     "terminal_screen",
     "terminal_widget",
     "themes",
