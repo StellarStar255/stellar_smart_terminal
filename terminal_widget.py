@@ -264,7 +264,7 @@ def merge_extracted_lines(rows, columns: int,
 from PyQt6.QtWidgets import (
     QWidget, QApplication, QHBoxLayout, QPushButton, QLabel, QFileDialog, QSizePolicy, QScrollBar
 )
-from PyQt6.QtCore import QThread, pyqtSignal, Qt, QTimer, QUrl
+from PyQt6.QtCore import QThread, pyqtSignal, Qt, QTimer, QUrl, QPoint
 from PyQt6.QtGui import (
     QFont, QColor, QPainter, QPen, QFontMetrics, QFontMetricsF, QFontInfo,
     QResizeEvent, QDesktopServices, QPixmap
@@ -310,6 +310,44 @@ class TerminalSignalBridge(QThread):
     process_finished = pyqtSignal(int)
 
 
+class _PaneHandleBar(QWidget):
+    """窗格顶部那条把手：按住拖过阈值 → 让主窗口开始挪窗格；双击 → 重命名。"""
+
+    DRAG_THRESHOLD = 6
+
+    def __init__(self, terminal):
+        super().__init__(terminal)
+        self._terminal = terminal
+        self._press_pos = None
+
+    def mousePressEvent(self, event):
+        if event.button() == Qt.MouseButton.LeftButton:
+            self._press_pos = event.pos()
+            self.setCursor(Qt.CursorShape.ClosedHandCursor)
+        super().mousePressEvent(event)
+
+    def mouseMoveEvent(self, event):
+        if self._press_pos is not None and (event.buttons() & Qt.MouseButton.LeftButton):
+            if (event.pos() - self._press_pos).manhattanLength() > self.DRAG_THRESHOLD:
+                self._press_pos = None
+                self.setCursor(Qt.CursorShape.OpenHandCursor)
+                self._terminal.pane_drag_requested.emit(self.mapToGlobal(event.pos()))
+                return
+        super().mouseMoveEvent(event)
+
+    def mouseReleaseEvent(self, event):
+        self._press_pos = None
+        self.setCursor(Qt.CursorShape.OpenHandCursor)
+        super().mouseReleaseEvent(event)
+
+    def mouseDoubleClickEvent(self, event):
+        if event.button() == Qt.MouseButton.LeftButton:
+            self._press_pos = None
+            self._terminal.rename_split_requested.emit()
+            return
+        super().mouseDoubleClickEvent(event)
+
+
 class TerminalWidget(TerminalInputMixin, TerminalMouseMixin,
                      TerminalScrollSearchMixin, TerminalRenderMixin, QWidget):
     """
@@ -343,6 +381,8 @@ class TerminalWidget(TerminalInputMixin, TerminalMouseMixin,
     move_split_left_requested = pyqtSignal()  # 请求将当前分屏向左移动
     move_split_up_requested = pyqtSignal()  # 请求将当前分屏向上移动
     rename_split_requested = pyqtSignal()  # 请求重命名当前分屏（显示/修改顶部标题栏）
+    # 拖着窗格顶部的把手离开了阈值：请求主窗口开始"挪窗格"（参数是全局坐标）
+    pane_drag_requested = pyqtSignal(QPoint)
     attention_requested = pyqtSignal()  # 疑似本轮命令/Claude 执行完毕（输出停顿），请求导航提醒
     interaction_requested = pyqtSignal()  # 终端响铃（BEL）：程序正在等待用户操作（如 Claude 确认提示）
     alert_matched = pyqtSignal(str)  # 输出命中提醒规则（参数=命中的模式文本）
@@ -495,6 +535,9 @@ class TerminalWidget(TerminalInputMixin, TerminalMouseMixin,
         self._header_h = 0           # 顶部标题栏当前占用的像素高度（0 = 隐藏）
         self._header_bar = None      # 标题栏 overlay 控件（首次命名时才创建）
         self._header_label = None
+        self._header_clear_btn = None
+        # 所在标签页有 ≥2 个窗格时显示顶部把手（拖它可以把窗格挪到任意位置）
+        self._pane_handle_visible = False
 
         # 终端尺寸（限制行数减少空白）
         self.term_cols = 120
@@ -2190,11 +2233,32 @@ class TerminalWidget(TerminalInputMixin, TerminalMouseMixin,
         """
         name = (name or "").strip()
         self._split_label = name or None
-        if self._split_label:
+        self._sync_header_bar()
+
+    def set_pane_handle_visible(self, visible: bool):
+        """所在标签页是否有多个窗格：有 → 每个窗格顶部显示一条把手（可拖动挪位置、
+        双击改名）；只剩一个窗格 → 收起（除非它有自定义名称）。"""
+        visible = bool(visible)
+        if visible == self._pane_handle_visible:
+            return
+        self._pane_handle_visible = visible
+        self._sync_header_bar()
+
+    def _sync_header_bar(self):
+        """按「有自定义名称 或 是分屏里的窗格」决定顶部标题栏/把手是否显示。"""
+        show = bool(self._split_label) or self._pane_handle_visible
+        if show:
             if self._header_bar is None:
                 self._create_header_bar()
-            self._header_label.setText(self._split_label)
-            self._header_bar.setToolTip(self._split_label)
+            text = self._split_label or t("split.pane_default")
+            self._header_label.setText(text)
+            self._header_label.setStyleSheet(
+                "color:#eaeaea;background:transparent;font-size:12px;font-weight:bold;"
+                if self._split_label else
+                "color:#9a9ab8;background:transparent;font-size:12px;")
+            self._header_bar.setToolTip(t("split.handle_tooltip"))
+            if self._header_clear_btn is not None:
+                self._header_clear_btn.setVisible(bool(self._split_label))
             self._header_h = self.HEADER_HEIGHT
             self._position_header_bar()
             self._header_bar.show()
@@ -2212,11 +2276,16 @@ class TerminalWidget(TerminalInputMixin, TerminalMouseMixin,
         self.update()
 
     def _create_header_bar(self):
-        """创建分屏标题栏 overlay（带名称文字 + 清除按钮）"""
-        self._header_bar = QWidget(self)
+        """创建分屏标题栏 overlay（把手 + 名称文字 + 重命名/清除按钮）"""
+        self._header_bar = _PaneHandleBar(self)
         lay = QHBoxLayout(self._header_bar)
-        lay.setContentsMargins(8, 0, 4, 0)
+        lay.setContentsMargins(6, 0, 4, 0)
         lay.setSpacing(4)
+
+        grip = QLabel("⋮⋮")
+        grip.setStyleSheet("color:#8a8aa8;background:transparent;font-size:12px;")
+        grip.setToolTip(t("split.handle_tooltip"))
+        lay.addWidget(grip)
 
         self._header_label = QLabel("")
         self._header_label.setStyleSheet(
@@ -2240,6 +2309,7 @@ class TerminalWidget(TerminalInputMixin, TerminalMouseMixin,
             "QPushButton:hover{color:#ff6b6b;}"
         )
         clear_btn.clicked.connect(lambda: self.set_split_label(None))
+        self._header_clear_btn = clear_btn
 
         lay.addWidget(self._header_label)
         lay.addStretch(1)
@@ -2247,6 +2317,7 @@ class TerminalWidget(TerminalInputMixin, TerminalMouseMixin,
         lay.addWidget(clear_btn)
 
         self._header_bar.setStyleSheet("QWidget{background-color:#3d3d5c;}")
+        self._header_bar.setCursor(Qt.CursorShape.OpenHandCursor)
 
     def _position_header_bar(self):
         """把标题栏铺满窗格顶部"""

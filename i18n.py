@@ -1157,6 +1157,10 @@ TRANSLATIONS = {
     "split.rename_title": {"zh": "重命名分屏", "en": "Rename Split"},
     "split.rename_prompt": {"zh": "输入分屏名称（留空清除）:", "en": "Split name (empty to clear):"},
     "split.clear_name": {"zh": "清除名称", "en": "Clear name"},
+    "split.pane_default": {"zh": "终端", "en": "Terminal"},
+    "split.handle_tooltip": {"zh": "拖动：把这个窗格挪到任意位置（另一窗格的上/下/左/右，或拖到标签栏变成独立标签）；双击：重命名", "en": "Drag to move this pane anywhere (above/below/left/right of another pane, or onto the tab strip to make it its own tab); double-click to rename"},
+    "status.pane_moved": {"zh": "已移动窗格", "en": "Pane moved"},
+    "status.pane_popped": {"zh": "已把窗格变成独立标签页", "en": "Pane moved into its own tab"},
 
     # ===== 状态栏/通用 =====
     "status.dir_history_tooltip": {"zh": "历史目录", "en": "Directory History"},

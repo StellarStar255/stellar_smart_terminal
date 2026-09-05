@@ -70,6 +70,8 @@ class TabSplitMixin:
             # 重新设置 parent
             splitter.setParent(self.tab_widget)
             self._absorb_terminals(terminals)
+            for _t in terminals:
+                _t.set_pane_handle_visible(len(terminals) > 1)
         else:
             # 创建新的分屏容器
             splitter = QSplitter(Qt.Orientation.Horizontal)
@@ -382,6 +384,7 @@ class TabSplitMixin:
 
         # 更新终端列表
         self.tab_terminals[idx].append(new_terminal)
+        self._refresh_pane_handles(idx)
 
         # 启动 shell 在当前终端的工作目录
         new_terminal.start_process([get_default_shell()], cwd=current_cwd)
@@ -475,6 +478,7 @@ class TabSplitMixin:
 
         # 更新终端列表
         self.tab_terminals[idx].append(new_terminal)
+        self._refresh_pane_handles(idx)
 
         # 启动新终端
         new_terminal.start_process([get_default_shell()], cwd=current_cwd)
@@ -573,6 +577,7 @@ class TabSplitMixin:
 
         # 若父 splitter 因此只剩一个子组件，解除这层嵌套，让剩余分屏自动扩展
         self._collapse_singleton_splitter(parent, idx)
+        self._refresh_pane_handles(idx)
 
         # 更新活动终端为剩余的第一个
         if terminals:
@@ -1094,6 +1099,10 @@ class TabSplitMixin:
             geo = self._split_zone_rect(zone)
             if geo is None:
                 return
+        elif kind == 'pane' and zone is not None:
+            geo = self._pane_zone_rect(zone)
+            if geo is None:
+                return
         else:
             strip = self._tab_drop_strip_rect()
             top_left = self.tab_widget.mapFromGlobal(strip.topLeft())
@@ -1215,6 +1224,7 @@ class TabSplitMixin:
             self.tab_sessions[dst_index] = taken['session']
         self.tab_widget.setTabText(dst_index, title)
         self.tab_widget.setCurrentIndex(dst_index)
+        self._refresh_pane_handles(dst_index)
         if terminals:
             self.active_terminal = terminals[0]
             terminals[0].setFocus()
@@ -1491,6 +1501,275 @@ class TabSplitMixin:
         new_window.resize(w, h)
         new_window.move(x, y)
         new_window.show()
+
+    # ---------- 窗格把手：拖着把手把窗格挪到任意位置 ----------
+    #
+    # 标签页里有 ≥2 个窗格时每个窗格顶部有一条把手。拖它和拖标签一样是影子
+    # 拖拽：光标下是哪个窗格就按离哪条边近高亮那半边，松手落到那一侧
+    # （同窗口、跨窗口、跨标签页都行）；落到标签栏 → 变成独立标签页。
+
+    def _refresh_pane_handles(self, idx):
+        """第 idx 页：多窗格 → 每个窗格显示把手；单窗格 → 收起。"""
+        terminals = self.tab_terminals.get(idx, [])
+        for term in terminals:
+            try:
+                term.set_pane_handle_visible(len(terminals) > 1)
+            except RuntimeError:
+                pass  # 终端 C++ 对象已销毁
+
+    def _pane_at(self, global_pos, exclude=None):
+        """本窗口当前页里光标下的那个窗格（TerminalWidget），没有则 None。"""
+        page = self.tab_widget.currentWidget()
+        if page is None:
+            return None
+        from terminal_widget import TerminalWidget
+        for term in page.findChildren(TerminalWidget):
+            if term is exclude or not term.isVisible():
+                continue
+            rect = QRect(term.mapToGlobal(QPoint(0, 0)), term.size())
+            if rect.contains(global_pos):
+                return term
+        return None
+
+    @staticmethod
+    def _edge_zone_in_rect(rect, global_pos):
+        """rect 内离哪条边近：(orientation, before)。"""
+        x = (global_pos.x() - rect.left()) / max(1, rect.width())
+        y = (global_pos.y() - rect.top()) / max(1, rect.height())
+        cands = [(x, Qt.Orientation.Horizontal, True),
+                 (1 - x, Qt.Orientation.Horizontal, False),
+                 (y, Qt.Orientation.Vertical, True),
+                 (1 - y, Qt.Orientation.Vertical, False)]
+        _, orientation, before = min(cands, key=lambda c: c[0])
+        return (orientation, before)
+
+    def _pane_zone_rect(self, zone):
+        """(target_terminal, orientation, before) → 高亮区域（tab_widget 坐标）。"""
+        target, orientation, before = zone
+        if sip.isdeleted(target):
+            return None
+        local = QRect(self.tab_widget.mapFromGlobal(target.mapToGlobal(QPoint(0, 0))),
+                      target.size())
+        if orientation == Qt.Orientation.Horizontal:
+            half = QRect(local.left(), local.top(), local.width() // 2, local.height())
+            if not before:
+                half.moveLeft(local.left() + local.width() - half.width())
+        else:
+            half = QRect(local.left(), local.top(), local.width(), local.height() // 2)
+            if not before:
+                half.moveTop(local.top() + local.height() - half.height())
+        return half
+
+    def _pane_drop_hit_at(self, global_pos, dragging):
+        """拖着窗格松手会发生什么：(window, 'strip', None) 变独立标签，
+        (window, 'pane', (目标窗格, orientation, before)) 挪到目标窗格那一侧，None 不动。"""
+        cls = host_class(self)
+        try:
+            top = QApplication.topLevelAt(global_pos)
+        except Exception:
+            top = None
+        if isinstance(top, cls):
+            candidates = [top]
+        elif top is None:
+            app = QApplication.instance()
+            candidates = [w for w in (app.topLevelWidgets() if app else []) if isinstance(w, cls)]
+        else:
+            return None
+        for w in candidates:
+            try:
+                if (sip.isdeleted(w) or not w.isVisible() or w.isMinimized()
+                        or getattr(w, '_closing_in_progress', False)):
+                    continue
+                if w._tab_drop_strip_rect().contains(global_pos):
+                    return (w, 'strip', None)
+                target = w._pane_at(global_pos, exclude=dragging)
+                if target is not None:
+                    rect = QRect(target.mapToGlobal(QPoint(0, 0)), target.size())
+                    orientation, before = self._edge_zone_in_rect(rect, global_pos)
+                    return (w, 'pane', (target, orientation, before))
+            except RuntimeError:
+                continue
+        return None
+
+    def _begin_pane_drag(self, terminal, global_pos):
+        """把手拖过阈值：影子跟着光标，松手决定去处。"""
+        if terminal is None or sip.isdeleted(terminal):
+            return
+        try:
+            pixmap = terminal.grab().scaledToWidth(
+                220, Qt.TransformationMode.SmoothTransformation)
+        except Exception:
+            pixmap = None
+        preview = TabDragPreview(pixmap) if pixmap is not None and not pixmap.isNull() else None
+        state = {'hit': None, 'hover_tab': -1, 'hover_since': 0.0}
+        timer = QTimer()
+        timer.setInterval(16)
+        self._pane_drag_timer = timer   # prevent GC
+
+        def _tick():
+            if sip.isdeleted(self) or sip.isdeleted(terminal):
+                timer.stop()
+                if preview is not None:
+                    preview.close()
+                return
+            pos = QCursor.pos()
+            if QApplication.mouseButtons() & Qt.MouseButton.LeftButton:
+                if preview is not None:
+                    preview.move(pos + self._TAB_DRAG_PREVIEW_OFFSET)
+                    if not preview.isVisible():
+                        preview.show()
+                hit = self._pane_drop_hit_at(pos, terminal)
+                self._set_drag_hit(state, hit)
+                # 悬停在本窗口标签栏的某个标签上 → 页面切过去，可以挪到别的标签页里
+                self._drag_hover_switch_tab(state, hit, pos, -1)
+                return
+            timer.stop()
+            if preview is not None:
+                preview.close()
+            hit = state['hit']
+            self._set_drag_hit(state, None)
+            try:
+                self._finish_pane_drag(terminal, pos, hit)
+            except Exception:
+                logger.exception("[Tabs] finishing pane drag failed")
+
+        timer.timeout.connect(_tick)
+        timer.start()
+
+    def _finish_pane_drag(self, terminal, pos, hit):
+        if hit is None or sip.isdeleted(terminal):
+            return
+        target_win, kind, zone = hit
+        if sip.isdeleted(target_win):
+            return
+        if kind == 'strip':
+            ok = target_win._pop_pane_to_tab(self, terminal,
+                                             target_win._tab_insert_index_at(pos))
+        else:
+            target, orientation, before = zone
+            ok = target_win._move_pane_next_to(self, terminal, target, orientation, before)
+        if ok:
+            target_win.raise_()
+            target_win.activateWindow()
+            if not sip.isdeleted(terminal):
+                target_win.active_terminal = terminal
+                terminal.setFocus()
+
+    def _find_tab_of_terminal_widget(self, terminal):
+        for idx, terms in self.tab_terminals.items():
+            if terminal in terms:
+                return idx
+        return -1
+
+    def _detach_pane(self, terminal):
+        """把窗格从它现在的位置摘出来（不销毁）：从 splitter 树、tab_terminals
+        里都拿掉，空出来的嵌套层解掉。返回 (src_idx, 该页剩余终端数)。"""
+        src_idx = self._find_tab_of_terminal_widget(terminal)
+        parent = terminal.parent()
+        parent_sizes = parent.sizes() if isinstance(parent, QSplitter) else None
+        close_index = parent.indexOf(terminal) if isinstance(parent, QSplitter) else -1
+        terminal.setParent(None)
+        if isinstance(parent, QSplitter) and parent_sizes and 0 <= close_index < len(parent_sizes):
+            freed = parent_sizes[close_index]
+            new_sizes = parent_sizes[:close_index] + parent_sizes[close_index + 1:]
+            if new_sizes:
+                give = close_index - 1 if close_index - 1 >= 0 else 0
+                new_sizes[give] += freed
+                if len(new_sizes) == parent.count():
+                    parent.setSizes(new_sizes)
+        if src_idx >= 0:
+            terms = self.tab_terminals.get(src_idx, [])
+            if terminal in terms:
+                terms.remove(terminal)
+            if isinstance(parent, QSplitter):
+                self._collapse_singleton_splitter(parent, src_idx)
+            self._refresh_pane_handles(src_idx)
+            return src_idx, len(terms)
+        return -1, 0
+
+    def _finish_pane_source(self, src_win, src_idx, remaining):
+        """源页一个窗格都不剩了（跨窗口把最后一个挪走）→ 关掉那一页。"""
+        if src_idx >= 0 and remaining == 0:
+            try:
+                src_win._close_tab(src_idx, auto_create_new=(src_win.tab_widget.count() <= 1))
+            except Exception:
+                logger.debug("_finish_pane_source: close tab failed", exc_info=True)
+
+    def _move_pane_next_to(self, src_win, terminal, target, orientation, before) -> bool:
+        """把 terminal 挪到 target 窗格的 orientation/before 那一侧（本窗口）。"""
+        if terminal is target or sip.isdeleted(target):
+            return False
+        dst_idx = self._find_tab_of_terminal_widget(target)
+        if dst_idx < 0:
+            return False
+        tparent = target.parent()
+        if not isinstance(tparent, QSplitter):
+            return False
+        src_idx, remaining = src_win._detach_pane(terminal)
+        if src_win is not self:
+            self._absorb_terminals([terminal])
+        # 重新找一次：摘除引起的嵌套解除可能换掉了 target 的父 splitter
+        tparent = target.parent()
+        if not isinstance(tparent, QSplitter):
+            return False
+        i = tparent.indexOf(target)
+        if tparent.orientation() == orientation:
+            sizes = tparent.sizes()
+            tparent.insertWidget(i + (0 if before else 1), terminal)
+            if i < len(sizes):
+                orig = sizes[i]
+                new_sizes = list(sizes)
+                new_sizes[i] = orig // 2
+                new_sizes.insert(i + 1, orig - orig // 2)
+                if len(new_sizes) == tparent.count():
+                    tparent.setSizes(new_sizes)
+        else:
+            sizes = tparent.sizes()
+            inner = self._styled_splitter(orientation)
+            target.setParent(None)
+            if before:
+                inner.addWidget(terminal)
+                inner.addWidget(target)
+            else:
+                inner.addWidget(target)
+                inner.addWidget(terminal)
+            tparent.insertWidget(i, inner)
+            if len(sizes) == tparent.count():
+                tparent.setSizes(sizes)
+            span = inner.width() if orientation == Qt.Orientation.Horizontal else inner.height()
+            span = span if span > 0 else 400
+            inner.setSizes([span // 2, span - span // 2])
+            target.show()
+        terminal.show()
+        self.tab_terminals.setdefault(dst_idx, []).append(terminal)
+        self._refresh_pane_handles(dst_idx)
+        src_win._finish_pane_source(src_win, src_idx, remaining)
+        self.statusbar.showMessage(t("status.pane_moved"), 3000)
+        return True
+
+    def _pop_pane_to_tab(self, src_win, terminal, insert_index=None) -> bool:
+        """把窗格变成本窗口的一个独立标签页。"""
+        if sip.isdeleted(terminal):
+            return False
+        src_idx = src_win._find_tab_of_terminal_widget(terminal)
+        if src_idx >= 0 and len(src_win.tab_terminals.get(src_idx, [])) <= 1 and src_win is self:
+            return False   # 本来就是独占一页
+        title = terminal.get_split_label() or t("split.pane_default")
+        cwd = None
+        try:
+            cwd = terminal.get_cwd()
+        except Exception:
+            pass  # 拿不到就用窗口目录
+        src_idx, remaining = src_win._detach_pane(terminal)
+        page = self._styled_splitter(Qt.Orientation.Horizontal)
+        page.addWidget(terminal)
+        idx = self._add_new_tab(external_splitter=page, external_terminals=[terminal],
+                                external_session=None, tab_name=title, tab_cwd=cwd)
+        if insert_index is not None and 0 <= insert_index < idx:
+            self.tab_widget.tabBar().moveTab(idx, insert_index)
+        src_win._finish_pane_source(src_win, src_idx, remaining)
+        self.statusbar.showMessage(t("status.pane_popped"), 3000)
+        return True
 
     def _rebuild_tab_mappings(self):
         """重建标签页映射"""
