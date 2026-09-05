@@ -68,24 +68,7 @@ class TabSplitMixin:
 
             # 重新设置 parent
             splitter.setParent(self.tab_widget)
-
-            # 重新连接 terminal 信号：先拆掉原窗口的全部接线，再按同一张表
-            # 接到本窗口（表在 MainWindow._TERMINAL_SIGNAL_NAMES，两处共用）
-            for terminal in terminals:
-                self._unwire_terminal_signals(terminal)
-                self._wire_terminal_signals(terminal)
-                # 归属转移：务必走 _adopt_terminal（内部会摘掉原窗口的事件
-                # 过滤器），否则原窗口的 active_terminal 会被本窗口的终端污染
-                self._adopt_terminal(terminal)
-
-                # 重新设置快速命令提供者，指向当前窗口的预设
-                terminal.quick_commands_provider = lambda: self.presets
-                terminal.local_quick_commands_provider = lambda: self.local_presets
-
-                # 确保 terminal 正确显示（修复从其他窗口拖拽后的显示问题）
-                terminal.setUpdatesEnabled(True)  # 恢复绘制更新（detach 时会暂停）
-                terminal.show()
-                terminal.update()
+            self._absorb_terminals(terminals)
         else:
             # 创建新的分屏容器
             splitter = QSplitter(Qt.Orientation.Horizontal)
@@ -146,6 +129,27 @@ class TabSplitMixin:
         # 工作区快照：标签结构变化，限流补写
         self._checkpoint_workspace()
         return idx
+
+    def _absorb_terminals(self, terminals):
+        """把来自别的窗口（或刚被摘下）的终端接进本窗口：重接信号、转移归属、
+        指回本窗口的预设，并恢复绘制。跨窗口接管标签与并入分屏共用。"""
+        for terminal in terminals:
+            # 重新连接 terminal 信号：先拆掉原窗口的全部接线，再按同一张表
+            # 接到本窗口（表在 MainWindow._TERMINAL_SIGNAL_NAMES，两处共用）
+            self._unwire_terminal_signals(terminal)
+            self._wire_terminal_signals(terminal)
+            # 归属转移：务必走 _adopt_terminal（内部会摘掉原窗口的事件
+            # 过滤器），否则原窗口的 active_terminal 会被本窗口的终端污染
+            self._adopt_terminal(terminal)
+
+            # 重新设置快速命令提供者，指向当前窗口的预设
+            terminal.quick_commands_provider = lambda: self.presets
+            terminal.local_quick_commands_provider = lambda: self.local_presets
+
+            # 确保 terminal 正确显示（修复从其他窗口拖拽后的显示问题）
+            terminal.setUpdatesEnabled(True)  # 恢复绘制更新（detach 时会暂停）
+            terminal.show()
+            terminal.update()
 
     def _close_tab_by_button(self, index):
         """通过按钮关闭标签页（需要找到正确的索引）"""
@@ -247,12 +251,14 @@ class TabSplitMixin:
         close_btn.clicked.connect(lambda checked, i=idx: self._close_tab_by_button(i))
         self.tab_widget.tabBar().setTabButton(idx, QTabBar.ButtonPosition.RightSide, close_btn)
 
-    def _wrap_tab_page(self, idx, orientation, new_terminal):
+    def _wrap_tab_page(self, idx, orientation, new_terminal, before=False):
         """把整个标签页内容包进一个新的 orientation 方向的 splitter，并加入 new_terminal。
 
         用于对整个标签页（而非单个小窗口）进行分屏：让 new_terminal 贯穿整个宽（垂直分屏）
         或整个高（水平分屏）。会更新 tab_splitters[idx] 指向新的外层 splitter，
         以保持 “标签页页面控件 == tab_splitters[idx]” 的不变式（detach / 重建映射依赖它）。
+        before=True 时新控件放在旧页面**前面**（左/上），并入分屏按落点方向用。
+        new_terminal 可以是任何控件（并入分屏时是另一页的整个 splitter）。
         """
         # 以 tab_widget 里的**真实页面**为准，而不是 tab_splitters[idx]。
         # 二者一旦不同步（跨窗口接管、重排后未及时重建映射），原实现会
@@ -272,8 +278,12 @@ class TabSplitMixin:
 
         # 先把旧页面从 tab 中摘下（removeTab 不销毁控件，Python 引用仍在），再重组
         self.tab_widget.removeTab(idx)
-        outer.addWidget(old_page)
-        outer.addWidget(new_terminal)
+        if before:
+            outer.addWidget(new_terminal)
+            outer.addWidget(old_page)
+        else:
+            outer.addWidget(old_page)
+            outer.addWidget(new_terminal)
         old_page.show()
 
         self.tab_widget.insertTab(idx, outer, title)
@@ -1042,7 +1052,7 @@ class TabSplitMixin:
                 new_window.move(mx, my)
                 # 悬在别的窗口标签栏上：那边高亮、这边半透明，提示「松手即并入」
                 self._set_tab_drop_hover(
-                    new_window, self._tab_drop_target_at(cursor_pos, exclude=new_window))
+                    new_window, self._tab_drop_hit_at(cursor_pos, exclude=new_window))
             else:
                 # 鼠标释放，停止拖拽跟随
                 drag_timer.stop()
@@ -1204,8 +1214,8 @@ class TabSplitMixin:
             return None
         return i if local.x() < bar.tabRect(i).center().x() else i + 1
 
-    def _show_tab_drop_hint(self):
-        """标签栏上盖一层半透明高亮：有标签正拖到本窗口上方。"""
+    def _show_tab_drop_hint(self, kind='strip', zone=None):
+        """盖一层半透明高亮：并成标签时罩住标签栏，并成分屏时罩住目标页的那半边。"""
         hint = getattr(self, '_tab_drop_hint', None)
         if hint is None or sip.isdeleted(hint):
             hint = QWidget(self.tab_widget)
@@ -1215,9 +1225,15 @@ class TabSplitMixin:
                 "background-color: rgba(102, 126, 234, 0.35);"
                 "border: 2px solid #667eea;")
             self._tab_drop_hint = hint
-        strip = self._tab_drop_strip_rect()
-        top_left = self.tab_widget.mapFromGlobal(strip.topLeft())
-        hint.setGeometry(top_left.x(), top_left.y(), strip.width(), strip.height())
+        if kind == 'split' and zone is not None:
+            geo = self._split_zone_rect(zone)
+            if geo is None:
+                return
+        else:
+            strip = self._tab_drop_strip_rect()
+            top_left = self.tab_widget.mapFromGlobal(strip.topLeft())
+            geo = QRect(top_left.x(), top_left.y(), strip.width(), strip.height())
+        hint.setGeometry(geo)
         hint.show()
         hint.raise_()
 
@@ -1227,18 +1243,21 @@ class TabSplitMixin:
             hint.hide()
 
     @staticmethod
-    def _set_tab_drop_hover(dragged, target):
-        """更新拖拽悬停态：目标窗口标签栏高亮、被拖的窗口半透明（让人看得见
-        底下的目标）；离开时复原。target=None 表示不在任何目标上。"""
-        prev = getattr(dragged, '_tab_drop_target', None)
-        if prev is target:
+    def _set_tab_drop_hover(dragged, hit):
+        """更新拖拽悬停态：目标区域高亮、被拖的窗口半透明（让人看得见底下的
+        目标）；离开时复原。hit 是 _tab_drop_hit_at 的返回值，None 表示不在
+        任何目标上。"""
+        prev = getattr(dragged, '_tab_drop_hit', None)
+        if prev == hit:
             return
-        if prev is not None and not sip.isdeleted(prev):
-            prev._hide_tab_drop_hint()
-        dragged._tab_drop_target = target
+        if prev is not None and not sip.isdeleted(prev[0]):
+            prev[0]._hide_tab_drop_hint()
+        dragged._tab_drop_hit = hit
+        # 兼容旧字段：只记目标窗口
+        dragged._tab_drop_target = hit[0] if hit else None
         try:
-            if target is not None:
-                target._show_tab_drop_hint()
+            if hit is not None:
+                hit[0]._show_tab_drop_hint(hit[1], hit[2])
                 dragged.setWindowOpacity(0.55)
             else:
                 dragged.setWindowOpacity(1.0)
@@ -1252,13 +1271,21 @@ class TabSplitMixin:
         self._set_tab_drop_hover(dragged, None)
         if sip.isdeleted(dragged):
             return False
-        target = self._tab_drop_target_at(cursor_pos, exclude=dragged)
-        if target is None:
+        hit = self._tab_drop_hit_at(cursor_pos, exclude=dragged)
+        if hit is None:
             return False
-        insert_at = target._tab_insert_index_at(cursor_pos)
-        idx = target._adopt_tab_from(dragged, index, insert_at)
-        if idx < 0:
-            return False
+        target, kind, zone = hit
+        if kind == 'split':
+            orientation, before = zone
+            ok = target._merge_tab_into_split(
+                dragged, index, target.tab_widget.currentIndex(), orientation, before)
+            if not ok:
+                return False
+        else:
+            insert_at = target._tab_insert_index_at(cursor_pos)
+            idx = target._adopt_tab_from(dragged, index, insert_at)
+            if idx < 0:
+                return False
         target.raise_()
         target.activateWindow()
         if target.active_terminal:
@@ -1338,7 +1365,7 @@ class TabSplitMixin:
                     self.width(), self.height(), cursor_pos)
                 self.move(mx, my)
                 self._set_tab_drop_hover(
-                    self, self._tab_drop_target_at(cursor_pos, exclude=self))
+                    self, self._tab_drop_hit_at(cursor_pos, exclude=self))
                 return
             drag_timer.stop()
             if moved[0]:
@@ -1348,6 +1375,157 @@ class TabSplitMixin:
 
         drag_timer.timeout.connect(_tick)
         drag_timer.start()
+
+    # ---------- 把另一个标签页并进来做分屏（同窗口 / 跨窗口） ----------
+
+    def _merge_tab_into_split(self, src, src_index, dst_index, orientation,
+                              before=False):
+        """把 src 窗口的第 src_index 页整页并入本窗口第 dst_index 页做分屏。
+
+        orientation=Horizontal 是左右、Vertical 是上下；before=True 时并入的
+        那页放左/上。源页的终端原样搬过来（shell 不断、它自己的分屏结构保留），
+        源标签消失；源窗口因此空了就关掉。返回是否成功。
+        """
+        if src is None or src_index < 0 or dst_index < 0:
+            return False
+        if src is self and src_index == dst_index:
+            return False
+        dst_page = self.tab_widget.widget(dst_index)
+        if dst_page is None:
+            return False
+        title = self.tab_widget.tabText(dst_index)
+        taken = src._take_tab_out(src_index)
+        if taken is None:
+            return False
+        # 同窗口摘掉一页后，目标页的索引可能前移了
+        dst_index = self.tab_widget.indexOf(dst_page)
+        if dst_index < 0:
+            return False
+        top = self._synced_tab_splitter(dst_index)
+        page = taken['splitter']
+        terminals = taken['terminals']
+        if src is not self:
+            self._absorb_terminals(terminals)
+        else:
+            for term in terminals:
+                term.setUpdatesEnabled(True)
+
+        # 源页只有一个窗格时把它解包出来，别把单子 splitter 套进去
+        # （关闭分屏后的 _collapse_singleton_splitter 只认嵌套层级）
+        if isinstance(page, QSplitter) and page.count() == 1:
+            child = page.widget(0)
+            child.setParent(None)
+            page.setParent(None)
+            page.deleteLater()
+            page = child
+
+        if top is not None and top.orientation() == orientation:
+            top.insertWidget(0 if before else top.count(), page)
+            count = top.count()
+            total = top.width() if orientation == Qt.Orientation.Horizontal else top.height()
+            if total > 0:
+                top.setSizes([total // count] * count)
+        else:
+            if self._wrap_tab_page(dst_index, orientation, page, before=before) is None:
+                return False
+        page.show()
+
+        dst_terms = self.tab_terminals.setdefault(dst_index, [])
+        if before:
+            dst_terms[0:0] = terminals
+        else:
+            dst_terms.extend(terminals)
+        if self.tab_sessions.get(dst_index) is None and taken['session'] is not None:
+            self.tab_sessions[dst_index] = taken['session']
+        self.tab_widget.setTabText(dst_index, title)
+        self.tab_widget.setCurrentIndex(dst_index)
+        if terminals:
+            self.active_terminal = terminals[0]
+            terminals[0].setFocus()
+        if src is not self and src.tab_widget.count() == 0:
+            src._close_emptied_window()
+        elif src is not self:
+            src._checkpoint_workspace()
+        self._checkpoint_workspace()
+        self.statusbar.showMessage(
+            t("status.merge_split_done", count=len(dst_terms)), 3000)
+        return True
+
+    def _merge_tab_into_current(self, tab_index, orientation):
+        """右键菜单：把第 tab_index 页并入当前页做分屏。"""
+        cur = self.tab_widget.currentIndex()
+        if cur < 0 or cur == tab_index:
+            return
+        self._merge_tab_into_split(self, tab_index, cur, orientation)
+
+    # 页面区四边各占这么大比例算"落到这一侧做分屏"，中间不算
+    _SPLIT_DROP_EDGE_RATIO = 0.3
+
+    def _tab_page_rect(self):
+        """当前标签页内容区（全局坐标）；没有页面则 None。"""
+        page = self.tab_widget.currentWidget()
+        if page is None or not page.isVisible():
+            return None
+        return QRect(page.mapToGlobal(QPoint(0, 0)), page.size())
+
+    def _split_zone_at(self, global_pos):
+        """global_pos 落在本窗口当前页的哪一侧：返回 (orientation, before)，
+        中间区域或不在页面上返回 None。"""
+        rect = self._tab_page_rect()
+        if rect is None or not rect.contains(global_pos):
+            return None
+        r = self._SPLIT_DROP_EDGE_RATIO
+        x = (global_pos.x() - rect.left()) / max(1, rect.width())
+        y = (global_pos.y() - rect.top()) / max(1, rect.height())
+        # 离哪条边最近就算哪一侧；都不够近（在中间）就不算
+        cands = [(x, Qt.Orientation.Horizontal, True),
+                 (1 - x, Qt.Orientation.Horizontal, False),
+                 (y, Qt.Orientation.Vertical, True),
+                 (1 - y, Qt.Orientation.Vertical, False)]
+        dist, orientation, before = min(cands, key=lambda c: c[0])
+        if dist > r:
+            return None
+        return (orientation, before)
+
+    def _split_zone_rect(self, zone):
+        """zone 对应的高亮区域（tab_widget 坐标）：目标页的那半边。"""
+        rect = self._tab_page_rect()
+        if rect is None:
+            return None
+        orientation, before = zone
+        local = QRect(self.tab_widget.mapFromGlobal(rect.topLeft()), rect.size())
+        if orientation == Qt.Orientation.Horizontal:
+            half = QRect(local.left(), local.top(), local.width() // 2, local.height())
+            if not before:
+                half.moveLeft(local.left() + local.width() - half.width())
+        else:
+            half = QRect(local.left(), local.top(), local.width(), local.height() // 2)
+            if not before:
+                half.moveTop(local.top() + local.height() - half.height())
+        return half
+
+    def _tab_drop_hit_at(self, global_pos, exclude=None):
+        """拖着标签松手会发生什么：(window, 'strip', None) 并成标签，
+        (window, 'split', (orientation, before)) 并成分屏，None 什么都不发生。"""
+        app = QApplication.instance()
+        if app is None:
+            return None
+        cls = host_class(self)
+        for w in app.topLevelWidgets():
+            if not isinstance(w, cls) or w is exclude:
+                continue
+            try:
+                if (sip.isdeleted(w) or not w.isVisible() or w.isMinimized()
+                        or getattr(w, '_closing_in_progress', False)):
+                    continue
+                if w._tab_drop_strip_rect().contains(global_pos):
+                    return (w, 'strip', None)
+                zone = w._split_zone_at(global_pos)
+                if zone is not None:
+                    return (w, 'split', zone)
+            except RuntimeError:
+                continue   # C++ 对象已销毁
+        return None
 
     def _rebuild_tab_mappings(self):
         """重建标签页映射"""
@@ -1814,6 +1992,17 @@ class TabSplitMixin:
         detach_action.setEnabled(self.tab_widget.count() > 1)
         detach_action.triggered.connect(
             lambda: self._detach_tab(tab_index, None, follow_drag=False))
+
+        # 把这个标签并入当前标签做分屏（左右 / 上下）——两个标签合成一页看
+        merge_menu = menu.addMenu(t("tab.merge_split_menu"))
+        merge_menu.setEnabled(self.tab_widget.count() > 1
+                              and tab_index != self.tab_widget.currentIndex())
+        merge_h = merge_menu.addAction(t("tab.merge_split_h"))
+        merge_h.triggered.connect(
+            lambda: self._merge_tab_into_current(tab_index, Qt.Orientation.Horizontal))
+        merge_v = merge_menu.addAction(t("tab.merge_split_v"))
+        merge_v.triggered.connect(
+            lambda: self._merge_tab_into_current(tab_index, Qt.Orientation.Vertical))
 
         menu.addSeparator()
 
