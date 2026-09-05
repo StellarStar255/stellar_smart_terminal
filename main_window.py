@@ -152,6 +152,11 @@ class MainWindow(ThemeMixin, ToolbarMixin, ConfigMixin, ExplorerPanelMixin,
 
     # 窗口计数器（用于生成唯一窗口标题）
     _window_counter = 0
+    # 整批关闭（Dock 上 Quit / Cmd+Q）：Qt 在同一条调用链里逐个给窗口发
+    # closeEvent，每个有进程在跑的窗口都会弹"确认退出"。记下上一次确认的
+    # 时刻，紧随其后的窗口不再重复问——见 _quit_recently_confirmed。
+    _quit_confirmed_at = 0.0
+    _QUIT_CONFIRM_REUSE_SECS = 2.0
 
     # 全局共享的窗口导航面板
     _global_window_navigator = None
@@ -5511,7 +5516,7 @@ class MainWindow(ThemeMixin, ToolbarMixin, ConfigMixin, ExplorerPanelMixin,
         except Exception:
             any_running = False
 
-        if any_running and not force_closing:
+        if any_running and not force_closing and not self._quit_recently_confirmed():
             # 创建自定义样式的消息框，避免深色主题导致文字不可见
             msg_box = self._make_styled_message_box(
                 QMessageBox.Icon.Question,
@@ -5524,8 +5529,10 @@ class MainWindow(ThemeMixin, ToolbarMixin, ConfigMixin, ExplorerPanelMixin,
             reply = msg_box.exec()
 
             if reply == QMessageBox.StandardButton.Cancel:
+                MainWindow._quit_confirmed_at = 0.0
                 event.ignore()
                 return
+            MainWindow._quit_confirmed_at = time.monotonic()
 
         # 标记进入清理阶段，防止重入
         self._closing_in_progress = True
@@ -5601,6 +5608,17 @@ class MainWindow(ThemeMixin, ToolbarMixin, ConfigMixin, ExplorerPanelMixin,
         # 应用不会退出，只剩置顶的导航面板(Tool 窗口)挂在后台 → 进程不结束。
         # 这里在已无其它存活主窗口时显式退出。
         self._quit_if_last_main_window()
+
+    @classmethod
+    def _quit_recently_confirmed(cls) -> bool:
+        """刚刚有别的窗口在"确认退出"里点过 是/否 → 本窗口不再重复问。
+
+        整批退出时各窗口的 closeEvent 在同一条同步调用链里一个接一个执行，
+        中间只隔着上一个窗口的清理（现在是毫秒级），2 秒的时间窗足够覆盖；
+        用户手动一个个关窗口时，超过 2 秒照常弹框。
+        """
+        stamp = cls._quit_confirmed_at
+        return bool(stamp) and (time.monotonic() - stamp) < cls._QUIT_CONFIRM_REUSE_SECS
 
     def _quit_if_last_main_window(self):
         """若已无其它存活的 MainWindow，则关闭导航面板并显式退出应用。
