@@ -2381,16 +2381,60 @@ class TabSplitMixin:
         if ed is not None:
             ed.deleteLater()
 
+    # ---- 分屏名称：就地改名 + 按项目记忆的常用名称 ----
+
+    CONFIG_KEY_SPLIT_NAMES = 'split_label_names_by_project'
+    _SPLIT_NAMES_PER_PROJECT = 20
+    _SPLIT_NAMES_PROJECTS_CAP = 60
+
+    def _split_name_project_key(self) -> str:
+        """常用名称按"项目"分组：这里的项目 = 本窗口的工作目录。"""
+        return os.path.normpath(self._window_cwd or "") or "~"
+
+    def _split_name_suggestions(self) -> list:
+        """改名下拉里的候选：本项目最近用过的在前，再补全局历史，去重。"""
+        import app_config
+        by_project = app_config.read_config().get(self.CONFIG_KEY_SPLIT_NAMES)
+        mine = []
+        if isinstance(by_project, dict):
+            mine = [n for n in by_project.get(self._split_name_project_key(), [])
+                    if isinstance(n, str)]
+        out = []
+        for n in mine + list(getattr(self, 'used_label_names', [])):
+            if n and n not in out:
+                out.append(n)
+        return out[:12]
+
+    def _remember_split_name(self, name: str):
+        """记住这个名称：本项目列表置顶（上限 20），全局历史也记一份。"""
+        import app_config
+        name = (name or "").strip()
+        if not name:
+            return
+        key = self._split_name_project_key()
+
+        def _apply(cfg):
+            table = cfg.get(self.CONFIG_KEY_SPLIT_NAMES)
+            if not isinstance(table, dict):
+                table = {}
+            names = [n for n in table.get(key, []) if isinstance(n, str) and n != name]
+            names.insert(0, name)
+            table[key] = names[:self._SPLIT_NAMES_PER_PROJECT]
+            if len(table) > self._SPLIT_NAMES_PROJECTS_CAP:
+                # 项目太多了：扔掉最早加入的（dict 保持插入顺序）
+                for k in list(table.keys())[:len(table) - self._SPLIT_NAMES_PROJECTS_CAP]:
+                    table.pop(k, None)
+            cfg[self.CONFIG_KEY_SPLIT_NAMES] = table
+            return True
+
+        try:
+            app_config.update_config_with(_apply, description='split-names')
+        except Exception:
+            logger.debug("_remember_split_name failed", exc_info=True)
+        self._remember_label_name(name)
+
     def _rename_split(self, terminal):
-        """重命名某个分屏（窗格）。名称非空时在窗格顶部显示标题栏，留空则清除。"""
+        """重命名某个分屏（窗格）：直接在把手上就地编辑，附带本项目常用名称下拉。"""
         if terminal is None:
             return
-        current = terminal.get_split_label() or ""
-        name, ok = self._prompt_label_name(t("split.rename_title"), t("split.rename_prompt"), current)
-        if not ok:
-            return
-        name = (name or "").strip()
-        terminal.set_split_label(name)
-        if name:
-            self._remember_label_name(name)
-        self._save_config()
+        terminal.start_inline_rename(self._split_name_suggestions())

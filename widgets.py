@@ -375,6 +375,9 @@ class InlineRenameEdit(QLineEdit):
 
     def focusOutEvent(self, event):
         super().focusOutEvent(event)
+        # 补全下拉弹出时焦点会短暂离开输入框：那不是"用户点了别处"，别提交
+        if event.reason() == Qt.FocusReason.PopupFocusReason:
+            return
         self._commit()
 
 

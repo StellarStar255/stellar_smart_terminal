@@ -384,6 +384,8 @@ class TerminalWidget(TerminalInputMixin, TerminalMouseMixin,
     rename_split_requested = pyqtSignal()  # 请求重命名当前分屏（显示/修改顶部标题栏）
     # 拖着窗格顶部的把手离开了阈值：请求主窗口开始"挪窗格"（参数是全局坐标）
     pane_drag_requested = pyqtSignal(QPoint)
+    # 就地改名提交了一个非空名称：主窗口据此记进"本项目常用名称"
+    split_label_committed = pyqtSignal(str)
     attention_requested = pyqtSignal()  # 疑似本轮命令/Claude 执行完毕（输出停顿），请求导航提醒
     interaction_requested = pyqtSignal()  # 终端响铃（BEL）：程序正在等待用户操作（如 Claude 确认提示）
     alert_matched = pyqtSignal(str)  # 输出命中提醒规则（参数=命中的模式文本）
@@ -537,6 +539,8 @@ class TerminalWidget(TerminalInputMixin, TerminalMouseMixin,
         self._header_bar = None      # 标题栏 overlay 控件（首次命名时才创建）
         self._header_label = None
         self._header_clear_btn = None
+        self._header_rename_btn = None
+        self._inline_rename_editor = None
         # 所在标签页有 ≥2 个窗格时显示顶部把手（拖它可以把窗格挪到任意位置）
         self._pane_handle_visible = False
 
@@ -2301,6 +2305,7 @@ class TerminalWidget(TerminalInputMixin, TerminalMouseMixin,
             "QPushButton:hover{color:#667eea;}"
         )
         rename_btn.clicked.connect(self.rename_split_requested.emit)
+        self._header_rename_btn = rename_btn
 
         clear_btn = QPushButton("×")
         clear_btn.setFixedSize(18, 18)
@@ -2324,6 +2329,78 @@ class TerminalWidget(TerminalInputMixin, TerminalMouseMixin,
         """把标题栏铺满窗格顶部"""
         if self._header_bar is not None:
             self._header_bar.setGeometry(0, 0, self.width(), self.HEADER_HEIGHT)
+
+    # ==================== 就地改名 ====================
+
+    def start_inline_rename(self, suggestions=None):
+        """在窗格顶部把手上直接改名（不弹对话框）。
+
+        输入框盖在名称文字的位置上，附带一个下拉：suggestions 里是本项目
+        常用的名称，点一下即选中；回车/失焦提交，Esc 取消，留空 = 清除名称。
+        把手当前没显示（单窗格且没命名）时先临时把它亮出来。
+        """
+        from widgets import InlineRenameEdit
+        from PyQt6.QtWidgets import QCompleter
+        from PyQt6.QtCore import QStringListModel
+        self.cancel_inline_rename()
+        was_hidden = self._header_h == 0
+        if was_hidden:
+            self._pane_handle_visible = True
+            self._sync_header_bar()
+        bar = self._header_bar
+        editor = InlineRenameEdit(bar)
+        editor.setText(self._split_label or "")
+        editor.selectAll()
+        editor.setPlaceholderText(t("split.rename_placeholder"))
+        left = self._header_label.geometry().left()
+        right = (self._header_rename_btn.geometry().left() - 6
+                 if self._header_rename_btn is not None else bar.width() - 8)
+        editor.setGeometry(left, 2, max(80, right - left), bar.height() - 4)
+        editor.setStyleSheet(
+            "QLineEdit{background:#282c34;color:#ffffff;border:1px solid #667eea;"
+            "border-radius:3px;padding:0px 4px;font-size:12px;}"
+        )
+        names = [n for n in (suggestions or []) if n]
+        if names:
+            completer = QCompleter(QStringListModel(names, editor), editor)
+            completer.setCompletionMode(QCompleter.CompletionMode.UnfilteredPopupCompletion)
+            completer.setCaseSensitivity(Qt.CaseSensitivity.CaseInsensitive)
+            completer.activated[str].connect(
+                lambda text, e=editor: (e.setText(text), e._commit()))
+            editor.setCompleter(completer)
+        editor.committed.connect(lambda text: self._finish_inline_rename(text, was_hidden))
+        editor.cancelled.connect(lambda: self._finish_inline_rename(None, was_hidden))
+        self._inline_rename_editor = editor
+        editor.show()
+        editor.raise_()
+        editor.setFocus()
+        if names:
+            # 一亮出来就把候选列表展开，看到即选
+            QTimer.singleShot(0, lambda e=editor: e.completer() and e.completer().complete())
+
+    def cancel_inline_rename(self):
+        ed = self._inline_rename_editor
+        self._inline_rename_editor = None
+        if ed is not None:
+            ed.deleteLater()
+
+    def _finish_inline_rename(self, text, was_hidden):
+        """text=None 表示取消。"""
+        ed = self._inline_rename_editor
+        self._inline_rename_editor = None
+        if ed is not None:
+            ed.deleteLater()
+        if was_hidden:
+            self._pane_handle_visible = False   # 临时亮出来的把手，改完按规则收起
+        if text is None:
+            self._sync_header_bar()
+            self.setFocus()
+            return
+        name = (text or "").strip()
+        self.set_split_label(name)
+        if name:
+            self.split_label_committed.emit(name)
+        self.setFocus()
 
     # ==================== 字体缩放 ====================
 
