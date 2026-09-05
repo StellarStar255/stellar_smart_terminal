@@ -143,7 +143,22 @@ class TestMergeTabIntoSplit(unittest.TestCase):
         self.assertEqual((hit[0], hit[1]), (a, 'strip'))
         hit = a._tab_drop_hit_at(left)
         self.assertEqual(hit, (a, 'split', (Qt.Orientation.Horizontal, True)))
-        self.assertIsNone(a._tab_drop_hit_at(left, exclude=a))
+        # 正拖着的就是当前页：落回自己当前页做分屏没意义，不算命中
+        self.assertIsNone(a._tab_drop_hit_at(left, dragging_index=a.tab_widget.currentIndex()))
+
+    def test_finish_drag_on_split_zone_merges(self):
+        a = self.win_a
+        a._add_new_tab(tab_name="zone")
+        src = a.tab_widget.count() - 1
+        a.tab_widget.setCurrentIndex(0)
+        n = a.tab_widget.count()
+        rect = a._tab_page_rect()
+        pos = QPoint(rect.right() - 5, rect.center().y())
+        a._finish_tab_drag(src, pos, (a, 'split', (Qt.Orientation.Horizontal, False)))
+        self.assertEqual(a.tab_widget.count(), n - 1)
+        page = a.tab_widget.widget(0)
+        self.assertEqual(page.orientation(), Qt.Orientation.Horizontal)
+        self._consistent(a)
 
 
 if __name__ == '__main__':

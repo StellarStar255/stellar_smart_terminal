@@ -785,7 +785,8 @@ class MainWindow(ThemeMixin, ToolbarMixin, ConfigMixin, ExplorerPanelMixin,
         # 无视 QSS、按 NSAppearance 横贯整行画一条深灰底（浅色主题下极其突兀），
         # 而且 widget.grab() 复现不出来（只有真实屏幕合成才可见）。
         self.detachable_tab_bar.setDrawBase(False)
-        self.detachable_tab_bar.tab_detach_requested.connect(self._detach_tab)
+        # 拖出标签 → 影子拖拽（松手才决定：并标签 / 并分屏 / 拆窗口），见 _begin_tab_drag
+        self.detachable_tab_bar.tab_detach_requested.connect(self._begin_tab_drag)
         self.detachable_tab_bar.tab_rename_requested.connect(self._begin_inline_tab_rename)
 
         self.tab_widget.setTabsClosable(False)  # 禁用内置关闭按钮，使用自定义

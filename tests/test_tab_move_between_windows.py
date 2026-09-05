@@ -92,12 +92,74 @@ class TestMoveTabBetweenWindows(unittest.TestCase):
     def test_drop_target_hit_test(self):
         a, b = self.win_a, self.win_b
         strip_b = b._tab_drop_strip_rect()
-        self.assertIs(a._tab_drop_target_at(strip_b.center(), exclude=a), b)
-        # 被拖的窗口自己不算目标
-        self.assertIsNone(b._tab_drop_target_at(strip_b.center(), exclude=b))
-        # 标签栏以外（窗口正中）不算
+        hit = a._tab_drop_hit_at(strip_b.center())
+        self.assertEqual((hit[0], hit[1]), (b, 'strip'))
+        # 页面正中（不靠任何边）不算
         mid = b.mapToGlobal(QPoint(b.width() // 2, b.height() // 2))
-        self.assertIsNone(a._tab_drop_target_at(mid, exclude=a))
+        self.assertIsNone(a._tab_drop_hit_at(mid))
+
+    def test_finish_drag_on_strip_of_other_window_moves_tab(self):
+        a, b = self.win_a, self.win_b
+        a._add_new_tab(tab_name="fly")
+        idx = a.tab_widget.count() - 1
+        a_before, b_before = a.tab_widget.count(), b.tab_widget.count()
+        a._finish_tab_drag(idx, b._tab_drop_strip_rect().center(), (b, 'strip', None))
+        self.assertEqual(a.tab_widget.count(), a_before - 1)
+        self.assertEqual(b.tab_widget.count(), b_before + 1)
+        self._assert_mappings_consistent(a)
+        self._assert_mappings_consistent(b)
+
+    def test_finish_drag_on_own_strip_reorders(self):
+        a = self.win_a
+        while a.tab_widget.count() < 3:
+            a._add_new_tab(tab_name=f"t{a.tab_widget.count()}")
+        a.tab_widget.setTabText(0, "first")
+        last = a.tab_widget.count() - 1
+        a.tab_widget.setTabText(last, "last")
+        bar = a.tab_widget.tabBar()
+        r0 = bar.tabRect(0)
+        pos = bar.mapToGlobal(QPoint(r0.left() + 2, r0.center().y()))   # 插到第 0 个前面
+        a._finish_tab_drag(last, pos, (a, 'strip', None))
+        self.assertEqual(a.tab_widget.tabText(0), "last")
+        self.assertEqual(a.tab_widget.tabText(1), "first")
+        self._assert_mappings_consistent(a)
+
+    def test_finish_drag_in_the_open_detaches_at_drop_point(self):
+        a = self.win_a
+        a._add_new_tab(tab_name="loose")
+        idx = a.tab_widget.count() - 1
+        n = a.tab_widget.count()
+        wins_before = {w for w in self.app.topLevelWidgets() if isinstance(w, self.mw_mod.MainWindow)}
+        drop = QPoint(300, 300)
+        a._finish_tab_drag(idx, drop, None)
+        self.app.processEvents()
+        new = [w for w in self.app.topLevelWidgets()
+               if isinstance(w, self.mw_mod.MainWindow) and w not in wins_before]
+        self.assertEqual(len(new), 1)
+        self.assertEqual(a.tab_widget.count(), n - 1)
+        self.assertEqual(new[0].tab_widget.tabText(0), "loose")
+        self.assertFalse(new[0].isMaximized())
+        self._assert_mappings_consistent(new[0])
+        new[0]._force_closing = True
+        from PyQt6.QtGui import QCloseEvent
+        QApplication.sendEvent(new[0], QCloseEvent())
+        new[0].deleteLater()
+
+    def test_sole_tab_dropped_in_the_open_stays(self):
+        b = self.win_b
+        while b.tab_widget.count() > 1:
+            b._close_tab(b.tab_widget.count() - 1, auto_create_new=False)
+        def live():
+            # 只数活着的：别的用例 deleteLater 的窗口可能在这次 processEvents 里才真正回收
+            return {w for w in self.app.topLevelWidgets()
+                    if isinstance(w, self.mw_mod.MainWindow) and not sip.isdeleted(w)
+                    and w.isVisible() and not getattr(w, '_closing_in_progress', False)}
+        self.app.processEvents()
+        wins_before = live()
+        b._finish_tab_drag(0, QPoint(50, 50), None)
+        self.app.processEvents()
+        self.assertEqual(b.tab_widget.count(), 1)
+        self.assertEqual(live() - wins_before, set())
 
     def test_insert_index_follows_cursor_half(self):
         b = self.win_b
@@ -136,54 +198,3 @@ class TestMoveTabBetweenWindows(unittest.TestCase):
 
 if __name__ == '__main__':
     unittest.main()
-
-
-class TestShrinkMaximizedForDrag(unittest.TestCase):
-    """拖最大化窗口的标签：先还原成普通窗口再跟手（最大化窗口动不了、挡住目标）。"""
-
-    @classmethod
-    def setUpClass(cls):
-        cls.app = QApplication.instance() or QApplication([])
-        import main_window
-        cls.mw = main_window
-        cls.win = main_window.MainWindow()
-        cls.win.show()
-        cls.app.processEvents()
-
-    @classmethod
-    def tearDownClass(cls):
-        from PyQt6.QtGui import QCloseEvent
-        cls.win._force_closing = True
-        QApplication.sendEvent(cls.win, QCloseEvent())
-        cls.win.deleteLater()
-        cls.app.processEvents()
-        del cls.win
-
-    def test_normal_window_is_left_alone(self):
-        w = self.win
-        w.showNormal()
-        self.app.processEvents()
-        self.assertIsNone(w._shrink_for_tab_drag(w, QPoint(w.x() + 50, w.y() + 30)))
-
-    def test_maximized_window_is_restored_under_cursor(self):
-        w = self.win
-        w.showMaximized()
-        self.app.processEvents()
-        self.assertTrue(w.isMaximized())
-        old = w.frameGeometry()
-        cursor = QPoint(old.x() + old.width() // 2, old.y() + 40)
-
-        pos = w._shrink_for_tab_drag(w, cursor)
-
-        self.assertIsNotNone(pos)
-        self.app.processEvents()
-        self.assertFalse(w.isMaximized())
-        avail = QApplication.primaryScreen().availableGeometry()
-        # 离屏的"屏幕"只有 800x600，比窗口最小尺寸还小：按公式断言而不是硬比屏幕
-        want_w = max(w.minimumWidth(), int(avail.width() * w._DRAG_SHRINK_RATIO))
-        self.assertEqual(w.width(), want_w)
-        # 光标仍落在窗口内、离顶部还是原来那么远（标签栏那一行）
-        x, y = pos
-        self.assertLessEqual(x, cursor.x())
-        self.assertGreaterEqual(x + w.width(), cursor.x())
-        self.assertEqual(cursor.y() - y, 40)

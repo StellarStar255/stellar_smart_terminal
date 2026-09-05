@@ -13,7 +13,7 @@ from PyQt6.QtWidgets import (QApplication, QMenu, QMessageBox, QPushButton,
                              QSplitter, QTabBar, QWidget)
 from dialogs import get_default_shell
 from i18n import t
-from widgets import InlineRenameEdit
+from widgets import InlineRenameEdit, TabDragPreview
 from app_logging import get_logger
 # 进程级共享类属性 / 构造新窗口经 window_host.host_class(self) 落到真 MainWindow
 from window_host import host_class
@@ -905,17 +905,16 @@ class TabSplitMixin:
                              attempt, new_window.geometry(), target_geo)
         QTimer.singleShot(loop_delay, _realign)
 
-    def _detach_tab(self, index, global_pos, follow_drag=True):
+    def _detach_tab(self, index, global_pos=None, follow_drag=False, drop_pos=None):
         """将标签页分离为独立窗口（创建完整的 host_class(self)）
 
-        follow_drag=True 时新窗口跟随鼠标拖拽（拖出标签触发）；
-        False 时直接在父窗口附近层叠展开（右键菜单触发）。
+        drop_pos=None（右键菜单）：新窗口与父窗口逐像素重合地"原地出现"；
+        drop_pos=光标位置（拖拽松手在空白处）：新窗口出现在松手处，标签栏
+        正好落在光标下，尺寸取父窗口尺寸（父窗口最大化时取屏幕 60%）。
+        follow_drag 参数已无作用，保留只为兼容旧调用。
         """
-        # 唯一的标签页拆不出新窗口，但拖它 = 拖着整个窗口走：松手落在别的
-        # 窗口标签栏上就并过去（把拆出去的标签拖回原窗口正是这条路）。
+        # 唯一的标签页拆不出新窗口（拖拽路径里松手在空白处什么都不发生）
         if self.tab_widget.count() <= 1:
-            if follow_drag and self.isVisible():
-                self._start_carry_window_drag(index)
             return
 
         # 获取标签页标题
@@ -982,14 +981,8 @@ class TabSplitMixin:
 
         # 拖拽与菜单 expand 共用「原地出现」语义：新窗口直接与父窗口逐像素
         # 重合（隐形对齐后显形，见 _align_child_with_parent_geometry）。
-        # 拖拽路径在此基础上，若用户松手前继续拖动超过阈值，则中止对齐、
-        # 转为跟随光标的相对拖拽（见 _start_detach_drag_follow）——既做到
-        # 「拖出即与父窗口同大小同位置」，又保留自由摆放能力。
-        if follow_drag:
-            drag_state = {'moved': False}
-            new_window._detach_drag_state = drag_state
-            self._align_child_with_parent_geometry(
-                new_window, abort_check=lambda: drag_state['moved'])
+        if drop_pos is not None:
+            self._place_detached_at(new_window, drop_pos)
         else:
             self._align_child_with_parent_geometry(new_window)
 
@@ -1000,130 +993,13 @@ class TabSplitMixin:
         # 添加到列表以跟踪（销毁后自动摘除）
         self._track_detached_window(new_window)
 
-        # 菜单触发时无拖拽，直接聚焦新窗口终端即可
-        if not follow_drag:
-            if new_window.active_terminal:
-                new_window.active_terminal.setFocus()
-        else:
-            self._start_detach_drag_follow(new_window)
+        if new_window.active_terminal:
+            new_window.active_terminal.setFocus()
 
         # 如果主窗口没有标签页了，创建一个新的
         if self.tab_widget.count() == 0:
             self._add_new_tab()
             self._update_running_state(False)
-
-    def _start_detach_drag_follow(self, new_window):
-        """拖拽分离后的跟随逻辑：窗口已「原地出现」与父窗口重合。
-
-        松手前若继续拖动超过阈值（DRAG_THRESH），中止对齐校正、转为跟随光标
-        的相对拖拽（按拖出时刻起的光标位移挪窗口）；原地松手则窗口保持与父
-        窗口逐像素重合，零移动。松手时按既有规则做吸附对齐。
-        （macOS 上 startSystemMove() 因鼠标按下事件不在新窗口上而导致窗口漂移，
-        故用 timer 轮询鼠标位置实现跟随。）
-        """
-        start_cursor = QCursor.pos()
-        drag_state = getattr(new_window, '_detach_drag_state', None) or {'moved': False}
-        base_pos = [0, 0]  # 转入相对拖拽时的窗口位置基准（frame 坐标）
-        DRAG_THRESH = 8
-        drag_timer = QTimer()
-        drag_timer.setInterval(16)  # ~60fps 平滑跟随
-        new_window._detach_drag_timer = drag_timer  # prevent GC
-
-        def _follow_mouse():
-            if sip.isdeleted(new_window):
-                drag_timer.stop()
-                return
-            buttons = QApplication.mouseButtons()
-            if buttons & Qt.MouseButton.LeftButton:
-                cursor_pos = QCursor.pos()
-                dx = cursor_pos.x() - start_cursor.x()
-                dy = cursor_pos.y() - start_cursor.y()
-                if not drag_state['moved']:
-                    if abs(dx) <= DRAG_THRESH and abs(dy) <= DRAG_THRESH:
-                        return  # 还没拖出阈值：窗口保持与父窗口重合
-                    # 接管拖拽（对齐校正循环检测到后会自动退出并显形）。
-                    # 基准取「当前窗口位置 - 当前位移」，从现位置平滑续接。
-                    drag_state['moved'] = True
-                    # 父窗口最大化时新窗口也继承了最大化：先还原成能跟手的
-                    # 普通窗口（见 _shrink_for_tab_drag），否则拖不动也看不见目标
-                    shrunk = self._shrink_for_tab_drag(new_window, cursor_pos)
-                    if shrunk is not None:
-                        base_pos[0] = shrunk[0] - dx
-                        base_pos[1] = shrunk[1] - dy
-                    else:
-                        base_pos[0] = new_window.x() - dx
-                        base_pos[1] = new_window.y() - dy
-                mx, my = host_class(self)._clamp_window_pos(
-                    base_pos[0] + dx, base_pos[1] + dy,
-                    new_window.width(), new_window.height(), cursor_pos)
-                new_window.move(mx, my)
-                # 悬在别的窗口标签栏上：那边高亮、这边半透明，提示「松手即并入」
-                self._set_tab_drop_hover(
-                    new_window, self._tab_drop_hit_at(cursor_pos, exclude=new_window))
-            else:
-                # 鼠标释放，停止拖拽跟随
-                drag_timer.stop()
-                if not sip.isdeleted(new_window) and new_window.isVisible():
-                    # 没拖动过：窗口已与父窗口重合（或正在对齐中），无需吸附
-                    if not drag_state['moved']:
-                        new_window.raise_()
-                        new_window.activateWindow()
-                        if new_window.active_terminal:
-                            new_window.active_terminal.setFocus()
-                        return
-                    # 松手落在别的窗口（含父窗口）的标签栏上 → 标签并过去，
-                    # 刚拆出来的空窗口随之关闭。要先于吸附判断：吸附的
-                    # 「大面积叠在父窗口上」和「落在父窗口标签栏」是会重叠的。
-                    if self._finish_tab_drag_drop(new_window, 0):
-                        return
-                    # 吸附对齐：松手时若与父窗口的边缘只差一点（肉眼想对齐但差
-                    # 几十像素），自动贴齐父窗口，消除"差一丁点错位"。
-                    if not sip.isdeleted(self) and self.isVisible():
-                        pf = self.frameGeometry()
-                        nf = new_window.frameGeometry()
-                        inter = pf.intersected(nf)
-                        overlap = inter.width() * inter.height()
-                        if overlap >= 0.6 * nf.width() * nf.height():
-                            # 大面积叠在父窗口上 → 视为想完全重合，继承父窗口
-                            # 几何（位置+尺寸逐像素一致，持续校正 macOS 微调）
-                            self._align_child_with_parent_geometry(new_window)
-                        else:
-                            # 拖拽期间 macOS 可能把越界窗口悄悄压小（级联/约束
-                            # 到屏幕），松手时先把尺寸还原成父窗口尺寸再做吸附，
-                            # 位置按还原后的尺寸重新约束在屏幕内。
-                            if (not self.isMaximized()
-                                    and new_window.size() != self.size()):
-                                new_window.resize(self.size())
-                                cx, cy = host_class(self)._clamp_window_pos(
-                                    new_window.x(), new_window.y(),
-                                    self.width(), self.height(),
-                                    new_window.frameGeometry().center())
-                                new_window.move(cx, cy)
-                                nf = new_window.frameGeometry()
-                            SNAP = 56
-                            nx, ny = new_window.x(), new_window.y()
-                            # 上对齐 / 贴在父窗口正下方
-                            if abs(ny - pf.y()) <= SNAP:
-                                ny = pf.y()
-                            elif abs(ny - pf.bottom()) <= SNAP:
-                                ny = pf.bottom() + 1
-                            # 左对齐 / 贴在父窗口右侧 / 贴在父窗口左侧
-                            if abs(nx - pf.x()) <= SNAP:
-                                nx = pf.x()
-                            elif abs(nx - (pf.right() + 1)) <= SNAP:
-                                nx = pf.right() + 1
-                            elif abs((nx + nf.width()) - pf.x()) <= SNAP:
-                                nx = pf.x() - nf.width()
-                            if (nx, ny) != (new_window.x(), new_window.y()):
-                                # 边缘贴齐同样用平滑滑移代替瞬移
-                                host_class(self)._slide_window_to(new_window, nx, ny)
-                    new_window.raise_()
-                    new_window.activateWindow()
-                    if new_window.active_terminal:
-                        new_window.active_terminal.setFocus()
-
-        drag_timer.timeout.connect(_follow_mouse)
-        drag_timer.start()
 
     def _take_tab_out(self, index):
         """把第 index 页从本窗口摘下来（不销毁内容），返回它的全部随身数据。
@@ -1192,25 +1068,6 @@ class TabSplitMixin:
         h = max(bar.height(), self._TAB_DROP_STRIP_MIN_H)
         return QRect(origin.x(), bar_top, tw.width(), h)
 
-    def _tab_drop_target_at(self, global_pos, exclude=None):
-        """global_pos 落在哪个（别的）主窗口的标签栏上；没有则 None。"""
-        app = QApplication.instance()
-        if app is None:
-            return None
-        cls = host_class(self)
-        for w in app.topLevelWidgets():
-            if not isinstance(w, cls) or w is exclude:
-                continue
-            try:
-                if (sip.isdeleted(w) or not w.isVisible() or w.isMinimized()
-                        or getattr(w, '_closing_in_progress', False)):
-                    continue
-                if w._tab_drop_strip_rect().contains(global_pos):
-                    return w
-            except RuntimeError:
-                continue   # C++ 对象已销毁
-        return None
-
     def _tab_insert_index_at(self, global_pos):
         """按光标横向位置算插入位置：落在某个标签的左半边插它前面，右半边插它
         后面；不在任何标签上则追加到末尾（None）。"""
@@ -1248,56 +1105,6 @@ class TabSplitMixin:
         hint = getattr(self, '_tab_drop_hint', None)
         if hint is not None and not sip.isdeleted(hint):
             hint.hide()
-
-    @staticmethod
-    def _set_tab_drop_hover(dragged, hit):
-        """更新拖拽悬停态：目标区域高亮、被拖的窗口半透明（让人看得见底下的
-        目标）；离开时复原。hit 是 _tab_drop_hit_at 的返回值，None 表示不在
-        任何目标上。"""
-        prev = getattr(dragged, '_tab_drop_hit', None)
-        if prev == hit:
-            return
-        if prev is not None and not sip.isdeleted(prev[0]):
-            prev[0]._hide_tab_drop_hint()
-        dragged._tab_drop_hit = hit
-        # 兼容旧字段：只记目标窗口
-        dragged._tab_drop_target = hit[0] if hit else None
-        try:
-            if hit is not None:
-                hit[0]._show_tab_drop_hint(hit[1], hit[2])
-                dragged.setWindowOpacity(0.55)
-            else:
-                dragged.setWindowOpacity(1.0)
-        except RuntimeError:
-            pass
-
-    def _finish_tab_drag_drop(self, dragged, index) -> bool:
-        """拖拽松手：光标在别的窗口标签栏上就把 dragged 的第 index 页并过去。
-        返回是否发生了并入。无论如何都清掉悬停态。"""
-        cursor_pos = QCursor.pos()
-        self._set_tab_drop_hover(dragged, None)
-        if sip.isdeleted(dragged):
-            return False
-        hit = self._tab_drop_hit_at(cursor_pos, exclude=dragged)
-        if hit is None:
-            return False
-        target, kind, zone = hit
-        if kind == 'split':
-            orientation, before = zone
-            ok = target._merge_tab_into_split(
-                dragged, index, target.tab_widget.currentIndex(), orientation, before)
-            if not ok:
-                return False
-        else:
-            insert_at = target._tab_insert_index_at(cursor_pos)
-            idx = target._adopt_tab_from(dragged, index, insert_at)
-            if idx < 0:
-                return False
-        target.raise_()
-        target.activateWindow()
-        if target.active_terminal:
-            target.active_terminal.setFocus()
-        return True
 
     def _adopt_tab_from(self, src, src_index, insert_index=None):
         """把 src 窗口的第 src_index 页整个搬进本窗口（终端不重建、shell 不断）。
@@ -1343,80 +1150,6 @@ class TabSplitMixin:
                 self._update_running_state(False)
 
         QTimer.singleShot(0, _close)
-
-    _DRAG_SHRINK_RATIO = 0.6
-
-    @classmethod
-    def _shrink_for_tab_drag(cls, win, cursor_pos):
-        """最大化/全屏的窗口先还原成普通窗口再跟手。
-
-        最大化的窗口 move() 不生效、也把底下所有目标窗口全挡住了——用户拖着
-        一个满屏的窗口根本看不见要放去哪。还原成屏幕 60% 大小，按光标在旧
-        窗口里的相对横向位置摆放，纵向保持光标到窗口顶部的距离（仍停在标签栏
-        那一行）。返回新的 (x, y)；本来就是普通窗口返回 None。
-        """
-        try:
-            if not (win.isMaximized() or win.isFullScreen()):
-                return None
-            old = win.frameGeometry()
-            fx = (cursor_pos.x() - old.x()) / max(1, old.width())
-            dy = cursor_pos.y() - old.y()
-            scr = QApplication.screenAt(cursor_pos) or QApplication.primaryScreen()
-            avail = scr.availableGeometry()
-            w = max(win.minimumWidth(), int(avail.width() * cls._DRAG_SHRINK_RATIO))
-            h = max(win.minimumHeight(), int(avail.height() * cls._DRAG_SHRINK_RATIO))
-            win.showNormal()
-            win.resize(w, h)
-            x, y = cls._clamp_window_pos(
-                int(cursor_pos.x() - fx * w), cursor_pos.y() - dy, w, h, cursor_pos)
-            win.move(x, y)
-            return x, y
-        except RuntimeError:
-            return None
-
-    def _start_carry_window_drag(self, index):
-        """拖唯一的标签 = 拖着整个窗口走。松手落在别的窗口标签栏上就并过去；
-        否则窗口就留在松手的位置。跟随方式同 _start_detach_drag_follow。"""
-        start_cursor = QCursor.pos()
-        shrunk = self._shrink_for_tab_drag(self, start_cursor)
-        if shrunk is not None:
-            off_x = shrunk[0] - start_cursor.x()
-            off_y = shrunk[1] - start_cursor.y()
-        else:
-            off_x = self.x() - start_cursor.x()
-            off_y = self.y() - start_cursor.y()
-        DRAG_THRESH = 8
-        moved = [False]
-        drag_timer = QTimer()
-        drag_timer.setInterval(16)
-        self._carry_drag_timer = drag_timer  # prevent GC
-
-        def _tick():
-            if sip.isdeleted(self):
-                drag_timer.stop()
-                return
-            if QApplication.mouseButtons() & Qt.MouseButton.LeftButton:
-                cursor_pos = QCursor.pos()
-                if not moved[0]:
-                    if (abs(cursor_pos.x() - start_cursor.x()) <= DRAG_THRESH
-                            and abs(cursor_pos.y() - start_cursor.y()) <= DRAG_THRESH):
-                        return
-                    moved[0] = True
-                mx, my = host_class(self)._clamp_window_pos(
-                    off_x + cursor_pos.x(), off_y + cursor_pos.y(),
-                    self.width(), self.height(), cursor_pos)
-                self.move(mx, my)
-                self._set_tab_drop_hover(
-                    self, self._tab_drop_hit_at(cursor_pos, exclude=self))
-                return
-            drag_timer.stop()
-            if moved[0]:
-                self._finish_tab_drag_drop(self, index)
-            else:
-                self._set_tab_drop_hover(self, None)
-
-        drag_timer.timeout.connect(_tick)
-        drag_timer.start()
 
     # ---------- 把另一个标签页并进来做分屏（同窗口 / 跨窗口） ----------
 
@@ -1546,16 +1279,29 @@ class TabSplitMixin:
                 half.moveTop(local.top() + local.height() - half.height())
         return half
 
-    def _tab_drop_hit_at(self, global_pos, exclude=None):
-        """拖着标签松手会发生什么：(window, 'strip', None) 并成标签，
-        (window, 'split', (orientation, before)) 并成分屏，None 什么都不发生。"""
-        app = QApplication.instance()
-        if app is None:
-            return None
+    def _tab_drop_hit_at(self, global_pos, dragging_index=None):
+        """拖着标签松手会发生什么：(window, 'strip', None) 并成标签 / 同窗口重排，
+        (window, 'split', (orientation, before)) 并入分屏，None 什么都不发生。
+
+        以光标下**最上层**的窗口为准（QApplication.topLevelAt）——几何相交的
+        窗口可能被别的窗口盖着；离屏/拿不到时退回按几何找。dragging_index 是
+        本窗口正被拖的标签：落回自己当前页做分屏没有意义，不算命中。
+        """
         cls = host_class(self)
-        for w in app.topLevelWidgets():
-            if not isinstance(w, cls) or w is exclude:
-                continue
+        top = None
+        try:
+            top = QApplication.topLevelAt(global_pos)
+        except Exception:
+            top = None
+        if isinstance(top, cls):
+            candidates = [top]
+        elif top is None:
+            app = QApplication.instance()
+            candidates = [w for w in (app.topLevelWidgets() if app else [])
+                          if isinstance(w, cls)]
+        else:
+            return None   # 光标下是别的窗口（对话框/其它应用）
+        for w in candidates:
             try:
                 if (sip.isdeleted(w) or not w.isVisible() or w.isMinimized()
                         or getattr(w, '_closing_in_progress', False)):
@@ -1564,10 +1310,138 @@ class TabSplitMixin:
                     return (w, 'strip', None)
                 zone = w._split_zone_at(global_pos)
                 if zone is not None:
+                    if (w is self and dragging_index is not None
+                            and self.tab_widget.currentIndex() == dragging_index):
+                        return None
                     return (w, 'split', zone)
             except RuntimeError:
                 continue   # C++ 对象已销毁
         return None
+
+    # ---------- 拖标签：跟着光标的是一张标签「影子」，松手才决定去处 ----------
+    #
+    # 以前拖出阈值的一瞬间就整个建出一个新窗口跟手：建窗口要几百毫秒、
+    # 满屏的窗口把目标全挡住、拖回原窗口还得穿过自己刚拆出的窗口——手感
+    # 极差。现在拖动期间只有一张半透明的标签影子跟着光标，光标下是哪个窗口
+    # 的标签栏 / 页面边缘就高亮哪里；松手时：标签栏 → 并成标签（同窗口 =
+    # 重排），页面边缘 → 并入分屏，空白处 → 在松手处拆成新窗口。
+
+    _TAB_DRAG_PREVIEW_OFFSET = QPoint(14, 10)
+
+    def _begin_tab_drag(self, index, global_pos):
+        """标签栏拖出阈值后进入影子拖拽，直到松开鼠标。"""
+        if index < 0 or index >= self.tab_widget.count():
+            return
+        bar = self.tab_widget.tabBar()
+        try:
+            pixmap = bar.grab(bar.tabRect(index))
+        except Exception:
+            pixmap = None
+        preview = TabDragPreview(pixmap) if pixmap is not None and not pixmap.isNull() else None
+        state = {'hit': None}
+        timer = QTimer()
+        timer.setInterval(16)
+        self._tab_drag_timer = timer   # prevent GC
+
+        def _tick():
+            if sip.isdeleted(self):
+                timer.stop()
+                if preview is not None:
+                    preview.close()
+                return
+            pos = QCursor.pos()
+            if QApplication.mouseButtons() & Qt.MouseButton.LeftButton:
+                if preview is not None:
+                    preview.move(pos + self._TAB_DRAG_PREVIEW_OFFSET)
+                    if not preview.isVisible():
+                        preview.show()
+                self._set_drag_hit(state, self._tab_drop_hit_at(pos, dragging_index=index))
+                return
+            timer.stop()
+            if preview is not None:
+                preview.close()
+            hit = state['hit']
+            self._set_drag_hit(state, None)
+            try:
+                self._finish_tab_drag(index, pos, hit)
+            except Exception:
+                logger.exception("[Tabs] finishing tab drag failed")
+
+        timer.timeout.connect(_tick)
+        timer.start()
+
+    @staticmethod
+    def _set_drag_hit(state, hit):
+        """更新悬停命中：换目标时前一个的高亮收掉、新的亮起。"""
+        prev = state.get('hit')
+        if prev == hit:
+            return
+        if prev is not None and not sip.isdeleted(prev[0]):
+            prev[0]._hide_tab_drop_hint()
+        state['hit'] = hit
+        if hit is not None:
+            try:
+                hit[0]._show_tab_drop_hint(hit[1], hit[2])
+            except RuntimeError:
+                pass
+
+    def _finish_tab_drag(self, index, pos, hit):
+        """松手：按命中位置决定去处。"""
+        if index < 0 or index >= self.tab_widget.count():
+            return
+        if hit is None:
+            # 空白处：拆成新窗口，出现在松手处（唯一的标签拆不了，什么都不做）
+            if self.tab_widget.count() > 1:
+                self._detach_tab(index, pos, drop_pos=pos)
+            return
+        target, kind, zone = hit
+        if sip.isdeleted(target):
+            return
+        if kind == 'strip':
+            insert_at = target._tab_insert_index_at(pos)
+            if target is self:
+                count = self.tab_widget.count()
+                ins = count if insert_at is None else insert_at
+                to = ins - 1 if ins > index else ins
+                if 0 <= to < count and to != index:
+                    self.tab_widget.tabBar().moveTab(index, to)   # tabMoved → 重建映射
+                return
+            if target._adopt_tab_from(self, index, insert_at) < 0:
+                return
+        else:
+            orientation, before = zone
+            dst = target.tab_widget.currentIndex()
+            if target is self and dst == index:
+                return
+            if not target._merge_tab_into_split(self, index, dst, orientation, before):
+                return
+        target.raise_()
+        target.activateWindow()
+        if target.active_terminal:
+            target.active_terminal.setFocus()
+
+    _DETACH_SHRINK_RATIO = 0.6
+
+    def _place_detached_at(self, new_window, drop_pos):
+        """把拆出的新窗口摆到松手处：标签栏落在光标下，尺寸随父窗口
+        （父窗口最大化/全屏时取屏幕 60%，不然一出来又是满屏）。"""
+        scr = QApplication.screenAt(drop_pos) or QApplication.primaryScreen()
+        avail = scr.availableGeometry()
+        if self.isMaximized() or self.isFullScreen():
+            w = max(new_window.minimumWidth(), int(avail.width() * self._DETACH_SHRINK_RATIO))
+            h = max(new_window.minimumHeight(), int(avail.height() * self._DETACH_SHRINK_RATIO))
+        else:
+            w, h = self.width(), self.height()
+        # 光标到窗口顶部的距离 = 父窗口标签栏到父窗口顶部的距离（含标题栏）
+        try:
+            dy = self._tab_drop_strip_rect().center().y() - self.frameGeometry().y()
+        except Exception:
+            dy = 80
+        x, y = host_class(self)._clamp_window_pos(
+            drop_pos.x() - 60, drop_pos.y() - max(20, dy), w, h, drop_pos)
+        new_window.resize(w, h)
+        new_window.move(x, y)
+        new_window.show()
 
     def _rebuild_tab_mappings(self):
         """重建标签页映射"""

@@ -9,8 +9,8 @@ from PyQt6.QtWidgets import (
     QStyle, QStyledItemDelegate, QStyleOptionButton, QStyleOptionComboBox,
     QStylePainter, QTabBar, QWidget
 )
-from PyQt6.QtCore import Qt, QTimer, QEvent, QPoint, QRectF, QStringListModel, pyqtSignal
-from PyQt6.QtGui import QColor, QPainter, QPainterPath, QPalette, QPen
+from PyQt6.QtCore import Qt, QTimer, QEvent, QPoint, QPointF, QRectF, QStringListModel, pyqtSignal
+from PyQt6.QtGui import QColor, QMouseEvent, QPainter, QPainterPath, QPalette, QPen
 
 from utils import parse_search_tokens, name_matches_tokens
 
@@ -389,7 +389,8 @@ class DetachableTabBar(QTabBar):
         self._drag_start_pos = None
         self._drag_tab_index = -1
         self._is_dragging = False
-        self._detach_threshold = 50  # 拖拽分离的距离阈值
+        # 竖向拖出标签栏这么多像素就进入影子拖拽（横向拖动交给 QTabBar 重排）
+        self._detach_threshold = 28
         self._original_cursor = None
 
     def mouseDoubleClickEvent(self, event):
@@ -424,12 +425,23 @@ class DetachableTabBar(QTabBar):
             if self._original_cursor:
                 self.setCursor(self._original_cursor)
 
-        # 如果垂直方向拖拽超过阈值，触发分离
+        # 如果垂直方向拖拽超过阈值，触发分离（影子拖拽，见 _begin_tab_drag）
         if abs(diff.y()) > self._detach_threshold:
             self._is_dragging = True
             global_pos = self.mapToGlobal(event.pos())
-            self.tab_detach_requested.emit(self._drag_tab_index, global_pos)
+            index = self._drag_tab_index
+            press_pos = self._drag_start_pos
             self._reset_drag_state()
+            # 先把 QTabBar 自己的拖动状态收掉（按原位置补一个松开）：标签在
+            # 影子拖拽期间留在原处，别让它跟着横向乱滑、松手时又触发一次重排
+            try:
+                fake = QMouseEvent(QEvent.Type.MouseButtonRelease, QPointF(press_pos),
+                                   Qt.MouseButton.LeftButton, Qt.MouseButton.NoButton,
+                                   Qt.KeyboardModifier.NoModifier)
+                super().mouseReleaseEvent(fake)
+            except Exception:
+                pass  # 收不掉也只是标签滑一下，不影响拖拽结果
+            self.tab_detach_requested.emit(index, global_pos)
             return
 
         super().mouseMoveEvent(event)
@@ -445,6 +457,30 @@ class DetachableTabBar(QTabBar):
         if self._original_cursor:
             self.setCursor(self._original_cursor)
             self._original_cursor = None
+
+
+class TabDragPreview(QWidget):
+    """拖标签时跟着光标的那张半透明"影子"（标签的截图）。
+
+    独立的置顶无边框小窗、对鼠标透明、不抢焦点；放在光标右下方一点，
+    这样 QApplication.topLevelAt(光标) 永远查不到它自己。
+    """
+
+    def __init__(self, pixmap):
+        super().__init__(None, Qt.WindowType.ToolTip | Qt.WindowType.FramelessWindowHint
+                         | Qt.WindowType.WindowStaysOnTopHint)
+        self.setAttribute(Qt.WidgetAttribute.WA_TranslucentBackground)
+        self.setAttribute(Qt.WidgetAttribute.WA_TransparentForMouseEvents)
+        self.setAttribute(Qt.WidgetAttribute.WA_ShowWithoutActivating)
+        self._pixmap = pixmap
+        dpr = pixmap.devicePixelRatio() or 1.0
+        self.resize(max(1, int(pixmap.width() / dpr)), max(1, int(pixmap.height() / dpr)))
+
+    def paintEvent(self, event):
+        p = QPainter(self)
+        p.setOpacity(0.85)
+        p.drawPixmap(0, 0, self._pixmap)
+        p.end()
 
 
 class _ToolbarCheckBox(QCheckBox):
