@@ -1161,6 +1161,10 @@ TRANSLATIONS = {
     "split.rename_placeholder": {"zh": "窗格名称（留空清除）", "en": "Pane name (empty to clear)"},
     "split.handle_tooltip": {"zh": "拖动：把这个窗格挪到任意位置（另一窗格的上/下/左/右，或拖到标签栏变成独立标签）；双击：重命名", "en": "Drag to move this pane anywhere (above/below/left/right of another pane, or onto the tab strip to make it its own tab); double-click to rename"},
     "status.pane_moved": {"zh": "已移动窗格", "en": "Pane moved"},
+    "status.pane_orientation_flipped": {"zh": "已切换排列方向", "en": "Split orientation flipped"},
+    "pane.flip_orientation": {"zh": "左右 ↔ 上下 切换", "en": "Flip Side-by-side ↔ Stacked"},
+    "pane.pop_to_tab": {"zh": "变成独立标签页", "en": "Move to Its Own Tab"},
+    "pane.close": {"zh": "关闭这个窗格", "en": "Close This Pane"},
     "status.pane_popped": {"zh": "已把窗格变成独立标签页", "en": "Pane moved into its own tab"},
 
     # ===== 状态栏/通用 =====

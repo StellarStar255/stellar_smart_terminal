@@ -112,6 +112,52 @@ class TestPaneDrag(unittest.TestCase):
         self.assertEqual([top.widget(0), top.widget(1), top.widget(2)], [a, c, b])
         self._consistent(w)
 
+    def test_two_panes_change_orientation_without_nesting(self):
+        """[A|B] 把 B 拖到 A 的下半边 → 顶层直接变成上下 [A/B]，不套一层。"""
+        w = self.win
+        idx, (a, b) = self._fresh_split_tab(w, 2)
+        top = w.tab_widget.widget(idx)
+        self.assertTrue(w._move_pane_next_to(w, b, a, Qt.Orientation.Vertical, False))
+        top = w.tab_widget.widget(idx)
+        self.assertEqual(top.orientation(), Qt.Orientation.Vertical)
+        self.assertEqual([top.widget(0), top.widget(1)], [a, b])
+        # 再拖回左右：B 到 A 的左半边 → [B|A]
+        self.assertTrue(w._move_pane_next_to(w, b, a, Qt.Orientation.Horizontal, True))
+        top = w.tab_widget.widget(idx)
+        self.assertEqual(top.orientation(), Qt.Orientation.Horizontal)
+        self.assertEqual([top.widget(0), top.widget(1)], [b, a])
+        self._consistent(w)
+
+    def test_flip_orientation_action(self):
+        w = self.win
+        idx, (a, b, c) = self._fresh_split_tab(w, 3)
+        top = w.tab_widget.widget(idx)
+        self.assertEqual(top.orientation(), Qt.Orientation.Horizontal)
+        self.assertTrue(w._flip_pane_orientation(b))
+        self.assertEqual(top.orientation(), Qt.Orientation.Vertical)
+        self.assertEqual([top.widget(k) for k in range(3)], [a, b, c])
+        self.assertTrue(w._flip_pane_orientation(b))
+        self.assertEqual(top.orientation(), Qt.Orientation.Horizontal)
+
+    def test_top_singleton_chain_is_flattened_after_close(self):
+        """[A|B]，B 下面再放 C（A 右边是竖着的 [B/C]），关掉 A → 顶层直接是 [B/C]，
+        不是 top[inner[B,C]]。"""
+        w = self.win
+        idx, (a, b) = self._fresh_split_tab(w, 2)
+        w.active_terminal = b
+        b.setFocus()
+        w._split_vertical_current_terminal()        # B 下面多一个 C
+        self.app.processEvents()
+        a2, b2, c = w.tab_terminals[idx]
+        w.active_terminal = a
+        a.setFocus()
+        w._close_current_split()
+        self.app.processEvents()
+        top = w.tab_widget.widget(idx)
+        self.assertEqual(top.orientation(), Qt.Orientation.Vertical)
+        self.assertEqual([top.widget(0), top.widget(1)], [b, c])
+        self._consistent(w)
+
     def test_move_pane_below_wraps_target(self):
         w = self.win
         idx, (a, b, c) = self._fresh_split_tab(w, 3)

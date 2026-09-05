@@ -348,6 +348,10 @@ class _PaneHandleBar(QWidget):
             self._terminal.rename_split_requested.emit()
         event.accept()
 
+    def contextMenuEvent(self, event):
+        self._terminal.pane_menu_requested.emit(event.globalPos())
+        event.accept()
+
 
 class TerminalWidget(TerminalInputMixin, TerminalMouseMixin,
                      TerminalScrollSearchMixin, TerminalRenderMixin, QWidget):
@@ -386,6 +390,8 @@ class TerminalWidget(TerminalInputMixin, TerminalMouseMixin,
     pane_drag_requested = pyqtSignal(QPoint)
     # 就地改名提交了一个非空名称：主窗口据此记进"本项目常用名称"
     split_label_committed = pyqtSignal(str)
+    # 右键窗格把手：请求主窗口弹窗格菜单（参数是全局坐标）
+    pane_menu_requested = pyqtSignal(QPoint)
     attention_requested = pyqtSignal()  # 疑似本轮命令/Claude 执行完毕（输出停顿），请求导航提醒
     interaction_requested = pyqtSignal()  # 终端响铃（BEL）：程序正在等待用户操作（如 Claude 确认提示）
     alert_matched = pyqtSignal(str)  # 输出命中提醒规则（参数=命中的模式文本）

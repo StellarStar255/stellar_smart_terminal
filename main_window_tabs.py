@@ -577,6 +577,7 @@ class TabSplitMixin:
 
         # 若父 splitter 因此只剩一个子组件，解除这层嵌套，让剩余分屏自动扩展
         self._collapse_singleton_splitter(parent, idx)
+        self._flatten_top_singleton(idx)
         self._refresh_pane_handles(idx)
 
         # 更新活动终端为剩余的第一个
@@ -1204,6 +1205,8 @@ class TabSplitMixin:
             page.deleteLater()
             page = child
 
+        if top is not None and top.count() == 1 and top.orientation() != orientation:
+            top.setOrientation(orientation)   # 单窗格页：换方向而不是再套一层
         if top is not None and top.orientation() == orientation:
             top.insertWidget(0 if before else top.count(), page)
             count = top.count()
@@ -1508,6 +1511,40 @@ class TabSplitMixin:
     # 拖拽：光标下是哪个窗格就按离哪条边近高亮那半边，松手落到那一侧
     # （同窗口、跨窗口、跨标签页都行）；落到标签栏 → 变成独立标签页。
 
+    def _show_pane_menu(self, terminal, global_pos):
+        """右键窗格把手：重命名 / 左右↔上下 / 变成独立标签 / 关闭这个窗格。"""
+        if terminal is None or sip.isdeleted(terminal):
+            return
+        menu = QMenu(self)
+        menu.setStyleSheet("""
+            QMenu { background-color: #2d2d44; color: #eaeaea; border: 1px solid #3d3d5c;
+                    border-radius: 4px; padding: 4px; }
+            QMenu::item { padding: 6px 20px; border-radius: 3px; }
+            QMenu::item:selected { background-color: #667eea; }
+            QMenu::item:disabled { color: #666; }
+        """)
+        rename = menu.addAction(t("ctx.rename_split"))
+        rename.triggered.connect(lambda: self._rename_split(terminal))
+        parent = terminal.parent()
+        flip = menu.addAction(t("pane.flip_orientation"))
+        flip.setEnabled(isinstance(parent, QSplitter) and parent.count() > 1)
+        flip.triggered.connect(lambda: self._flip_pane_orientation(terminal))
+        menu.addSeparator()
+        idx = self._find_tab_of_terminal_widget(terminal)
+        multi = len(self.tab_terminals.get(idx, [])) > 1
+        pop = menu.addAction(t("pane.pop_to_tab"))
+        pop.setEnabled(multi)
+        pop.triggered.connect(lambda: self._pop_pane_to_tab(self, terminal))
+        close = menu.addAction(t("pane.close"))
+        close.setEnabled(multi)
+
+        def _close():
+            self.active_terminal = terminal
+            terminal.setFocus()
+            self._close_current_split()
+        close.triggered.connect(_close)
+        menu.exec(global_pos)
+
     def _refresh_pane_handles(self, idx):
         """第 idx 页：多窗格 → 每个窗格显示把手；单窗格 → 收起。"""
         terminals = self.tab_terminals.get(idx, [])
@@ -1661,6 +1698,44 @@ class TabSplitMixin:
                 return idx
         return -1
 
+    def _flatten_top_singleton(self, idx):
+        """顶层 splitter 只剩一个孩子且它也是 splitter → 把孩子的内容提上来，
+        顶层改成孩子的方向。顶层不能被 _collapse_singleton_splitter 解掉（它就是
+        页面控件），只能这样"吸收"。反复拖动后树才不会留下一串单子套娃。"""
+        top = self.tab_splitters.get(idx)
+        while (isinstance(top, QSplitter) and top.count() == 1
+               and isinstance(top.widget(0), QSplitter)):
+            inner = top.widget(0)
+            orientation = inner.orientation()
+            sizes = inner.sizes()
+            children = [inner.widget(k) for k in range(inner.count())]
+            for child in children:
+                child.setParent(None)
+            inner.setParent(None)
+            inner.deleteLater()
+            top.setOrientation(orientation)
+            for child in children:
+                top.addWidget(child)
+                child.show()
+            if len(sizes) == top.count():
+                top.setSizes(sizes)
+
+    def _flip_pane_orientation(self, terminal):
+        """把 terminal 所在那层 splitter 的方向翻过来（左右 ↔ 上下）。"""
+        parent = terminal.parent() if terminal is not None else None
+        if not isinstance(parent, QSplitter):
+            return False
+        sizes = parent.sizes()
+        new = (Qt.Orientation.Vertical if parent.orientation() == Qt.Orientation.Horizontal
+               else Qt.Orientation.Horizontal)
+        parent.setOrientation(new)
+        # 换方向后长度轴变了：按原比例分配
+        total = parent.width() if new == Qt.Orientation.Horizontal else parent.height()
+        if sizes and sum(sizes) > 0 and total > 0:
+            parent.setSizes([max(1, int(total * x / sum(sizes))) for x in sizes])
+        self.statusbar.showMessage(t("status.pane_orientation_flipped"), 3000)
+        return True
+
     def _detach_pane(self, terminal):
         """把窗格从它现在的位置摘出来（不销毁）：从 splitter 树、tab_terminals
         里都拿掉，空出来的嵌套层解掉。返回 (src_idx, 该页剩余终端数)。"""
@@ -1683,6 +1758,7 @@ class TabSplitMixin:
                 terms.remove(terminal)
             if isinstance(parent, QSplitter):
                 self._collapse_singleton_splitter(parent, src_idx)
+            self._flatten_top_singleton(src_idx)
             self._refresh_pane_handles(src_idx)
             return src_idx, len(terms)
         return -1, 0
@@ -1722,6 +1798,11 @@ class TabSplitMixin:
         if not isinstance(tparent, QSplitter):
             return False
         i = tparent.indexOf(target)
+        if tparent.count() == 1 and tparent.orientation() != orientation:
+            # 目标是这层里唯一的窗格（典型：[A|B] 把 B 拖到 A 的上/下半边）：
+            # 直接把这层的方向换过来，不套一层新的 splitter——左右 ↔ 上下就是
+            # 这样切换的，树也不会越拖越深
+            tparent.setOrientation(orientation)
         if tparent.orientation() == orientation:
             sizes = tparent.sizes()
             tparent.insertWidget(i + (0 if before else 1), terminal)
