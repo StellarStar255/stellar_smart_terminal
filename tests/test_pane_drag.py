@@ -154,3 +154,38 @@ class TestPaneDrag(unittest.TestCase):
 
 if __name__ == '__main__':
     unittest.main()
+
+
+class TestHandleBarSwallowsMouse(unittest.TestCase):
+    """拖把手时按下/拖动不能漏给终端——否则整屏文字被选成一片蓝。"""
+
+    @classmethod
+    def setUpClass(cls):
+        cls.app = QApplication.instance() or QApplication([])
+        from terminal_widget import TerminalWidget
+        cls.term = TerminalWidget()
+        cls.term.resize(600, 400)
+        cls.term.show()
+        cls.term.set_pane_handle_visible(True)
+        cls.app.processEvents()
+
+    @classmethod
+    def tearDownClass(cls):
+        cls.term.cleanup()
+        cls.term.deleteLater()
+        cls.app.processEvents()
+
+    def test_press_and_drag_on_handle_selects_nothing(self):
+        from PyQt6.QtTest import QTest
+        bar = self.term._header_bar
+        self.assertTrue(bar.isVisible())
+        got = []
+        self.term.pane_drag_requested.connect(lambda p: got.append(p))
+        start = QPoint(bar.width() // 2, bar.height() // 2)
+        QTest.mousePress(bar, Qt.MouseButton.LeftButton, pos=start)
+        for d in (3, 6, 12, 40):
+            QTest.mouseMove(bar, start + QPoint(d, d))
+        QTest.mouseRelease(bar, Qt.MouseButton.LeftButton, pos=start + QPoint(40, 40))
+        self.app.processEvents()
+        self.assertEqual(len(got), 1)
+        self.assertFalse(self.term._has_selection())

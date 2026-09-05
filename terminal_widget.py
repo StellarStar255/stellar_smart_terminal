@@ -320,11 +320,14 @@ class _PaneHandleBar(QWidget):
         self._terminal = terminal
         self._press_pos = None
 
+    # 鼠标事件一律在这里吃掉、不往父级（终端）传：QWidget 默认 ignore 会让
+    # 按下/拖动落到终端的鼠标处理里 → 拖把手时整屏文字被"选中"成一片蓝。
+
     def mousePressEvent(self, event):
         if event.button() == Qt.MouseButton.LeftButton:
             self._press_pos = event.pos()
             self.setCursor(Qt.CursorShape.ClosedHandCursor)
-        super().mousePressEvent(event)
+        event.accept()
 
     def mouseMoveEvent(self, event):
         if self._press_pos is not None and (event.buttons() & Qt.MouseButton.LeftButton):
@@ -332,20 +335,18 @@ class _PaneHandleBar(QWidget):
                 self._press_pos = None
                 self.setCursor(Qt.CursorShape.OpenHandCursor)
                 self._terminal.pane_drag_requested.emit(self.mapToGlobal(event.pos()))
-                return
-        super().mouseMoveEvent(event)
+        event.accept()
 
     def mouseReleaseEvent(self, event):
         self._press_pos = None
         self.setCursor(Qt.CursorShape.OpenHandCursor)
-        super().mouseReleaseEvent(event)
+        event.accept()
 
     def mouseDoubleClickEvent(self, event):
         if event.button() == Qt.MouseButton.LeftButton:
             self._press_pos = None
             self._terminal.rename_split_requested.emit()
-            return
-        super().mouseDoubleClickEvent(event)
+        event.accept()
 
 
 class TerminalWidget(TerminalInputMixin, TerminalMouseMixin,
