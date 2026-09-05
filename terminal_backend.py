@@ -750,6 +750,13 @@ else:
             # DSR/DA 等查询回写应答，与 GUI 线程的键入并发写同一 master fd。
             # 单次 os.write 的多段循环若交错会在 PTY 里字节错位。
             self._write_lock = threading.Lock()
+            # 唤醒管道：stop() 往里写一个字节，读取线程的 select 立刻返回，
+            # 不必等 100ms 轮询周期。stop 走的是 GUI 线程且要 join 读取线程，
+            # 关一批终端（退出程序）时这些等待是串行相加的。
+            self._wake_r, self._wake_w = os.pipe()
+            # stop() 已发起：读取线程退出时不再为"子进程还没被回收"轮询 1 秒
+            # （交互式 shell / 全屏程序普遍忽略 SIGTERM，那 1 秒几乎必等满）
+            self._stop_requested = False
 
         def start(self, command: List[str], cwd: Optional[str] = None,
                   cols: int = 80, rows: int = 24) -> bool:
@@ -904,7 +911,10 @@ else:
             check_counter = 0  # 用于降低 waitpid 调用频率
             while self._running:
                 try:
-                    ready, _, _ = select.select([self._master_fd], [], [], 0.1)
+                    ready, _, _ = select.select(
+                        [self._master_fd, self._wake_r], [], [], 0.1)
+                    if self._wake_r in ready:
+                        break       # stop() 叫醒的：不读，直接收尾
                     if ready:
                         try:
                             # 读取合并（按时间窗攒批）在基类 _pump_reads 里，与
@@ -964,6 +974,10 @@ else:
             """
             if self._child_pid is None:
                 return
+            # 是 stop() 在收尾：子进程多半还活着（等 master 关闭后的 SIGHUP
+            # 才会退），轮询 1 秒毫无意义——GUI 线程正 join 着本线程。
+            if self._stop_requested:
+                wait = False
             attempts = 50 if wait else 1
             try:
                 for i in range(attempts):
@@ -1043,6 +1057,7 @@ else:
                 return False
 
         def stop(self) -> None:
+            self._stop_requested = True
             self._running = False
 
             # 清理回调引用（打破循环引用）
@@ -1056,30 +1071,62 @@ else:
                 except ProcessLookupError:  # 子进程已退出
                     pass
 
+            # 叫醒卡在 select 里的读取线程
+            try:
+                os.write(self._wake_w, b'x')
+            except OSError:
+                pass  # 管道已在上一次 _cleanup 里关掉（重复 stop）
+
             self._cleanup()
 
         def _cleanup(self):
             """清理资源"""
-            # 先等待线程退出（线程检测到 _running=False 会自行退出）
+            # 先等待线程退出（已被唤醒管道叫醒，通常瞬间返回）
             if self._reader_thread is not None:
                 self._reader_thread.join(timeout=2.0)
                 self._reader_thread = None
 
-            # 然后关闭文件描述符
+            # 然后关闭文件描述符。关 master 会让内核给 shell 发 SIGHUP——
+            # 忽略 SIGTERM 的交互式 shell 靠这个退出
             if self._master_fd is not None:
                 try:
                     os.close(self._master_fd)
                 except Exception:
                     logger.debug("_cleanup: suppressed exception", exc_info=True)
                 self._master_fd = None
+            for attr in ('_wake_r', '_wake_w'):
+                fd = getattr(self, attr, None)
+                if fd is not None:
+                    try:
+                        os.close(fd)
+                    except OSError:
+                        pass  # 已关闭的 fd，无需处理
+                    setattr(self, attr, None)
 
-            # Reap the child process to prevent zombies
-            if self._child_pid is not None:
+            # Reap the child process to prevent zombies. 此刻它多半刚收到
+            # SIGHUP 还没退完，一次 WNOHANG 常常拿到 0——交给后台线程有界
+            # 地等它，别让调用线程（GUI）在这里睡
+            pid, self._child_pid = self._child_pid, None
+            if pid is not None:
                 try:
-                    os.waitpid(self._child_pid, os.WNOHANG)
+                    reaped, _ = os.waitpid(pid, os.WNOHANG)
                 except ChildProcessError:  # 已被回收
-                    pass
-                self._child_pid = None
+                    reaped = pid
+                if reaped == 0:
+                    threading.Thread(target=self._reap_later, args=(pid,),
+                                     name=f"pty-reap-{pid}", daemon=True).start()
+
+        @staticmethod
+        def _reap_later(pid: int, timeout: float = 5.0):
+            """后台回收已被 SIGTERM/SIGHUP 的子进程，最多等 timeout 秒。"""
+            deadline = time.monotonic() + timeout
+            while time.monotonic() < deadline:
+                try:
+                    if os.waitpid(pid, os.WNOHANG)[0] != 0:
+                        return
+                except ChildProcessError:
+                    return
+                time.sleep(0.05)
 
         @property
         def is_running(self) -> bool:
