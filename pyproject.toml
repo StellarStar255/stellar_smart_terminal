@@ -70,6 +70,7 @@ py-modules = [
     "main_window_git",
     "main_window_remote",
     "main_window_tabs",
+    "main_window_menus",
     "main_window_theme",
     "main_window_toolbar",
     "main_window_update",

@@ -396,6 +396,18 @@ class TerminalInputMixin:
                 pass
         event.accept()
 
+    # macOS 上 Cmd+字母默认全被终端抢走（当 Ctrl 发给 shell）。这几个留给菜单栏：
+    # Cmd+N 新窗口、Cmd+O 打开文件夹（Cmd+Shift+O 打开文件）。物理 Ctrl+N/O
+    # （MetaModifier）照旧发给 shell，不受影响。
+    _MENU_RESERVED_KEYS = (Qt.Key.Key_N, Qt.Key.Key_O)
+
+    def _is_menu_reserved_combo(self, key, modifiers) -> bool:
+        if sys.platform != 'darwin' or key not in self._MENU_RESERVED_KEYS:
+            return False
+        is_cmd = bool(modifiers & Qt.KeyboardModifier.ControlModifier)
+        is_physical_ctrl = bool(modifiers & Qt.KeyboardModifier.MetaModifier)
+        return is_cmd and not is_physical_ctrl
+
     def event(self, event):
         """处理事件 - 确保特殊键不被Qt拦截"""
         # 处理 ShortcutOverride 事件 - 告诉 Qt 我们要自己处理这些按键，不要当作快捷键
@@ -409,7 +421,7 @@ class TerminalInputMixin:
             # 物理 Control 键 → MetaModifier, 物理 Command 键 → ControlModifier
             # 所以需要同时检查两者
             if (modifiers & Qt.KeyboardModifier.ControlModifier) or (modifiers & Qt.KeyboardModifier.MetaModifier):
-                if Qt.Key.Key_A <= key <= Qt.Key.Key_Z:
+                if Qt.Key.Key_A <= key <= Qt.Key.Key_Z and not self._is_menu_reserved_combo(key, modifiers):
                     event.accept()  # 接受事件，阻止 Qt 将其作为快捷键处理
                     return True
 

@@ -54,6 +54,7 @@ from main_window_explorer import ExplorerPanelMixin  # Explorer 侧面板（从 
 from main_window_git import GitPanelMixin  # Git 侧面板（从 main_window 拆出）
 from main_window_remote import RemotePanelMixin  # 远程 SSH/SFTP 侧面板（从 main_window 拆出）
 from main_window_tabs import TabSplitMixin  # 标签页与分屏（从 main_window 拆出）
+from main_window_menus import MenusMixin  # 原生菜单栏（从 main_window 拆出）
 import themes  # 主题配色表（纯数据，从 main_window 拆出）
 from i18n import t, set_language
 from utils import get_config_path, list_notify_sounds, play_notify_sound
@@ -95,7 +96,7 @@ class _SpringPressWatcher(QObject):
 
 class MainWindow(ThemeMixin, ToolbarMixin, ConfigMixin, ExplorerPanelMixin,
                  GitPanelMixin, RemotePanelMixin, TabSplitMixin, UpdateMixin,
-                 QMainWindow):
+                 MenusMixin, QMainWindow):
     """主窗口"""
 
     # 配置文件路径（源码运行=项目目录；打包运行=平台用户数据目录，见 utils.get_data_dir）
@@ -348,7 +349,7 @@ class MainWindow(ThemeMixin, ToolbarMixin, ConfigMixin, ExplorerPanelMixin,
         self._setup_toolbar()
         self._setup_statusbar()
         self._setup_shortcuts()
-        self._setup_window_menu()
+        self._setup_menubar()   # 文件 / 视图 / 终端 / 窗口 / 帮助
         MainWindow._install_backtick_monitor()  # AppKit 级截获 Cmd+`，覆盖系统不稳定的原生循环
         self._connect_signals()
 
@@ -1448,30 +1449,8 @@ class MainWindow(ThemeMixin, ToolbarMixin, ConfigMixin, ExplorerPanelMixin,
         self.addAction(debug_action)
 
     def _setup_window_menu(self):
-        """原生「窗口」菜单：可点击的「下一个/上一个窗口」，并展示 Cmd+` / Cmd+Shift+`。
-
-        说明：实际的 Cmd+` 按键处理由 _install_backtick_monitor 的 AppKit 级 keyDown
-        监听器完成（见那里的说明）——菜单项这里主要用于可发现性与鼠标点击触发。
-        注意菜单项的快捷键本身不会拦截系统的 Cmd+`：macOS 的「移动焦点到下一窗口」是
-        系统级保留快捷键，优先级高于应用菜单/QShortcut，需用户在「系统设置 → 键盘 →
-        键盘快捷键 → 键盘」中禁用后，Cmd+` 才会落到我们的监听器里稳定切换。
-        """
-        menubar = self.menuBar()
-        window_menu = menubar.addMenu(t("window.menu"))
-
-        next_action = QAction(t("window.next_window"), self)
-        next_action.setShortcut(QKeySequence("Ctrl+`"))  # macOS 上 Qt 自动映射为 Cmd+`
-        next_action.setShortcutContext(Qt.ShortcutContext.ApplicationShortcut)
-        next_action.triggered.connect(lambda: self._cycle_to_window(1))
-        window_menu.addAction(next_action)
-
-        prev_action = QAction(t("window.prev_window"), self)
-        prev_action.setShortcut(QKeySequence("Ctrl+Shift+`"))  # Cmd+Shift+`
-        prev_action.setShortcutContext(Qt.ShortcutContext.ApplicationShortcut)
-        prev_action.triggered.connect(lambda: self._cycle_to_window(-1))
-        window_menu.addAction(prev_action)
-
-        self._window_menu_actions = (next_action, prev_action)  # 防 GC
+        """兼容旧入口：菜单栏现由 main_window_menus.MenusMixin 统一搭建。"""
+        self._build_window_menu(self.menuBar())
 
     def _cycle_to_window(self, direction):
         """菜单点击入口：委托给类级的窗口循环实现。"""
@@ -4694,6 +4673,11 @@ class MainWindow(ThemeMixin, ToolbarMixin, ConfigMixin, ExplorerPanelMixin,
 
     def _apply_language(self):
         """更新所有 UI 文本以反映当前语言"""
+        # 原生菜单栏：整条重建（复用的快捷键动作只改文本）
+        try:
+            self._rebuild_menus()
+        except Exception:
+            logger.debug("_apply_language: menu rebuild failed", exc_info=True)
         # 标题栏
         self.title_label.setText(t("toolbar.title_label"))
         self.preset_label.setText(t("toolbar.preset_label"))
