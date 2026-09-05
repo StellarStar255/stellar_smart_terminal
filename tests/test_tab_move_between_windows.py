@@ -136,3 +136,54 @@ class TestMoveTabBetweenWindows(unittest.TestCase):
 
 if __name__ == '__main__':
     unittest.main()
+
+
+class TestShrinkMaximizedForDrag(unittest.TestCase):
+    """拖最大化窗口的标签：先还原成普通窗口再跟手（最大化窗口动不了、挡住目标）。"""
+
+    @classmethod
+    def setUpClass(cls):
+        cls.app = QApplication.instance() or QApplication([])
+        import main_window
+        cls.mw = main_window
+        cls.win = main_window.MainWindow()
+        cls.win.show()
+        cls.app.processEvents()
+
+    @classmethod
+    def tearDownClass(cls):
+        from PyQt6.QtGui import QCloseEvent
+        cls.win._force_closing = True
+        QApplication.sendEvent(cls.win, QCloseEvent())
+        cls.win.deleteLater()
+        cls.app.processEvents()
+        del cls.win
+
+    def test_normal_window_is_left_alone(self):
+        w = self.win
+        w.showNormal()
+        self.app.processEvents()
+        self.assertIsNone(w._shrink_for_tab_drag(w, QPoint(w.x() + 50, w.y() + 30)))
+
+    def test_maximized_window_is_restored_under_cursor(self):
+        w = self.win
+        w.showMaximized()
+        self.app.processEvents()
+        self.assertTrue(w.isMaximized())
+        old = w.frameGeometry()
+        cursor = QPoint(old.x() + old.width() // 2, old.y() + 40)
+
+        pos = w._shrink_for_tab_drag(w, cursor)
+
+        self.assertIsNotNone(pos)
+        self.app.processEvents()
+        self.assertFalse(w.isMaximized())
+        avail = QApplication.primaryScreen().availableGeometry()
+        # 离屏的"屏幕"只有 800x600，比窗口最小尺寸还小：按公式断言而不是硬比屏幕
+        want_w = max(w.minimumWidth(), int(avail.width() * w._DRAG_SHRINK_RATIO))
+        self.assertEqual(w.width(), want_w)
+        # 光标仍落在窗口内、离顶部还是原来那么远（标签栏那一行）
+        x, y = pos
+        self.assertLessEqual(x, cursor.x())
+        self.assertGreaterEqual(x + w.width(), cursor.x())
+        self.assertEqual(cursor.y() - y, 40)

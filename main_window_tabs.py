@@ -1044,8 +1044,15 @@ class TabSplitMixin:
                     # 接管拖拽（对齐校正循环检测到后会自动退出并显形）。
                     # 基准取「当前窗口位置 - 当前位移」，从现位置平滑续接。
                     drag_state['moved'] = True
-                    base_pos[0] = new_window.x() - dx
-                    base_pos[1] = new_window.y() - dy
+                    # 父窗口最大化时新窗口也继承了最大化：先还原成能跟手的
+                    # 普通窗口（见 _shrink_for_tab_drag），否则拖不动也看不见目标
+                    shrunk = self._shrink_for_tab_drag(new_window, cursor_pos)
+                    if shrunk is not None:
+                        base_pos[0] = shrunk[0] - dx
+                        base_pos[1] = shrunk[1] - dy
+                    else:
+                        base_pos[0] = new_window.x() - dx
+                        base_pos[1] = new_window.y() - dy
                 mx, my = host_class(self)._clamp_window_pos(
                     base_pos[0] + dx, base_pos[1] + dy,
                     new_window.width(), new_window.height(), cursor_pos)
@@ -1337,12 +1344,47 @@ class TabSplitMixin:
 
         QTimer.singleShot(0, _close)
 
+    _DRAG_SHRINK_RATIO = 0.6
+
+    @classmethod
+    def _shrink_for_tab_drag(cls, win, cursor_pos):
+        """最大化/全屏的窗口先还原成普通窗口再跟手。
+
+        最大化的窗口 move() 不生效、也把底下所有目标窗口全挡住了——用户拖着
+        一个满屏的窗口根本看不见要放去哪。还原成屏幕 60% 大小，按光标在旧
+        窗口里的相对横向位置摆放，纵向保持光标到窗口顶部的距离（仍停在标签栏
+        那一行）。返回新的 (x, y)；本来就是普通窗口返回 None。
+        """
+        try:
+            if not (win.isMaximized() or win.isFullScreen()):
+                return None
+            old = win.frameGeometry()
+            fx = (cursor_pos.x() - old.x()) / max(1, old.width())
+            dy = cursor_pos.y() - old.y()
+            scr = QApplication.screenAt(cursor_pos) or QApplication.primaryScreen()
+            avail = scr.availableGeometry()
+            w = max(win.minimumWidth(), int(avail.width() * cls._DRAG_SHRINK_RATIO))
+            h = max(win.minimumHeight(), int(avail.height() * cls._DRAG_SHRINK_RATIO))
+            win.showNormal()
+            win.resize(w, h)
+            x, y = cls._clamp_window_pos(
+                int(cursor_pos.x() - fx * w), cursor_pos.y() - dy, w, h, cursor_pos)
+            win.move(x, y)
+            return x, y
+        except RuntimeError:
+            return None
+
     def _start_carry_window_drag(self, index):
         """拖唯一的标签 = 拖着整个窗口走。松手落在别的窗口标签栏上就并过去；
         否则窗口就留在松手的位置。跟随方式同 _start_detach_drag_follow。"""
         start_cursor = QCursor.pos()
-        off_x = self.x() - start_cursor.x()
-        off_y = self.y() - start_cursor.y()
+        shrunk = self._shrink_for_tab_drag(self, start_cursor)
+        if shrunk is not None:
+            off_x = shrunk[0] - start_cursor.x()
+            off_y = shrunk[1] - start_cursor.y()
+        else:
+            off_x = self.x() - start_cursor.x()
+            off_y = self.y() - start_cursor.y()
         DRAG_THRESH = 8
         moved = [False]
         drag_timer = QTimer()
