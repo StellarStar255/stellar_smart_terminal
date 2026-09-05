@@ -220,20 +220,127 @@ class RemotePanelMixin:
 
     REMOTE_PASTE_SUBDIR = ".images"
 
+    # ---- 这个终端现在连着哪台远端？----
+
+    @staticmethod
+    def _list_processes():
+        """[(pid, ppid, args)]，一次 ps 拿全表。拿不到返回 []。"""
+        import subprocess
+        try:
+            out = subprocess.run(['ps', '-axo', 'pid=,ppid=,args='],
+                                 capture_output=True, text=True, timeout=3).stdout
+        except Exception:
+            return []
+        rows = []
+        for line in out.splitlines():
+            parts = line.strip().split(None, 2)
+            if len(parts) < 2:
+                continue
+            try:
+                rows.append((int(parts[0]), int(parts[1]), parts[2] if len(parts) > 2 else ""))
+            except ValueError:
+                continue
+        return rows
+
+    @classmethod
+    def _ssh_args_under(cls, shell_pid, processes=None):
+        """终端 shell 的子孙里正在跑的 ssh 命令行（第一条），没有返回 None。"""
+        if not shell_pid:
+            return None
+        rows = cls._list_processes() if processes is None else processes
+        children = {}
+        for pid, ppid, args in rows:
+            children.setdefault(ppid, []).append((pid, args))
+        stack = [shell_pid]
+        seen = set()
+        while stack:
+            cur = stack.pop()
+            if cur in seen:
+                continue
+            seen.add(cur)
+            for pid, args in children.get(cur, []):
+                exe = args.split(None, 1)[0] if args else ""
+                if os.path.basename(exe) == 'ssh':
+                    return args
+                stack.append(pid)
+        return None
+
+    def _known_remote_hosts(self):
+        panel = getattr(self, 'remote_panel', None)
+        if panel is None:
+            return []
+        return list(getattr(panel, '_hosts', []) or []) + list(getattr(panel, '_extra_hosts', []) or [])
+
+    @staticmethod
+    def _match_host_for_ssh_args(args, hosts, preferred=None):
+        """把 ssh 命令行对到已知主机：ControlPath 精确对上 > user@hostname 整词 >
+        别名整词 > hostname 整词；preferred（标签打开时记的主机）优先验证。"""
+        import ssh_control
+        tokens = args.split()
+        ordered = ([preferred] if preferred is not None else []) + [
+            h for h in hosts if h is not preferred]
+        for h in ordered:
+            try:
+                ctl = ssh_control.control_path_for(h)
+            except Exception:
+                ctl = ""
+            if ctl and any(tok.endswith(f"ControlPath={ctl}") for tok in tokens):
+                return h
+        for h in ordered:
+            target = f"{h.user}@{h.hostname}" if h.user else h.hostname
+            if target in tokens:
+                return h
+        for h in ordered:
+            if h.alias in tokens:
+                return h
+        for h in ordered:
+            if h.hostname and h.hostname in tokens:
+                return h
+        return None
+
+    def _ssh_host_for_terminal(self, term):
+        """term 里此刻正跑着的 ssh 连的是哪台已知主机；不在 ssh 里返回 None。
+
+        以前只认标签打开时记下的 _ssh_host_config：手敲 `ssh xxx`、重启恢复的
+        标签、ssh 已退出回到本地 shell 这些情况全判错。现在看进程：shell 的
+        子孙里有 ssh 才算，再拿它的命令行对到 Remote 面板里的主机。
+        """
+        backend = getattr(term, '_backend', None)
+        shell_pid = getattr(backend, '_child_pid', None)
+        args = self._ssh_args_under(shell_pid)
+        if not args:
+            return None
+        preferred = getattr(term, '_ssh_host_config', None)
+        return self._match_host_for_ssh_args(args, self._known_remote_hosts(), preferred)
+
     def _remote_session_for_host(self, host_config):
-        """Remote 面板当前连着这台机器就返回它的会话，否则 None。"""
+        """能往这台机器传文件的会话：Remote 面板正连着它 → 面板会话；
+        否则这台机器有活着的 ssh 主连接（MFA 登录留下的）→ 临时起一条复用
+        主连接的会话（不用输码）；都没有 → None。"""
         panel = getattr(self, 'remote_panel', None)
         sess = getattr(panel, '_session', None) if panel is not None else None
-        if sess is None:
-            return None
         try:
-            if not sess.is_connected():
-                return None
-            if sess.host_config.alias != host_config.alias:
-                return None
+            if sess is not None and sess.is_connected() \
+                    and sess.host_config.alias == host_config.alias:
+                return sess
         except Exception:
-            return None
-        return sess
+            pass
+        cache = getattr(self, '_upload_sessions', None)
+        if cache is None:
+            cache = self._upload_sessions = {}
+        adhoc = cache.get(host_config.alias)
+        try:
+            if adhoc is not None and adhoc.is_alive():
+                return adhoc
+        except Exception:
+            pass
+        import ssh_control
+        if ssh_control.is_supported() and ssh_control.master_socket_exists(host_config):
+            adhoc = ssh_control.ControlMasterSession(host_config, parent=self)
+            adhoc.connect_async()      # 单工作线程：后面提交的上传排在连接之后
+            cache[host_config.alias] = adhoc
+            return adhoc
+        return None
 
     def _upload_pasted_media_for_terminal(self, term, local_path: str) -> bool:
         """把本地粘贴的文件传到 term 所连的远端。
@@ -243,32 +350,42 @@ class RemotePanelMixin:
         就返回 False，终端退回敲本地路径。上传排在面板会话的工作线程上，结束
         后经 term.remote_upload_done 回 GUI 线程；返回 True 表示已接手。
         """
-        host = getattr(term, '_ssh_host_config', None)
-        if host is None or not os.path.isfile(local_path):
+        if not os.path.isfile(local_path):
             return False
+        host = self._ssh_host_for_terminal(term)
+        if host is None:
+            return False          # 不在 ssh 里（本地 shell）：照常敲本地路径
         sess = self._remote_session_for_host(host)
         if sess is None:
             self.statusbar.showMessage(
-                t("status.remote_paste_no_session", host=host.alias), 5000)
+                t("status.remote_paste_no_session", host=host.alias), 8000)
             return False
-        panel = self.remote_panel
-        base = getattr(panel, '_current_path', None) or sess.home() or "/"
-        remote_dir = posixpath.join(base, self.REMOTE_PASTE_SUBDIR)
-        remote_path = posixpath.join(remote_dir, os.path.basename(local_path))
+        panel = getattr(self, 'remote_panel', None)
+        panel_sess = getattr(panel, '_session', None) if panel is not None else None
+        base = None
+        if panel_sess is sess:
+            base = getattr(panel, '_current_path', None)
+        remote_dir = None if base else self.REMOTE_PASTE_SUBDIR   # 没面板目录 → 远端家目录下 .images
+        if base:
+            remote_dir = posixpath.join(base, self.REMOTE_PASTE_SUBDIR)
         self.statusbar.showMessage(
             t("status.remote_paste_uploading", host=host.alias), 10000)
 
         def _job():
+            rdir = remote_dir
+            if not posixpath.isabs(rdir):
+                rdir = posixpath.join(sess.home() or "/", rdir)
+            rpath = posixpath.join(rdir, os.path.basename(local_path))
             try:
-                sess.mkdir(remote_dir)
+                sess.mkdir(rdir)
             except Exception:
                 pass  # 目录已存在（paramiko 的 sftp.mkdir 对已有目录会抛）
-            sess.upload(local_path, remote_path)
+            sess.upload(local_path, rpath)
             try:
-                sess.invalidate_cache(remote_dir)
+                sess.invalidate_cache(rdir)
             except Exception:
                 pass  # 缓存失效只是锦上添花
-            return remote_path
+            return rpath
 
         fut = sess.submit(_job)
 

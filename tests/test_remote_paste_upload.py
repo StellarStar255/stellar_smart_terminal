@@ -84,9 +84,15 @@ class TestRemotePasteUpload(unittest.TestCase):
         cls.app.processEvents()
         del cls.win
 
-    def _terminal(self):
+    def _terminal(self, ssh_running=True):
         term = self.win.tab_terminals[self.win.tab_widget.currentIndex()][0]
-        term._ssh_host_config = HostConfig(alias='gpu13', hostname='10.0.0.1')
+        host = HostConfig(alias='gpu13', hostname='10.0.0.1')
+        term._ssh_host_config = host
+        # 是否在 ssh 里现在看进程树：这里直接桩掉"shell 子孙里的 ssh 命令行"
+        self.win._known_remote_hosts = lambda: [host]
+        self.win._ssh_args_under = (
+            (lambda pid, processes=None: "ssh -tt gpu13") if ssh_running
+            else (lambda pid, processes=None: None))
         typed = []
         term._write_paste = lambda data: typed.append(data) or True
         pasted = []
@@ -130,11 +136,45 @@ class TestRemotePasteUpload(unittest.TestCase):
         self.assertEqual(term._pending_remote_pastes, {})
 
     def test_local_tab_is_untouched(self):
-        term, typed, pasted = self._terminal()
-        term._ssh_host_config = None
+        term, typed, pasted = self._terminal(ssh_running=False)
         self.win.remote_panel = _FakePanel(_FakeSession('gpu13'), '/data/proj')
         term._deliver_media_path(self.local, prefix='', suffix='')
         self.assertEqual(typed, [self.local.encode()])
+
+
+
+
+class TestSshDetection(unittest.TestCase):
+    """不靠标签打开时记的主机：看 shell 子孙里有没有 ssh、命令行对到哪台。"""
+
+    @classmethod
+    def setUpClass(cls):
+        cls.app = QApplication.instance() or QApplication([])
+        import main_window
+        cls.mw = main_window
+
+    def test_ssh_args_under_walks_descendants(self):
+        rows = [(100, 1, "/bin/zsh -l"), (200, 100, "python3 foo.py"),
+                (300, 200, "/usr/bin/ssh -o ControlPath=/tmp/c-1 user@h:22"),
+                (400, 1, "ssh other")]
+        M = self.mw.MainWindow
+        self.assertEqual(M._ssh_args_under(100, rows), "/usr/bin/ssh -o ControlPath=/tmp/c-1 user@h:22")
+        self.assertIsNone(M._ssh_args_under(200, [(100, 1, "/bin/zsh")]))
+        self.assertIsNone(M._ssh_args_under(None, rows))
+
+    def test_match_prefers_controlpath_then_target_then_alias(self):
+        import ssh_control
+        M = self.mw.MainWindow
+        a = HostConfig(alias='gpu13', hostname='bastion.example', user='me@root@10.0.0.13')
+        b = HostConfig(alias='gpu16', hostname='bastion.example', user='me@root@10.0.0.16')
+        c = HostConfig(alias='lab', hostname='192.168.1.9', user='huang')
+        ctl = ssh_control.control_path_for(b)
+        self.assertIs(M._match_host_for_ssh_args(
+            f"ssh -o ControlMaster=no -o ControlPath={ctl} me@root@10.0.0.13@bastion.example", [a, b, c]), b)
+        self.assertIs(M._match_host_for_ssh_args("ssh -tt me@root@10.0.0.13@bastion.example", [a, b, c]), a)
+        self.assertIs(M._match_host_for_ssh_args("ssh lab", [a, b, c]), c)
+        self.assertIs(M._match_host_for_ssh_args("ssh -p 22 192.168.1.9", [a, b, c]), c)
+        self.assertIsNone(M._match_host_for_ssh_args("ssh nowhere", [a, b, c]))
 
 
 if __name__ == '__main__':

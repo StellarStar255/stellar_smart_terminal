@@ -641,22 +641,23 @@ class TerminalInputMixin:
     def _deliver_media_path(self, local_path: str, prefix: str = '', suffix: str = ''):
         """把一个图片/音视频文件的路径交给终端里的程序。
 
-        本地 shell：直接敲本地路径。SSH 标签（_ssh_host_config 已设）：本地路径
+        本地 shell：直接敲本地路径。终端正跑着 ssh（归属窗口看进程判断）：本地路径
         对远端毫无意义——先让归属窗口把文件传到远端（走 Remote 面板已认证的
         连接），传完由 remote_upload_done 回到 GUI 线程敲远端路径；传不了
         （面板没连着这台机器）就退回敲本地路径，至少不吞掉这次粘贴。
         """
-        if getattr(self, '_ssh_host_config', None) is not None:
-            owner = getattr(self, '_owner_window', None)
-            uploader = getattr(owner, '_upload_pasted_media_for_terminal', None)
-            if uploader is not None:
-                self._pending_remote_pastes[local_path] = (prefix, suffix)
-                try:
-                    if uploader(self, local_path):
-                        return          # 传完会经 remote_upload_done 回来
-                except Exception:
-                    logger.debug("_deliver_media_path: uploader failed", exc_info=True)
-                self._pending_remote_pastes.pop(local_path, None)
+        # 是否在 ssh 里由归属窗口看进程决定（手敲的 ssh、重启恢复的标签也算），
+        # 不再只认标签打开时记的 _ssh_host_config
+        owner = getattr(self, '_owner_window', None)
+        uploader = getattr(owner, '_upload_pasted_media_for_terminal', None)
+        if uploader is not None:
+            self._pending_remote_pastes[local_path] = (prefix, suffix)
+            try:
+                if uploader(self, local_path):
+                    return          # 传完会经 remote_upload_done 回来
+            except Exception:
+                logger.debug("_deliver_media_path: uploader failed", exc_info=True)
+            self._pending_remote_pastes.pop(local_path, None)
         self._type_media_path(local_path, prefix, suffix, local_path)
 
     def _type_media_path(self, path: str, prefix: str, suffix: str, local_path: str):
