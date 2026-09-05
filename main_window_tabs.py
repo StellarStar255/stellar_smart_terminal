@@ -6,6 +6,7 @@ orientation/drag)。纯方法搬迁，行为不变；detach 构造新窗口/进�
 属性经 host_class(self) 落到 MainWindow。
 """
 import os
+import time
 from PyQt6 import sip
 from PyQt6.QtCore import QPoint, QRect, QTimer, Qt
 from PyQt6.QtGui import QCursor
@@ -1233,8 +1234,9 @@ class TabSplitMixin:
             return
         self._merge_tab_into_split(self, tab_index, cur, orientation)
 
-    # 页面区四边各占这么大比例算"落到这一侧做分屏"，中间不算
-    _SPLIT_DROP_EDGE_RATIO = 0.3
+    # 页面区四边各占这么大比例算"落到这一侧做分屏"（离哪条边近算哪边），
+    # 只留正中一小块不算——落在那里 = 拆成新窗口
+    _SPLIT_DROP_EDGE_RATIO = 0.4
 
     def _tab_page_rect(self):
         """当前标签页内容区（全局坐标）；没有页面则 None。"""
@@ -1338,7 +1340,13 @@ class TabSplitMixin:
         except Exception:
             pixmap = None
         preview = TabDragPreview(pixmap) if pixmap is not None and not pixmap.isNull() else None
-        state = {'hit': None}
+        # 拖的是当前页：页面区先切到邻页——正在拖的这页不能和自己分屏，
+        # 显示出来的必须是"要并进去的那页"。松手后它若还留在本窗口再切回来。
+        dragged_page = self.tab_widget.widget(index)
+        state = {'hit': None,
+                 'restore': self._drag_switch_to_neighbor(index),
+                 'dragged_page': dragged_page,
+                 'hover_tab': -1, 'hover_since': 0.0}
         timer = QTimer()
         timer.setInterval(16)
         self._tab_drag_timer = timer   # prevent GC
@@ -1355,7 +1363,9 @@ class TabSplitMixin:
                     preview.move(pos + self._TAB_DRAG_PREVIEW_OFFSET)
                     if not preview.isVisible():
                         preview.show()
-                self._set_drag_hit(state, self._tab_drop_hit_at(pos, dragging_index=index))
+                hit = self._tab_drop_hit_at(pos, dragging_index=index)
+                self._set_drag_hit(state, hit)
+                self._drag_hover_switch_tab(state, hit, pos, index)
                 return
             timer.stop()
             if preview is not None:
@@ -1364,11 +1374,50 @@ class TabSplitMixin:
             self._set_drag_hit(state, None)
             try:
                 self._finish_tab_drag(index, pos, hit)
-            except Exception:
-                logger.exception("[Tabs] finishing tab drag failed")
+            finally:
+                if state['restore']:
+                    self._drag_restore_current(state['dragged_page'])
 
         timer.timeout.connect(_tick)
         timer.start()
+
+    def _drag_switch_to_neighbor(self, index) -> bool:
+        """拖的是当前页且还有别的页 → 页面区切到邻页（优先左边）。返回是否切了。"""
+        count = self.tab_widget.count()
+        if count <= 1 or self.tab_widget.currentIndex() != index:
+            return False
+        neighbor = index - 1 if index > 0 else index + 1
+        self.tab_widget.setCurrentIndex(neighbor)
+        return True
+
+    def _drag_restore_current(self, dragged_page):
+        """松手后被拖的页还在本窗口（重排 / 什么都没发生）→ 切回它。"""
+        try:
+            idx = self.tab_widget.indexOf(dragged_page)
+        except RuntimeError:
+            return
+        if idx >= 0:
+            self.tab_widget.setCurrentIndex(idx)
+
+    _DRAG_HOVER_SWITCH_SECS = 0.35
+
+    def _drag_hover_switch_tab(self, state, hit, pos, dragging_index):
+        """拖着标签在本窗口标签栏上悬停到某个别的标签 ≥0.35s → 页面区切到它，
+        这样可以先选"跟哪一页分屏"，再往下拖到页面边缘松手。"""
+        tab = -1
+        if hit is not None and hit[0] is self and hit[1] == 'strip':
+            bar = self.tab_widget.tabBar()
+            tab = bar.tabAt(bar.mapFromGlobal(pos))
+            if tab == dragging_index:
+                tab = -1
+        now = time.monotonic()
+        if tab != state['hover_tab']:
+            state['hover_tab'] = tab
+            state['hover_since'] = now
+            return
+        if (tab >= 0 and now - state['hover_since'] >= self._DRAG_HOVER_SWITCH_SECS
+                and self.tab_widget.currentIndex() != tab):
+            self.tab_widget.setCurrentIndex(tab)
 
     @staticmethod
     def _set_drag_hit(state, hit):

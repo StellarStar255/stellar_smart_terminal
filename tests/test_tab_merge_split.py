@@ -161,5 +161,73 @@ class TestMergeTabIntoSplit(unittest.TestCase):
         self._consistent(a)
 
 
+class TestDragCurrentTabSplitsInOneGo(unittest.TestCase):
+    """拖当前页：页面区先切到邻页，落在页面边缘就能直接和它分屏（不必先拆窗再拖回）。"""
+
+    @classmethod
+    def setUpClass(cls):
+        cls.app = QApplication.instance() or QApplication([])
+        import main_window
+        cls.mw = main_window
+        cls.win = main_window.MainWindow()
+        cls.win.resize(1000, 700)
+        cls.win.show()
+        cls.app.processEvents()
+
+    @classmethod
+    def tearDownClass(cls):
+        from PyQt6.QtGui import QCloseEvent
+        cls.win._force_closing = True
+        QApplication.sendEvent(cls.win, QCloseEvent())
+        cls.win.deleteLater()
+        cls.app.processEvents()
+        del cls.win
+
+    def test_switches_to_neighbor_and_merges_on_edge_drop(self):
+        w = self.win
+        w._add_new_tab(tab_name="second")
+        idx = w.tab_widget.count() - 1
+        w.tab_widget.setCurrentIndex(idx)
+        second_terms = list(w.tab_terminals[idx])
+        neighbor = idx - 1
+        first_page = w.tab_widget.widget(neighbor)
+        n = w.tab_widget.count()
+
+        self.assertTrue(w._drag_switch_to_neighbor(idx))
+        self.assertEqual(w.tab_widget.currentIndex(), neighbor)   # 页面区显示的是要并进去的那页
+        rect = w._tab_page_rect()
+        pos = QPoint(rect.right() - 5, rect.center().y())
+        hit = w._tab_drop_hit_at(pos, dragging_index=idx)
+        self.assertEqual(hit, (w, 'split', (Qt.Orientation.Horizontal, False)))
+
+        w._finish_tab_drag(idx, pos, hit)
+        self.assertEqual(w.tab_widget.count(), n - 1)
+        page = w.tab_widget.widget(neighbor)
+        self.assertEqual(page.orientation(), Qt.Orientation.Horizontal)
+        self.assertIn(second_terms[0], w.tab_terminals[neighbor])
+        # 目标页顶层方向相同 → 直接插进它（page 就是原页）；否则外面包一层
+        self.assertTrue(page is first_page or page.widget(0) is first_page)
+        self.assertIs(page.widget(page.count() - 1), second_terms[0])   # 并入的在右边
+
+    def test_nothing_happens_restores_dragged_tab(self):
+        w = self.win
+        w._add_new_tab(tab_name="third")
+        idx = w.tab_widget.count() - 1
+        w.tab_widget.setCurrentIndex(idx)
+        page = w.tab_widget.widget(idx)
+        self.assertTrue(w._drag_switch_to_neighbor(idx))
+        self.assertNotEqual(w.tab_widget.currentIndex(), idx)
+        w._drag_restore_current(page)
+        self.assertEqual(w.tab_widget.currentIndex(), idx)
+
+    def test_page_center_is_still_open_space(self):
+        w = self.win
+        rect = w._tab_page_rect()
+        self.assertIsNone(w._split_zone_at(rect.center()))
+        # 离边 30% 处已经算靠边（以前要 <30% 才算，中间一大片什么都不发生）
+        p = QPoint(rect.left() + int(rect.width() * 0.35), rect.center().y())
+        self.assertEqual(w._split_zone_at(p), (Qt.Orientation.Horizontal, True))
+
+
 if __name__ == '__main__':
     unittest.main()
