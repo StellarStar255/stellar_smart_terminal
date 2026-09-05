@@ -327,6 +327,9 @@ class TerminalWidget(TerminalInputMixin, TerminalMouseMixin,
     output_recorded = pyqtSignal(str)
     session_ended = pyqtSignal()
     image_pasted = pyqtSignal(str)  # 图片粘贴信号，参数为图片路径
+    # SSH 标签里粘贴的图片先上传到远端，传完再把远端路径敲进终端：
+    # (本地路径, 远端路径；失败为空串)。工作线程发出，槽在 GUI 线程跑
+    remote_upload_done = pyqtSignal(str, str)
     raw_output_received = pyqtSignal(str)  # 原始输出信号（用于 OpenAI API 服务器）
     close_tab_requested = pyqtSignal()  # 请求关闭当前标签页 (Cmd+W)
     new_tab_requested = pyqtSignal()  # 请求新建标签页 (Cmd+T)
@@ -703,6 +706,10 @@ class TerminalWidget(TerminalInputMixin, TerminalMouseMixin,
 
         # 图片保存位置设置（True=工作目录，False=系统临时目录）
         self.image_save_local = True
+
+        # SSH 标签：粘贴的图片在上传远端期间挂起的 (本地路径 → 前缀/后缀)
+        self._pending_remote_pastes = {}
+        self.remote_upload_done.connect(self._on_remote_upload_done)
 
         # API 服务器输出监听（只有启用时才发射 raw_output_received 信号）
         self._api_output_enabled = False

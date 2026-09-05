@@ -636,6 +636,43 @@ class TerminalInputMixin:
             if self._write_paste(data):
                 self.input_buffer += text
 
+    # ---- 媒体路径投递：本地直接敲；SSH 标签先上传远端再敲远端路径 ----
+
+    def _deliver_media_path(self, local_path: str, prefix: str = '', suffix: str = ''):
+        """把一个图片/音视频文件的路径交给终端里的程序。
+
+        本地 shell：直接敲本地路径。SSH 标签（_ssh_host_config 已设）：本地路径
+        对远端毫无意义——先让归属窗口把文件传到远端（走 Remote 面板已认证的
+        连接），传完由 remote_upload_done 回到 GUI 线程敲远端路径；传不了
+        （面板没连着这台机器）就退回敲本地路径，至少不吞掉这次粘贴。
+        """
+        if getattr(self, '_ssh_host_config', None) is not None:
+            owner = getattr(self, '_owner_window', None)
+            uploader = getattr(owner, '_upload_pasted_media_for_terminal', None)
+            if uploader is not None:
+                self._pending_remote_pastes[local_path] = (prefix, suffix)
+                try:
+                    if uploader(self, local_path):
+                        return          # 传完会经 remote_upload_done 回来
+                except Exception:
+                    logger.debug("_deliver_media_path: uploader failed", exc_info=True)
+                self._pending_remote_pastes.pop(local_path, None)
+        self._type_media_path(local_path, prefix, suffix, local_path)
+
+    def _type_media_path(self, path: str, prefix: str, suffix: str, local_path: str):
+        if ' ' in path and not prefix:
+            path_text = f'"{path}"{suffix}' if suffix else path
+        else:
+            path_text = prefix + path + suffix
+        if self._write_paste(path_text.encode('utf-8')):
+            self.input_buffer += path_text
+            self.image_pasted.emit(local_path)
+
+    def _on_remote_upload_done(self, local_path: str, remote_path: str):
+        """远端上传结束（GUI 线程）：成功敲远端路径，失败退回本地路径。"""
+        prefix, suffix = self._pending_remote_pastes.pop(local_path, ('', ''))
+        self._type_media_path(remote_path or local_path, prefix, suffix, local_path)
+
     def _image_save_dir(self) -> Path:
         """「Image to CWD」存图的目标目录（带兜底，绝不抛异常）。
 
@@ -729,11 +766,8 @@ if (hasFileURL) {{
                 # 若应用（如 Claude Code）启用了 Bracketed Paste，_write_paste
                 # 会将内容包裹在 ESC[200~/ESC[201~ 之间，应用据此识别为整块粘贴
                 # 并把路径显示为 [Image #N]；未启用时则直接落为原始路径文本。
-                path_text = save_path
-                data = path_text.encode('utf-8')
-                if self._write_paste(data):
-                    self.input_buffer += path_text
-                    self.image_pasted.emit(save_path)
+                # SSH 标签：先上传到远端，传完再敲远端路径（见 _deliver_media_path）
+                self._deliver_media_path(save_path, prefix='', suffix='')
                 return True
 
             elif output.startswith("FILES:"):
@@ -747,6 +781,9 @@ if (hasFileURL) {{
                                 ext in self._VIDEO_EXTENSIONS or
                                 ext in self._IMAGE_EXTENSIONS)
                     prefix = '@' if (is_media and self.image_prefix_enabled) else ''
+                    if is_media:
+                        self._deliver_media_path(fp, prefix=prefix, suffix=' ')
+                        continue
                     if ' ' in fp and not prefix:
                         path_text = f'"{fp}" '
                     else:
@@ -754,8 +791,6 @@ if (hasFileURL) {{
                     data = path_text.encode('utf-8')
                     if self._write_paste(data):
                         self.input_buffer += path_text
-                        if is_media:
-                            self.image_pasted.emit(fp)
                 # 只要 JXA 检测到 file-url，就算处理完毕（即使写入失败也不应
                 # 回落到文本粘贴，否则会把文件路径的文本表示重复粘一次）
                 return True
@@ -781,11 +816,7 @@ if (hasFileURL) {{
                     ext = Path(file_path).suffix.lower()
                     if ext in self._AUDIO_EXTENSIONS or ext in self._VIDEO_EXTENSIONS or ext in self._IMAGE_EXTENSIONS:
                         prefix = '@' if self.image_prefix_enabled else ''
-                        path_text = prefix + file_path + ' '
-                        data = path_text.encode('utf-8')
-                        if self._write_paste(data):
-                            self.input_buffer += path_text
-                            self.image_pasted.emit(file_path)
+                        self._deliver_media_path(file_path, prefix=prefix, suffix=' ')
                         return
 
         # 检查是否有图片
@@ -805,11 +836,7 @@ if (hasFileURL) {{
                     # 发送原始路径；若 Bracketed Paste 启用则由 _write_paste
                     # 自动包裹 ESC[200~/ESC[201~，Claude Code 等应用据此将路径
                     # 识别为图片并展示为 [Image #N]。
-                    path_text = str(image_path)
-                    data = path_text.encode('utf-8')
-                    if self._write_paste(data):
-                        self.input_buffer += path_text
-                        self.image_pasted.emit(str(image_path))
+                    self._deliver_media_path(str(image_path), prefix='', suffix='')
                 return
 
         # 处理文本粘贴

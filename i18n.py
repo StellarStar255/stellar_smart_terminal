@@ -1212,6 +1212,8 @@ TRANSLATIONS = {
     "status.pasted_video": {"zh": "已粘贴视频: {path}", "en": "Pasted video: {path}"},
     "status.pasted_audio": {"zh": "已粘贴音频: {path}", "en": "Pasted audio: {path}"},
     "status.pasted_image": {"zh": "已粘贴图片: {path}", "en": "Pasted image: {path}"},
+    "status.remote_paste_uploading": {"zh": "正在把图片上传到 {host}…", "en": "Uploading image to {host}…"},
+    "status.remote_paste_no_session": {"zh": "Remote 面板未连接 {host}，图片留在本地（连上后再粘贴即可自动上传）", "en": "Remote panel is not connected to {host}; image kept local (connect the panel and paste again to upload)"},
     "status.pasted_file": {"zh": "已粘贴文件: {path}", "en": "Pasted file: {path}"},
     "status.split_done": {"zh": "已分屏: 当前标签页有 {count} 个终端", "en": "Split: {count} terminals in current tab"},
     "status.vsplit_done": {"zh": "已垂直分屏: 当前标签页有 {count} 个终端", "en": "V-Split: {count} terminals in current tab"},

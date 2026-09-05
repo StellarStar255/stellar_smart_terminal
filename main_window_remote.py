@@ -4,6 +4,8 @@
 纯方法搬迁，行为不变；_open_ssh_in_new_window 构造新窗口/进程级窗口
 计数经 host_class(self) 落到 MainWindow。分屏布局管道方法留在主类。
 """
+import os
+import posixpath
 from PyQt6 import sip
 from PyQt6.QtCore import QTimer, Qt
 from i18n import t
@@ -213,6 +215,75 @@ class RemotePanelMixin:
                 except Exception:
                     logger.debug("_go: suppressed exception", exc_info=True)
         QTimer.singleShot(120, _go)
+
+    # ---------- SSH 标签里粘贴的图片：传到远端再敲路径 ----------
+
+    REMOTE_PASTE_SUBDIR = ".images"
+
+    def _remote_session_for_host(self, host_config):
+        """Remote 面板当前连着这台机器就返回它的会话，否则 None。"""
+        panel = getattr(self, 'remote_panel', None)
+        sess = getattr(panel, '_session', None) if panel is not None else None
+        if sess is None:
+            return None
+        try:
+            if not sess.is_connected():
+                return None
+            if sess.host_config.alias != host_config.alias:
+                return None
+        except Exception:
+            return None
+        return sess
+
+    def _upload_pasted_media_for_terminal(self, term, local_path: str) -> bool:
+        """把本地粘贴的文件传到 term 所连的远端。
+
+        目录取 Remote 面板当前浏览的目录下的 .images/（面板一般停在项目目录；
+        Claude Code 读项目目录以外的文件要多点一次授权），面板没连着这台机器
+        就返回 False，终端退回敲本地路径。上传排在面板会话的工作线程上，结束
+        后经 term.remote_upload_done 回 GUI 线程；返回 True 表示已接手。
+        """
+        host = getattr(term, '_ssh_host_config', None)
+        if host is None or not os.path.isfile(local_path):
+            return False
+        sess = self._remote_session_for_host(host)
+        if sess is None:
+            self.statusbar.showMessage(
+                t("status.remote_paste_no_session", host=host.alias), 5000)
+            return False
+        panel = self.remote_panel
+        base = getattr(panel, '_current_path', None) or sess.home() or "/"
+        remote_dir = posixpath.join(base, self.REMOTE_PASTE_SUBDIR)
+        remote_path = posixpath.join(remote_dir, os.path.basename(local_path))
+        self.statusbar.showMessage(
+            t("status.remote_paste_uploading", host=host.alias), 10000)
+
+        def _job():
+            try:
+                sess.mkdir(remote_dir)
+            except Exception:
+                pass  # 目录已存在（paramiko 的 sftp.mkdir 对已有目录会抛）
+            sess.upload(local_path, remote_path)
+            try:
+                sess.invalidate_cache(remote_dir)
+            except Exception:
+                pass  # 缓存失效只是锦上添花
+            return remote_path
+
+        fut = sess.submit(_job)
+
+        def _done(f):
+            try:
+                result = f.result()
+            except Exception as e:
+                logger.warning(f"[RemotePaste] upload failed: {e}")
+                result = ""
+            try:
+                term.remote_upload_done.emit(local_path, result)
+            except RuntimeError:
+                pass  # 终端已销毁
+        fut.add_done_callback(_done)
+        return True
 
     def _open_ssh_terminal_tab(self, host_config, remote_cd_path):
         """新开一个 tab 跑 ssh 到远端
