@@ -62,8 +62,19 @@ class TestGitAsyncOps(unittest.TestCase):
         self._wait_workers()  # set_repository 触发的初始刷新先跑完
 
     def tearDown(self):
+        from PyQt6.QtCore import QEvent
         self.panel.shutdown()
+        # 先把 GitManager 的文件监视器和 5s 轮询停掉，再删仓库目录。否则
+        # 旧面板还盯着一个正在消失的 .git（kqueue 事件 + 又起 git 子进程），
+        # 而 processEvents() 并不处理 deleteLater —— 上一个用例的面板会一直
+        # 活到模块结束，几个用例叠起来就是 macOS runner 上那个随机段错误。
+        try:
+            self.panel._git_manager._stop_watching()
+        except Exception:
+            pass  # 已经停过或对象已销毁
         self.panel.deleteLater()
+        self.app.processEvents()
+        self.app.sendPostedEvents(None, QEvent.Type.DeferredDelete)   # 真删掉
         self.app.processEvents()
         self._tmp.cleanup()
 
