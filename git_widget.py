@@ -2236,7 +2236,10 @@ class GitHeaderWidget(QFrame):
         self.settings_btn.clicked.connect(self.settings_clicked.emit)
         layout.addWidget(self.settings_btn)
 
-        self._update_style()
+        # 走完整的 apply_theme：三个工具按钮的图标只在那里画。面板现在是
+        # 首次打开才构建的，主窗口只在换主题时才会再调 apply_theme——只做
+        # _update_style 的话，按钮从建出来到换主题前一直是没有图标的空方块。
+        self.apply_theme(self.theme)
 
     def _update_style(self):
         """更新样式"""

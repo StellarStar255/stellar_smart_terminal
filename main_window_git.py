@@ -81,6 +81,9 @@ class GitPanelMixin:
             return panel
         current_theme = self.THEMES.get(self.current_theme, self.THEMES["午夜黑"])
         panel = GitPanel(theme=current_theme)
+        # 懒建的面板错过了启动时那次 _apply_theme：所有只在 apply_theme 里
+        # 完成的初始化（头部工具按钮的图标等）要在这里补一遍
+        panel.apply_theme(current_theme)
         self.git_panel = panel
         self.git_panel_container.layout().addWidget(panel)
         # 面板默认按 12pt 初始化，但 GUI 字号可能已是别的值（启动时缩放已应用过）→
