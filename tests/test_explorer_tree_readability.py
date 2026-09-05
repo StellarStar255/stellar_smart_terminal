@@ -107,8 +107,6 @@ class TestJunkFilter(_Base):
         (root / "pom.xml").write_text("x", encoding="utf-8")
         p.set_show_hidden(True)
         p.set_root_path(str(root))
-        for _ in range(20):
-            self.app.processEvents()
 
         def visible_names():
             src_root = p.model.index(str(root))
@@ -116,14 +114,26 @@ class TestJunkFilter(_Base):
             return {p._proxy.fileName(p._proxy.index(r, 0, proxy_root))
                     for r in range(p._proxy.rowCount(proxy_root))}
 
+        def wait_until(pred, timeout=8.0):
+            # QFileSystemModel 在后台线程读目录：固定跑几轮 processEvents 在
+            # CI 的慢机器上会一行都还没到（macOS runner 上真翻过车），要带截止等
+            import time as _time
+            deadline = _time.monotonic() + timeout
+            while _time.monotonic() < deadline:
+                self.app.processEvents()
+                if pred():
+                    return True
+                _time.sleep(0.02)
+            return pred()
+
+        wait_until(lambda: len(visible_names()) >= 2)
         names = visible_names()
         self.assertNotIn(".DS_Store", names, "垃圾行该被过滤掉")
         self.assertIn(".gitignore", names, "真隐藏文件不能被连坐")
         self.assertIn("pom.xml", names)
 
         p.set_hide_junk(False)
-        for _ in range(20):
-            self.app.processEvents()
+        wait_until(lambda: ".DS_Store" in visible_names())
         self.assertIn(".DS_Store", visible_names(), "关掉开关就该看得见")
 
     def test_junk_hidden_independently_of_hidden_files(self):
