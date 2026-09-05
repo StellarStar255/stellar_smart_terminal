@@ -210,6 +210,32 @@ class TestPaneDrag(unittest.TestCase):
         other.deleteLater()
         self.app.processEvents()
 
+    def test_horizontal_drag_near_the_top_still_means_side_by_side(self):
+        """[A|B]：从 B 的把手横着拖到 A 里，光标贴着 A 的顶边（y≈5%）——
+        以前"离顶边最近"判成上下；现在按所在层方向分区：A 的左 1/3 = 左侧，
+        右 1/3 = 右侧，只有中间那一条才按上下判。"""
+        w = self.win
+        idx, (a, b) = self._fresh_split_tab(w, 2)
+        near_top_right = a.mapToGlobal(QPoint(int(a.width() * 0.85), int(a.height() * 0.05)))
+        hit = w._pane_drop_hit_at(near_top_right, dragging=b)
+        self.assertEqual(hit[2], (a, Qt.Orientation.Horizontal, False))
+        near_top_left = a.mapToGlobal(QPoint(int(a.width() * 0.15), int(a.height() * 0.05)))
+        hit = w._pane_drop_hit_at(near_top_left, dragging=b)
+        self.assertEqual(hit[2], (a, Qt.Orientation.Horizontal, True))
+        # 中间那一条：上半 → 放上面，下半 → 放下面
+        mid_top = a.mapToGlobal(QPoint(a.width() // 2, int(a.height() * 0.2)))
+        self.assertEqual(w._pane_drop_hit_at(mid_top, dragging=b)[2], (a, Qt.Orientation.Vertical, True))
+        mid_bottom = a.mapToGlobal(QPoint(a.width() // 2, int(a.height() * 0.8)))
+        self.assertEqual(w._pane_drop_hit_at(mid_bottom, dragging=b)[2], (a, Qt.Orientation.Vertical, False))
+
+    def test_stacked_layout_uses_top_bottom_thirds(self):
+        w = self.win
+        idx, (a, b) = self._fresh_split_tab(w, 2, orientation=Qt.Orientation.Vertical)
+        near_left_bottom = a.mapToGlobal(QPoint(int(a.width() * 0.05), int(a.height() * 0.85)))
+        self.assertEqual(w._pane_drop_hit_at(near_left_bottom, dragging=b)[2], (a, Qt.Orientation.Vertical, False))
+        mid_left = a.mapToGlobal(QPoint(int(a.width() * 0.2), a.height() // 2))
+        self.assertEqual(w._pane_drop_hit_at(mid_left, dragging=b)[2], (a, Qt.Orientation.Horizontal, True))
+
     def test_pane_hit_test_picks_nearest_edge(self):
         w = self.win
         idx, (a, b) = self._fresh_split_tab(w, 2)

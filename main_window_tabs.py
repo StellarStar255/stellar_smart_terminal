@@ -1569,16 +1569,42 @@ class TabSplitMixin:
         return None
 
     @staticmethod
-    def _edge_zone_in_rect(rect, global_pos):
-        """rect 内离哪条边近：(orientation, before)。"""
+    def _pane_zone_in_rect(rect, global_pos, primary):
+        """目标窗格 rect 内光标落区 → (orientation, before)。
+
+        不按"离哪条边近"——把手在窗格顶上，从把手拖出去时光标天然贴着顶边，
+        横着拖到旁边的窗格总被判成"上下"。改成按目标所在那层的方向分区：
+        沿该方向的外侧各 1/3 是"放到这一侧"（左右排的就是左 1/3 / 右 1/3），
+        中间 1/3 那一条才按另一轴的半边判"换成上下（或左右）"。横着一拖就是
+        左右，想改成上下就把光标放到目标正中那一条里。
+        """
         x = (global_pos.x() - rect.left()) / max(1, rect.width())
         y = (global_pos.y() - rect.top()) / max(1, rect.height())
-        cands = [(x, Qt.Orientation.Horizontal, True),
-                 (1 - x, Qt.Orientation.Horizontal, False),
-                 (y, Qt.Orientation.Vertical, True),
-                 (1 - y, Qt.Orientation.Vertical, False)]
-        _, orientation, before = min(cands, key=lambda c: c[0])
-        return (orientation, before)
+        if primary == Qt.Orientation.Horizontal:
+            if x < 1 / 3:
+                return (Qt.Orientation.Horizontal, True)
+            if x > 2 / 3:
+                return (Qt.Orientation.Horizontal, False)
+            return (Qt.Orientation.Vertical, y < 0.5)
+        if y < 1 / 3:
+            return (Qt.Orientation.Vertical, True)
+        if y > 2 / 3:
+            return (Qt.Orientation.Vertical, False)
+        return (Qt.Orientation.Horizontal, x < 0.5)
+
+    @staticmethod
+    def _pane_primary_axis(target):
+        """目标窗格"所在那层"的方向：跳过只包着一个孩子的 splitter 壳
+        （整页分屏会留下这种单子外壳），取第一个真正有兄弟的那层。"""
+        parent = target.parent()
+        while isinstance(parent, QSplitter):
+            if parent.count() > 1:
+                return parent.orientation()
+            nxt = parent.parent()
+            if not isinstance(nxt, QSplitter):
+                return parent.orientation()
+            parent = nxt
+        return Qt.Orientation.Horizontal
 
     def _pane_zone_rect(self, zone):
         """(target_terminal, orientation, before) → 高亮区域（tab_widget 坐标）。"""
@@ -1622,7 +1648,8 @@ class TabSplitMixin:
                 target = w._pane_at(global_pos, exclude=dragging)
                 if target is not None:
                     rect = QRect(target.mapToGlobal(QPoint(0, 0)), target.size())
-                    orientation, before = self._edge_zone_in_rect(rect, global_pos)
+                    orientation, before = self._pane_zone_in_rect(
+                        rect, global_pos, self._pane_primary_axis(target))
                     return (w, 'pane', (target, orientation, before))
             except RuntimeError:
                 continue
