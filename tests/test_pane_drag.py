@@ -86,6 +86,32 @@ class TestPaneDrag(unittest.TestCase):
         self.assertEqual(set(w.tab_terminals[idx]), {a, b})
         self._consistent(w)
 
+    def test_drop_on_the_side_it_already_sits_swaps_the_two(self):
+        """[A|B]：把 B 拖到 A 的右半边（它本来就在那）→ 直接交换成 [B|A]，
+        不必非得拖到最左边。"""
+        w = self.win
+        idx, (a, b) = self._fresh_split_tab(w, 2)
+        top = w.tab_widget.widget(idx)
+        top.setSizes([300, 500])
+        self.assertTrue(w._move_pane_next_to(w, b, a, Qt.Orientation.Horizontal, False))
+        self.assertEqual([top.widget(0), top.widget(1)], [b, a])
+        s0, s1 = top.sizes()
+        self.assertGreater(s0, s1)                        # 尺寸跟着换（splitter 会按比例缩放）
+        self.assertEqual(w.tab_terminals[idx], [b, a])
+        # 再拖一次（A 现在在右边，拖到 B 的右半边）→ 换回来
+        self.assertTrue(w._move_pane_next_to(w, a, b, Qt.Orientation.Horizontal, False))
+        self.assertEqual([top.widget(0), top.widget(1)], [a, b])
+        self._consistent(w)
+
+    def test_three_panes_move_is_not_a_swap(self):
+        """[A|B|C]：C 拖到 A 的右半边 → [A|C|B]（真正的挪动，不是交换）。"""
+        w = self.win
+        idx, (a, b, c) = self._fresh_split_tab(w, 3)
+        top = w.tab_widget.widget(idx)
+        self.assertTrue(w._move_pane_next_to(w, c, a, Qt.Orientation.Horizontal, False))
+        self.assertEqual([top.widget(0), top.widget(1), top.widget(2)], [a, c, b])
+        self._consistent(w)
+
     def test_move_pane_below_wraps_target(self):
         w = self.win
         idx, (a, b, c) = self._fresh_split_tab(w, 3)

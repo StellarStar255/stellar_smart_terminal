@@ -1705,6 +1705,15 @@ class TabSplitMixin:
         tparent = target.parent()
         if not isinstance(tparent, QSplitter):
             return False
+        # 已经紧挨着目标、又落在朝着自己的那一侧：按原逻辑"挪到旁边"等于原地
+        # 不动。两个窗格左右/上下排着、想调个个儿是最常见的诉求——直接交换。
+        if (src_win is self and terminal.parent() is tparent
+                and tparent.orientation() == orientation):
+            i, j = tparent.indexOf(target), tparent.indexOf(terminal)
+            if (before and j == i - 1) or (not before and j == i + 1):
+                self._swap_adjacent_panes(tparent, i, j)
+                self.statusbar.showMessage(t("status.pane_moved"), 3000)
+                return True
         src_idx, remaining = src_win._detach_pane(terminal)
         if src_win is not self:
             self._absorb_terminals([terminal])
@@ -1746,6 +1755,23 @@ class TabSplitMixin:
         src_win._finish_pane_source(src_win, src_idx, remaining)
         self.statusbar.showMessage(t("status.pane_moved"), 3000)
         return True
+
+    def _swap_adjacent_panes(self, splitter, i, j):
+        """交换同一 splitter 里相邻的两个子控件（尺寸跟着换）。"""
+        a, b = min(i, j), max(i, j)
+        sizes = splitter.sizes()
+        w_b = splitter.widget(b)
+        splitter.insertWidget(a, w_b)
+        if len(sizes) == splitter.count():
+            sizes[a], sizes[b] = sizes[b], sizes[a]
+            splitter.setSizes(sizes)
+        # tab_terminals 里的顺序也跟着换（左移/上移快捷键按它找兄弟）
+        w_a = splitter.widget(b)
+        for terms in self.tab_terminals.values():
+            if w_a in terms and w_b in terms:
+                ia, ib = terms.index(w_a), terms.index(w_b)
+                terms[ia], terms[ib] = terms[ib], terms[ia]
+                break
 
     def _pop_pane_to_tab(self, src_win, terminal, insert_index=None) -> bool:
         """把窗格变成本窗口的一个独立标签页。"""
