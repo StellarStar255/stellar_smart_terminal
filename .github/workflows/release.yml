@@ -88,6 +88,7 @@ jobs:
           .venv-build/bin/python -m pip install pytest --quiet
           if [ "$GITHUB_EVENT_NAME" = "workflow_dispatch" ]; then
             lldb --batch \
+              -o "settings set target.process.stop-on-exec false" \
               -o "process launch --stop-at-entry -- -m pytest tests/ -v -p no:cacheprovider" \
               -o "process handle SIGPIPE SIGCHLD SIGUSR1 SIGUSR2 SIGINT -s false -n false" \
               -o "continue" \
