@@ -357,10 +357,14 @@ class TerminalMouseMixin:
                     # 模式的普通 shell / REPL。
                     self._send_mouse_event(event, 'press')
                     self._send_mouse_event(event, 'release')
-                else:
+                elif not self._mouse_mode:
                     # 非鼠标模式 - 尝试移动光标到点击位置（使用相对坐标）
                     display_cell = self._pos_to_cell(event.pos())
                     self._move_cursor_to_click(display_cell)
+                # 程序开了鼠标上报、但「点击转发」开关关着：什么都别发。以前这里
+                # 也走"定位光标"，往 Claude Code 这类 TUI 里连发一串方向键转义
+                # 序列——它的选项框收到 ESC 开头的东西就当成取消（"User declined
+                # to answer questions"），一点选项就全没了。
                 # 清除选择状态
                 self._selection_start = None
                 self._selection_end = None
@@ -411,17 +415,12 @@ class TerminalMouseMixin:
         if diff == 0:
             return
 
-        # 发送方向键（根据 DECCKM 模式选择正确的转义序列）
+        # 发送方向键（根据 DECCKM 模式选择正确的转义序列）。整串一次写出：
+        # 逐条写会被程序按块读到半截序列，孤零零的 ESC 会被当成 Escape 键。
         right_key = b'\x1bOC' if self.screen._decckm else b'\x1b[C'
         left_key = b'\x1bOD' if self.screen._decckm else b'\x1b[D'
-        if diff > 0:
-            # 向右移动
-            for _ in range(diff):
-                self._write_to_backend(right_key)
-        else:
-            # 向左移动
-            for _ in range(-diff):
-                self._write_to_backend(left_key)
+        seq = right_key * diff if diff > 0 else left_key * (-diff)
+        self._write_to_backend(seq)
 
     def _shortcut_hint(self, action_id, default_seq):
         """返回某分屏操作当前生效快捷键的「 (原生格式)」后缀，用于右键菜单标签。

@@ -59,6 +59,28 @@ class TestMouseClickForward(unittest.TestCase):
         self.assertNotIn(b'\x1b[C', blob)
         self.assertNotIn(b'\x1b[D', blob)
 
+    def test_mouse_mode_with_forwarding_off_sends_nothing(self):
+        """Claude Code 开了鼠标上报、用户没开"点击转发"：单击必须什么都不发。
+        以前会退到"定位光标"路径往程序里灌方向键，Claude Code 的选项框收到
+        ESC 开头的序列就当成取消——一点选项就全没了。"""
+        w = self._widget()
+        w.set_mouse_click_forward_enabled(False)
+        w._mouse_mode = True
+        # 点在光标所在行、且列不同 → 旧逻辑必然发方向键
+        w.screen.cursor.y = 2
+        w.screen.cursor.x = 20
+        self._click(w, abs_cell=(12, 5), rel_cell=(2, 5))
+        self.assertEqual(w._writes, [], "鼠标模式下关掉转发就该一个字节都不发")
+
+    def test_cursor_move_is_written_as_one_burst(self):
+        """普通 shell 里点击定位光标：整串方向键一次写出，别让程序读到半截 ESC。"""
+        w = self._widget()
+        w._mouse_mode = False
+        w.screen.cursor.y = 2
+        w.screen.cursor.x = 8
+        self._click(w, abs_cell=(12, 5), rel_cell=(2, 5))
+        self.assertEqual(w._writes, [b'\x1b[D' * 3])
+
     def test_click_not_forwarded_without_mouse_mode(self):
         w = self._widget()
         w._mouse_mode = False
