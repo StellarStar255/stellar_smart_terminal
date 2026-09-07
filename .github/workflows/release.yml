@@ -80,20 +80,34 @@ jobs:
 
       - name: Run tests (offscreen)
         # -v：runner 上偶发段错误（faulthandler 的 Python 栈不够定位），
-        # 逐条打印才知道崩在哪个用例之后。
+        # 逐条打印才知道崩在哪个用例之后。手动触发时整个跑在 lldb 下：
+        # 崩溃那一刻直接打印所有线程的原生栈（ReportCrash 在 runner 上不可靠）。
+        env:
+          QT_QPA_PLATFORM: offscreen
         run: |
           .venv-build/bin/python -m pip install pytest --quiet
-          QT_QPA_PLATFORM=offscreen .venv-build/bin/python -m pytest tests/ -v -p no:cacheprovider
+          if [ "$GITHUB_EVENT_NAME" = "workflow_dispatch" ]; then
+            lldb --batch \
+              -o "process launch --stop-at-entry -- -m pytest tests/ -v -p no:cacheprovider" \
+              -o "process handle SIGPIPE SIGCHLD SIGUSR1 SIGUSR2 SIGINT -s false -n false" \
+              -o "continue" \
+              -o "bt all" \
+              -o "quit" \
+              -- .venv-build/bin/python 2>&1 | tee lldb-run.log
+            grep -q "exited with status = 0" lldb-run.log
+          else
+            .venv-build/bin/python -m pytest tests/ -v -p no:cacheprovider
+          fi
 
       - name: Dump native crash report (on failure)
         if: failure()
         run: |
+          sleep 20   # ReportCrash 写 .ips 有延迟
           echo "== newest crash reports =="
-          ls -t ~/Library/Logs/DiagnosticReports/ 2>/dev/null | head -5 || true
-          f=$(ls -t ~/Library/Logs/DiagnosticReports/*ython*.ips 2>/dev/null | head -1)
+          ls -t ~/Library/Logs/DiagnosticReports/ /Library/Logs/DiagnosticReports/ 2>/dev/null | head -8 || true
+          f=$(ls -t ~/Library/Logs/DiagnosticReports/*.ips /Library/Logs/DiagnosticReports/*.ips 2>/dev/null | grep -i python | head -1)
           if [ -n "$f" ]; then
             echo "== $f =="
-            # .ips 第一行是元数据 JSON，其后是含线程栈的 JSON；崩溃线程一般在前面
             head -c 80000 "$f"
           else
             echo "no python crash report found"
