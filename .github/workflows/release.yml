@@ -23,8 +23,9 @@ jobs:
     name: macOS (arm64)
     runs-on: macos-latest
     timeout-minutes: 30
-    # 手动触发（workflow_dispatch）时跳过，只在推 tag 时发版
-    if: startsWith(github.ref, 'refs/tags/')
+    # 推 tag 时发版；手动触发（workflow_dispatch）也跑构建 + 测试但不碰 Release
+    # ——用来在不发版的情况下复现 macOS runner 上的测试崩溃。
+    if: startsWith(github.ref, 'refs/tags/') || github.event_name == 'workflow_dispatch'
     steps:
       - uses: actions/checkout@v5
 
@@ -33,6 +34,7 @@ jobs:
           python-version: "3.12"
 
       - name: Check spec version matches tag
+        if: startsWith(github.ref, 'refs/tags/')
         run: |
           SPEC_V=$(grep -m1 CFBundleShortVersionString smart_terminal.spec | sed 's/[^0-9.]//g')
           case "$GITHUB_REF_NAME" in
@@ -77,17 +79,35 @@ jobs:
         run: ./build.sh
 
       - name: Run tests (offscreen)
+        # -v：runner 上偶发段错误（faulthandler 的 Python 栈不够定位），
+        # 逐条打印才知道崩在哪个用例之后。
         run: |
           .venv-build/bin/python -m pip install pytest --quiet
-          QT_QPA_PLATFORM=offscreen .venv-build/bin/python -m pytest tests/ -q
+          QT_QPA_PLATFORM=offscreen .venv-build/bin/python -m pytest tests/ -v -p no:cacheprovider
+
+      - name: Dump native crash report (on failure)
+        if: failure()
+        run: |
+          echo "== newest crash reports =="
+          ls -t ~/Library/Logs/DiagnosticReports/ 2>/dev/null | head -5 || true
+          f=$(ls -t ~/Library/Logs/DiagnosticReports/*ython*.ips 2>/dev/null | head -1)
+          if [ -n "$f" ]; then
+            echo "== $f =="
+            # .ips 第一行是元数据 JSON，其后是含线程栈的 JSON；崩溃线程一般在前面
+            head -c 80000 "$f"
+          else
+            echo "no python crash report found"
+          fi
 
       - name: Zip app bundle
+        if: startsWith(github.ref, 'refs/tags/')
         run: |
           VERSION="${GITHUB_REF_NAME#v}"
           ditto -c -k --keepParent "dist/Stellar Smart Terminal.app" \
             "dist/Stellar-Smart-Terminal-v${VERSION}-macOS-arm64.zip"
 
       - name: Upload to release
+        if: startsWith(github.ref, 'refs/tags/')
         env:
           GH_TOKEN: ${{ github.token }}
         run: |
