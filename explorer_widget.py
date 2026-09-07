@@ -885,11 +885,20 @@ class ExplorerPanel(QWidget, explorer_common.TransferJobHost):
         self.search_results.setVisible(False)
         self.search_results.itemDoubleClicked.connect(self._open_search_result)
 
-        # 文件系统模型
-        self.model = FilteredFileSystemModel()
-        # 用轻量图标提供器，避免大目录展开时逐文件查询系统图标导致卡顿
+        # 文件系统模型。**必须挂在面板下面**（parent=self）：QFileSystemModel 有一条
+        # 后台 QFileInfoGatherer 线程，目录读完会往主线程投递 updates 事件，处理时
+        # 会调用图标提供器。模型没 parent 时它的生死只靠 Python 引用计数/GC，
+        # 面板销毁后模型可能还活着、而 _icon_provider 已被回收 →
+        # QFileInfoGatherer::getInfo 里悬空指针段错误（macOS CI 上抓到的 core）。
+        # 有 parent 后面板的 C++ 析构会先删掉模型（析构里等 gatherer 线程退出），
+        # 再轮到 Python 侧回收提供器，顺序永远安全。
+        self.model = FilteredFileSystemModel(self)
+        # 用轻量图标提供器，避免大目录展开时逐文件查询系统图标导致卡顿。
+        # setIconProvider 不接管所有权：把提供器再挂到模型的 Python 包装上，
+        # 保证只要模型活着提供器就活着（refresh() 换模型时旧模型也各自持有）。
         self._icon_provider = _FastIconProvider()
         self.model.setIconProvider(self._icon_provider)
+        self.model._icon_provider_keepalive = self._icon_provider
         self.model.setRootPath("")
         # 是否显示以点开头的隐藏文件/文件夹由 _show_hidden 决定（始终排除 . 和 ..）
         self.model.setFilter(self._build_filter())
@@ -1257,8 +1266,9 @@ class ExplorerPanel(QWidget, explorer_common.TransferJobHost):
             sel_path = self._proxy.filePath(idx)
 
         old_model = self.model
-        self.model = FilteredFileSystemModel()
+        self.model = FilteredFileSystemModel(self)
         self.model.setIconProvider(self._icon_provider)
+        self.model._icon_provider_keepalive = self._icon_provider
         self.model.setFilter(self._build_filter())
         self.model.setReadOnly(False)
         self.model.setRootPath("")
