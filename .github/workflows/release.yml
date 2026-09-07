@@ -87,15 +87,30 @@ jobs:
         run: |
           .venv-build/bin/python -m pip install pytest --quiet
           if [ "$GITHUB_EVENT_NAME" = "workflow_dispatch" ]; then
-            lldb --batch \
-              -o "settings set target.process.stop-on-exec false" \
-              -o "process launch --stop-at-entry -- -m pytest tests/ -v -p no:cacheprovider" \
-              -o "process handle SIGPIPE SIGCHLD SIGUSR1 SIGUSR2 SIGINT -s false -n false" \
-              -o "continue" \
-              -o "bt all" \
-              -o "quit" \
-              -- .venv-build/bin/python 2>&1 | tee lldb-run.log
-            grep -q "exited with status = 0" lldb-run.log
+            # 诊断模式：几组实验依次跑完再判定，每组单独报告退出码。
+            # lldb 下整套能跑过（Heisenbug），所以改抓 core：崩了用 lldb 读 core 打原生栈。
+            PY=.venv-build/bin/python
+            sudo chmod 1777 /cores 2>/dev/null || true
+            ulimit -c unlimited
+            set +e
+            echo "::group::EXP1 git_async_ops alone"
+            $PY -m pytest tests/test_git_async_ops.py -v -p no:cacheprovider; r1=$?
+            echo "::endgroup::"; echo "EXP1 rc=$r1"
+            echo "::group::EXP2 e* modules + git_async_ops"
+            $PY -m pytest tests/test_e*.py tests/test_git_async_ops.py -q -p no:cacheprovider; r2=$?
+            echo "::endgroup::"; echo "EXP2 rc=$r2"
+            echo "::group::EXP3 full suite"
+            $PY -m pytest tests/ -v -p no:cacheprovider; r3=$?
+            echo "::endgroup::"; echo "EXP3 rc=$r3"
+            set -e
+            core=$(ls -t /cores/core.* 2>/dev/null | head -1)
+            if [ -n "$core" ]; then
+              echo "== core: $core =="
+              lldb --batch -c "$core" -o "thread list" -o "bt all" -o quit $PY 2>&1 | head -500
+            else
+              echo "no core file in /cores"; ls -la /cores 2>/dev/null || true
+            fi
+            [ $r1 -eq 0 ] && [ $r2 -eq 0 ] && [ $r3 -eq 0 ]
           else
             .venv-build/bin/python -m pytest tests/ -v -p no:cacheprovider
           fi
