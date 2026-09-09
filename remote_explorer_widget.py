@@ -2150,15 +2150,76 @@ class RemoteExplorerPanel(QWidget, explorer_common.TransferJobHost):
 
         app_config.update_config_with(_apply, description='remote-forwards')
 
+    def _run_blocking(self, fn, label: str):
+        """在后台线程跑 fn，同时转一个不可取消的小进度框保持界面响应；
+        返回 fn 的结果，异常原样抛出。"""
+        import concurrent.futures
+        from PyQt6.QtCore import QEventLoop
+        fut = concurrent.futures.ThreadPoolExecutor(max_workers=1).submit(fn)
+        dlg = QProgressDialog(label, "", 0, 0, self)
+        dlg.setCancelButton(None)
+        dlg.setWindowModality(Qt.WindowModality.WindowModal)
+        dlg.setMinimumDuration(300)
+        loop = QEventLoop(self)
+        timer = QTimer(self)
+        timer.setInterval(80)
+        timer.timeout.connect(lambda: fut.done() and loop.quit())
+        timer.start()
+        try:
+            if not fut.done():
+                loop.exec()
+        finally:
+            timer.stop()
+            dlg.close()
+            dlg.deleteLater()
+        return fut.result()
+
+    def _ensure_master_interactive(self, host: HostConfig) -> bool:
+        """端口转发要挂在主连接上：没有就建一条。
+
+        要动态码的堡垒机只能走「🔑 MFA 登录」（提示用户）。普通主机自己建：
+        先试密钥 / agent，不行就用面板里缓存过的密码，再不行弹框要一次密码。
+        """
+        if ssh_control.master_socket_exists(host):
+            return True
+        if self._is_mfa_host(host.alias):
+            QMessageBox.information(self, t("remote.fwd_title", host=host.alias),
+                                    t("remote.fwd_need_master"))
+            return False
+        password = self.get_cached_password(host.alias) or ""
+        for attempt in range(2):
+            try:
+                self._run_blocking(
+                    lambda pw=password: ssh_control.ensure_master(host, password=pw),
+                    t("remote.fwd_connecting_master", host=host.alias))
+                if password:
+                    self._cached_passwords[host.alias] = password
+                return True
+            except ssh_control.NeedsPassword:
+                if attempt == 1:
+                    break
+                pw, ok = QInputDialog.getText(
+                    self, t("remote.password_title"),
+                    t("remote.password_prompt", host=host.alias),
+                    QLineEdit.EchoMode.Password)
+                if not ok or not pw:
+                    return False
+                password = pw
+            except Exception as e:      # noqa: BLE001 — 报给用户
+                QMessageBox.warning(self, t("remote.fwd_title", host=host.alias),
+                                    t("remote.fwd_master_failed", error=str(e)))
+                return False
+        QMessageBox.warning(self, t("remote.fwd_title", host=host.alias),
+                            t("remote.fwd_master_failed", error=t("remote.fwd_auth_failed")))
+        return False
+
     def _show_forwards_dialog(self, host: HostConfig):
         """端口转发管理框。规则挂在主连接上，所以先确保主连接在。"""
         if not ssh_control.is_supported():
             QMessageBox.information(self, t("remote.fwd_title", host=host.alias),
                                     t("remote.fwd_unsupported"))
             return
-        if not ssh_control.master_socket_exists(host):
-            QMessageBox.information(self, t("remote.fwd_title", host=host.alias),
-                                    t("remote.fwd_need_master"))
+        if not self._ensure_master_interactive(host):
             return
         active = set(self._active_forwards.get(host.alias, ()))
         dlg = _ForwardsDialog(
@@ -2176,12 +2237,24 @@ class RemoteExplorerPanel(QWidget, explorer_common.TransferJobHost):
         if not ssh_control.is_supported():
             return
         applied = set(self._active_forwards.get(host.alias, ()))
-        for spec in self._load_forwards(host.alias):
-            if not spec.get("auto"):
-                continue
+        pending = [spec for spec in self._load_forwards(host.alias)
+                   if spec.get("auto") and _ForwardsDialog.rule_key(spec) not in applied]
+        if not pending:
+            return
+        # 普通（非 MFA）主机连上时还没有主连接：用刚才连接用的密钥/密码悄悄
+        # 建一条，建不起来就提示、不影响这次连接
+        if (not ssh_control.master_socket_exists(host)
+                and not self._is_mfa_host(host.alias)):
+            try:
+                self._run_blocking(
+                    lambda: ssh_control.ensure_master(
+                        host, password=self.get_cached_password(host.alias) or ""),
+                    t("remote.fwd_connecting_master", host=host.alias))
+            except Exception as e:      # noqa: BLE001
+                self.error_occurred.emit(t("remote.fwd_master_failed", error=str(e)))
+                return
+        for spec in pending:
             key = _ForwardsDialog.rule_key(spec)
-            if key in applied:
-                continue
             try:
                 ssh_control.forward_apply(host, spec, cancel=False)
                 applied.add(key)

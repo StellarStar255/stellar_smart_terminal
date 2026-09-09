@@ -784,10 +784,28 @@ class TestForwardRulesInPanel(unittest.TestCase):
         ])
         applied = []
         with mock.patch('ssh_control.is_supported', lambda: True), \
+                mock.patch('ssh_control.master_socket_exists', lambda h: True), \
                 mock.patch('ssh_control.forward_apply',
                            lambda h, spec, cancel=False: applied.append(spec)):
             panel._auto_apply_forwards(_host())
         self.assertEqual([s['bind_port'] for s in applied], [8888])
+
+    def test_plain_host_gets_a_master_before_auto_forwards(self):
+        """普通（非 MFA）主机连上时还没有主连接：先用缓存的密码建一条再挂。"""
+        panel = self._panel()
+        panel._save_forwards('bastion', [
+            {'type': 'L', 'bind_port': 8888, 'dest_port': 8888, 'auto': True}])
+        panel.prime_cached_password('bastion', 'pw1')
+        order = []
+        with mock.patch('ssh_control.is_supported', lambda: True), \
+                mock.patch('ssh_control.master_socket_exists', lambda h: False), \
+                mock.patch.object(panel, '_is_mfa_host', return_value=False), \
+                mock.patch('ssh_control.ensure_master',
+                           lambda h, password="": order.append(('master', password))), \
+                mock.patch('ssh_control.forward_apply',
+                           lambda h, spec, cancel=False: order.append(('fwd', spec['bind_port']))):
+            panel._auto_apply_forwards(_host())
+        self.assertEqual(order, [('master', 'pw1'), ('fwd', 8888)])
 
     def test_a_failing_forward_only_warns(self):
         """端口被占不该把整个连接流程带崩。"""
@@ -801,6 +819,7 @@ class TestForwardRulesInPanel(unittest.TestCase):
             raise RuntimeError('本机端口 8888 已被占用：node(pid 42)')
 
         with mock.patch('ssh_control.is_supported', lambda: True), \
+                mock.patch('ssh_control.master_socket_exists', lambda h: True), \
                 mock.patch('ssh_control.forward_apply', _boom):
             panel._auto_apply_forwards(_host())
         self.assertEqual(len(errors), 1)
@@ -812,6 +831,7 @@ class TestForwardRulesInPanel(unittest.TestCase):
         panel._save_forwards('bastion', [spec])
         calls = []
         with mock.patch('ssh_control.is_supported', lambda: True), \
+                mock.patch('ssh_control.master_socket_exists', lambda h: True), \
                 mock.patch('ssh_control.forward_apply',
                            lambda h, s, cancel=False: calls.append(s)):
             panel._auto_apply_forwards(_host())

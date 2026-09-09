@@ -270,27 +270,8 @@ def mfa_login(cfg: HostConfig, code: str = "", password: str = "",
             fh.write(_ASKPASS_SCRIPT)
         os.chmod(askpass, 0o700)
         _write_secret_files(tmpdir, code, password)
-        # hours=0 是「不自动断开」→ ControlPersist=yes（一直留着，直到被显式
-        # 关掉或机器重启）；其余按小时数，上限 24h
-        persist = "yes" if int(hours or 0) <= 0 else f"{min(24, int(hours))}h"
-        args = [
-            "ssh",
-            "-o", "BatchMode=no",
-            "-o", "StrictHostKeyChecking=accept-new",
-            "-o", f"ConnectTimeout={CONNECT_TIMEOUT + 13}",
-            "-o", f"ServerAliveInterval={SERVER_ALIVE_INTERVAL}",
-            "-o", "NumberOfPasswordPrompts=1",
-            "-o", "ControlMaster=yes",
-            "-o", f"ControlPath={ctl}",
-            "-o", f"ControlPersist={persist}",
-        ]
-        if not cfg.raw:
-            # 内存态主机（没进 ~/.ssh/config）才需要我们自己补端口/密钥
-            if cfg.port and cfg.port != 22:
-                args += ["-o", f"Port={int(cfg.port)}"]
-            if cfg.identity_file and os.path.isfile(cfg.identity_file):
-                args += ["-o", f"IdentityFile={cfg.identity_file}"]
-        args += ["-N", "-f", ssh_target(cfg)]
+        persist = _persist_value(hours)
+        args = _master_args(cfg, ctl, persist, batch=False)
         proc = subprocess.run(
             args, env=_login_env(askpass),
             stdin=subprocess.DEVNULL, stdout=subprocess.PIPE,
@@ -307,6 +288,79 @@ def mfa_login(cfg: HostConfig, code: str = "", password: str = "",
         raise RuntimeError("登录超时（堡垒机没有在预期时间内完成认证）")
     finally:
         shutil.rmtree(tmpdir, ignore_errors=True)
+
+
+def _persist_value(hours) -> str:
+    """hours=0 是「不自动断开」→ ControlPersist=yes（一直留着，直到被显式关掉
+    或机器重启）；其余按小时数，上限 24h。"""
+    return "yes" if int(hours or 0) <= 0 else f"{min(24, int(hours))}h"
+
+
+def _master_args(cfg: HostConfig, ctl: str, persist: str, batch: bool) -> list:
+    """建常驻主连接的 ssh 命令行（-M -N -f）。batch=True 时绝不弹交互提示：
+    只靠密钥 / agent / ~/.ssh/config 认证，不行就立刻失败。"""
+    args = [
+        "ssh",
+        "-o", f"BatchMode={'yes' if batch else 'no'}",
+        "-o", "StrictHostKeyChecking=accept-new",
+        "-o", f"ConnectTimeout={CONNECT_TIMEOUT + 13}",
+        "-o", f"ServerAliveInterval={SERVER_ALIVE_INTERVAL}",
+        "-o", "NumberOfPasswordPrompts=1",
+        "-o", "ControlMaster=yes",
+        "-o", f"ControlPath={ctl}",
+        "-o", f"ControlPersist={persist}",
+    ]
+    if not cfg.raw:
+        # 内存态主机（没进 ~/.ssh/config）才需要我们自己补端口/密钥
+        if cfg.port and cfg.port != 22:
+            args += ["-o", f"Port={int(cfg.port)}"]
+        if cfg.identity_file and os.path.isfile(cfg.identity_file):
+            args += ["-o", f"IdentityFile={cfg.identity_file}"]
+    args += ["-N", "-f", ssh_target(cfg)]
+    return args
+
+
+class NeedsPassword(RuntimeError):
+    """密钥 / agent 认证不过，得要个密码再试。"""
+
+
+def start_master_with_keys(cfg: HostConfig, hours: int = DEFAULT_KEEP_HOURS) -> str:
+    """只靠密钥 / agent / ssh_config 建主连接（BatchMode=yes，零交互）。返回 ControlPath。"""
+    if not is_supported():
+        raise RuntimeError("这个平台不支持 ssh 主连接（ControlMaster）")
+    ctl = control_path_for(cfg)
+    if not ctl:
+        raise RuntimeError("ControlPath 建不出来（临时目录路径太长）")
+    args = _master_args(cfg, ctl, _persist_value(hours), batch=True)
+    try:
+        proc = subprocess.run(args, stdin=subprocess.DEVNULL, stdout=subprocess.PIPE,
+                              stderr=subprocess.PIPE, timeout=LOGIN_TIMEOUT)
+    except subprocess.TimeoutExpired:
+        raise RuntimeError("连接超时")
+    if proc.returncode == 0:
+        logger.info("[SSH-CTL] %s: master connection up via keys", cfg.alias)
+        return ctl
+    err = (proc.stderr or b"").decode("utf-8", "replace").strip()
+    tail = " · ".join([l for l in err.split("\n") if l.strip()][-2:])
+    raise RuntimeError(tail or f"ssh 退出码 {proc.returncode}")
+
+
+def ensure_master(cfg: HostConfig, password: str = "",
+                  hours: int = DEFAULT_KEEP_HOURS) -> str:
+    """确保这台主机有一条活着的主连接（端口转发要挂在它上面）。
+
+    不需要动态码的普通主机也能用：先试密钥 / agent（零交互）；不行且给了
+    密码就用密码建；两样都没有抛 NeedsPassword，让 UI 去要密码。返回 ControlPath。
+    """
+    if master_alive(cfg):
+        return control_path_for(cfg)
+    try:
+        return start_master_with_keys(cfg, hours)
+    except RuntimeError as e:
+        key_err = str(e)
+    if password:
+        return mfa_login(cfg, code="", password=password, hours=hours)
+    raise NeedsPassword(key_err)
 
 
 def master_socket_exists(cfg: HostConfig) -> bool:

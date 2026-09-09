@@ -858,10 +858,13 @@ TRANSLATIONS = {
     "remote.fwd_duplicate": {"zh": "已经有一条监听同一地址/端口的规则了。",
                               "en": "A rule already listens on that address/port."},
     "remote.fwd_need_master": {
-        "zh": "端口转发要挂在常驻主连接上。请先用「🔑 MFA 登录」连一次这台主机。",
-        "en": "Port forwarding attaches to the persistent master connection — "
-              "log in to this host once (🔑 MFA Login) first.",
+        "zh": "这台主机要动态码：端口转发要挂在常驻主连接上，请先用「🔑 MFA 登录」连一次。",
+        "en": "This host needs a one-time code: port forwarding attaches to the persistent "
+              "master connection — log in once with 🔑 MFA Login first.",
     },
+    "remote.fwd_connecting_master": {"zh": "正在为 {host} 建立主连接…", "en": "Opening a master connection to {host}…"},
+    "remote.fwd_master_failed": {"zh": "建不起主连接，端口转发用不了：{error}", "en": "Could not open a master connection, so port forwarding is unavailable: {error}"},
+    "remote.fwd_auth_failed": {"zh": "密钥和密码都没通过认证", "en": "neither key nor password authentication succeeded"},
     "remote.fwd_unsupported": {
         "zh": "这个平台的 OpenSSH 不支持 ControlMaster 主连接，用不了端口转发。",
         "en": "This platform's OpenSSH has no ControlMaster support, so port "
