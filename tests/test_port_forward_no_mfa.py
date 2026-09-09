@@ -29,6 +29,11 @@ def _proc(rc, err=b""):
 class TestEnsureMaster(unittest.TestCase):
     def setUp(self):
         self.host = HostConfig(alias='gpu-main1', hostname='10.10.80.70', user='huang', port=2222)
+        # Windows 的 OpenSSH 没有 ControlMaster → is_supported() 为 False；这里只测
+        # 决策逻辑（subprocess 已桩掉），把平台判断也桩成支持
+        p = mock.patch.object(ssh_control, 'is_supported', return_value=True)
+        p.start()
+        self.addCleanup(p.stop)
 
     def test_alive_master_is_reused(self):
         with mock.patch.object(ssh_control, 'master_alive', return_value=True), \
