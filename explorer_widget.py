@@ -936,6 +936,12 @@ class ExplorerPanel(QWidget, explorer_common.TransferJobHost):
         # 关闭展开/收起动画：动画会对所有新出现的行反复重新布局+重绘，
         # 大目录（几十个文件）展开/收起时明显卡顿；关掉后即时完成。
         self.tree_view.setAnimated(False)
+        # 双击目录的展开/收起由 _on_double_click 自己切换（那里还要区分
+        # 「双击进入目录」模式）。必须关掉 QTreeView 自带的双击展开：它在
+        # 发完 doubleClicked 信号之后还会再切换一次，两次互相抵消——首次
+        # 双击时子项尚未装载、Qt 那次不生效所以能展开，之后子项已在，
+        # 每次双击都是「收起再展开」，表现为文件夹弹开后再也合不上。
+        self.tree_view.setExpandsOnDoubleClick(False)
         # 12px：比默认窄，配合参考线仍然分得清层级，深层不至于挤出屏幕
         self.tree_view.setIndentation(12)
 
