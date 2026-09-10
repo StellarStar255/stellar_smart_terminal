@@ -15,7 +15,7 @@ from PyQt6.QtWidgets import (
     QWidget, QVBoxLayout, QHBoxLayout, QPlainTextEdit,
     QPushButton, QLabel, QFrame, QMessageBox,
     QSplitter, QLineEdit, QTextEdit, QTextBrowser, QStackedWidget, QScrollArea,
-    QSizePolicy, QMenu, QFileDialog, QTabBar,
+    QSizePolicy, QMenu, QFileDialog, QTabBar, QApplication,
 )
 from PyQt6.QtCore import (
     Qt, pyqtSignal, QRect, QSize, QFileSystemWatcher, QTimer, QEvent, QUrl,
@@ -43,6 +43,11 @@ _AUTOSAVE_INTERVAL_MS = 30 * 1000
 # 模块级共享：同一文件在不同窗格间切换也能延续位置；仅内存态，不落盘。
 _VIEW_STATE_REGISTRY: dict = {}
 _VIEW_STATE_MAX = 200  # 防无限增长；超限时淘汰最早记录的文件
+# Markdown 超过此大小不再默认进渲染预览，先开源码视图（◎ 手动切预览仍可用）。
+# 预览渲染是 GUI 线程同步做的：setMarkdown + 六道排版精修 + 代码高亮，
+# 全部线性但常数不小（实测 2.3MB/11 万行约 3 秒，慢机器成倍），
+# 超大文件默认进预览等于打开即卡住。
+_MD_AUTO_PREVIEW_MAX_BYTES = 512 * 1024
 
 
 def _looks_binary(raw: bytes) -> bool:
@@ -1921,6 +1926,7 @@ class FileEditorWidget(QWidget):
         self._html_preview_supported = False  # 当前文件是否为 HTML（预览走系统浏览器）
         self._in_md_preview = False         # 当前是否显示渲染预览页
         self._md_img_cache = {}             # 预览图片解码/缩放缓存 {(path, mtime, w): QImage}
+        self._md_has_images = False         # 上次预览渲染的文档是否含内嵌图片
         # 多窗格分屏：是否高亮当前活动窗格（仅在 >1 窗格时由 EditorArea 打开）
         self._is_active = False
         self._show_active_indicator = False
@@ -2127,6 +2133,9 @@ class FileEditorWidget(QWidget):
         self._md_browser.setOpenLinks(False)
         self._md_browser.setOpenExternalLinks(False)
         self._md_browser.anchorClicked.connect(self._on_md_link_clicked)
+        # 预览只读、每次重渲染都整篇重建：撤销栈纯属白记（大文档上还要
+        # 为后处理的每次编辑分配撤销条目）
+        self._md_browser.document().setUndoRedoEnabled(False)
         # 点击预览区也把本窗格设为活动窗格
         self._md_browser.viewport().installEventFilter(self)
         # 预览页右键菜单：Qt 默认只有复制/全选，这里在其后追加与源码页
@@ -2819,7 +2828,7 @@ class FileEditorWidget(QWidget):
         is_md = suffix in ('.md', '.markdown')
         self._set_md_support(is_md)
         self._set_html_support(suffix in ('.html', '.htm'))
-        if is_md:
+        if is_md and len(raw) <= _MD_AUTO_PREVIEW_MAX_BYTES:
             self._set_md_preview(True, sync_scroll=False)
 
         # 恢复上次离开该文件时的视图位置（光标 + 滚动）
@@ -3044,6 +3053,12 @@ class FileEditorWidget(QWidget):
             return
         if self._md_browser.viewport().width() == self._md_last_render_width:
             return
+        # 视口变宽/变窄只影响「宽图按视口缩放」这一件事；文档里根本没有
+        # 图片时重渲染毫无意义——而打开任何超过一屏的文档，滚动条一出现
+        # 视口就会变窄一次，等于每次打开都白白多渲染一整遍
+        if not self._md_has_images:
+            self._md_last_render_width = self._md_browser.viewport().width()
+            return
         self._render_md_preview()
 
     def _render_md_preview(self):
@@ -3053,26 +3068,53 @@ class FileEditorWidget(QWidget):
         重渲染尽量保留预览页滚动位置（外部变更重载时不跳回顶部）。
         """
         self._md_last_render_width = self._md_browser.viewport().width()
+        self._md_has_images = False   # 由 _preload_md_images 遍历时重新判定
         doc = self._md_browser.document()
         if self._current_file:
             doc.setBaseUrl(QUrl.fromLocalFile(
                 os.path.dirname(os.path.abspath(self._current_file)) + os.sep))
         scroll_pos = self._md_browser.verticalScrollBar().value()
+        text = self.editor.toPlainText()
+        # 超过默认预览阈值的大文档是用户手动切进来的：渲染要秒级，给个沙漏
+        big = len(text) > _MD_AUTO_PREVIEW_MAX_BYTES
+        if big:
+            QApplication.setOverrideCursor(Qt.CursorShape.WaitCursor)
+        try:
+            self._render_md_document(doc, text)
+        finally:
+            if big:
+                QApplication.restoreOverrideCursor()
+        self._md_browser.verticalScrollBar().setValue(scroll_pos)
+
+    def _render_md_document(self, doc, text: str):
+        """setMarkdown + 全部排版后处理（_render_md_preview 的主体）。"""
         # MarkdownNoHTML：禁用原始 HTML 解析。否则正文里出现 <tag> 这类未闭合
         # HTML 时，Qt 会把其后的所有内容当 HTML 吞掉（文档从那里被截断）；
         # 禁用后 HTML 按字面文本显示，同时也杜绝了 HTML 注入的渲染面。
         doc.setMarkdown(
-            self.editor.toPlainText(),
+            text,
             QTextDocument.MarkdownFeature.MarkdownDialectGitHub
             | QTextDocument.MarkdownFeature.MarkdownNoHTML,
         )
-        self._inline_md_html_images(doc)
-        self._apply_md_html_layout(doc)
-        self._fit_md_images(doc)
-        self._preload_md_images(doc)
-        self._prepare_md_blocks(doc)
-        self._polish_md_document(doc)
-        self._md_browser.verticalScrollBar().setValue(scroll_pos)
+        # 后处理各 pass 对预览文档做成百上千次 QTextCursor 编辑（剥标签、
+        # 插 pad 块、插引用条、每个代码行插左内边距……）。文档一旦完成过
+        # 布局（视口 resize / 缩放触发的重渲染就是这种情况），每次编辑都
+        # 会让 QTextDocumentLayout 从改动处起重排全文 → 编辑次数 × 文档
+        # 长度 = O(n²)：实测 466KB 的 markdown 重渲染要 35 秒，几 MB 的
+        # 文件直接把 GUI 线程卡死（Ubuntu 上连窗口都关不掉）。整段包在
+        # 一个 edit block 里：文档内容仍即时更新（各 pass 的遍历/读取不受
+        # 影响），布局与 contentsChange 只在 endEditBlock 时合并通知一次。
+        edit = QTextCursor(doc)
+        edit.beginEditBlock()
+        try:
+            self._inline_md_html_images(doc)
+            self._apply_md_html_layout(doc)
+            self._fit_md_images(doc)
+            self._preload_md_images(doc)
+            self._prepare_md_blocks(doc)
+            self._polish_md_document(doc)
+        finally:
+            edit.endEditBlock()
 
     def _fit_md_images(self, doc):
         """把宽于视口的内嵌图片等比缩到视口宽（GitHub 风格），消除横向滚动。
@@ -3147,6 +3189,7 @@ class FileEditorWidget(QWidget):
                 frag = it.fragment()
                 cf = frag.charFormat()
                 if cf.isImageFormat():
+                    self._md_has_images = True
                     name = cf.toImageFormat().name()
                     path = (name if os.path.isabs(name)
                             else os.path.join(base_dir, name))
