@@ -424,6 +424,11 @@ class _MfaLoginDialog(QDialog):
         return bool(self._terminal_check and self._terminal_check.isChecked())
 
 
+# 进程内共享的「已生效端口转发」登记：alias -> 规则 key 集合（见
+# RemoteExplorerPanel._active_forwards 的说明）
+_ACTIVE_FORWARDS: dict[str, set] = {}
+
+
 class _ForwardsDialog(QDialog):
     """端口转发管理（一台主机多条规则）。
 
@@ -1197,9 +1202,10 @@ class RemoteExplorerPanel(QWidget, explorer_common.TransferJobHost):
         self._pending_mfa: Optional[dict] = None
         # 本次连接是不是「复用已有主连接」的尝试（失败了要转去要新码，不弹错误框）
         self._mfa_reuse_attempt = False
-        # alias -> 已生效的端口转发 key 集合（转发挂在 ssh 主连接上，
-        # 面板重开也还在，所以只作为本进程的显示状态）
-        self._active_forwards: dict[str, set] = {}
+        # alias -> 已生效的端口转发 key 集合。转发挂在 ssh 主连接上，主连接是
+        # 进程级的（control socket），所以状态也按进程共享：多窗口各有一个
+        # 面板，A 窗口挂的转发 B 窗口的主机列表同样要标出来
+        self._active_forwards: dict[str, set] = _ACTIVE_FORWARDS
         self._mfa_lock = threading.Lock()   # 认证回调在 SSH 工作线程上读它
         # 主连接空闲保持：0 = 不自动断开；>0 时空闲超过该秒数就断开，
         # 下次操作需要重新 MFA 登录（动态码有效期只撑一次认证）
@@ -1647,6 +1653,10 @@ class RemoteExplorerPanel(QWidget, explorer_common.TransferJobHost):
         self._hosts_list.setDragDropMode(
             QAbstractItemView.DragDropMode.InternalMove if manual
             else QAbstractItemView.DragDropMode.NoDragDrop)
+        # 重建列表会丢选中项：记住当前选中的主机，重建后再选回来（转发框
+        # 关闭后的刷新等场景下用户正停在那一行）
+        cur = self._hosts_list.currentItem()
+        cur_alias = cur.data(_ROLE_ENTRY).alias if cur and cur.data(_ROLE_ENTRY) else None
         self._hosts_list.clear()
         combined = list(self._hosts) + list(self._extra_hosts)
         if not combined:
@@ -1658,11 +1668,48 @@ class RemoteExplorerPanel(QWidget, explorer_common.TransferJobHost):
             for h in self._sorted_hosts(combined):
                 target = f"{h.user + '@' if h.user else ''}{h.hostname}:{h.port}"
                 icon = "🔑" if h.alias in mfa_hosts else "🖥"
-                item = QListWidgetItem(f"{icon}  {h.alias}    {target}")
+                text = f"{icon}  {h.alias}    {target}"
+                active = self._active_forward_specs(h)
+                if active:
+                    # 🔀 N：这台主机上正挂着 N 条端口转发（与右键菜单的图标一致）
+                    text += f"    🔀 {len(active)}"
+                item = QListWidgetItem(text)
                 item.setData(_ROLE_ENTRY, h)
+                if active:
+                    item.setToolTip(
+                        t("remote.fwd_active_tip", n=len(active)) + "\n"
+                        + "\n".join(ssh_control.forward_label(s) for s in active))
                 # 允许 Enter/F2 原地重命名（编辑框由 _HostAliasDelegate 只显示 alias）
                 item.setFlags(item.flags() | Qt.ItemFlag.ItemIsEditable)
                 self._hosts_list.addItem(item)
+                if h.alias == cur_alias:
+                    self._hosts_list.setCurrentItem(item)
+
+    def _active_forward_specs(self, host: HostConfig) -> list:
+        """这台主机上当前生效的转发规则（供列表标记/提示用）。
+
+        转发挂在主连接上：主连接的 control socket 没了（空闲断开、外部
+        `ssh -O exit`、进程重启后的陈旧登记），转发必然也没了——顺手把
+        登记清掉，列表不会顶着一个假的 🔀。
+        """
+        keys = self._active_forwards.get(host.alias)
+        if not keys:
+            return []
+        if not ssh_control.master_socket_exists(host):
+            self._active_forwards.pop(host.alias, None)
+            return []
+        rule_key = _ForwardsDialog.rule_key
+        specs = [s for s in self._load_forwards(host.alias) if rule_key(s) in keys]
+        # 规则文件里已删但登记还在（不该发生）：按 key 兜底显示
+        known = {rule_key(s) for s in specs}
+        specs += [{"type": k.split("|")[0], "bind_host": k.split("|")[1],
+                   "bind_port": k.split("|")[2]} for k in keys if k not in known]
+        return specs
+
+    def _forget_forwards(self, alias: str):
+        """主连接被关掉 → 它上面的转发全没了，清登记并刷新列表标记。"""
+        if self._active_forwards.pop(alias, None) is not None:
+            self._populate_hosts_list()
 
     def _on_add_host_clicked(self):
         dlg = _AddHostDialog(self, with_alias=True)
@@ -2231,11 +2278,16 @@ class RemoteExplorerPanel(QWidget, explorer_common.TransferJobHost):
         dlg.exec()
         self._save_forwards(host.alias, dlg.rules())
         self._active_forwards[host.alias] = dlg.active_keys()
+        self._populate_hosts_list()   # 🔀 标记立刻反映到列表上
 
     def _auto_apply_forwards(self, host: HostConfig):
         """连上之后自动挂勾了「自动」的转发；失败只提示，不影响连接。"""
         if not ssh_control.is_supported():
             return
+        if not ssh_control.master_socket_exists(host):
+            # 主连接不在 → 之前登记的转发（上次会话留下的）必然已失效，
+            # 不能拿它当「已挂」跳过自动挂载
+            self._active_forwards.pop(host.alias, None)
         applied = set(self._active_forwards.get(host.alias, ()))
         pending = [spec for spec in self._load_forwards(host.alias)
                    if spec.get("auto") and _ForwardsDialog.rule_key(spec) not in applied]
@@ -2265,6 +2317,7 @@ class RemoteExplorerPanel(QWidget, explorer_common.TransferJobHost):
                     "remote.fwd_failed",
                     rule=ssh_control.forward_label(spec), error=str(e)))
         self._active_forwards[host.alias] = applied
+        self._populate_hosts_list()   # 🔀 标记立刻反映到列表上
 
     # ---- 主连接空闲保持 ----
 
@@ -2290,8 +2343,10 @@ class RemoteExplorerPanel(QWidget, explorer_common.TransferJobHost):
                 and self._session.host_config.alias == host.alias):
             self._shutdown_master(self._session)
             self._disconnect()
+            self._forget_forwards(host.alias)
             return
         ssh_control.master_exit(host)
+        self._forget_forwards(host.alias)
 
     def _check_idle_timeout(self):
         """空闲看门狗：超过保持时长就断开主连接，提示需要重新 MFA 登录。"""
@@ -2308,6 +2363,7 @@ class RemoteExplorerPanel(QWidget, explorer_common.TransferJobHost):
         # 的），所以空闲到期必须显式把它关掉，否则"保持时长"形同虚设
         self._shutdown_master(self._session)
         self._disconnect()
+        self._forget_forwards(alias)
         self.error_occurred.emit(t(
             "remote.mfa_idle_disconnected", host=alias,
             minutes=max(1, self._mfa_keep_secs // 60)))

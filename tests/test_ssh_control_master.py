@@ -757,10 +757,16 @@ class TestForwardRulesInPanel(unittest.TestCase):
         self._tmp = tempfile.mkdtemp(prefix='fwd-cfg-')
         self._orig = app_config.get_config_path
         app_config.get_config_path = lambda: Path(self._tmp) / 'cfg.json'
+        # 「已生效转发」登记是进程级共享的（多窗口一致），用例之间要清干净，
+        # 否则上一个用例挂上的规则会被下一个当成「已挂」跳过
+        import remote_explorer_widget
+        remote_explorer_widget._ACTIVE_FORWARDS.clear()
 
     def tearDown(self):
         import app_config
         app_config.get_config_path = self._orig
+        import remote_explorer_widget
+        remote_explorer_widget._ACTIVE_FORWARDS.clear()
 
     def _panel(self):
         from remote_explorer_widget import RemoteExplorerPanel

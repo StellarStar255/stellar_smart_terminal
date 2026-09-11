@@ -836,6 +836,7 @@ TRANSLATIONS = {
     # --- 端口转发（挂在 ssh 主连接上） ---
     "remote.fwd_menu": {"zh": "🔀 端口转发…", "en": "🔀 Port Forwarding…"},
     "remote.fwd_title": {"zh": "🔀 端口转发 — {host}", "en": "🔀 Port Forwarding — {host}"},
+    "remote.fwd_active_tip": {"zh": "端口转发生效中（{n} 条）：", "en": "Port forwarding active ({n}):"},
     "remote.fwd_hint": {
         "zh": "转发挂在这台主机的常驻主连接上，随时加/撤都不用重新认证（要动态码的堡垒机也一样）。"
               "勾「自动」的规则会在下次连上时自动挂起。",
