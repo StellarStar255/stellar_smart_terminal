@@ -693,6 +693,8 @@ TRANSLATIONS = {
     "git_mgr.discard_failed": {"zh": "放弃更改失败: {error}", "en": "Discard changes failed: {error}"},
     "git_mgr.commit_empty": {"zh": "提交信息不能为空", "en": "Commit message cannot be empty"},
     "git_mgr.commit_failed": {"zh": "提交失败: {error}", "en": "Commit failed: {error}"},
+    "git_mgr.nothing_to_commit": {"zh": "没有需要提交的更改，工作区是干净的。",
+                                  "en": "Nothing to commit — the working tree is clean."},
     "git_mgr.revert_failed": {"zh": "撤销提交失败: {error}", "en": "Failed to revert commit: {error}"},
     "git_mgr.reset_failed": {"zh": "重置失败: {error}", "en": "Failed to reset: {error}"},
     "git_mgr.diff_failed": {"zh": "获取 diff 失败: {error}", "en": "Failed to get diff: {error}"},

@@ -739,7 +739,12 @@ class GitManager(QObject):
 
         success, output = self._run_git('commit', '-m', message)
         if not success:
-            self.error_occurred.emit(t("git_mgr.commit_failed", error=output))
+            if 'nothing to commit' in output or 'nothing added to commit' in output:
+                # git 会甩出整段 status 输出（"On branch main / Your branch is
+                # up to date…"），对用户只有一句有用：没东西可提交
+                self.error_occurred.emit(t("git_mgr.nothing_to_commit"))
+            else:
+                self.error_occurred.emit(t("git_mgr.commit_failed", error=output))
             return False
         self.status_changed.emit()
         return True

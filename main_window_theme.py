@@ -61,19 +61,39 @@ def menu_qss(theme: dict, padding: str = "4px", radius: str = "6px") -> str:
 
 def message_box_qss(theme: dict, check_image: str = "") -> str:
     """QMessageBox 样式：底色/文字/按钮全部取自主题，浅色主题是浅盒子、深色
-    主题是深盒子（以前一律写死 #f0f0f0 浅色，深色主题下突兀）。"""
+    主题是深盒子。
+
+    追加到 MainWindow 的样式表里之后，窗口下所有 QMessageBox（包括
+    QMessageBox.warning() 这类静态调用弹出的）都按 Qt 层叠继承到，不必逐处
+    设样式。设计要点：正文不用系统默认的粗体（macOS 上 Qt 把消息框主文案
+    设成粗体，多行 git 输出看着像一坨），说明文字用次要色，默认按钮走
+    accent 主色、其它按钮为次要样式，按钮圆角与工具栏一致。
+    """
     key = ("msgbox", check_image) + _theme_key(
         theme, 'bg_dark', 'bg_medium', 'bg_lighter', 'bg_hover', 'bg_light',
-        'text', 'border', 'accent')
+        'text', 'text_dim', 'border', 'accent', 'accent_hover')
     qss = _QSS_CACHE.get(key)
     if qss is None:
+        accent = theme.get('accent', '#667eea')
         qss = f"""
             QMessageBox {{
                 background-color: {theme.get('bg_dark', '#f0f0f0')};
             }}
             QMessageBox QLabel {{
                 color: {theme.get('text', '#333333')};
+                background-color: transparent;
+                border: none;
+                font-size: 13px;
+            }}
+            QMessageBox QLabel#qt_msgbox_label {{
                 font-size: 14px;
+                font-weight: normal;
+                padding: 4px 4px 2px 0px;
+            }}
+            QMessageBox QLabel#qt_msgbox_informativelabel {{
+                color: {theme.get('text_dim', '#888888')};
+                font-weight: normal;
+                padding: 0px 4px 6px 0px;
             }}
             QMessageBox QCheckBox {{
                 color: {theme.get('text', '#333333')};
@@ -85,26 +105,37 @@ def message_box_qss(theme: dict, check_image: str = "") -> str:
                 background-color: {theme.get('bg_medium', '#ffffff')};
             }}
             QMessageBox QCheckBox::indicator:hover {{
-                border-color: {theme.get('accent', '#667eea')};
+                border-color: {accent};
             }}
             QMessageBox QCheckBox::indicator:checked {{
-                border-color: {theme.get('accent', '#667eea')};
-                background-color: {theme.get('accent', '#667eea')};
+                border-color: {accent};
+                background-color: {accent};
                 {check_image}
             }}
             QMessageBox QPushButton {{
                 background-color: {theme.get('bg_lighter', '#e0e0e0')};
                 color: {theme.get('text', '#333333')};
                 border: 1px solid {theme.get('border', '#999999')};
-                padding: 5px 15px;
-                border-radius: 3px;
-                min-width: 60px;
+                padding: 6px 18px;
+                border-radius: 6px;
+                min-width: 76px;
+                font-size: 13px;
             }}
             QMessageBox QPushButton:hover {{
                 background-color: {theme.get('bg_hover', '#d0d0d0')};
+                border-color: {accent};
             }}
             QMessageBox QPushButton:pressed {{
                 background-color: {theme.get('bg_light', '#c0c0c0')};
+            }}
+            QMessageBox QPushButton:default {{
+                background-color: {accent};
+                border-color: {accent};
+                color: #ffffff;
+            }}
+            QMessageBox QPushButton:default:hover {{
+                background-color: {theme.get('accent_hover', accent)};
+                border-color: {theme.get('accent_hover', accent)};
             }}
         """
         _QSS_CACHE[key] = qss
@@ -143,6 +174,14 @@ class ThemeMixin:
                 self.setWindowIcon(original_icon)
                 from PyQt6.QtWidgets import QApplication
                 QApplication.instance().setWindowIcon(original_icon)
+
+    @staticmethod
+    def _message_box_qss(theme: dict) -> str:
+        """消息框样式（追加进主窗口样式表，窗口下所有 QMessageBox 按层叠继承）。"""
+        from utils import checkbox_checkmark_url
+        check_url = checkbox_checkmark_url()
+        check_image = f"image: url({check_url});" if check_url else ""
+        return message_box_qss(theme, check_image)
 
     def _apply_theme(self, theme_name: str):
         """应用主题到整个界面"""
@@ -255,7 +294,7 @@ class ThemeMixin:
                 border: 2px solid {t['accent']};
                 background-color: {t['accent']};
             }}
-        """)
+        """ + self._message_box_qss(t))
 
         # 主分割器样式
         self.main_splitter.setStyleSheet(f"""

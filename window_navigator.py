@@ -999,35 +999,8 @@ class WindowNavigatorPanel(QWidget):
                 QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No
             )
             msg_box.setDefaultButton(QMessageBox.StandardButton.No)
-            msg_box.setStyleSheet(f"""
-                QMessageBox {{
-                    background-color: {th['bg_dark']};
-                }}
-                QMessageBox QLabel {{
-                    color: {th['text']};
-                    background-color: transparent;
-                    font-size: 13px;
-                    border: none;
-                }}
-                QMessageBox QPushButton {{
-                    background-color: {th['bg_lighter']};
-                    color: {th['text']};
-                    border: 1px solid {th['border']};
-                    border-radius: 4px;
-                    padding: 6px 18px;
-                    min-width: 72px;
-                    font-size: 12px;
-                }}
-                QMessageBox QPushButton:hover {{
-                    background-color: {th['accent']};
-                    border-color: {th['accent']};
-                    color: #ffffff;
-                }}
-                QMessageBox QPushButton:default {{
-                    background-color: {th['bg_light']};
-                    border-color: {th['accent']};
-                }}
-            """)
+            from main_window_theme import message_box_qss
+            msg_box.setStyleSheet(message_box_qss(th))
             # 让弹窗显示在导航面板附近
             geo = self.geometry()
             msg_box.move(geo.x() + max(0, (geo.width() - 360) // 2),
