@@ -34,6 +34,7 @@ from PyQt6.QtWidgets import (
     QApplication, QInputDialog, QMenu, QSizePolicy,
     QStackedWidget, QCheckBox
 )
+import copy
 from PyQt6 import sip  # 用于检查 C++ 对象是否已被删除
 from PyQt6.QtCore import (Qt, QTimer, QEvent, QPoint, QRect, QObject,
                           QVariantAnimation, QEasingCurve, QAbstractAnimation)
@@ -5335,21 +5336,50 @@ class MainWindow(ThemeMixin, ToolbarMixin, ConfigMixin, ExplorerPanelMixin,
         """打开预设管理对话框"""
         dialog = PresetDialog(self.presets, self, theme=self.THEMES.get(self.current_theme, self.THEMES["午夜黑"]))
         if dialog.exec() == QDialog.DialogCode.Accepted:
-            self.presets = dialog.get_presets()
-            self._presets_modified = True  # 标记预设已修改
-            self._populate_presets()
-            self._save_config()
-            self.statusbar.showMessage(t("status.preset_saved"), 3000)
+            self._apply_edited_presets(dialog.get_presets())
 
     def _add_new_preset(self):
         """打开预设管理对话框并自动添加新预设"""
         dialog = PresetDialog(self.presets, self, auto_add=True, theme=self.THEMES.get(self.current_theme, self.THEMES["午夜黑"]))
         if dialog.exec() == QDialog.DialogCode.Accepted:
-            self.presets = dialog.get_presets()
-            self._presets_modified = True  # 标记预设已修改
-            self._populate_presets()
-            self._save_config()
-            self.statusbar.showMessage(t("status.preset_saved"), 3000)
+            self._apply_edited_presets(dialog.get_presets())
+
+    def _apply_edited_presets(self, presets: list):
+        """预设管理框确认后：本窗口采用新列表、落盘，并同步到其它窗口。"""
+        self.presets = presets
+        self._presets_modified = True  # 标记预设已修改
+        self._populate_presets()
+        self._save_config()
+        self._broadcast_presets()
+        self.statusbar.showMessage(t("status.preset_saved"), 3000)
+
+    def _broadcast_presets(self):
+        """把本窗口刚改好的预设同步到其它 MainWindow 的下拉框。
+
+        预设是全局配置，但每个窗口启动时各自读了一份进内存；以前只有改动
+        的那个窗口刷新下拉框，其它窗口要重启才能看到新预设。接收方只是
+        采用磁盘上已经写好的内容，不标记 _presets_modified——否则它退出时
+        会拿这份副本再写一次盘，与之后别的窗口的改动互相覆盖。
+        """
+        app = QApplication.instance()
+        if app is None:
+            return
+        for w in app.topLevelWidgets():
+            if w is self or not isinstance(w, MainWindow) or sip.isdeleted(w):
+                continue
+            try:
+                w._adopt_presets(copy.deepcopy(self.presets))
+            except Exception:
+                logger.debug("_broadcast_presets: suppressed exception", exc_info=True)
+
+    def _adopt_presets(self, presets: list):
+        """采用别的窗口改好的预设列表；尽量按名字保住本窗口当前选中项。"""
+        combo = getattr(self, 'preset_combo', None)
+        current = combo.currentText() if combo is not None else ''
+        self.presets = presets
+        names = [p.get('name') for p in presets]
+        self.last_preset_index = names.index(current) if current in names else 0
+        self._populate_presets()
 
     # ==================== 本地快速命令相关方法 ====================
 
