@@ -440,11 +440,13 @@ class _ForwardsDialog(QDialog):
     """
 
     def __init__(self, parent=None, *, alias: str, rules: list,
-                 apply_cb=None, cancel_cb=None, active: Optional[set] = None):
+                 apply_cb=None, cancel_cb=None, active: Optional[set] = None,
+                 force_cb=None):
         super().__init__(parent)
         self._alias = alias
         self._apply_cb = apply_cb          # (spec) -> None，抛异常表示失败
         self._cancel_cb = cancel_cb
+        self._force_cb = force_cb          # (spec) -> None：端口被 ssh 占着时强制释放再挂
         self._active = set(active or ())   # 已生效规则的 key
         self.setWindowTitle(t("remote.fwd_title", host=alias))
         self.setModal(True)
@@ -646,6 +648,28 @@ class _ForwardsDialog(QDialog):
         key = self.rule_key(spec)
         try:
             (self._cancel_cb if cancel else self._apply_cb)(spec)
+        except ssh_control.LocalPortBusy as e:
+            # 端口被 ssh 进程占着：十有八九是残留的同一条转发（应用重启后
+            # 登记丢了、主连接还活着）→ 给「强制释放并启用」
+            if cancel or self._force_cb is None or not e.held_by_ssh_only():
+                QMessageBox.warning(self, t("remote.fwd_title", host=self._alias), str(e))
+                return
+            box = QMessageBox(self)
+            box.setIcon(QMessageBox.Icon.Question)
+            box.setWindowTitle(t("remote.fwd_title", host=self._alias))
+            box.setText(str(e))
+            box.setInformativeText(t("remote.fwd_port_busy_force"))
+            force_btn = box.addButton(t("remote.fwd_force_btn"),
+                                      QMessageBox.ButtonRole.AcceptRole)
+            box.addButton(QMessageBox.StandardButton.Cancel)
+            box.exec()
+            if box.clickedButton() is not force_btn:
+                return
+            try:
+                self._force_cb(spec)
+            except Exception as e2:     # noqa: BLE001
+                QMessageBox.warning(self, t("remote.fwd_title", host=self._alias), str(e2))
+                return
         except Exception as e:      # noqa: BLE001 — 原样告诉用户
             QMessageBox.warning(self, t("remote.fwd_title", host=self._alias),
                                 str(e))
@@ -2273,6 +2297,7 @@ class RemoteExplorerPanel(QWidget, explorer_common.TransferJobHost):
             self, alias=host.alias, rules=self._load_forwards(host.alias),
             apply_cb=lambda spec: ssh_control.forward_apply(host, spec, cancel=False),
             cancel_cb=lambda spec: ssh_control.forward_apply(host, spec, cancel=True),
+            force_cb=lambda spec: ssh_control.forward_force_apply(host, spec),
             active=active,
         )
         dlg.exec()

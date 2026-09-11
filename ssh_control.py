@@ -481,20 +481,88 @@ def local_port_busy(host: str, port) -> bool:
         s.close()
 
 
-def who_holds_port(port) -> str:
-    """查谁占着这个端口（lsof）；查不出来返回空串。"""
+def port_holders(port) -> list:
+    """查谁占着这个端口（lsof）→ [(进程名, pid), ...]；查不出来返回空表。"""
     try:
         proc = subprocess.run(
             ["lsof", "-nP", f"-iTCP:{int(port)}", "-sTCP:LISTEN"],
             stdout=subprocess.PIPE, stderr=subprocess.DEVNULL, timeout=5)
     except Exception:
-        return ""
+        return []
     names = []
     for line in (proc.stdout or b"").decode("utf-8", "replace").split("\n")[1:]:
         cols = line.split()
-        if len(cols) > 1 and cols[0] and (cols[0], cols[1]) not in names:
-            names.append((cols[0], cols[1]))
-    return "、".join(f"{n}(pid {p})" for n, p in names)
+        if len(cols) > 1 and cols[0] and cols[1].isdigit():
+            pair = (cols[0], int(cols[1]))
+            if pair not in names:
+                names.append(pair)
+    return names
+
+
+def who_holds_port(port) -> str:
+    """查谁占着这个端口；查不出来返回空串。"""
+    return "、".join(f"{n}(pid {p})" for n, p in port_holders(port))
+
+
+class LocalPortBusy(RuntimeError):
+    """-L/-D 要监听的本机端口已被占用。holders: [(进程名, pid)]。"""
+
+    def __init__(self, port, holders: list):
+        self.port = port
+        self.holders = list(holders)
+        who = "、".join(f"{n}(pid {p})" for n, p in self.holders)
+        super().__init__(f"本机端口 {port} 已被占用" + (f"：{who}" if who else ""))
+
+    def held_by_ssh_only(self) -> bool:
+        """占端口的全是 ssh 进程（大概率是残留的转发/主连接，可以强制释放）。"""
+        return bool(self.holders) and all(n == "ssh" for n, _ in self.holders)
+
+
+def _kill_wait(pid: int, timeout: float = 2.0) -> None:
+    """TERM → 等 → KILL。进程已不在视为成功。"""
+    import signal
+    for sig in (signal.SIGTERM, signal.SIGKILL):
+        try:
+            os.kill(pid, sig)
+        except ProcessLookupError:
+            return
+        except PermissionError:
+            raise RuntimeError(f"没有权限结束进程 {pid}")
+        deadline = time.monotonic() + timeout
+        while time.monotonic() < deadline:
+            try:
+                os.kill(pid, 0)
+            except ProcessLookupError:
+                return
+            time.sleep(0.05)
+
+
+def forward_force_apply(cfg: HostConfig, spec: dict) -> str:
+    """端口被 ssh 进程占着时的「强制释放并启用」。
+
+    最常见的情形：这台主机的常驻主连接上早就挂着同一条转发（应用重启后
+    内存里的登记没了，主连接还活着），再 Start 一次就撞到自己。所以先在
+    主连接上 `-O cancel` 同一条规则再重试；还不行才结束占着端口的 ssh
+    进程（若那是某台主机的主连接，那台主机的会话会一并断开）。占端口的
+    不是 ssh 进程时不动它——那可能是用户自己的服务。
+    """
+    kind = str(spec.get("type") or "L").upper()
+    host = spec.get("bind_host") or "127.0.0.1"
+    port = spec.get("bind_port")
+    if kind != "R" and local_port_busy(host, port):
+        try:
+            forward_apply(cfg, spec, cancel=True)
+        except (RuntimeError, subprocess.SubprocessError, OSError) as e:
+            # 主连接上本来就没这条（或主连接不在）→ 撤不掉很正常，走下一步
+            logger.debug("forward_force_apply: cancel on master failed: %s", e)
+        if local_port_busy(host, port):
+            holders = port_holders(port)
+            if holders and all(n == "ssh" for n, _ in holders):
+                for _, pid in holders:
+                    _kill_wait(pid)
+            else:
+                raise LocalPortBusy(port, holders)
+    return forward_apply(cfg, spec, cancel=False)
 
 
 def forward_apply(cfg: HostConfig, spec: dict, cancel: bool = False) -> str:
@@ -513,9 +581,7 @@ def forward_apply(cfg: HostConfig, spec: dict, cancel: bool = False) -> str:
         host = spec.get("bind_host") or "127.0.0.1"
         port = spec.get("bind_port")
         if local_port_busy(host, port):
-            who = who_holds_port(port)
-            raise RuntimeError(
-                f"本机端口 {port} 已被占用" + (f"：{who}" if who else ""))
+            raise LocalPortBusy(port, port_holders(port))
     proc = subprocess.run(
         ["ssh", "-O", ("cancel" if cancel else "forward"),
          "-o", f"ControlPath={ctl}", *args, ssh_target(cfg)],

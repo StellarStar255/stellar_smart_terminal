@@ -871,6 +871,16 @@ TRANSLATIONS = {
         "en": "This platform's OpenSSH has no ControlMaster support, so port "
               "forwarding is unavailable.",
     },
+    "remote.fwd_port_busy_force": {
+        "zh": "占着端口的是 ssh 进程，多半是上次残留的同一条转发。要强制释放吗？\n"
+              "会先在主连接上撤销这条转发再重试；还不行就结束那个 ssh 进程"
+              "（如果它是某台主机的主连接，那台主机的会话会断开）。",
+        "en": "The port is held by an ssh process, most likely a leftover of this same "
+              "forward. Force-release it?\nThe forward is first cancelled on the master "
+              "connection and retried; failing that, the ssh process is killed (if it is "
+              "another host's master connection, that host's session will drop).",
+    },
+    "remote.fwd_force_btn": {"zh": "强制释放并启用", "en": "Force-release and start"},
     "remote.fwd_failed": {"zh": "端口转发失败（{rule}）：{error}",
                            "en": "Port forward failed ({rule}): {error}"},
     "remote.mfa_drop_master": {
