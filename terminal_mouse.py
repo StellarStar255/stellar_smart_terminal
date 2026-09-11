@@ -16,6 +16,7 @@ TerminalWidget 的鼠标事件/选区/文本提取/URL/拖放方法集合，纯�
 初始化并持有；本 mixin 不可独立实例化。
 """
 
+import unicodedata
 import functools
 import sys
 
@@ -1067,6 +1068,33 @@ class TerminalMouseMixin:
     # 所以三击 /home/huangqiliang 或 huangqiliang@host 只选中其中一个 huangqiliang。
     _WORD_CHARS_NARROW = set('abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789_')
 
+    @staticmethod
+    def _word_cell_mask(line_text: str, word_chars: set) -> list:
+        """逐 cell 判定是否属于「单词」（供 _select_word_at 用）。
+
+        - ASCII 按 word_chars 集合；
+        - 非 ASCII 的字母/数字（中日韩、带音标的拉丁字母等）一律算词，
+          否则双击 images_容器空满_20260907.zip 只能选到 _20260907.zip；
+        - 宽字符占两格，第二格在 _get_line_text 里是空格占位：紧跟在
+          「属于词的宽字符」后面的那个空格算它的一部分，不然每个中文字
+          之后都会断词。全角标点（，。、）是宽字符但不算词，其占位格也不算。
+        """
+        mask = []
+        prev_word_wide = False
+        for ch in line_text:
+            if ch in word_chars:
+                is_word, wide = True, False
+            elif ch == ' ':
+                is_word, wide = prev_word_wide, False
+            elif ord(ch) > 127:
+                is_word = unicodedata.category(ch)[0] in ('L', 'N')
+                wide = unicodedata.east_asian_width(ch) in ('F', 'W')
+            else:
+                is_word, wide = False, False
+            mask.append(is_word)
+            prev_word_wide = is_word and wide
+        return mask
+
     @_history_gesture
     def _select_word_at(self, cell: tuple, word_chars: set = None):
         """选中指定位置的单词。
@@ -1085,13 +1113,14 @@ class TerminalMouseMixin:
         if not line_text:
             return
 
+        mask = self._word_cell_mask(line_text, word_chars)
         # 向左找边界
         start = col
-        while start > 0 and (start - 1 < len(line_text)) and line_text[start - 1] in word_chars:
+        while start > 0 and (start - 1 < len(mask)) and mask[start - 1]:
             start -= 1
         # 向右找边界
         end = col
-        while end < len(line_text) and line_text[end] in word_chars:
+        while end < len(mask) and mask[end]:
             end += 1
 
         if start >= end:
@@ -1109,10 +1138,11 @@ class TerminalMouseMixin:
         # 用 rstrip() 去掉行尾填充空格（应用层按盒子边距折行时，内容并不顶到终端右边缘）
         while start_col == 0 and start_row > 0 and _is_continuation(start_row - 1):
             prev_text = self._get_line_text(start_row - 1).rstrip()
-            if not prev_text or prev_text[-1] not in word_chars:
+            pmask = self._word_cell_mask(prev_text, word_chars)
+            if not prev_text or not pmask[-1]:
                 break
             s = len(prev_text)
-            while s > 0 and prev_text[s - 1] in word_chars:
+            while s > 0 and pmask[s - 1]:
                 s -= 1
             start_row -= 1
             start_col = s
@@ -1127,11 +1157,12 @@ class TerminalMouseMixin:
             if end_col < len(cur_text.rstrip()) - 1:
                 break
             next_text = self._get_line_text(end_row + 1)
-            if not next_text or next_text[0] not in word_chars:
+            nmask = self._word_cell_mask(next_text, word_chars)
+            if not next_text or not nmask[0]:
                 break
             next_content_end = len(next_text.rstrip()) - 1  # 下一行内容末列（非填充空格）
             e = 0
-            while e < len(next_text) and next_text[e] in word_chars:
+            while e < len(nmask) and nmask[e]:
                 e += 1
             end_row += 1
             end_col = e - 1
