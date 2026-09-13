@@ -296,6 +296,41 @@ def _persist_value(hours) -> str:
     return "yes" if int(hours or 0) <= 0 else f"{min(24, int(hours))}h"
 
 
+_IPQOS_CACHE: dict = {}      # ssh 目标 → 交互会话的 DSCP 类别
+
+
+def interactive_ipqos(cfg: HostConfig) -> str:
+    """这台主机上 ssh 给「交互会话」用的 DSCP 类别（`ssh -G` 的 ipqos 第一个值）。
+
+    OpenSSH 的 IPQoS 默认是「交互 / 非交互」两档（新版 ef / cs0，旧版
+    af21 / cs1），而且在连接建立时设一次就锁定。`-M -N` 的常驻主连接被判
+    成非交互 → 整条连接（含挂在上面的所有端口转发）都打最低档标记；用户
+    手敲的 `ssh -L` 带 shell 是交互会话 → 打 EF / AF21。在有拥塞的
+    Wi-Fi / VPN 上，EF 走优先队列、CS1 甚至被当"scavenger"限速，表现就是
+    应用里的转发比手敲命令慢一大截。建主连接时显式按交互档标记，让转发
+    流量与用户手敲的 ssh 完全同级。按 `ssh -G <目标>` 取值而不是写死，
+    这样与用户本机 OpenSSH 版本及 ~/.ssh/config 里的 IPQoS 设置一致。
+    """
+    target = ssh_target(cfg)
+    cached = _IPQOS_CACHE.get(target)
+    if cached:
+        return cached
+    val = "af21"
+    try:
+        proc = subprocess.run(
+            ["ssh", "-G", target], stdin=subprocess.DEVNULL,
+            stdout=subprocess.PIPE, stderr=subprocess.DEVNULL, timeout=8)
+        for line in (proc.stdout or b"").decode("utf-8", "replace").splitlines():
+            parts = line.split()
+            if len(parts) >= 2 and parts[0] == "ipqos":
+                val = parts[1]
+                break
+    except (subprocess.SubprocessError, OSError) as e:
+        logger.debug("interactive_ipqos: ssh -G failed: %s", e)
+    _IPQOS_CACHE[target] = val
+    return val
+
+
 def _master_args(cfg: HostConfig, ctl: str, persist: str, batch: bool) -> list:
     """建常驻主连接的 ssh 命令行（-M -N -f）。batch=True 时绝不弹交互提示：
     只靠密钥 / agent / ~/.ssh/config 认证，不行就立刻失败。"""
@@ -309,6 +344,8 @@ def _master_args(cfg: HostConfig, ctl: str, persist: str, batch: bool) -> list:
         "-o", "ControlMaster=yes",
         "-o", f"ControlPath={ctl}",
         "-o", f"ControlPersist={persist}",
+        # 端口转发都挂在这条连接上：按交互会话档打 DSCP（见 interactive_ipqos）
+        "-o", f"IPQoS={interactive_ipqos(cfg)}",
     ]
     if not cfg.raw:
         # 内存态主机（没进 ~/.ssh/config）才需要我们自己补端口/密钥

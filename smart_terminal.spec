@@ -131,6 +131,10 @@ if sys.platform == "darwin":
             # Big Sur / Monterey 上会在 dyld 加载 Qt 时直接崩而不是友好提示。
             "LSMinimumSystemVersion": "13.0",
             "NSHighResolutionCapable": True,
+            # 终端应用不能被 App Nap：切到浏览器用端口转发 / 看远端任务时本应用
+            # 在后台，App Nap 会对整个进程组（含 -f 转后台的 ssh 主连接）做
+            # 定时器合并与 I/O 降级，隧道和 PTY 都会变慢。Terminal.app / iTerm2 同样禁用。
+            "LSAppNapIsDisabled": True,
             "NSRequiresAquaSystemAppearance": False,
             # 终端应用需要的权限说明（访问用户文件等由系统按需弹窗）。
             # NSAppleEventsUsageDescription 缺失时 Apple 事件会被静默拒绝
