@@ -866,6 +866,9 @@ TRANSLATIONS = {
               "master connection — log in once with 🔑 MFA Login first.",
     },
     "remote.fwd_connecting_master": {"zh": "正在为 {host} 建立主连接…", "en": "Opening a master connection to {host}…"},
+    "remote.fwd_refreshing_master": {"zh": "正在按新的网络优先级重建 {host} 的主连接…",
+                                     "en": "Rebuilding the master connection to {host} with the new network priority…"},
+    "remote.fwd_applying": {"zh": "正在设置端口转发…", "en": "Applying port forwarding…"},
     "remote.fwd_master_failed": {"zh": "建不起主连接，端口转发用不了：{error}", "en": "Could not open a master connection, so port forwarding is unavailable: {error}"},
     "remote.fwd_auth_failed": {"zh": "密钥和密码都没通过认证", "en": "neither key nor password authentication succeeded"},
     "remote.fwd_unsupported": {

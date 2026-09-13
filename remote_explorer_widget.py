@@ -2252,6 +2252,8 @@ class RemoteExplorerPanel(QWidget, explorer_common.TransferJobHost):
         先试密钥 / agent，不行就用面板里缓存过的密码，再不行弹框要一次密码。
         """
         if ssh_control.master_socket_exists(host):
+            if not self._refresh_pre_qos_master(host):
+                return True      # 老主连接换不掉也不拦着用户，只是没提速
             return True
         if self._is_mfa_host(host.alias):
             QMessageBox.information(self, t("remote.fwd_title", host=host.alias),
@@ -2284,6 +2286,28 @@ class RemoteExplorerPanel(QWidget, explorer_common.TransferJobHost):
                             t("remote.fwd_master_failed", error=t("remote.fwd_auth_failed")))
         return False
 
+    def _refresh_pre_qos_master(self, host: HostConfig) -> bool:
+        """升级后还活着的老主连接（修复前建的，低优先级标记）→ 非 MFA 主机
+        静默关掉重建，让挂上去的转发真正提速。MFA 主机重建要重输码，不动，
+        用户「退出主连接」再登一次即可。返回是否已换成新主连接（本来就是
+        新的也算 True）。"""
+        if not ssh_control.master_is_pre_qos(host):
+            return True
+        if self._is_mfa_host(host.alias):
+            return False
+        try:
+            self._run_blocking(
+                lambda: ssh_control.refresh_master(
+                    host, password=self.get_cached_password(host.alias) or ""),
+                t("remote.fwd_refreshing_master", host=host.alias))
+        except Exception as e:      # noqa: BLE001 — 重建失败就保留旧的
+            logger.info("[RemoteExplorerPanel] refresh master for %s failed: %s",
+                        host.alias, e)
+            return False
+        # 老主连接上挂的转发随它一起没了：清登记，让用户/自动挂载重新挂
+        self._active_forwards.pop(host.alias, None)
+        return True
+
     def _show_forwards_dialog(self, host: HostConfig):
         """端口转发管理框。规则挂在主连接上，所以先确保主连接在。"""
         if not ssh_control.is_supported():
@@ -2293,11 +2317,17 @@ class RemoteExplorerPanel(QWidget, explorer_common.TransferJobHost):
         if not self._ensure_master_interactive(host):
             return
         active = set(self._active_forwards.get(host.alias, ()))
+        # 三个回调都走 _run_blocking：`ssh -O forward` 正常几十毫秒，但主连接
+        # 卡住时要等到 15s 超时，不能把 GUI 线程一起冻住
+        def _bg(fn):
+            return lambda spec: self._run_blocking(
+                lambda: fn(spec), t("remote.fwd_applying"))
+
         dlg = _ForwardsDialog(
             self, alias=host.alias, rules=self._load_forwards(host.alias),
-            apply_cb=lambda spec: ssh_control.forward_apply(host, spec, cancel=False),
-            cancel_cb=lambda spec: ssh_control.forward_apply(host, spec, cancel=True),
-            force_cb=lambda spec: ssh_control.forward_force_apply(host, spec),
+            apply_cb=_bg(lambda spec: ssh_control.forward_apply(host, spec, cancel=False)),
+            cancel_cb=_bg(lambda spec: ssh_control.forward_apply(host, spec, cancel=True)),
+            force_cb=_bg(lambda spec: ssh_control.forward_force_apply(host, spec)),
             active=active,
         )
         dlg.exec()
@@ -2313,6 +2343,8 @@ class RemoteExplorerPanel(QWidget, explorer_common.TransferJobHost):
             # 主连接不在 → 之前登记的转发（上次会话留下的）必然已失效，
             # 不能拿它当「已挂」跳过自动挂载
             self._active_forwards.pop(host.alias, None)
+        else:
+            self._refresh_pre_qos_master(host)   # 老主连接换新的（非 MFA）
         applied = set(self._active_forwards.get(host.alias, ()))
         pending = [spec for spec in self._load_forwards(host.alias)
                    if spec.get("auto") and _ForwardsDialog.rule_key(spec) not in applied]
@@ -2330,17 +2362,24 @@ class RemoteExplorerPanel(QWidget, explorer_common.TransferJobHost):
             except Exception as e:      # noqa: BLE001
                 self.error_occurred.emit(t("remote.fwd_master_failed", error=str(e)))
                 return
-        for spec in pending:
-            key = _ForwardsDialog.rule_key(spec)
-            try:
-                ssh_control.forward_apply(host, spec, cancel=False)
-                applied.add(key)
-                logger.info("[RemoteExplorerPanel] port forward up: %s",
-                            ssh_control.forward_label(spec))
-            except Exception as e:      # noqa: BLE001 — 端口被占等，提示即可
-                self.error_occurred.emit(t(
-                    "remote.fwd_failed",
-                    rule=ssh_control.forward_label(spec), error=str(e)))
+        def _apply_all():
+            """工作线程里逐条挂；返回 (成功 key 列表, [(规则, 错误)])。"""
+            ok, failed = [], []
+            for spec in pending:
+                try:
+                    ssh_control.forward_apply(host, spec, cancel=False)
+                    ok.append(_ForwardsDialog.rule_key(spec))
+                    logger.info("[RemoteExplorerPanel] port forward up: %s",
+                                ssh_control.forward_label(spec))
+                except Exception as e:      # noqa: BLE001 — 端口被占等，提示即可
+                    failed.append((spec, str(e)))
+            return ok, failed
+
+        ok, failed = self._run_blocking(_apply_all, t("remote.fwd_applying"))
+        applied.update(ok)
+        for spec, err in failed:
+            self.error_occurred.emit(t(
+                "remote.fwd_failed", rule=ssh_control.forward_label(spec), error=err))
         self._active_forwards[host.alias] = applied
         self._populate_hosts_list()   # 🔀 标记立刻反映到列表上
 

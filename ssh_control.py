@@ -280,6 +280,7 @@ def mfa_login(cfg: HostConfig, code: str = "", password: str = "",
         if proc.returncode == 0:
             logger.info("[SSH-CTL] %s: master connection up (persist=%s)",
                         cfg.alias, persist)
+            _mark_master_qos(cfg, ctl)
             return ctl
         err = (proc.stderr or b"").decode("utf-8", "replace").strip()
         tail = " · ".join([l for l in err.split("\n") if l.strip()][-3:])
@@ -331,6 +332,43 @@ def interactive_ipqos(cfg: HostConfig) -> str:
     return val
 
 
+def _qos_marker_path(ctl: str) -> str:
+    """记录主连接用了什么 IPQoS 的旁路文件（与 control socket 同目录同名 + .qos）。"""
+    return ctl + ".qos"
+
+
+def _mark_master_qos(cfg: HostConfig, ctl: str) -> None:
+    """主连接建成后记下它的 IPQoS 档；socket 本身读不出 TOS，只能旁路记账。"""
+    try:
+        with open(_qos_marker_path(ctl), "w", encoding="utf-8") as fh:
+            fh.write(interactive_ipqos(cfg))
+    except OSError as e:
+        logger.debug("_mark_master_qos failed: %s", e)
+
+
+def master_is_pre_qos(cfg: HostConfig) -> bool:
+    """主连接在，但它是「按交互档打 IPQoS」这个修复之前建的（没有记账文件）。
+
+    ControlPersist=yes 的主连接跨应用重启常驻，升级后老连接还是低优先级
+    标记，挂上去的转发照样慢——非 MFA 主机可以静默重建（见面板）。
+    """
+    ctl = control_path_for(cfg)
+    return bool(ctl) and os.path.exists(ctl) and not os.path.exists(_qos_marker_path(ctl))
+
+
+def refresh_master(cfg: HostConfig, password: str = "",
+                   hours: int = DEFAULT_KEEP_HOURS) -> str:
+    """关掉现有主连接再按当前参数重建（用于把修复前的老主连接换成新标记）。"""
+    master_exit(cfg)
+    ctl = control_path_for(cfg)
+    if ctl:
+        for _ in range(20):          # -O exit 是异步收尾，等 socket 消失
+            if not os.path.exists(ctl):
+                break
+            time.sleep(0.1)
+    return ensure_master(cfg, password=password, hours=hours)
+
+
 def _master_args(cfg: HostConfig, ctl: str, persist: str, batch: bool) -> list:
     """建常驻主连接的 ssh 命令行（-M -N -f）。batch=True 时绝不弹交互提示：
     只靠密钥 / agent / ~/.ssh/config 认证，不行就立刻失败。"""
@@ -376,6 +414,7 @@ def start_master_with_keys(cfg: HostConfig, hours: int = DEFAULT_KEEP_HOURS) -> 
         raise RuntimeError("连接超时")
     if proc.returncode == 0:
         logger.info("[SSH-CTL] %s: master connection up via keys", cfg.alias)
+        _mark_master_qos(cfg, ctl)
         return ctl
     err = (proc.stderr or b"").decode("utf-8", "replace").strip()
     tail = " · ".join([l for l in err.split("\n") if l.strip()][-2:])
