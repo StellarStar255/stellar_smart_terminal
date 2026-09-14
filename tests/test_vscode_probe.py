@@ -48,7 +48,10 @@ class TestProbeOffThread(unittest.TestCase):
         with mock.patch.object(vscode_manager.subprocess, 'run', side_effect=fake_run):
             panel = VSCodeExtensionPanel()
             try:
-                panel._check_vscode()
+                # 只靠面板构造时挂的 100ms 定时器触发探测，别再手动调一次
+                # _check_vscode()：两个触发源在 CI 慢机器上会撞出第二次探测
+                # （线程已结束、结果尚未投递的窗口里 isRunning() 为 False），
+                # 于是 --version 被调两次——macOS job 两次假失败都是它。
                 self._pump(lambda: 'VS Code 1.96.0' in panel.vscode_status.text())
                 self.assertIn('VS Code 1.96.0', panel.vscode_status.text())
                 self.assertTrue(calls, '没有探测到任何 code CLI 调用')
@@ -67,6 +70,35 @@ class TestProbeOffThread(unittest.TestCase):
                     self.app.sendPostedEvents(None, QEvent.Type.DeferredDelete)
                     self.app.processEvents()
 
+    def test_probe_async_dedupes_until_result_delivered(self):
+        """结果没回到 GUI 线程之前，再多的 probe_async 都不该再起线程。
+        模拟"线程已结束、finished 还排在队里"的窗口：把 isRunning 桩成 False。"""
+        calls = []
+
+        def fake_run(argv, *a, **k):
+            calls.append(list(argv))
+            if '--version' in argv:
+                return mock.Mock(returncode=0, stdout='1.96.0\n', stderr='')
+            return mock.Mock(returncode=0, stdout='', stderr='')
+
+        with mock.patch.object(vscode_manager.subprocess, 'run', side_effect=fake_run), \
+                mock.patch.object(vscode_manager.ProbeWorker, 'isRunning', return_value=False):
+            mgr = vscode_manager.VSCodeManager()
+            try:
+                mgr.probe_async()
+                # 让工作线程真正跑完 run()，但先不处理 GUI 事件（finished 仍在队列里）
+                mgr._probe_worker.wait(5000)
+                mgr.probe_async()
+                mgr.probe_async()
+                self._pump(lambda: mgr._probe_pending is False)
+                versions = [a for a in calls if '--version' in a]
+                self.assertEqual(len(versions), 1, '结果未投递前重复 probe_async 起了第二次探测')
+            finally:
+                # isRunning 被桩掉后 shutdown() 不会等线程，这里显式等，免得 QThread 析构 abort
+                if mgr._probe_worker is not None:
+                    mgr._probe_worker.wait(5000)
+                mgr.shutdown()
+
     def test_unavailable_reported_via_slot(self):
         def fake_run(argv, *a, **k):
             raise FileNotFoundError('code')
@@ -74,7 +106,6 @@ class TestProbeOffThread(unittest.TestCase):
         with mock.patch.object(vscode_manager.subprocess, 'run', side_effect=fake_run):
             panel = VSCodeExtensionPanel()
             try:
-                panel._check_vscode()
                 self._pump(lambda: panel.no_vscode_label.isVisibleTo(panel))
                 self.assertTrue(panel.no_vscode_label.isVisibleTo(panel))
             finally:

@@ -229,18 +229,26 @@ class VSCodeManager(QObject):
         self._search_worker: Optional[SearchWorker] = None
         self._install_worker: Optional[InstallWorker] = None
         self._probe_worker: Optional[ProbeWorker] = None
+        # 上一次探测的结果是否还没回到 GUI 线程。不能只看 isRunning()：工作线程
+        # run() 返回后、排队的 finished 信号被 GUI 处理前，isRunning() 已是 False，
+        # 这时再来一次 probe_async 会叠加起第二个线程、多拉一次 code CLI
+        # （面板构造的 100ms 定时器与外部刷新撞车时就会这样，CI 慢机器上稳定复现）。
+        self._probe_pending = False
         self._installed_extensions: List[str] = []
 
     def probe_async(self, list_only: bool = False):
         """异步探测 VS Code 可用性与已安装扩展（结果经 probe_completed /
         installed_list_updated 信号回 GUI 线程）。list_only=True 只刷新列表。"""
-        if self._probe_worker is not None and self._probe_worker.isRunning():
+        if self._probe_pending or (
+                self._probe_worker is not None and self._probe_worker.isRunning()):
             return  # 上一次还没回来，不叠加
+        self._probe_pending = True
         self._probe_worker = ProbeWorker(self._code_path, list_only, self)
         self._probe_worker.finished.connect(self._on_probe_finished)
         self._probe_worker.start()
 
     def _on_probe_finished(self, available: bool, version: str, installed: list):
+        self._probe_pending = False
         if available:
             self._installed_extensions = list(installed)
         if not (self._probe_worker is not None and self._probe_worker.list_only):
