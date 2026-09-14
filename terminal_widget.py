@@ -895,6 +895,10 @@ class TerminalWidget(TerminalInputMixin, TerminalMouseMixin,
         # lazygit、fzf、htop）。默认关闭：避免在 Claude Code 里误点选项。滚轮上报不受此
         # 开关影响（另有单独路径）。由主窗口按用户设置下发。
         self._mouse_click_forward_enabled = False
+        # 焦点上报（\x1b[?1004h）跟踪：Claude Code / Ink 类 TUI 默认**不开**鼠标上报，
+        # 但会无条件开焦点上报。把它当作"前台是全屏 TUI、不是行编辑器"的标志——
+        # 这类程序里单击绝不能再走"定位光标发方向键"（见 _move_cursor_to_click）。
+        self._focus_report_mode = False
 
         # 快速命令提供者回调（由主窗口设置，返回预设列表）
         self.quick_commands_provider = None
@@ -1379,7 +1383,14 @@ class TerminalWidget(TerminalInputMixin, TerminalMouseMixin,
             text = self._RE_SYNC_OUTPUT.sub('', text)      # Sync output (不支持)
             text = self._RE_KITTY_KEYBOARD.sub('', text)   # Kitty keyboard protocol
             text = self._RE_TERMINAL_QUERY.sub('', text)   # 终端查询响应（已回复，过滤掉不传给pyte）
-            text = self._RE_FOCUS_REPORT.sub('', text)     # Focus reporting
+            # 焦点上报开关：记下最后一次的状态再剥掉（pyte 不认）。开着 = 前台是
+            # Claude Code 这类 TUI，点击定位光标要闭嘴（见 _move_cursor_to_click）。
+            if '\x1b[?1004' in text:
+                on_pos = text.rfind('\x1b[?1004h')
+                off_pos = text.rfind('\x1b[?1004l')
+                if on_pos >= 0 or off_pos >= 0:
+                    self._focus_report_mode = on_pos > off_pos
+                text = self._RE_FOCUS_REPORT.sub('', text)     # Focus reporting
             text = self._RE_CURSOR_STYLE.sub('', text)     # 光标样式
 
             # OSC序列（使用预编译正则）
@@ -1573,6 +1584,8 @@ class TerminalWidget(TerminalInputMixin, TerminalMouseMixin,
 
     def _on_process_finished(self, status: int):
         """进程结束"""
+        # 程序被杀/崩溃时来不及发 \x1b[?1004l：这里复位，下一个 shell 的点击定位才正常
+        self._focus_report_mode = False
         self.session_ended.emit()
         # 关闭诊断捕获文件
         if self._debug_capture_file:

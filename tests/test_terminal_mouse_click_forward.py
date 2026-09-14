@@ -81,6 +81,51 @@ class TestMouseClickForward(unittest.TestCase):
         self._click(w, abs_cell=(12, 5), rel_cell=(2, 5))
         self.assertEqual(w._writes, [b'\x1b[D' * 3])
 
+    def test_focus_reporting_app_gets_no_arrow_burst(self):
+        """Claude Code 不开鼠标上报（默认），但会开焦点上报（\x1b[?1004h）。
+        以前这时单击仍走"定位光标"往它灌一串方向键：PTY 读端可能把这串在 ESC
+        后面拆开，而 Claude Code 对孤立 ESC 只等 50ms 就当成 Esc 键——提问框
+        直接 "User declined to answer questions"。开了焦点上报的程序一律不注入。"""
+        w = self._widget()
+        w._mouse_mode = False
+        w._process_output_text('\x1b[?1004h')
+        w.screen.cursor.y = 2
+        w.screen.cursor.x = 0
+        self._click(w, abs_cell=(12, 5), rel_cell=(2, 5))
+        self.assertEqual(w._writes, [], "焦点上报开着的 TUI 里点击不能发方向键")
+
+    def test_focus_reporting_off_restores_cursor_move(self):
+        """程序退出前关掉焦点上报（\x1b[?1004l）→ 回到普通 shell 的点击定位。"""
+        w = self._widget()
+        w._mouse_mode = False
+        w._process_output_text('\x1b[?1004h')
+        w._process_output_text('\x1b[?1004l')
+        w.screen.cursor.y = 2
+        w.screen.cursor.x = 0
+        self._click(w, abs_cell=(12, 5), rel_cell=(2, 5))
+        self.assertEqual(w._writes, [b'\x1b[C' * 5])
+
+    def test_process_exit_resets_focus_reporting(self):
+        """程序被杀没来得及发 1004l：进程结束也要复位，下一个 shell 正常定位。"""
+        w = self._widget()
+        w._mouse_mode = False
+        w._process_output_text('\x1b[?1004h')
+        w._on_process_finished(0)
+        w.screen.cursor.y = 2
+        w.screen.cursor.x = 0
+        self._click(w, abs_cell=(12, 5), rel_cell=(2, 5))
+        self.assertEqual(w._writes, [b'\x1b[C' * 5])
+
+    def test_alt_screen_app_gets_no_arrow_burst(self):
+        """备用屏幕里的 TUI（less/vim 不开鼠标时）点击也不该收到方向键。"""
+        w = self._widget()
+        w._mouse_mode = False
+        w.screen._in_alt_screen = True
+        w.screen.cursor.y = 2
+        w.screen.cursor.x = 0
+        self._click(w, abs_cell=(12, 5), rel_cell=(2, 5))
+        self.assertEqual(w._writes, [])
+
     def test_click_not_forwarded_without_mouse_mode(self):
         w = self._widget()
         w._mouse_mode = False

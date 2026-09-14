@@ -359,13 +359,12 @@ class TerminalMouseMixin:
                     self._send_mouse_event(event, 'press')
                     self._send_mouse_event(event, 'release')
                 elif not self._mouse_mode:
-                    # 非鼠标模式 - 尝试移动光标到点击位置（使用相对坐标）
+                    # 非鼠标模式 - 尝试移动光标到点击位置（使用相对坐标）。
+                    # 注意 _move_cursor_to_click 内部还会按"焦点上报/备用屏幕"
+                    # 再拦一道：Claude Code 默认不开鼠标上报，走的正是这个分支。
                     display_cell = self._pos_to_cell(event.pos())
                     self._move_cursor_to_click(display_cell)
-                # 程序开了鼠标上报、但「点击转发」开关关着：什么都别发。以前这里
-                # 也走"定位光标"，往 Claude Code 这类 TUI 里连发一串方向键转义
-                # 序列——它的选项框收到 ESC 开头的东西就当成取消（"User declined
-                # to answer questions"），一点选项就全没了。
+                # 程序开了鼠标上报、但「点击转发」开关关着：什么都别发。
                 # 清除选择状态
                 self._selection_start = None
                 self._selection_end = None
@@ -374,6 +373,21 @@ class TerminalMouseMixin:
             self.update()
         super().mouseReleaseEvent(event)
 
+    def _click_cursor_move_blocked(self) -> bool:
+        """前台程序是全屏 TUI 时，单击绝不能往它里面灌方向键。
+
+        Claude Code（Ink）默认**不开**鼠标上报，所以 _mouse_mode 那道闸拦不住它；
+        它开的是焦点上报（\x1b[?1004h）。以前点在它光标所在行（提问框里恰好是
+        当前选中项那一行——用户最想点的地方）就连发一串 \x1b[C：PTY 读端并不保证
+        一次 write 一次读到，Claude Code 一旦先读到孤零零的 ESC、随后 ~50ms 内没
+        等来余下字节，就按 Esc 键处理——提问框直接 "User declined to answer
+        questions"。方向键对它本就没意义，开了焦点上报或进了备用屏幕（less/vim
+        不开鼠标时）一律不发。
+        """
+        if getattr(self, '_focus_report_mode', False):
+            return True
+        return bool(getattr(getattr(self, 'screen', None), '_in_alt_screen', False))
+
     def _move_cursor_to_click(self, click_pos: tuple):
         """通过发送方向键移动光标到点击位置
 
@@ -381,6 +395,8 @@ class TerminalMouseMixin:
         支持 Python REPL 等交互式程序中的光标定位。
         """
         if not click_pos or self._backend is None:
+            return
+        if self._click_cursor_move_blocked():
             return
 
         # _pos_to_cell 返回 (row, col) 格式
