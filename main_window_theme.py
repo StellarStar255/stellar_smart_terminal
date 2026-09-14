@@ -68,6 +68,12 @@ def message_box_qss(theme: dict, check_image: str = "") -> str:
     设样式。设计要点：正文不用系统默认的粗体（macOS 上 Qt 把消息框主文案
     设成粗体，多行 git 输出看着像一坨），说明文字用次要色，默认按钮走
     accent 主色、其它按钮为次要样式，按钮圆角与工具栏一致。
+
+    按钮**不能写 min-width**（哪怕写 0）：样式表里一出现 min-width，Qt 就把按钮的
+    minimumWidth 改成"规则值 + 内边距"，布局从此只认这个显式最小值、不再看按文字
+    算出的 minimumSizeHint；而 macOS 上 QMessageBox 恰好按布局最小宽度 setFixedSize，
+    四个按钮全被压成同一个宽度，"Open Releases Page"/"Download & Install" 两头被
+    截掉。想让短按钮不至于太窄，用左右 padding 撑，不用 min-width。
     """
     key = ("msgbox", check_image) + _theme_key(
         theme, 'bg_dark', 'bg_medium', 'bg_lighter', 'bg_hover', 'bg_light',
@@ -116,9 +122,8 @@ def message_box_qss(theme: dict, check_image: str = "") -> str:
                 background-color: {theme.get('bg_lighter', '#e0e0e0')};
                 color: {theme.get('text', '#333333')};
                 border: 1px solid {theme.get('border', '#999999')};
-                padding: 6px 18px;
+                padding: 6px 20px;
                 border-radius: 6px;
-                min-width: 76px;
                 font-size: 13px;
             }}
             QMessageBox QPushButton:hover {{
