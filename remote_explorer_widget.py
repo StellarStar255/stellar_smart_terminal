@@ -2252,8 +2252,14 @@ class RemoteExplorerPanel(QWidget, explorer_common.TransferJobHost):
         先试密钥 / agent，不行就用面板里缓存过的密码，再不行弹框要一次密码。
         """
         if ssh_control.master_socket_exists(host):
-            if not self._refresh_pre_qos_master(host):
-                return True      # 老主连接换不掉也不拦着用户，只是没提速
+            if (self._is_mfa_host(host.alias)
+                    and ssh_control.master_is_pre_qos(host)):
+                # MFA 主连接不能静默重建（要重输动态码），但它挂着低优先级
+                # DSCP、转发慢——问用户要不要现在重登换成交互档。
+                if self._offer_mfa_qos_relogin(host):
+                    return False   # 用户选了重登：断开重连流程接管，别再开转发框
+                return True        # 用户不重登：照旧用（慢的）主连接
+            self._refresh_pre_qos_master(host)   # 非 MFA：静默重建
             return True
         if self._is_mfa_host(host.alias):
             QMessageBox.information(self, t("remote.fwd_title", host=host.alias),
@@ -2285,6 +2291,21 @@ class RemoteExplorerPanel(QWidget, explorer_common.TransferJobHost):
         QMessageBox.warning(self, t("remote.fwd_title", host=host.alias),
                             t("remote.fwd_master_failed", error=t("remote.fwd_auth_failed")))
         return False
+
+    def _offer_mfa_qos_relogin(self, host: HostConfig) -> bool:
+        """MFA 主连接挂着低优先级 DSCP（老版本 / ssh -G 瞬时失败留下的），转发慢。
+        它不能静默重建，问用户要不要现在重登换成交互档。选「是」就断开主连接并
+        重新走 MFA 登录，返回是否已发起重登。"""
+        ret = QMessageBox.question(
+            self, t("remote.fwd_title", host=host.alias),
+            t("remote.fwd_mfa_qos_relogin"),
+            QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No,
+            QMessageBox.StandardButton.No)
+        if ret != QMessageBox.StandardButton.Yes:
+            return False
+        self._drop_master(host)
+        self._mfa_login(host, allow_reuse=False)
+        return True
 
     def _refresh_pre_qos_master(self, host: HostConfig) -> bool:
         """升级后还活着的老主连接（修复前建的，低优先级标记）→ 非 MFA 主机

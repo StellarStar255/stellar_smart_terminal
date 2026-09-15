@@ -47,12 +47,30 @@ class QosMarkerTest(unittest.TestCase):
         with open(self.ctl + '.qos') as fh:
             self.assertEqual(fh.read().strip(), 'ef')
 
-    def test_pre_qos_master_detected_only_when_socket_exists_without_marker(self):
-        self.assertFalse(ssh_control.master_is_pre_qos(self.host))   # 没 socket
-        open(self.ctl, 'w').close()
-        self.assertTrue(ssh_control.master_is_pre_qos(self.host))    # 有 socket 没记账
-        open(self.ctl + '.qos', 'w').close()
-        self.assertFalse(ssh_control.master_is_pre_qos(self.host))   # 已记账
+    def test_pre_qos_master_detected_by_missing_or_mismatched_marker(self):
+        # ssh -G 恒定报 ef → 当前交互档 = ef
+        with mock.patch.object(ssh_control.subprocess, 'run',
+                               return_value=_proc(b"ipqos ef cs0\n")):
+            self.assertFalse(ssh_control.master_is_pre_qos(self.host))   # 没 socket
+            open(self.ctl, 'w').close()
+            self.assertTrue(ssh_control.master_is_pre_qos(self.host))    # 有 socket 没记账
+            with open(self.ctl + '.qos', 'w') as fh:
+                fh.write('af21')                                        # 老连接记的是低优先级档
+            self.assertTrue(ssh_control.master_is_pre_qos(self.host),
+                            "记的档(af21)与当前交互档(ef)不一致 → 应判为过期")
+            with open(self.ctl + '.qos', 'w') as fh:
+                fh.write('ef')                                          # 记的档 == 当前交互档
+            self.assertFalse(ssh_control.master_is_pre_qos(self.host))
+
+    def test_marker_records_exact_qos_used_not_a_second_probe(self):
+        """建连算一次 qos、记账用同一个值：即使两次 ssh -G 取值会漂移，
+        记的也是主连接真正打的档（否则 master_is_pre_qos 会误判成过期反复重建）。"""
+        seq = [_proc(b"ipqos ef cs0\n"), _proc(b"ipqos af21 cs1\n")]
+        with mock.patch.object(ssh_control.subprocess, 'run',
+                               side_effect=lambda *a, **k: seq.pop(0)):
+            ssh_control.start_master_with_keys(self.host)
+        with open(self.ctl + '.qos') as fh:
+            self.assertEqual(fh.read().strip(), 'ef')
 
     def test_refresh_master_exits_then_rebuilds(self):
         order = []
@@ -89,14 +107,35 @@ class PanelRefreshTest(unittest.TestCase):
         refresh.assert_called_once()
         self.assertNotIn('gpu', self.panel._active_forwards)
 
-    def test_mfa_host_pre_qos_master_left_alone(self):
+    def test_mfa_host_pre_qos_prompts_decline_keeps_slow_master(self):
+        """MFA 主连接过期：提示用户重登；用户选「否」→ 不静默重建，照旧用。"""
+        from PyQt6.QtWidgets import QMessageBox
         with mock.patch.object(ssh_control, 'master_socket_exists', return_value=True), \
              mock.patch.object(ssh_control, 'master_is_pre_qos', return_value=True), \
              mock.patch.object(self.panel, '_is_mfa_host', return_value=True), \
-             mock.patch.object(ssh_control, 'refresh_master') as refresh:
+             mock.patch.object(QMessageBox, 'question',
+                               return_value=QMessageBox.StandardButton.No) as q, \
+             mock.patch.object(ssh_control, 'refresh_master') as refresh, \
+             mock.patch.object(self.panel, '_mfa_login') as mfa:
             self.assertTrue(self.panel._ensure_master_interactive(self.host))
+        q.assert_called_once()
         refresh.assert_not_called()
+        mfa.assert_not_called()
         self.assertIn('gpu', self.panel._active_forwards)
+
+    def test_mfa_host_pre_qos_prompt_accept_drops_and_relogins(self):
+        """用户选「是」→ 断开主连接 + 重新 MFA 登录；转发框不再打开（返回 False）。"""
+        from PyQt6.QtWidgets import QMessageBox
+        with mock.patch.object(ssh_control, 'master_socket_exists', return_value=True), \
+             mock.patch.object(ssh_control, 'master_is_pre_qos', return_value=True), \
+             mock.patch.object(self.panel, '_is_mfa_host', return_value=True), \
+             mock.patch.object(QMessageBox, 'question',
+                               return_value=QMessageBox.StandardButton.Yes), \
+             mock.patch.object(self.panel, '_drop_master') as drop, \
+             mock.patch.object(self.panel, '_mfa_login') as mfa:
+            self.assertFalse(self.panel._ensure_master_interactive(self.host))
+        drop.assert_called_once()
+        mfa.assert_called_once()
 
     def test_new_master_not_touched(self):
         with mock.patch.object(ssh_control, 'master_socket_exists', return_value=True), \

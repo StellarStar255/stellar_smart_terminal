@@ -860,6 +860,15 @@ TRANSLATIONS = {
     "remote.fwd_close": {"zh": "完成", "en": "Done"},
     "remote.fwd_duplicate": {"zh": "已经有一条监听同一地址/端口的规则了。",
                               "en": "A rule already listens on that address/port."},
+    "remote.fwd_mfa_qos_relogin": {
+        "zh": "当前主连接是较早建立的，端口转发跑在较低的网络优先级（DSCP）上，比手动 "
+              "ssh 慢。重新登录可换成交互级优先级，转发随即提速。这会断开当前会话、"
+              "需要再输一次动态码。现在重新登录？",
+        "en": "The current master connection was established earlier and runs port forwards "
+              "at a lower network priority (DSCP) than a manual ssh. Re-logging in switches it "
+              "to interactive priority and speeds up forwarding. This disconnects the current "
+              "session and needs a fresh one-time code. Re-login now?",
+    },
     "remote.fwd_need_master": {
         "zh": "这台主机要动态码：端口转发要挂在常驻主连接上，请先用「🔑 MFA 登录」连一次。",
         "en": "This host needs a one-time code: port forwarding attaches to the persistent "

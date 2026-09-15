@@ -55,14 +55,23 @@ class MasterIpqosTest(unittest.TestCase):
             args = ssh_control._master_args(self.host, '/tmp/ctl', 'yes', batch=True)
         self.assertEqual(self._opt(args, 'IPQoS'), 'af21')
 
-    def test_ssh_G_failure_falls_back_to_af21_and_is_cached(self):
+    def test_ssh_G_failure_falls_back_to_ef_and_is_not_cached(self):
+        """ssh -G 失败 → 回退 ef（现代交互档），而不是把主连接标成低优先级 af21；
+        且回退值不缓存——一次瞬时失败不能钉死整个进程后续所有主连接的档。"""
         with mock.patch.object(ssh_control.subprocess, 'run',
                                side_effect=OSError("no ssh")) as run:
             a1 = ssh_control._master_args(self.host, '/tmp/ctl', 'yes', batch=True)
             a2 = ssh_control._master_args(self.host, '/tmp/ctl', 'yes', batch=False)
-        self.assertEqual(self._opt(a1, 'IPQoS'), 'af21')
-        self.assertEqual(self._opt(a2, 'IPQoS'), 'af21')
-        self.assertEqual(run.call_count, 1, "ssh -G 结果应按目标缓存")
+        self.assertEqual(self._opt(a1, 'IPQoS'), 'ef')
+        self.assertEqual(self._opt(a2, 'IPQoS'), 'ef')
+        self.assertEqual(run.call_count, 2, "回退值不该缓存，第二次要再试 ssh -G")
+
+    def test_ssh_G_success_is_cached(self):
+        with mock.patch.object(ssh_control.subprocess, 'run',
+                               return_value=_proc(b"ipqos ef cs0\n")) as run:
+            ssh_control.interactive_ipqos(self.host)
+            ssh_control.interactive_ipqos(self.host)
+        self.assertEqual(run.call_count, 1, "成功读到的值才按目标缓存")
 
     def test_real_ssh_G_on_this_machine_yields_interactive_class(self):
         """真跑一次 ssh -G（不联网）：取到的必须是交互档，不是 none/cs0/cs1。"""

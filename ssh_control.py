@@ -271,7 +271,8 @@ def mfa_login(cfg: HostConfig, code: str = "", password: str = "",
         os.chmod(askpass, 0o700)
         _write_secret_files(tmpdir, code, password)
         persist = _persist_value(hours)
-        args = _master_args(cfg, ctl, persist, batch=False)
+        qos = interactive_ipqos(cfg)
+        args = _master_args(cfg, ctl, persist, batch=False, qos=qos)
         proc = subprocess.run(
             args, env=_login_env(askpass),
             stdin=subprocess.DEVNULL, stdout=subprocess.PIPE,
@@ -280,7 +281,7 @@ def mfa_login(cfg: HostConfig, code: str = "", password: str = "",
         if proc.returncode == 0:
             logger.info("[SSH-CTL] %s: master connection up (persist=%s)",
                         cfg.alias, persist)
-            _mark_master_qos(cfg, ctl)
+            _mark_master_qos(cfg, ctl, qos)
             return ctl
         err = (proc.stderr or b"").decode("utf-8", "replace").strip()
         tail = " · ".join([l for l in err.split("\n") if l.strip()][-3:])
@@ -316,7 +317,7 @@ def interactive_ipqos(cfg: HostConfig) -> str:
     cached = _IPQOS_CACHE.get(target)
     if cached:
         return cached
-    val = "af21"
+    val = ""
     try:
         proc = subprocess.run(
             ["ssh", "-G", target], stdin=subprocess.DEVNULL,
@@ -328,6 +329,12 @@ def interactive_ipqos(cfg: HostConfig) -> str:
                 break
     except (subprocess.SubprocessError, OSError) as e:
         logger.debug("interactive_ipqos: ssh -G failed: %s", e)
+    if not val:
+        # ssh -G 没跑成 / 没报 ipqos：回退到 ef（现代 OpenSSH ≥7.8 交互会话
+        # 的默认档），**不是**旧的 af21——一次瞬时失败不能把主连接标成低优先级
+        # DSCP，那正是要避免的「转发比手敲 ssh 慢」。且**不缓存**回退值：下次
+        # 重试，免得一次抖动把整个进程里之后建的所有主连接都钉成回退档。
+        return "ef"
     _IPQOS_CACHE[target] = val
     return val
 
@@ -337,23 +344,45 @@ def _qos_marker_path(ctl: str) -> str:
     return ctl + ".qos"
 
 
-def _mark_master_qos(cfg: HostConfig, ctl: str) -> None:
-    """主连接建成后记下它的 IPQoS 档；socket 本身读不出 TOS，只能旁路记账。"""
+def _mark_master_qos(cfg: HostConfig, ctl: str, qos: str = "") -> None:
+    """主连接建成后记下它**实际打的** IPQoS 档；socket 读不出 TOS，只能旁路记账。
+
+    传入建连时算好的 qos，保证记账值 == 主连接真正用的标记。别在这里再算一次
+    interactive_ipqos：两次 ssh -G 之间取值可能不同（缓存未命中/回退），记账
+    与实际打的档一旦对不上，下面的 master_is_pre_qos 会误判成「过期」反复重建。"""
     try:
         with open(_qos_marker_path(ctl), "w", encoding="utf-8") as fh:
-            fh.write(interactive_ipqos(cfg))
+            fh.write(qos or interactive_ipqos(cfg))
     except OSError as e:
         logger.debug("_mark_master_qos failed: %s", e)
 
 
-def master_is_pre_qos(cfg: HostConfig) -> bool:
-    """主连接在，但它是「按交互档打 IPQoS」这个修复之前建的（没有记账文件）。
+def _read_master_qos(ctl: str) -> str:
+    """读旁路记账里主连接建连时用的 IPQoS 档；没有 / 读不出返回空串。"""
+    try:
+        with open(_qos_marker_path(ctl), "r", encoding="utf-8") as fh:
+            return fh.read().strip()
+    except OSError:
+        return ""
 
-    ControlPersist=yes 的主连接跨应用重启常驻，升级后老连接还是低优先级
-    标记，挂上去的转发照样慢——非 MFA 主机可以静默重建（见面板）。
+
+def master_is_pre_qos(cfg: HostConfig) -> bool:
+    """主连接在，但它的 IPQoS 档跟「现在该用的交互档」对不上 —— 需要重建。
+
+    两种情形都会让挂在上面的端口转发跑在低优先级 DSCP 上、比手敲 ssh 慢：
+    (a) 没有 .qos 记账文件 = 「按交互档打 IPQoS」这个修复之前建的老连接；
+    (b) 记的档 != 当前 ssh -G 的交互档 = 当年 ssh -G 瞬时失败被记成回退档
+        （老版本回退是 af21），或用户改了 ~/.ssh/config 里的 IPQoS。
+    ControlPersist=yes 的主连接跨应用重启常驻，所以升级 / 改配置后要能认出并
+    重建——非 MFA 主机静默重建，MFA 主机提示用户重登（见面板）。
     """
     ctl = control_path_for(cfg)
-    return bool(ctl) and os.path.exists(ctl) and not os.path.exists(_qos_marker_path(ctl))
+    if not (ctl and os.path.exists(ctl)):
+        return False
+    marked = _read_master_qos(ctl)
+    if not marked:
+        return True                          # 修复前的老连接，没记账
+    return marked != interactive_ipqos(cfg)  # 记的档与当前交互档不一致
 
 
 def refresh_master(cfg: HostConfig, password: str = "",
@@ -369,7 +398,8 @@ def refresh_master(cfg: HostConfig, password: str = "",
     return ensure_master(cfg, password=password, hours=hours)
 
 
-def _master_args(cfg: HostConfig, ctl: str, persist: str, batch: bool) -> list:
+def _master_args(cfg: HostConfig, ctl: str, persist: str, batch: bool,
+                 qos: str = "") -> list:
     """建常驻主连接的 ssh 命令行（-M -N -f）。batch=True 时绝不弹交互提示：
     只靠密钥 / agent / ~/.ssh/config 认证，不行就立刻失败。"""
     args = [
@@ -383,7 +413,7 @@ def _master_args(cfg: HostConfig, ctl: str, persist: str, batch: bool) -> list:
         "-o", f"ControlPath={ctl}",
         "-o", f"ControlPersist={persist}",
         # 端口转发都挂在这条连接上：按交互会话档打 DSCP（见 interactive_ipqos）
-        "-o", f"IPQoS={interactive_ipqos(cfg)}",
+        "-o", f"IPQoS={qos or interactive_ipqos(cfg)}",
     ]
     if not cfg.raw:
         # 内存态主机（没进 ~/.ssh/config）才需要我们自己补端口/密钥
@@ -406,7 +436,8 @@ def start_master_with_keys(cfg: HostConfig, hours: int = DEFAULT_KEEP_HOURS) -> 
     ctl = control_path_for(cfg)
     if not ctl:
         raise RuntimeError("ControlPath 建不出来（临时目录路径太长）")
-    args = _master_args(cfg, ctl, _persist_value(hours), batch=True)
+    qos = interactive_ipqos(cfg)
+    args = _master_args(cfg, ctl, _persist_value(hours), batch=True, qos=qos)
     try:
         proc = subprocess.run(args, stdin=subprocess.DEVNULL, stdout=subprocess.PIPE,
                               stderr=subprocess.PIPE, timeout=LOGIN_TIMEOUT)
@@ -414,7 +445,7 @@ def start_master_with_keys(cfg: HostConfig, hours: int = DEFAULT_KEEP_HOURS) -> 
         raise RuntimeError("连接超时")
     if proc.returncode == 0:
         logger.info("[SSH-CTL] %s: master connection up via keys", cfg.alias)
-        _mark_master_qos(cfg, ctl)
+        _mark_master_qos(cfg, ctl, qos)
         return ctl
     err = (proc.stderr or b"").decode("utf-8", "replace").strip()
     tail = " · ".join([l for l in err.split("\n") if l.strip()][-2:])
