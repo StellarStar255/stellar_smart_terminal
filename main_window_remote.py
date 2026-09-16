@@ -336,11 +336,42 @@ class RemotePanelMixin:
             pass
         import ssh_control
         if ssh_control.is_supported() and ssh_control.master_socket_exists(host_config):
+            # 缓存里那条已经死了（主连接陈旧、上次连接失败）：先真正关掉——
+            # 它带 parent 被 C++ 持有，不 disconnect 的话 executor 线程永不回收
+            old = cache.pop(host_config.alias, None)
+            if old is not None:
+                try:
+                    old.disconnect()
+                except Exception:
+                    logger.debug("_remote_session_for_host: old session disconnect failed",
+                                 exc_info=True)
             adhoc = ssh_control.ControlMasterSession(host_config, parent=self)
+            adhoc.connect_failed.connect(self._on_upload_session_failed)
             adhoc.connect_async()      # 单工作线程：后面提交的上传排在连接之后
             cache[host_config.alias] = adhoc
             return adhoc
         return None
+
+    def _on_upload_session_failed(self, msg: str):
+        """粘图临时会话连不上（多半是主连接已死、socket 陈旧）：清缓存、关会话、
+        状态栏提示一句。绑定方法槽，靠 sender() 认出是哪条会话。"""
+        sess = self.sender()
+        cache = getattr(self, '_upload_sessions', None) or {}
+        for alias, cached in list(cache.items()):
+            if cached is not sess:
+                continue
+            cache.pop(alias, None)
+            try:
+                cached.disconnect()
+            except Exception:
+                logger.debug("_on_upload_session_failed: disconnect failed", exc_info=True)
+            logger.warning(f"[RemotePaste] ad-hoc session for {alias} failed: {msg}")
+            try:
+                self.statusbar.showMessage(
+                    t("status.remote_paste_session_failed", host=alias, error=msg), 8000)
+            except Exception:
+                logger.debug("_on_upload_session_failed: statusbar unavailable",
+                             exc_info=True)
 
     def _upload_pasted_media_for_terminal(self, term, local_path: str) -> bool:
         """把本地粘贴的文件传到 term 所连的远端。
@@ -372,6 +403,11 @@ class RemotePanelMixin:
             t("status.remote_paste_uploading", host=host.alias), 10000)
 
         def _job():
+            alive = getattr(sess, 'is_alive', None)
+            if callable(alive) and not alive():
+                # 会话没连上（主连接死了）：别再 home()→"/" 去 mkdir "/.images"，
+                # 直接失败让终端回退敲本地路径
+                raise RuntimeError(f"session to {host.alias} is not connected")
             rdir = remote_dir
             if not posixpath.isabs(rdir):
                 rdir = posixpath.join(sess.home() or "/", rdir)

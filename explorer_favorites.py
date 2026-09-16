@@ -12,6 +12,8 @@ Mirrors remote_bookmarks.py, simplified to a flat list (no host
 dimension): local favorites are global, not scoped to a workspace.
 """
 import json
+import os
+import tempfile
 import threading
 from typing import Optional
 
@@ -49,9 +51,23 @@ def _load() -> list[str]:
 def _save() -> None:
     if _cache is None:
         return
+    # 原子写（同 session_manager._write_session_data）：先写同目录临时文件再
+    # os.replace。直接 open("w") 会先把原文件截成 0 字节，写一半崩溃/磁盘满
+    # 时收藏整个丢掉。
     try:
-        with _PATH.open("w", encoding="utf-8") as fh:
-            json.dump(_cache, fh, indent=2, ensure_ascii=False)
+        _PATH.parent.mkdir(parents=True, exist_ok=True)
+        fd, tmp_path = tempfile.mkstemp(
+            dir=str(_PATH.parent), suffix=".tmp", prefix=".favorites_")
+        try:
+            with os.fdopen(fd, "w", encoding="utf-8") as fh:
+                json.dump(_cache, fh, indent=2, ensure_ascii=False)
+            os.replace(tmp_path, str(_PATH))
+        except BaseException:
+            try:
+                os.unlink(tmp_path)
+            except OSError:
+                pass   # 临时文件可能已被 replace 挪走；主错误在下面 raise
+            raise
     except OSError:
         logger.warning("explorer favorites not saved", exc_info=True)
 

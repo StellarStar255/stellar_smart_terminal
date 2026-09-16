@@ -460,6 +460,21 @@ def local_entry_size(path: str) -> int:
         return 0
 
 
+def _prepare_local_copy(src: str, dst: str, overwrite: bool) -> int:
+    """复制/移动前的准备，在工作线程里跑：覆盖时先删掉目标，再统计源大小。
+
+    以前这两步都在 GUI 线程同步做——local_entry_size 要 os.walk 最多 5 万
+    条目、覆盖一个大目录的 rmtree 更是秒级，期间整个窗口无响应。
+    返回值给进度条当分母（算不出返回 0）。
+    """
+    if overwrite and os.path.lexists(dst):
+        if os.path.isdir(dst) and not os.path.islink(dst):
+            shutil.rmtree(dst)
+        else:
+            os.remove(dst)
+    return local_entry_size(src)
+
+
 def _copy_file_reporting(src: str, dst: str, report) -> None:
     """copy2 的分块版：每写一块就上报增量字节，让单个大文件也有进度。"""
     with open(src, 'rb') as fs, open(dst, 'wb') as fd:
@@ -1167,8 +1182,9 @@ class ExplorerPanel(QWidget, explorer_common.TransferJobHost):
         """
         errors = []
         skipped = 0
-        # 先在 GUI 线程把冲突问完，再把真正的复制整批交给工作线程
-        pairs: list = []
+        # 先在 GUI 线程把冲突问完；覆盖删除 + 大小统计 + 真正的复制都整批
+        # 交给工作线程（这里只跑事件循环画进度）
+        pairs: list = []   # (src, dst, overwrite)
         for src in src_paths:
             try:
                 if not os.path.exists(src):
@@ -1178,6 +1194,7 @@ class ExplorerPanel(QWidget, explorer_common.TransferJobHost):
                 if os.path.abspath(src) == os.path.abspath(dst):
                     skipped += 1
                     continue
+                overwrite = False
                 if os.path.exists(dst):
                     reply = QMessageBox.question(
                         self, t("explorer.overwrite_title"),
@@ -1188,25 +1205,38 @@ class ExplorerPanel(QWidget, explorer_common.TransferJobHost):
                     if reply != QMessageBox.StandardButton.Yes:
                         skipped += 1
                         continue
-                    if os.path.isdir(dst) and not os.path.islink(dst):
-                        shutil.rmtree(dst)
-                    else:
-                        os.remove(dst)
-                pairs.append((src, dst))
+                    overwrite = True
+                pairs.append((src, dst, overwrite))
             except Exception as e:
                 errors.append(f"{os.path.basename(src)}: {e}")
         if pairs:
             pool = self._local_executor()
-            sizes = [local_entry_size(src) for src, _ in pairs]
-            live, on_bytes = self._local_byte_counter(len(pairs))
+            preps = [pool.submit(_prepare_local_copy, src, dst, ow)
+                     for src, dst, ow in pairs]
+            try:
+                self._wait_future_with_progress(preps, t("explorer.pasting"))
+            except RuntimeError:
+                pass  # 逐个 future 归因到文件名
+            ready: list = []
+            sizes: list = []
+            for (src, dst, _ow), fut in zip(pairs, preps):
+                if not fut.done() or fut.cancelled():
+                    continue   # 面板已销毁 / 批量被取消：不再复制
+                exc = fut.exception()
+                if exc is not None:
+                    errors.append(f"{os.path.basename(src)}: {exc}")
+                    continue
+                ready.append((src, dst))
+                sizes.append(fut.result())
+            live, on_bytes = self._local_byte_counter(len(ready))
             futures = [pool.submit(copy_local_entry, src, dst, False, on_bytes(i))
-                       for i, (src, dst) in enumerate(pairs)]
+                       for i, (src, dst) in enumerate(ready)]
             try:
                 self._wait_future_with_progress(
                     futures, t("explorer.pasting"), sizes=sizes, live=live)
             except RuntimeError:
                 pass  # 逐个 future 归因到文件名
-            for (src, _dst), fut in zip(pairs, futures):
+            for (src, _dst), fut in zip(ready, futures):
                 exc = fut.exception() if fut.done() else None
                 if exc is not None:
                     errors.append(f"{os.path.basename(src)}: {exc}")
@@ -2473,6 +2503,7 @@ class ExplorerPanel(QWidget, explorer_common.TransferJobHost):
                         self._finish_job_row(job, row)
                         continue
                     # 同源同目标：原地复制 → 自动 (N) 后缀，绝不弹窗
+                    overwrite = False
                     if same_folder:
                         if os.path.exists(dst):
                             name = explorer_clipboard.next_free_name(name, local_name_exists)
@@ -2488,15 +2519,19 @@ class ExplorerPanel(QWidget, explorer_common.TransferJobHost):
                         if sticky:
                             sticky_decision = action
                         if action == "overwrite":
-                            if os.path.isdir(dst) and not os.path.islink(dst):
-                                shutil.rmtree(dst)
-                            else:
-                                os.remove(dst)
+                            overwrite = True
                         else:  # keep
                             name = explorer_clipboard.next_free_name(name, local_name_exists)
                             dst = os.path.join(target_dir, name)
-                    # 复制/移动在工作线程跑，这里只跑事件循环画进度
-                    size = local_entry_size(src)
+                    # 覆盖删除 + 大小统计 + 复制/移动都在工作线程跑，这里只跑
+                    # 事件循环画进度
+                    prep = self._local_executor().submit(
+                        _prepare_local_copy, src, dst, overwrite)
+                    self._wait_future_with_progress([prep], t("explorer.pasting"))
+                    if not prep.done() or prep.cancelled():
+                        cancel_all = True   # 批量被取消 / 面板已销毁
+                        break
+                    size = prep.result()   # 覆盖删除失败 → 抛出，由下面 except 归因到本条目
                     live, on_bytes = self._local_byte_counter(1)
                     fut = self._local_executor().submit(
                         copy_local_entry, src, dst, move_mode, on_bytes(0))

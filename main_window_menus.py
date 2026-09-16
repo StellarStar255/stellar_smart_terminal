@@ -47,7 +47,20 @@ class MenusMixin:
                 act.deleteLater()
             except RuntimeError:
                 pass
-        self.menuBar().clear()
+        menubar = self.menuBar()
+        # clear() 只摘 action；addMenu(title) 建的 QMenu 父对象是 menubar，
+        # 不主动销毁就每切一次语言多留一整套（子菜单随父菜单一起走）。
+        # 菜单里的 QAction 父对象都是窗口，不会被连带删掉。
+        for act in menubar.actions():
+            sub = act.menu()
+            if sub is None:
+                continue
+            try:
+                sub.setParent(None)
+                sub.deleteLater()
+            except RuntimeError:
+                pass
+        menubar.clear()
         self._setup_menubar()
 
     # 复用 _setup_shortcuts 建好的动作：菜单里显示同一个快捷键，且不会歧义

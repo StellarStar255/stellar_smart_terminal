@@ -10,20 +10,36 @@ import time
 from pathlib import Path
 from datetime import datetime
 
-# macOS 原生窗口支持
-if sys.platform == 'darwin':
-    try:
-        from AppKit import (
-            NSApp,
-            NSWindowCollectionBehaviorFullScreenPrimary,
-            NSWindowCollectionBehaviorManaged,
-            NSWindowCollectionBehaviorParticipatesInCycle
-        )
-        MACOS_NATIVE_AVAILABLE = True
-    except ImportError:
-        MACOS_NATIVE_AVAILABLE = False
-else:
-    MACOS_NATIVE_AVAILABLE = False
+# macOS 原生窗口支持（AppKit / pyobjc）。
+# 不在模块顶层导入：AppKit 一次要 60ms+，占 import main_window 近一半，而它
+# 只在窗口 show 之后的 _setup_macos_window / _install_backtick_monitor 里用到。
+# 首次需要时再判断并缓存；旧名字 MACOS_NATIVE_AVAILABLE 经模块级 __getattr__
+# 惰性给出，兼容外部 getattr 用法。
+_macos_native_cache = None
+
+
+def _macos_native_available() -> bool:
+    global _macos_native_cache
+    if _macos_native_cache is None:
+        ok = False
+        if sys.platform == 'darwin':
+            try:
+                import AppKit  # noqa: F401
+                ok = True
+            except ImportError:
+                ok = False
+        _macos_native_cache = ok
+    return _macos_native_cache
+
+
+def __getattr__(name):
+    # 惰性暴露的模块级名字：老代码/测试还按常量或顶层导入的方式取
+    if name == 'MACOS_NATIVE_AVAILABLE':
+        return _macos_native_available()
+    if name == 'OpenAIServerManager':
+        from openai_server import OpenAIServerManager
+        return OpenAIServerManager
+    raise AttributeError(f"module {__name__!r} has no attribute {name!r}")
 
 from PyQt6.QtWidgets import (
     QMainWindow, QWidget, QVBoxLayout, QHBoxLayout,
@@ -44,7 +60,7 @@ from terminal_widget import TerminalWidget
 from session_manager import SessionManager
 from exporter import export_session
 from history_dialog import HistoryDialog
-from openai_server import OpenAIServerManager
+# openai_server（OpenAIServerManager）在 __init__ 里惰性导入：只有建窗口才用到
 from git_widget import GitDiffView, GitOutputView
 from window_navigator import WindowNavigatorPanel  # 从 main_window 拆出的导航面板
 from main_window_update import UpdateMixin  # 应用内更新流程（从 main_window 拆出）
@@ -93,6 +109,35 @@ class _SpringPressWatcher(QObject):
             except RuntimeError:
                 pass  # 宿主窗口已销毁，探针随 parent 一起被回收前的空窗
         return False
+
+
+class _QuitEventFilter(QObject):
+    """应用级 Quit 事件探针：精确标记「整批退出」这一条同步调用链。
+
+    Cmd+Q / Dock 上 Quit / QApplication.quit()（Qt 6.5+）都给 app 发
+    QEvent.Quit，QApplication::event 在同一条调用链里同步 closeAllWindows()，
+    逐个窗口跑 closeEvent。这里在事件送达 QApplication::event 之前把宿主类的
+    _batch_closing 置 True、自己驱动 app.event(ev)、结束后复位——期间每个
+    closeEvent 都能确定"我处在整批退出里"，第一个窗口确认过就不再重复问；
+    用户手动逐个关窗时标志为 False，每个窗口照常弹确认。
+
+    不能用 singleShot(0) 清标志：第一个窗口的确认框 exec() 会跑嵌套事件循环，
+    定时器会在后面的窗口 closeEvent 之前就把标志清掉。
+    """
+
+    def __init__(self, host_cls, app):
+        super().__init__(app)
+        self._host = host_cls
+
+    def eventFilter(self, obj, event):
+        if event.type() != QEvent.Type.Quit or not isinstance(obj, QApplication):
+            return False
+        self._host._batch_closing = True
+        try:
+            obj.event(event)   # QApplication::event(Quit)：closeAllWindows + 退出判定
+        finally:
+            self._host._batch_closing = False
+        return True   # 已替 Qt 处理过，别再送一遍
 
 
 class MainWindow(ThemeMixin, ToolbarMixin, ConfigMixin, ExplorerPanelMixin,
@@ -159,6 +204,11 @@ class MainWindow(ThemeMixin, ToolbarMixin, ConfigMixin, ExplorerPanelMixin,
     # 时刻，紧随其后的窗口不再重复问——见 _quit_recently_confirmed。
     _quit_confirmed_at = 0.0
     _QUIT_CONFIRM_REUSE_SECS = 2.0
+    # 正处在整批退出（QEvent.Quit → closeAllWindows）的同步调用链里：由
+    # _QuitEventFilter 置位/复位。只有它为 True 时上面的时间戳才算数——
+    # 用户手动一个个关窗口时每个都照常弹确认（以前 2 秒内一律跳过）。
+    _batch_closing = False
+    _quit_event_filter = None   # 应用级 Quit 探针，只装一次
 
     # 全局共享的窗口导航面板
     _global_window_navigator = None
@@ -326,7 +376,8 @@ class MainWindow(ThemeMixin, ToolbarMixin, ConfigMixin, ExplorerPanelMixin,
         # 本会话粘贴过的图片路径（按粘贴顺序，供“图片”按钮查看）
         self._pasted_images = []
 
-        # OpenAI API 服务器管理器
+        # OpenAI API 服务器管理器（惰性导入：openai_server 不该拖慢 import main_window）
+        from openai_server import OpenAIServerManager
         self.openai_server_manager = OpenAIServerManager()
         self.openai_server_manager.server_started.connect(self._on_openai_server_started)
         self.openai_server_manager.server_stopped.connect(self._on_openai_server_stopped)
@@ -351,7 +402,9 @@ class MainWindow(ThemeMixin, ToolbarMixin, ConfigMixin, ExplorerPanelMixin,
         self._setup_statusbar()
         self._setup_shortcuts()
         self._setup_menubar()   # 文件 / 视图 / 终端 / 窗口 / 帮助
-        MainWindow._install_backtick_monitor()  # AppKit 级截获 Cmd+`，覆盖系统不稳定的原生循环
+        # AppKit 级 Cmd+` 监听器改到首次 show 之后再装（见 showEvent）：
+        # 构造期不拖 AppKit
+        MainWindow._install_quit_event_filter()  # 整批退出探针（进程内只装一次）
         self._connect_signals()
 
         # 恢复上次的工作目录
@@ -476,6 +529,9 @@ class MainWindow(ThemeMixin, ToolbarMixin, ConfigMixin, ExplorerPanelMixin,
             QTimer.singleShot(0, self._update_flow_toolbar_height)
         if not self._macos_window_configured:
             self._macos_window_configured = True
+            # AppKit 级截获 Cmd+`（覆盖系统不稳定的原生循环）：首次 show 后再装，
+            # 进程内只装一次；放到下一拍是为了不让首次 AppKit 导入卡在 showEvent 里
+            QTimer.singleShot(0, MainWindow._install_backtick_monitor)
             # 延迟设置，确保窗口在 macOS 中完全注册
             def setup_macos():
                 if not sip.isdeleted(self):
@@ -583,10 +639,11 @@ class MainWindow(ThemeMixin, ToolbarMixin, ConfigMixin, ExplorerPanelMixin,
 
     def _setup_macos_window(self):
         """设置 macOS 原生窗口属性，使其在 Mission Control 中正确显示"""
-        if not MACOS_NATIVE_AVAILABLE:
+        if not _macos_native_available():
             return
 
         try:
+            from AppKit import NSApp
             window_title = self.windowTitle()
 
             # 遍历所有 NSApp 窗口，找到匹配的并设置属性
@@ -621,6 +678,11 @@ class MainWindow(ThemeMixin, ToolbarMixin, ConfigMixin, ExplorerPanelMixin,
             # - NSWindowCollectionBehaviorManaged (4): 被 Mission Control 管理
             # - NSWindowCollectionBehaviorParticipatesInCycle (32): 参与 Cmd+` 窗口循环和 Dock 窗口预览
             # - NSWindowCollectionBehaviorFullScreenPrimary (128): 支持全屏
+            from AppKit import (
+                NSWindowCollectionBehaviorFullScreenPrimary,
+                NSWindowCollectionBehaviorManaged,
+                NSWindowCollectionBehaviorParticipatesInCycle,
+            )
             new_behavior = (
                 NSWindowCollectionBehaviorManaged |
                 NSWindowCollectionBehaviorParticipatesInCycle |
@@ -1496,9 +1558,10 @@ class MainWindow(ThemeMixin, ToolbarMixin, ConfigMixin, ExplorerPanelMixin,
         macOS 原生「移动焦点到下一窗口」(Cmd+`) 在多窗口下会间歇性失灵，且其优先级
         高于应用菜单快捷键（QAction 根本不触发）。NSEvent 本地监听器在事件分发到窗口/
         原生处理【之前】就能拿到 keyDown，处理后返回 None 吞掉事件，从而用我们自己的
-        _cycle_windows 稳定替换系统那条不稳定的循环。只装一次（全应用共享）。
+        _cycle_windows 稳定替换系统那条不稳定的循环。只装一次（全应用共享），
+        由首次 showEvent 延后一拍调用（不在 __init__：避免构造期导入 AppKit）。
         """
-        if not MACOS_NATIVE_AVAILABLE or cls._backtick_monitor is not None:
+        if cls._backtick_monitor is not None or not _macos_native_available():
             return
         try:
             from AppKit import NSEvent, NSEventMaskKeyDown
@@ -5587,6 +5650,13 @@ class MainWindow(ThemeMixin, ToolbarMixin, ConfigMixin, ExplorerPanelMixin,
         except Exception as e:
             logger.warning(f"[Close] git panel shutdown failed: {e}")
 
+        # 应用内更新线程：请求中止下载即可（线程无父对象、由进程级池托管，
+        # 不随窗口析构，也绝不在这里 wait 卡 GUI）
+        try:
+            self._shutdown_update_workers()
+        except Exception as e:
+            logger.warning(f"[Close] update worker shutdown failed: {e}")
+
         # 完整清理所有终端资源
         # 注意：terminal.cleanup() 内部会 join 后端 reader thread (最长 2s)，
         # 这是阻塞 GUI 线程的同步操作。逐个 try 包住，避免一个终端清理失败
@@ -5629,13 +5699,28 @@ class MainWindow(ThemeMixin, ToolbarMixin, ConfigMixin, ExplorerPanelMixin,
         self._quit_if_last_main_window()
 
     @classmethod
-    def _quit_recently_confirmed(cls) -> bool:
-        """刚刚有别的窗口在"确认退出"里点过 是/否 → 本窗口不再重复问。
+    def _install_quit_event_filter(cls):
+        """给 QApplication 装一次 Quit 探针（_QuitEventFilter），标记整批退出。"""
+        if cls._quit_event_filter is not None:
+            return
+        app = QApplication.instance()
+        if app is None:
+            return
+        cls._quit_event_filter = _QuitEventFilter(cls, app)
+        app.installEventFilter(cls._quit_event_filter)
 
-        整批退出时各窗口的 closeEvent 在同一条同步调用链里一个接一个执行，
-        中间只隔着上一个窗口的清理（现在是毫秒级），2 秒的时间窗足够覆盖；
-        用户手动一个个关窗口时，超过 2 秒照常弹框。
+    @classmethod
+    def _quit_recently_confirmed(cls) -> bool:
+        """同一批整批退出里，前面的窗口刚在"确认退出"里点过 是/否 → 本窗口不再重复问。
+
+        只在 _batch_closing 为 True（处于 QEvent.Quit → closeAllWindows 的同步
+        调用链里，见 _QuitEventFilter）时才复用确认；用户手动一个个关窗口时
+        标志为 False，每个窗口都照常弹框——以前只看 2 秒时间窗，确认过一个
+        窗口后 2 秒内手动关另一个会被直接杀掉。时间窗保留作二道保险（同一
+        批里各窗口的清理是毫秒级，2 秒足够）。
         """
+        if not cls._batch_closing:
+            return False
         stamp = cls._quit_confirmed_at
         return bool(stamp) and (time.monotonic() - stamp) < cls._QUIT_CONFIRM_REUSE_SECS
 

@@ -309,6 +309,9 @@ class UpdateDownloader(QThread):
         # 退回 Content-Length 校验。
         self._expected_size = int(expected_size or 0)
         self._cancelled = False
+        # 本次下载的临时目录（stellar_update_*）。成功后保留给安装步骤，
+        # 由调用方决定何时删（用户取消重启 → 当场删；装包 → 换包脚本删）
+        self.workdir = None
 
     def cancel(self):
         """请求中止下载。线程在下一个读块边界收工并清理临时目录，
@@ -362,6 +365,7 @@ class UpdateDownloader(QThread):
                 raise ValueError(
                     f"refusing to download update from untrusted URL: {self._url}")
             workdir = tempfile.mkdtemp(prefix='stellar_update_')
+            self.workdir = workdir
             # Windows 安装包 / Linux deb 本身就是安装载体，落盘即用；
             # 只有 macOS 的 zip 需要解包
             lower = self._url.lower()
@@ -427,16 +431,54 @@ class UpdateDownloader(QThread):
             if workdir and not keep:
                 import shutil
                 shutil.rmtree(workdir, ignore_errors=True)
+                self.workdir = None
+
+
+def _find_update_workdir(path) -> str:
+    """从下载产物路径向上找到本次下载的 stellar_update_* 临时目录；找不到
+    返回空串（脚本里对空值不做任何删除）。纯字符串处理、不 resolve：
+    macOS 上 /tmp 会被解析成 /private/tmp，脚本里删的必须是调用方看到的
+    那个路径；同时兼容 Windows 反斜杠。"""
+    path = os.fspath(path or '')
+    sep = '\\' if '\\' in path else '/'
+    parts = re.split(r'[\\/]', path)
+    for i in range(len(parts) - 1, -1, -1):
+        if parts[i].startswith('stellar_update_'):
+            return sep.join(parts[:i + 1])
+    return ''
+
+
+def _workdir_for_script(new_path, workdir) -> str:
+    """换包脚本里要删的临时目录：调用方给了就用，否则从产物路径推断；
+    只接受 stellar_update_* 目录，其它一律留空——脚本里 rm -rf 绝不能碰到
+    别的路径。"""
+    wd = workdir or _find_update_workdir(new_path)
+    if not wd:
+        return ''
+    last = re.split(r'[\\/]', wd.rstrip('/\\'))[-1]
+    return wd if last.startswith('stellar_update_') else ''
 
 
 # 分阶段换包：等待退出 → 验签+核对 Team ID → 去 quarantine → 暂存旧包 →
 # 换入新包 → 删暂存；任何一步失败把旧包挪回来，保证不出现「没有可用 app」
 # 的中间态。验签放在剥 quarantine 之前：剥掉后 Gatekeeper 不再评估新包，
 # 所以这里必须自己把关——不是我们证书签的包一律不装、拉起旧包退出。
+# 收尾（trap EXIT）：换包/回滚/放弃哪条路都把下载临时目录 WORKDIR 删掉
+# （里面是几百 MB 的 update.zip 和已经 mv 走或用不上的 .app），再删脚本
+# 自身。脚本本体在 mkstemp 出来的 /tmp 单独文件里、不在 WORKDIR 内，且
+# bash 已把这个小脚本整个读进缓冲，末尾 unlink 自己是安全的。
 _UPDATER_SCRIPT = """#!/bin/bash
 PID={pid}
 BUNDLE="{bundle}"
 NEW_APP="{new_app}"
+WORKDIR="{workdir}"
+cleanup() {{
+  case "$WORKDIR" in
+    */stellar_update_*) rm -rf "$WORKDIR" ;;
+  esac
+  rm -f -- "$0"
+}}
+trap cleanup EXIT
 for _ in $(seq 1 120); do
   kill -0 "$PID" 2>/dev/null || break
   sleep 0.5
@@ -461,9 +503,11 @@ open "$BUNDLE"
 """
 
 
-def build_updater_script(pid: int, bundle: str, new_app: str) -> str:
+def build_updater_script(pid: int, bundle: str, new_app: str,
+                         workdir: str | None = None) -> str:
     return _UPDATER_SCRIPT.format(pid=pid, bundle=bundle, new_app=new_app,
-                                  team_id=MAC_TEAM_ID)
+                                  team_id=MAC_TEAM_ID,
+                                  workdir=_workdir_for_script(new_app, workdir))
 
 
 # Windows：等应用退出 → 静默跑 Inno 安装包原地升级 → 重启应用。
@@ -487,15 +531,26 @@ goto wait
 :install
 "{setup}" /SILENT /NORESTART
 start "" "{exe}"
+del /q "{setup}"
+if not "{workdir}"=="" rd /s /q "{workdir}"
+(goto) 2>nul & del "%~f0"
 """
+# 收尾三行：先拉起新版，再删安装包和下载临时目录（几十 MB 的 setup 不该
+# 永远留在 %TEMP%），最后 `(goto) 2>nul & del "%~f0"` 是 cmd 批处理自删的
+# 标准写法——(goto) 结束批处理上下文后同一行已解析的 del 仍会执行；它不是
+# 括号块（没有 %var% 延迟展开问题，见上面第 1 条）。
 
 
-def build_updater_bat(pid: int, setup: str, exe: str) -> str:
-    return _UPDATER_BAT.format(pid=pid, setup=setup, exe=exe)
+def build_updater_bat(pid: int, setup: str, exe: str,
+                      workdir: str | None = None) -> str:
+    return _UPDATER_BAT.format(pid=pid, setup=setup, exe=exe,
+                               workdir=_workdir_for_script(setup, workdir))
 
 
-def _install_and_restart_windows(setup_path: str) -> bool:
-    bat = build_updater_bat(os.getpid(), setup_path, sys.executable)
+def _install_and_restart_windows(setup_path: str,
+                                 workdir: str | None = None) -> bool:
+    bat = build_updater_bat(os.getpid(), setup_path, sys.executable,
+                            workdir=workdir)
     fd, bat_path = tempfile.mkstemp(prefix='stellar_updater_', suffix='.bat')
     with os.fdopen(fd, 'w') as f:
         f.write(bat)
@@ -518,6 +573,14 @@ _UPDATER_SH_LINUX = """#!/bin/bash
 PID={pid}
 DEB="{deb}"
 EXE="{exe}"
+WORKDIR="{workdir}"
+cleanup() {{
+  case "$WORKDIR" in
+    */stellar_update_*) rm -rf "$WORKDIR" ;;
+  esac
+  rm -f -- "$0"
+}}
+trap cleanup EXIT
 for _ in $(seq 1 120); do
   kill -0 "$PID" 2>/dev/null || break
   sleep 0.5
@@ -529,12 +592,16 @@ setsid "$EXE" >/dev/null 2>&1 &
 """
 
 
-def build_updater_sh_linux(pid: int, deb: str, exe: str) -> str:
-    return _UPDATER_SH_LINUX.format(pid=pid, deb=deb, exe=exe)
+def build_updater_sh_linux(pid: int, deb: str, exe: str,
+                           workdir: str | None = None) -> str:
+    return _UPDATER_SH_LINUX.format(pid=pid, deb=deb, exe=exe,
+                                    workdir=_workdir_for_script(deb, workdir))
 
 
-def _install_and_restart_linux(deb_path: str) -> bool:
-    script = build_updater_sh_linux(os.getpid(), deb_path, sys.executable)
+def _install_and_restart_linux(deb_path: str,
+                               workdir: str | None = None) -> bool:
+    script = build_updater_sh_linux(os.getpid(), deb_path, sys.executable,
+                                    workdir=workdir)
     fd, sh_path = tempfile.mkstemp(prefix='stellar_updater_', suffix='.sh')
     with os.fdopen(fd, 'w') as f:
         f.write(script)
@@ -544,22 +611,25 @@ def _install_and_restart_linux(deb_path: str) -> bool:
     return True
 
 
-def install_and_restart(new_app_path: str) -> bool:
+def install_and_restart(new_app_path: str, workdir: str | None = None) -> bool:
     """写换装脚本并以独立进程启动。返回 True 后调用方应立即退出应用。
 
     macOS 传解包出的 .app 路径（分阶段换包）；Windows 传 Inno 安装包
     路径（静默原地升级）；Linux 传 .deb 路径（pkexec + apt 原地升级）。
+    workdir 是本次下载的 stellar_update_* 临时目录（UpdateDownloader.workdir），
+    脚本装完会把它删掉；不传则从产物路径推断。
     """
     if not can_self_update():
         return False   # 源码运行 / 不支持的平台：绝不触发换装
     if sys.platform == 'win32':
-        return _install_and_restart_windows(new_app_path)
+        return _install_and_restart_windows(new_app_path, workdir=workdir)
     if sys.platform == 'linux':
-        return _install_and_restart_linux(new_app_path)
+        return _install_and_restart_linux(new_app_path, workdir=workdir)
     bundle = bundle_path()
     if bundle is None:
         return False
-    script = build_updater_script(os.getpid(), str(bundle), new_app_path)
+    script = build_updater_script(os.getpid(), str(bundle), new_app_path,
+                                  workdir=workdir)
     fd, script_path = tempfile.mkstemp(prefix='stellar_updater_', suffix='.sh')
     with os.fdopen(fd, 'w') as f:
         f.write(script)

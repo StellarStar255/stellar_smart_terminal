@@ -1735,7 +1735,15 @@ class SSHSession(QObject):
 
     @_auto_reconnect
     def mkdir(self, path: str):
+        """建目录；已经是目录就算成功（与 ControlMaster 后端的 `mkdir -p` 口径一致，
+        面板/粘图按同一套接口调两个后端）。同名是普通文件照样报错。"""
         sftp = self._require()
+        try:
+            st_mode = sftp.stat(path).st_mode or 0
+        except OSError:
+            st_mode = None
+        if st_mode is not None and stat.S_ISDIR(st_mode):
+            return
         sftp.mkdir(path)
         self.invalidate_cache(self._parent(path))
 
@@ -1760,11 +1768,10 @@ class SSHSession(QObject):
         self.invalidate_cache(self._parent(new))
         self.invalidate_cache(old)
 
-    @_auto_reconnect
     def upload(self, local_path: str, remote_path: str):
-        sftp = self._require()
-        sftp.put(local_path, remote_path)
-        self.invalidate_cache(self._parent(remote_path))
+        """与 ControlMasterSession.upload 同口径：先落 <目标>.part 再改名，半成品
+        不会被别人看见。直接委托 upload_with_progress（它自带 _auto_reconnect）。"""
+        self.upload_with_progress(local_path, remote_path, None)
 
     @_auto_reconnect
     def upload_with_progress(self, local_path: str, remote_path: str,

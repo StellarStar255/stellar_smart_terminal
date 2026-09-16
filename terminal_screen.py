@@ -338,8 +338,10 @@ class CompatibleHistoryScreen(pyte.HistoryScreen):
         super().__init__(*args, **kwargs)
         # 累计推入历史的总行数（用于滚动位置稳定化）
         self._total_history_lines = 0
-        # 软换行追踪：存储自动换行的行对象 id
-        self._soft_wrapped_ids = set()
+        # 软换行标记直接挂在行对象上（line.soft_wrapped，见 is_soft_wrapped）。
+        # 以前按 id(line) 登记在集合里：行被历史 deque 淘汰后 id 会被新行复用，
+        # 集合里的陈旧 id 让新写的短行被误判成软换行（复制少换行、双击选词跨行、
+        # resize 拼错行）。挂在对象上则生命周期与行一致，无需任何清理。
         self._in_draw = False
 
         # 备用屏幕缓冲区支持
@@ -356,6 +358,17 @@ class CompatibleHistoryScreen(pyte.HistoryScreen):
 
         # REP (CSI Pn b) 需要记住最近一次 draw 的图形字符
         self._last_drawn_char = None
+
+        # 鼠标上报 (1000/1002/1003/1006) 与焦点上报 (1004) 追踪：走 set_mode/
+        # reset_mode 钩子，pyte 的解析器天然跨 feed 块，不会因序列被块边界
+        # 拆开而漏掉（以前 widget 用块内子串扫描）。_tracked_mode_gen 每次变化
+        # 自增，widget 据此判断是否要把值同步到自己的属性上。
+        self._mouse_mode = False
+        self._focus_report = False
+        self._tracked_mode_gen = 0
+
+        # DSR/DA 应答写回进程的出口（widget 注入；None 时静默丢弃）
+        self.process_input_writer = None
 
     def select_graphic_rendition(self, *attrs, **kwargs):
         # 移除 private 参数（新版 pyte 会传递，但基类不支持）
@@ -375,6 +388,7 @@ class CompatibleHistoryScreen(pyte.HistoryScreen):
             # Bracketed Paste (mode 2004)
             if 2004 in modes:
                 self._bracketed_paste = True
+            self._track_private_modes(modes, True)
         super().set_mode(*modes, **kwargs)
 
     def reset_mode(self, *modes, **kwargs):
@@ -388,7 +402,49 @@ class CompatibleHistoryScreen(pyte.HistoryScreen):
             # Bracketed Paste (mode 2004)
             if 2004 in modes:
                 self._bracketed_paste = False
+            self._track_private_modes(modes, False)
         super().reset_mode(*modes, **kwargs)
+
+    _MOUSE_MODES = frozenset({1000, 1002, 1003, 1006})
+
+    def _track_private_modes(self, modes, on: bool):
+        """记录鼠标上报 / 焦点上报开关（任一变化让 _tracked_mode_gen 自增）。"""
+        changed = False
+        if self._MOUSE_MODES & set(modes):
+            if self._mouse_mode != on:
+                self._mouse_mode = on
+                changed = True
+        if 1004 in modes:
+            if self._focus_report != on:
+                self._focus_report = on
+                changed = True
+        if changed:
+            self._tracked_mode_gen += 1
+
+    # ------ 终端查询应答（DSR / DA）------
+    # pyte 解析到 CSI n / CSI c 时调用下面两个钩子，钩子经 write_process_input
+    # 写回进程。查询序列被读取块边界拆开时 pyte 仍能正确拼出，以前 widget 在块内
+    # 找 '\x1b[6n' 子串会漏掉。
+
+    def write_process_input(self, data: str) -> None:
+        writer = self.process_input_writer
+        if writer is not None:
+            writer(data)
+
+    def report_device_attributes(self, mode=0, **kwargs):
+        # 沿用原有应答格式（VT220 兼容）而不是 pyte 默认的 \x1b[?6c
+        if mode == 0 and not kwargs.get('private'):
+            self.write_process_input('\x1b[?62;c')
+
+    def report_device_status(self, mode=0, **kwargs):
+        if mode == 5:
+            self.write_process_input('\x1b[0n')
+        elif mode == 6:
+            # 光标位置：按查询点之前已上屏的内容作答（钩子在流内原位触发）
+            y = self.cursor.y + 1
+            x = self.cursor.x + 1
+            prefix = '?' if kwargs.get('private') else ''   # DECXCPR
+            self.write_process_input(f'\x1b[{prefix}{y};{x}R')
 
     def _enter_alt_screen(self, save_cursor=True):
         """进入备用屏幕：保存主缓冲区，创建空的备用缓冲区"""
@@ -400,17 +456,16 @@ class CompatibleHistoryScreen(pyte.HistoryScreen):
         # - 外层 defaultdict 保留 default_factory
         # - 每行 StaticDefaultDict 保留 .default（缺失列返回 default_char）
         saved = copy.copy(self.buffer)
-        sw = self._soft_wrapped_ids
         for row_idx in list(saved):
             orig = saved[row_idx]
             row_copy = copy.copy(orig)
             saved[row_idx] = row_copy
-            # 软换行标记按对象 id 登记：行被拷贝后 id 变化，必须把标记迁移到
-            # 拷贝上（原行对象随后被 clear 用作备用屏幕行，不应再带主屏标记），
-            # 否则备用屏幕期间 resize/退出后主屏的软换行信息丢失，reflow 失效。
-            if id(orig) in sw:
-                sw.discard(id(orig))
-                sw.add(id(row_copy))
+            # 软换行标记挂在行对象上：copy.copy 会连 __dict__ 一起浅拷贝（与
+            # .default 同理），拷贝自动带上标记；原行对象随后被 clear 用作备用
+            # 屏幕行，必须清掉它的标记（备用屏幕期间 resize 只保留 alt 行自身标记）。
+            if getattr(orig, 'soft_wrapped', False):
+                row_copy.soft_wrapped = True
+                orig.soft_wrapped = False
         self._saved_main_buffer = saved
         self._saved_main_history_lines = self._total_history_lines
         if save_cursor:
@@ -425,10 +480,7 @@ class CompatibleHistoryScreen(pyte.HistoryScreen):
     def _leave_alt_screen(self, restore_cursor=True):
         """退出备用屏幕：恢复主缓冲区"""
         if self._saved_main_buffer is not None:
-            # 备用屏幕行对象即将废弃：清掉它们的软换行标记，避免 id 复用造成误判
-            sw = self._soft_wrapped_ids
-            for row_idx in list(self.buffer):
-                sw.discard(id(self.buffer[row_idx]))
+            # 备用屏幕行对象连同其软换行标记一起废弃
             self.buffer = self._saved_main_buffer
             self._total_history_lines = self._saved_main_history_lines
             if restore_cursor and self._saved_main_cursor is not None:
@@ -439,6 +491,9 @@ class CompatibleHistoryScreen(pyte.HistoryScreen):
             self.cursor.x = max(0, min(self.cursor.x, self.columns - 1))
             self._saved_main_buffer = None
             self._saved_main_cursor = None
+        # 备用屏幕上 RI 等操作不该往 history.bottom 塞行（reverse_index 已改走
+        # Screen 原生实现）；这里再兜底清空，确保 TUI 内容绝不并进主屏 reflow。
+        self.history.bottom.clear()
         self._in_alt_screen = False
 
     def resize(self, lines=None, columns=None):
@@ -510,9 +565,9 @@ class CompatibleHistoryScreen(pyte.HistoryScreen):
 
         # 行对象（稀疏 dict）直接传给纯函数（按需惰性转换，免去为快路径行做
         # 提取的开销）；快路径透传会原样返回同一对象，借 id 复用原行容器。
-        sw = self._soft_wrapped_ids
         rows = [line if line else [] for line in src_lines]
-        flags = [line is not None and id(line) in sw for line in src_lines]
+        flags = [line is not None and getattr(line, 'soft_wrapped', False)
+                 for line in src_lines]
         reuse = {id(line): line for line in src_lines if line}
 
         new_rows, new_soft, row_map = reflow_rows(
@@ -555,18 +610,10 @@ class CompatibleHistoryScreen(pyte.HistoryScreen):
             cursor.y = max(0, min(new_idx - hist_n, new_lines - 1))
             cursor.x = max(0, min(new_x, new_columns))
 
-        # 软换行标记重建为新行对象的 id（顺带清掉已死行的陈旧 id）；
-        # 备用屏幕期间 resize 时保留 alt 缓冲区自身行的标记
-        new_ids = set()
+        # 软换行标记直接写到新行对象上（复用的原行也按新结果覆盖）；
+        # 备用屏幕期间 resize 时 alt 缓冲区自身行的标记不受影响（挂在各自对象上）
         for line_obj, flag in zip(line_objs, new_soft):
-            if flag:
-                new_ids.add(id(line_obj))
-        if self._in_alt_screen:
-            for y in range(old_lines):
-                line = self.buffer.get(y)
-                if line is not None and id(line) in sw:
-                    new_ids.add(id(line))
-        self._soft_wrapped_ids = new_ids
+            line_obj.soft_wrapped = bool(flag)
 
     # ------ 原有功能 ------
 
@@ -596,7 +643,9 @@ class CompatibleHistoryScreen(pyte.HistoryScreen):
     def linefeed(self):
         if not self._in_draw:
             # 显式换行(\n)：确保当前行不被标记为软换行
-            self._soft_wrapped_ids.discard(id(self.buffer[self.cursor.y]))
+            line = self.buffer.get(self.cursor.y)
+            if line is not None and getattr(line, 'soft_wrapped', False):
+                line.soft_wrapped = False
         super().linefeed()
 
     def index(self):
@@ -607,30 +656,45 @@ class CompatibleHistoryScreen(pyte.HistoryScreen):
             self._total_history_lines += 1
         if self._in_draw:
             # draw() 触发的 index 是自动换行（软换行）
-            self._soft_wrapped_ids.add(id(self.buffer[self.cursor.y]))
+            self.buffer[self.cursor.y].soft_wrapped = True
         if self._in_alt_screen:
             # 备用屏幕上不推入主屏幕历史，直接调用 Screen.index
             pyte.Screen.index(self)
         else:
             super().index()
 
+    def reverse_index(self):
+        """重写：不走 HistoryScreen.reverse_index。
+
+        pyte 的版本在光标位于顶行时把被挤出的底行 append 进 history.bottom
+        （向下分页缓冲）。本应用从不使用 prev/next_page，bottom 没有任何消费者；
+        而备用屏幕上 vim/less 的 ESC M 会把 TUI 内容塞进去，resize reflow 时被
+        当成「屏幕下方的内容」并进主屏，退出 TUI 后提示符下多出几行残影。
+        主屏与备用屏幕一律按真实终端语义直接丢弃被挤出的底行。
+        """
+        pyte.Screen.reverse_index(self)
+
     def erase_in_display(self, how=0, *args, **kwargs):
         # 清屏时清理软换行标记。只清当前缓冲区行的标记：清屏不影响历史行，
         # 备用屏幕上的清屏（TUI 启动时的 \x1b[2J 很常见）更不能动主屏/历史的
         # 标记，否则之后 resize reflow 时无法把被折行的主屏长行拼回逻辑行。
         if how == 2 or how == 3:
-            sw = self._soft_wrapped_ids
             for y in range(self.lines):
                 line = self.buffer.get(y)
-                if line is not None:
-                    sw.discard(id(line))
+                if line is not None and getattr(line, 'soft_wrapped', False):
+                    line.soft_wrapped = False
         super().erase_in_display(how, *args, **kwargs)
 
     def reset(self):
         # reset() 可能在 __init__ 中被 super().__init__() 调用
-        if hasattr(self, '_soft_wrapped_ids'):
-            self._soft_wrapped_ids.clear()
+        if hasattr(self, '_in_draw'):
             self._in_draw = False
+        if hasattr(self, '_tracked_mode_gen'):
+            # RIS 清掉所有模式（pyte 会清 self.mode），追踪值同步复位
+            if self._mouse_mode or self._focus_report:
+                self._mouse_mode = False
+                self._focus_report = False
+                self._tracked_mode_gen += 1
         if hasattr(self, '_in_alt_screen') and self._in_alt_screen:
             self._in_alt_screen = False
             self._saved_main_buffer = None
@@ -656,5 +720,5 @@ class CompatibleHistoryScreen(pyte.HistoryScreen):
         self._total_history_lines = 0
 
     def is_soft_wrapped(self, buffer_line) -> bool:
-        """检查指定行是否因自动换行而换行"""
-        return id(buffer_line) in self._soft_wrapped_ids
+        """检查指定行是否因自动换行而换行（标记挂在行对象上，见 __init__）"""
+        return getattr(buffer_line, 'soft_wrapped', False)

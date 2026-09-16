@@ -181,6 +181,8 @@ class GitManager(QObject):
     def __init__(self, parent=None):
         super().__init__(parent)
         self._repo_path: Optional[str] = None
+        self._git_dir: Optional[str] = None      # 当前仓库的 .git 目录（同仓短路用）
+        self._git_found = False                  # shutil.which('git') 成功过一次就不再查
         self._watcher: Optional[QFileSystemWatcher] = None
 
         # 备份刷新定时器（5秒间隔）
@@ -230,18 +232,29 @@ class GitManager(QObject):
         git_dir = self._find_git_dir(path)
         if not git_dir:
             self._repo_path = None
+            self._git_dir = None
             self._stop_watching()
             return False
 
+        # 同一个仓库（.git 目录没变）→ 什么都不用做。这个短路必须排在 which /
+        # rev-parse 之前：每次切标签都会调到这里，以前在 GUI 线程白起一次
+        # `git rev-parse` 才发现"同一仓库不重设"。
+        if self._repo_path is not None and git_dir == self._git_dir:
+            return True
+
         # git 不在 PATH：以前一路走到 _run_git 才报原始的
-        # "[Errno 2] No such file or directory: 'git'"，这里一次性给出明确提示
-        if shutil.which('git') is None:
-            self._repo_path = None
-            self._stop_watching()
-            if not self._git_missing_reported:
-                self._git_missing_reported = True
-                self.error_occurred.emit(t("git_mgr.git_not_found"))
-            return False
+        # "[Errno 2] No such file or directory: 'git'"，这里一次性给出明确提示。
+        # 找到过一次就缓存住（which 每次都要扫一遍 PATH）。
+        if not self._git_found:
+            if shutil.which('git') is None:
+                self._repo_path = None
+                self._git_dir = None
+                self._stop_watching()
+                if not self._git_missing_reported:
+                    self._git_missing_reported = True
+                    self.error_occurred.emit(t("git_mgr.git_not_found"))
+                return False
+            self._git_found = True
 
         # 获取仓库根目录 (prefer git rev-parse for worktree correctness)
         try:
@@ -260,9 +273,11 @@ class GitManager(QObject):
 
         # 如果是同一个仓库，不需要重新设置
         if self._repo_path == repo_root:
+            self._git_dir = git_dir
             return True
 
         self._repo_path = repo_root
+        self._git_dir = git_dir
         self._setup_watcher(git_dir)
         self._refresh_timer.start()
         return True

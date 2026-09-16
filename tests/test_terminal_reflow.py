@@ -468,7 +468,7 @@ class TestWidgetSideEffects(TerminalReflowBase):
         self.assertLessEqual(w.scroll_offset, len(w.screen.history.top))
 
     def test_selected_text_after_reflow(self):
-        # reflow 后 _soft_wrapped_ids 指向新行对象：选区提取仍能无缝拼接
+        # reflow 后软换行标记落在新行对象上：选区提取仍能无缝拼接
         w = self.make_widget(cols=80, rows=10)
         self.feed(w, "$ token-" + "a" * 90 + "\r\n")
         self.resize_screen(w, 10, 40)
@@ -508,7 +508,7 @@ class TestReflowPerformance(TerminalReflowBase):
             elif kind == 1:
                 r1 = make_row(f"L{i}:" + "x" * 74)
                 r2 = make_row("tail" + "y" * 40)
-                screen._soft_wrapped_ids.add(id(r1))
+                r1.soft_wrapped = True   # 软换行标记挂在行对象上
                 rows.append(r1)
                 rows.append(r2)
             elif kind == 2:

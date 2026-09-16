@@ -217,15 +217,19 @@ class _BreadcrumbBar(QWidget):
         self._layout.setSpacing(0)
         self.setMinimumHeight(22)
         self.setToolTip("")
+        # resize 每帧都会触发 _rebuild：可见段没变就不重建（见 _rebuild）；
+        # 段的额外像素按字体缓存（见 _seg_overhead），不每次新建样本控件实测
+        self._shown: Optional[list] = None
+        self._overhead_cache: Optional[tuple] = None   # (font.key(), overhead)
 
     def set_colors(self, text: str, dim: str):
         self._text, self._dim = text, dim
-        self._rebuild()
+        self._rebuild(force=True)
 
     def set_path(self, path: str):
         self._path = path or ""
         self.setToolTip(self._path)
-        self._rebuild()
+        self._rebuild(force=True)
 
     def path(self) -> str:
         return self._path
@@ -256,6 +260,11 @@ class _BreadcrumbBar(QWidget):
         实测而不是拍脑袋：QToolButton 自己的内边距/边框跟样式表、平台都
         有关，估小了布局就会把每段挤成 "aie…ger" 那种谁也认不出的样子。
         """
+        # 只跟字体有关（QSS 里的颜色不影响尺寸）：按 font.key() 缓存，拖分栏
+        # 时每帧 resize 不再新建两个控件设样式表量宽度
+        font_key = self.font().key()
+        if self._overhead_cache is not None and self._overhead_cache[0] == font_key:
+            return self._overhead_cache[1]
         # 样本控件不能以本控件为父：父控件可见时它们会在 deleteLater 生效前
         # 被画在左上角（曾在最左边多出一个 "/"）。无父对象的隐藏控件不会显示。
         sample = _CrumbLabel("W")
@@ -270,6 +279,7 @@ class _BreadcrumbBar(QWidget):
         sep.setStyleSheet(self._sep_qss())
         sep_w = sep.sizeHint().width()
         sep.deleteLater()
+        self._overhead_cache = (font_key, overhead + sep_w)
         return overhead + sep_w
 
     def visible_segments(self, width: int = -1, seg_overhead: int = -1) -> list:
@@ -334,14 +344,23 @@ class _BreadcrumbBar(QWidget):
         super().resizeEvent(event)
         self._rebuild()
 
-    def _rebuild(self):
+    def _rebuild(self, force: bool = False):
+        """按当前宽度重建各段控件。
+
+        force=False（resize 路径）：先算一遍可见段，与上次相同就直接返回——
+        拖分栏时每帧 resize 都全量拆建十几个 QLabel 纯属浪费。路径/颜色变了
+        走 force=True。
+        """
+        shown = self.visible_segments()
+        if not force and self._shown is not None and shown == self._shown:
+            return
+        self._shown = shown
         while self._layout.count():
             item = self._layout.takeAt(0)
             w = item.widget()
             if w is not None:
                 w.setParent(None)      # 先摘干净：只 deleteLater 的话
                 w.deleteLater()        # 布局缓存不失效，整行高度会塌成 0
-        shown = self.visible_segments()
         hidden = [seg for seg in self.segments()
                   if seg not in [s for s in shown if s[0] is not None]]
         prev_was_root = False

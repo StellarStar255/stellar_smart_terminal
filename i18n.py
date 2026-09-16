@@ -1356,6 +1356,10 @@ TRANSLATIONS = {
     "status.openai_server_started": {"zh": "OpenAI API 服务器已启动: http://127.0.0.1:{port}/v1/chat/completions", "en": "OpenAI API Server started: http://127.0.0.1:{port}/v1/chat/completions"},
     "status.openai_server_running": {"zh": "OpenAI API 服务器运行中: http://127.0.0.1:{port}", "en": "OpenAI API Server running: http://127.0.0.1:{port}"},
     "status.openai_server_stopped": {"zh": "OpenAI API 服务器已停止", "en": "OpenAI API Server stopped"},
+
+    # ===== 2026-09 ssh 主连接审查 =====
+    "remote.fwd_master_riders_skip": {"zh": "{host} 的主连接还是旧的网络优先级档，但有 {n} 个终端标签正搭在它上面，这次不重建（关掉这些标签后再连一次即可换新）", "en": "The master connection to {host} still uses the old network priority class, but {n} terminal tab(s) ride on it, so it was not rebuilt (close those tabs and reconnect to renew)"},
+    "status.remote_paste_session_failed": {"zh": "{host} 的 ssh 主连接不可用，图片留在本地：{error}", "en": "ssh master connection to {host} is unavailable; image kept local: {error}"},
 }
 
 

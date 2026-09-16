@@ -1491,24 +1491,32 @@ class GitDiffView(QWidget):
         # 暂存：patch 来自 index→worktree 的 diff，正向应用到 index；
         # 取消暂存：patch 来自 HEAD→index 的 diff，反向应用到 index。
         # 在后台线程执行，撞上 index.lock 时不会把 GUI 冻住。
+        # 结果连同 path/staged 一起带回：done 槽必须是本对象的绑定方法（视图
+        # 销毁后由 Qt 自动断开）。以前用 lambda 捕获 path/staged——lambda 不是
+        # 接收者的方法，视图销毁后不会断开，apply_patch 慢一点回来就访问已删
+        # 的 C++ 对象抛 RuntimeError（PyQt 默认 excepthook 下直接 qFatal）。
         def work():
             if not gm.apply_patch(patch, cached=True, reverse=staged):
-                return None
-            return gm.get_diff(path, staged)
+                return (None, path, staged)
+            return (gm.get_diff(path, staged), path, staged)
 
         self._hunk_busy = True
-        # 不设 parent：视图先于线程销毁时 QThread 不能被连带删除（会 abort）；
-        # done 槽是本 QObject 的绑定方法，视图销毁后由 Qt 自动断开。
+        # 不设 parent：视图先于线程销毁时 QThread 不能被连带删除（会 abort）
         worker = _GitResultWorker(work, 'hunk')
-        worker.done.connect(
-            lambda new_diff, _k, p=path, st=staged: self._on_hunk_done(new_diff, p, st))
+        worker.done.connect(self._on_hunk_done)
         self._hunk_workers.add(worker)
-        worker.finished.connect(lambda w=worker: self._hunk_workers.discard(w))
+        worker.finished.connect(self._on_hunk_worker_finished)
         worker.finished.connect(worker.deleteLater)
         worker.start()
 
-    def _on_hunk_done(self, new_diff, path, staged):
+    def _on_hunk_worker_finished(self):
+        self._hunk_workers.discard(self.sender())
+
+    def _on_hunk_done(self, result, _kind: str):
         self._hunk_busy = False
+        if not isinstance(result, tuple):
+            return   # work() 抛了异常（已记日志）
+        new_diff, path, staged = result
         # 期间用户已切到别的文件/视图：结果作废
         if new_diff is None or path != self._ctx_path or staged != self._ctx_staged:
             return
@@ -2433,6 +2441,119 @@ class GitHeaderWidget(QFrame):
         self.settings_btn.setToolTip(t("git.settings_tooltip"))
 
 
+class _StashDialog(QDialog):
+    """Stash 管理对话框：列出现有 stash，支持 Pop / Apply / Drop。
+
+    列表读取与三个操作全部经 GitPanel._run_git_async 在后台线程跑（以前
+    同步跑在 GUI 线程，撞上 index.lock 会睡满退避梯子把窗口冻住）；结果
+    回到 GUI 线程后就地重载列表并触发面板刷新。所有信号槽都是绑定方法：
+    对话框先于 worker 关闭时由 Qt 自动断开，不会碰已销毁的控件。
+    """
+
+    def __init__(self, panel):
+        super().__init__(panel)
+        self._panel = panel
+        self._busy = False
+        self.setWindowTitle(t("git.stash_manage_title"))
+        self.setMinimumWidth(480)
+        v = QVBoxLayout(self)
+
+        self.list_widget = QListWidget(self)
+        v.addWidget(self.list_widget)
+
+        btns = QHBoxLayout()
+        self.pop_btn = QPushButton(t("git.stash_pop_btn"))
+        self.apply_btn = QPushButton(t("git.stash_apply_btn"))
+        self.drop_btn = QPushButton(t("git.stash_drop_btn"))
+        self.close_btn = QPushButton(t("git.stash_close_btn"))
+        btns.addWidget(self.pop_btn)
+        btns.addWidget(self.apply_btn)
+        btns.addWidget(self.drop_btn)
+        btns.addStretch()
+        btns.addWidget(self.close_btn)
+        v.addLayout(btns)
+
+        self.pop_btn.clicked.connect(self._on_pop)
+        self.apply_btn.clicked.connect(self._on_apply)
+        self.drop_btn.clicked.connect(self._on_drop)
+        self.close_btn.clicked.connect(self.accept)
+
+        self.reload_list()
+
+    # ---- 列表 ----
+    def _set_buttons_enabled(self, enabled: bool):
+        for b in (self.pop_btn, self.apply_btn, self.drop_btn):
+            b.setEnabled(enabled)
+
+    def reload_list(self):
+        """后台取 stash 列表；取回前按钮禁用。"""
+        self._busy = True
+        self._set_buttons_enabled(False)
+        self._panel._run_git_async(self._panel._git_manager.stash_list,
+                                   'stash_list', self._on_list_loaded)
+
+    def _on_list_loaded(self, stashes, _kind: str):
+        self._busy = False
+        stashes = stashes or []   # worker 抛异常时为 None
+        self.list_widget.clear()
+        for st in stashes:
+            branch = f" [{st.branch}]" if st.branch else ""
+            item = QListWidgetItem(
+                f"{st.ref}{branch}  {st.message}  ({st.date})", self.list_widget
+            )
+            item.setData(Qt.ItemDataRole.UserRole, st.index)
+        has_any = bool(stashes)
+        if not has_any:
+            placeholder = QListWidgetItem(t("git.stash_empty"), self.list_widget)
+            placeholder.setFlags(Qt.ItemFlag.NoItemFlags)
+        self._set_buttons_enabled(has_any)
+
+    def _current_index(self):
+        item = self.list_widget.currentItem()
+        if item is None:
+            return None
+        return item.data(Qt.ItemDataRole.UserRole)
+
+    # ---- 操作 ----
+    def _on_pop(self):
+        self.do_op('pop')
+
+    def _on_apply(self):
+        self.do_op('apply')
+
+    def _on_drop(self):
+        self.do_op('drop')
+
+    def do_op(self, op: str):
+        if self._busy:
+            return
+        idx = self._current_index()
+        if idx is None:
+            return
+        if op == 'drop':
+            reply = QMessageBox.question(
+                self,
+                t("git.stash_drop_confirm_title"),
+                t("git.stash_drop_confirm_msg", ref=f"stash@{{{idx}}}"),
+                QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No,
+                QMessageBox.StandardButton.No,
+            )
+            if reply != QMessageBox.StandardButton.Yes:
+                return
+        gm = self._panel._git_manager
+        fn = {'drop': gm.stash_drop, 'pop': gm.stash_pop}.get(op, gm.stash_apply)
+        self._busy = True
+        self._set_buttons_enabled(False)
+        self._panel._run_git_async(lambda: fn(idx), f'stash_{op}', self._on_op_done)
+
+    def _on_op_done(self, _result, _kind: str):
+        self._busy = False
+        # pop/apply 失败（如产生冲突）时 stash 仍在，错误已弹窗；
+        # 无论成败都重载列表 + 刷新面板，保证 UI 与仓库实际状态一致。
+        self.reload_list()
+        self._panel._refresh_all_async()
+
+
 class GitPanel(QWidget):
     """Git 管理面板"""
 
@@ -2462,6 +2583,10 @@ class GitPanel(QWidget):
         self._fetch_running = False
         self._commit_running = False
         self._checkout_running = False
+        self._stash_running = False
+        # 最近一次刷新拿到的 HEAD 引用 (kind, name)：分支删除 / 引用切换的
+        # 前置检查直接用它，不再在 GUI 线程起 git 子进程去问
+        self._head_ref = ('unknown', '')
         self._refresh_running = False   # 后台全量刷新是否进行中
         self._refresh_pending = False   # 进行中又被请求 → 跑完后补一次（合并）
         self._status_refresh_running = False  # 后台轻量状态刷新是否进行中
@@ -2713,7 +2838,10 @@ class GitPanel(QWidget):
 
     def set_repository(self, path: str):
         """设置仓库路径"""
+        prev_repo = self._git_manager._repo_path
         is_repo = self._git_manager.set_repository(path)
+        if self._git_manager._repo_path != prev_repo:
+            self._head_ref = ('unknown', '')   # 换仓库：旧 HEAD 缓存作废，等刷新
 
         if is_repo:
             self.no_repo_label.hide()
@@ -2825,6 +2953,9 @@ class GitPanel(QWidget):
             return
         self.changes_widget.update_files(data['staged'], data['unstaged'])
         self.commit_widget.set_ahead_behind(data['ahead'], data['behind'])
+        # 先缓存再更新 header：update_branches 若程序性触发 ref_changed，
+        # _on_ref_changed 比对的就是这份最新值
+        self._head_ref = tuple(data['head_ref'])
         self.header.update_branches(data['branches'], data['head_ref'], data['tags'])
         limit = data.get('log_limit', 150)
         self.graph_widget.set_commits(data['commits'],
@@ -2987,9 +3118,9 @@ class GitPanel(QWidget):
         name = (name or '').strip()
         if not name:
             return
-        # 双保险：拒绝删除当前分支
-        cur = self._git_manager.get_current_branch()
-        if cur and cur == name:
+        # 双保险：拒绝删除当前分支（用刷新缓存的 HEAD，不在 GUI 线程起 git）
+        head_kind, head_name = self._head_ref
+        if head_kind == 'local' and head_name == name:
             QMessageBox.warning(
                 self,
                 t("git.delete_branch_title"),
@@ -3328,7 +3459,13 @@ class GitPanel(QWidget):
         menu.exec(pos)
 
     def _on_stash_save(self):
-        """贮藏当前修改（含未跟踪文件），说明可留空。"""
+        """贮藏当前修改（含未跟踪文件），说明可留空。
+
+        stash push 在后台线程跑（与 commit 一样）：撞上 index.lock 或大工作区
+        时同步跑会冻住整个窗口。忙碌中重复触发直接忽略。
+        """
+        if self._stash_running:
+            return
         text, ok = QInputDialog.getText(
             self,
             t("git.stash_save_title"),
@@ -3338,7 +3475,13 @@ class GitPanel(QWidget):
         )
         if not ok:
             return
-        success, output = self._git_manager.stash_save(text)
+        self._stash_running = True
+        self._run_git_async(lambda: self._git_manager.stash_save(text),
+                            'stash_save', self._on_stash_save_done)
+
+    def _on_stash_save_done(self, result, _kind: str):
+        self._stash_running = False
+        success, output = result if isinstance(result, tuple) else (False, '')
         if not success:
             return  # 失败信息已由 error_occurred 弹出
         if 'no local changes' in (output or '').lower():
@@ -3351,83 +3494,8 @@ class GitPanel(QWidget):
         self._refresh_all_async()
 
     def _show_stash_dialog(self):
-        """Stash 管理对话框：列出现有 stash，支持 Pop / Apply / Drop。
-
-        stash 操作均为本地命令（与 commit/checkout 一样同步执行），
-        操作完成后就地刷新列表并触发面板刷新。
-        """
-        dlg = QDialog(self)
-        dlg.setWindowTitle(t("git.stash_manage_title"))
-        dlg.setMinimumWidth(480)
-        v = QVBoxLayout(dlg)
-
-        list_widget = QListWidget(dlg)
-        v.addWidget(list_widget)
-
-        btns = QHBoxLayout()
-        pop_btn = QPushButton(t("git.stash_pop_btn"))
-        apply_btn = QPushButton(t("git.stash_apply_btn"))
-        drop_btn = QPushButton(t("git.stash_drop_btn"))
-        close_btn = QPushButton(t("git.stash_close_btn"))
-        btns.addWidget(pop_btn)
-        btns.addWidget(apply_btn)
-        btns.addWidget(drop_btn)
-        btns.addStretch()
-        btns.addWidget(close_btn)
-        v.addLayout(btns)
-
-        def reload_list():
-            list_widget.clear()
-            stashes = self._git_manager.stash_list()
-            for st in stashes:
-                branch = f" [{st.branch}]" if st.branch else ""
-                item = QListWidgetItem(
-                    f"{st.ref}{branch}  {st.message}  ({st.date})", list_widget
-                )
-                item.setData(Qt.ItemDataRole.UserRole, st.index)
-            has_any = bool(stashes)
-            if not has_any:
-                placeholder = QListWidgetItem(t("git.stash_empty"), list_widget)
-                placeholder.setFlags(Qt.ItemFlag.NoItemFlags)
-            for b in (pop_btn, apply_btn, drop_btn):
-                b.setEnabled(has_any)
-
-        def current_index():
-            item = list_widget.currentItem()
-            if item is None:
-                return None
-            return item.data(Qt.ItemDataRole.UserRole)
-
-        def do_op(op: str):
-            idx = current_index()
-            if idx is None:
-                return
-            if op == 'drop':
-                reply = QMessageBox.question(
-                    dlg,
-                    t("git.stash_drop_confirm_title"),
-                    t("git.stash_drop_confirm_msg", ref=f"stash@{{{idx}}}"),
-                    QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No,
-                    QMessageBox.StandardButton.No,
-                )
-                if reply != QMessageBox.StandardButton.Yes:
-                    return
-                self._git_manager.stash_drop(idx)
-            elif op == 'pop':
-                self._git_manager.stash_pop(idx)
-            else:
-                self._git_manager.stash_apply(idx)
-            # pop/apply 失败（如产生冲突）时 stash 仍在，错误已弹窗；
-            # 无论成败都重载列表 + 刷新面板，保证 UI 与仓库实际状态一致。
-            reload_list()
-            self._refresh_all_async()
-
-        pop_btn.clicked.connect(lambda: do_op('pop'))
-        apply_btn.clicked.connect(lambda: do_op('apply'))
-        drop_btn.clicked.connect(lambda: do_op('drop'))
-        close_btn.clicked.connect(dlg.accept)
-
-        reload_list()
+        """Stash 管理对话框：列出现有 stash，支持 Pop / Apply / Drop（见 _StashDialog）。"""
+        dlg = _StashDialog(self)
         dlg.exec()
 
     def _tick_fetch(self):
@@ -3511,9 +3579,9 @@ class GitPanel(QWidget):
         # detached 占位项仅用于显示，不触发任何操作
         if kind == 'detached':
             return
-        head_kind, head_name = self._git_manager.get_head_ref()
-        # 已经在目标引用上，无需切换
-        if (kind, name) == (head_kind, head_name):
+        # 已经在目标引用上，无需切换。用 _apply_refresh 缓存的 HEAD：header 里
+        # 的选项本就来自同一次刷新，不必再在 GUI 线程起 git 问一遍
+        if (kind, name) == self._head_ref:
             return
         if self._checkout_running:
             # 上一个 checkout 还没完成：忽略本次，刷新让选中态回到实际 HEAD

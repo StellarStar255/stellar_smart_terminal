@@ -703,20 +703,69 @@ class TerminalInputMixin:
                 continue
         return Path(tempfile.gettempdir())   # 理论兜底：临时目录本身必然存在
 
+    # ---- macOS 剪贴板探测的跳过条件 ----
+
+    def _clipboard_change_token(self):
+        """macOS 剪贴板变更计数（NSPasteboard.changeCount）；拿不到返回 None。
+
+        这是"剪贴板有没有变"的权威信号：截图到剪贴板（Cmd+Shift+Ctrl+4）不切换
+        前台应用，而 Qt 只在应用重新激活时才比对 changeCount 发 dataChanged，
+        单靠 dataChanged 会把新截图当成"没变"跳过探测、把图片粘贴静默吞掉。
+        只是读一个整数，不碰 mimeData（那才是 TIFF segfault 的根源）。
+        """
+        try:
+            from AppKit import NSPasteboard
+            return int(NSPasteboard.generalPasteboard().changeCount())
+        except Exception:
+            return None
+
+    def _on_clipboard_data_changed(self):
+        """QClipboard.dataChanged：剪贴板变了，上次探测结果作废。"""
+        self._clipboard_probe_stale = True
+
+    def _ensure_clipboard_watch(self):
+        if getattr(self, '_clipboard_watch_connected', False):
+            return
+        self._clipboard_watch_connected = True
+        try:
+            QApplication.clipboard().dataChanged.connect(self._on_clipboard_data_changed)
+        except Exception:
+            logger.debug("_ensure_clipboard_watch: connect failed", exc_info=True)
+
     def _paste_clipboard_data_macos_native(self) -> bool:
         """macOS: 使用 osascript + JXA 原生 API 安全处理剪贴板图片/文件
 
         返回 True 表示剪贴板中含图片/文件并已处理；返回 False 表示剪贴板里
         没有图片或文件 URL（调用方应回落到文本粘贴）。
+
+        两处省开销：
+        · 剪贴板自上次探测起没变（dataChanged 没响 且 changeCount 相同）且上次
+          结果是"无图片/文件"→ 跳过 40~60ms 的同步 osascript，直接回落文本粘贴。
+        · 图片先由 JXA 写到系统临时文件，确认真是图片后才创建 .images 目录并
+          移过去；以前每次 Cmd+V（含纯文本）都先在 cwd 下 mkdir .images。
         """
+        import shutil
         import subprocess
+        import tempfile
         from datetime import datetime
 
-        # 准备图片保存路径
-        timestamp = datetime.now().strftime("%Y%m%d_%H%M%S_%f")
-        save_path = str(self._image_save_dir() / f"paste_{timestamp}.png")
+        self._ensure_clipboard_watch()
+        token = self._clipboard_change_token()
+        if (token is not None
+                and not getattr(self, '_clipboard_probe_stale', True)
+                and getattr(self, '_clipboard_probe_none', False)
+                and token == getattr(self, '_clipboard_probe_token', None)):
+            return False
 
-        escaped_path = save_path.replace('\\', '\\\\').replace('"', '\\"')
+        try:
+            fd, tmp_path = tempfile.mkstemp(prefix='stellar_paste_', suffix='.png')
+            os.close(fd)
+        except OSError:
+            # 临时目录都不可写：退回直接写目标目录（极端兜底）
+            timestamp = datetime.now().strftime("%Y%m%d_%H%M%S_%f")
+            tmp_path = str(self._image_save_dir() / f"paste_{timestamp}.png")
+
+        escaped_path = tmp_path.replace('\\', '\\\\').replace('"', '\\"')
 
         # JXA (JavaScript for Automation) 脚本
         # 通过 NSPasteboard 原生 API 安全读取剪贴板，在子进程中运行
@@ -755,6 +804,10 @@ if (hasFileURL) {{
 }} else {{ "NOTHING"; }}
 '''
 
+        # 探测期间剪贴板若又变了，dataChanged 会把 stale 重新置 True
+        self._clipboard_probe_stale = False
+        self._clipboard_probe_token = token
+        self._clipboard_probe_none = False
         try:
             result = subprocess.run(
                 ['osascript', '-l', 'JavaScript', '-e', jxa_script],
@@ -762,7 +815,16 @@ if (hasFileURL) {{
             )
             output = result.stdout.strip()
 
-            if output == "IMAGE_OK" and os.path.isfile(save_path):
+            if output == "IMAGE_OK" and os.path.isfile(tmp_path):
+                # 确认是图片了，才解析/创建存图目录并把临时文件移过去
+                timestamp = datetime.now().strftime("%Y%m%d_%H%M%S_%f")
+                save_path = str(self._image_save_dir() / f"paste_{timestamp}.png")
+                try:
+                    shutil.move(tmp_path, save_path)
+                except OSError:
+                    logger.debug("image paste: move to save dir failed", exc_info=True)
+                    save_path = tmp_path   # 移不动就用临时文件本身，粘贴不该失败
+                    tmp_path = None        # 别让 finally 把它删了
                 # 粘贴图片时只发送原始路径（不加 @ 前缀、不加尾部空格）。
                 # 若应用（如 Claude Code）启用了 Bracketed Paste，_write_paste
                 # 会将内容包裹在 ESC[200~/ESC[201~ 之间，应用据此识别为整块粘贴
@@ -797,10 +859,19 @@ if (hasFileURL) {{
                 return True
 
             # output == "NOTHING" 或其他非预期输出：剪贴板无图片/文件
+            # 只有明确的 NOTHING 才允许下次跳过探测（osascript 出错要重探）
+            self._clipboard_probe_none = (output == "NOTHING")
             return False
         except Exception:
             # osascript 失败时，保守地返回 False，让调用方尝试文本粘贴
             return False
+        finally:
+            # 没用上的临时文件（纯文本/文件 URL/出错）清掉
+            try:
+                if tmp_path and os.path.isfile(tmp_path):
+                    os.unlink(tmp_path)
+            except OSError:
+                pass
 
     def _paste_from_clipboard_qt(self, clipboard):
         """非 macOS 平台：使用 Qt API 处理剪贴板粘贴"""

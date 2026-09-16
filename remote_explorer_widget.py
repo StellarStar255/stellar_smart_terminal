@@ -637,13 +637,17 @@ class _ForwardsDialog(QDialog):
             return
         spec = item.data(_ROLE_ENTRY)
         if self.rule_key(spec) in self._active:
-            self._apply_selected(True)     # 删之前先撤掉，别留个孤儿监听
+            # 删之前先撤掉，别留个孤儿监听；撤不掉就把规则留着（否则那个
+            # 还挂在主连接上的监听就再也没人管了）
+            if not self._apply_selected(True):
+                return
         self._list.takeItem(self._list.row(item))
 
-    def _apply_selected(self, cancel: bool):
+    def _apply_selected(self, cancel: bool) -> bool:
+        """挂/撤当前选中的规则。返回是否成功（失败已经弹过提示）。"""
         item = self._list.currentItem()
         if item is None or self._apply_cb is None:
-            return
+            return False
         spec = item.data(_ROLE_ENTRY)
         key = self.rule_key(spec)
         try:
@@ -653,7 +657,7 @@ class _ForwardsDialog(QDialog):
             # 登记丢了、主连接还活着）→ 给「强制释放并启用」
             if cancel or self._force_cb is None or not e.held_by_ssh_only():
                 QMessageBox.warning(self, t("remote.fwd_title", host=self._alias), str(e))
-                return
+                return False
             box = QMessageBox(self)
             box.setIcon(QMessageBox.Icon.Question)
             box.setWindowTitle(t("remote.fwd_title", host=self._alias))
@@ -664,18 +668,19 @@ class _ForwardsDialog(QDialog):
             box.addButton(QMessageBox.StandardButton.Cancel)
             box.exec()
             if box.clickedButton() is not force_btn:
-                return
+                return False
             try:
                 self._force_cb(spec)
             except Exception as e2:     # noqa: BLE001
                 QMessageBox.warning(self, t("remote.fwd_title", host=self._alias), str(e2))
-                return
+                return False
         except Exception as e:      # noqa: BLE001 — 原样告诉用户
             QMessageBox.warning(self, t("remote.fwd_title", host=self._alias),
                                 str(e))
-            return
+            return False
         self._active.discard(key) if cancel else self._active.add(key)
         self._refresh_item(item)
+        return True
 
     def rules(self) -> list:
         return [self._list.item(i).data(_ROLE_ENTRY)
@@ -1220,6 +1225,8 @@ class RemoteExplorerPanel(QWidget, explorer_common.TransferJobHost):
         # 供同一主机的 SSH 终端 tab 自动回填，避免二次输入。只存内存、不落盘、
         # 断开连接即清除。
         self._cached_passwords: dict[str, str] = {}
+        # 「主连接是旧档但有终端搭车、没重建」已经提示过的主机：提示只发一次
+        self._pre_qos_notified: set = set()
         # MFA（一次性动态码）登录：登录框里预先收好的答案，认证回调直接拿它作答，
         # 不再在认证中途弹框——人在框里翻手机的几十秒足够撞上 SSH 认证超时。
         # 只在内存里活到本次认证结束，用过即擦，绝不落盘。
@@ -2316,6 +2323,21 @@ class RemoteExplorerPanel(QWidget, explorer_common.TransferJobHost):
             return True
         if self._is_mfa_host(host.alias):
             return False
+        # 重建 = `-O exit` + 新建：搭在这条主连接上的终端标签（本窗口和别的
+        # 窗口都算）会一起被掐断。有人搭车就不动，提示一次让用户自己挑时机。
+        riders = ssh_control.master_riders(host)
+        if riders:
+            notified = getattr(self, '_pre_qos_notified', None)
+            if notified is None:
+                notified = self._pre_qos_notified = set()
+            if host.alias not in notified:
+                notified.add(host.alias)
+                logger.info("[RemoteExplorerPanel] master for %s is pre-QoS but "
+                            "%d terminal(s) ride on it; not rebuilding",
+                            host.alias, len(riders))
+                self.error_occurred.emit(t("remote.fwd_master_riders_skip",
+                                           host=host.alias, n=len(riders)))
+            return False
         try:
             self._run_blocking(
                 lambda: ssh_control.refresh_master(
@@ -2348,7 +2370,9 @@ class RemoteExplorerPanel(QWidget, explorer_common.TransferJobHost):
             self, alias=host.alias, rules=self._load_forwards(host.alias),
             apply_cb=_bg(lambda spec: ssh_control.forward_apply(host, spec, cancel=False)),
             cancel_cb=_bg(lambda spec: ssh_control.forward_apply(host, spec, cancel=True)),
-            force_cb=_bg(lambda spec: ssh_control.forward_force_apply(host, spec)),
+            force_cb=_bg(lambda spec: ssh_control.forward_force_apply(
+                host, spec, mfa=self._is_mfa_host(host.alias),
+                password=self.get_cached_password(host.alias) or "")),
             active=active,
         )
         dlg.exec()
@@ -2364,13 +2388,21 @@ class RemoteExplorerPanel(QWidget, explorer_common.TransferJobHost):
             # 主连接不在 → 之前登记的转发（上次会话留下的）必然已失效，
             # 不能拿它当「已挂」跳过自动挂载
             self._active_forwards.pop(host.alias, None)
-        else:
-            self._refresh_pre_qos_master(host)   # 老主连接换新的（非 MFA）
-        applied = set(self._active_forwards.get(host.alias, ()))
-        pending = [spec for spec in self._load_forwards(host.alias)
-                   if spec.get("auto") and _ForwardsDialog.rule_key(spec) not in applied]
+
+        def _pending():
+            applied = set(self._active_forwards.get(host.alias, ()))
+            return applied, [
+                spec for spec in self._load_forwards(host.alias)
+                if spec.get("auto") and _ForwardsDialog.rule_key(spec) not in applied]
+
+        applied, pending = _pending()
         if not pending:
             return
+        if ssh_control.master_socket_exists(host):
+            # 老主连接换新的（非 MFA）——只在真有转发要挂时才做：重建会掐断
+            # 搭在主连接上的终端标签，没转发可挂就别碰它
+            self._refresh_pre_qos_master(host)
+            applied, pending = _pending()   # 重建会清登记，原先已挂的也要重挂
         # 普通（非 MFA）主机连上时还没有主连接：用刚才连接用的密钥/密码悄悄
         # 建一条，建不起来就提示、不影响这次连接
         if (not ssh_control.master_socket_exists(host)

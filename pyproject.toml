@@ -94,8 +94,6 @@ py-modules = [
     "toolbar_manager",
     "transfer_progress",
     "utils",
-    "vscode_manager",
-    "vscode_widget",
     "widgets",
     "window_host",
     "window_navigator",

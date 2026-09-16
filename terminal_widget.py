@@ -430,6 +430,12 @@ class TerminalWidget(TerminalInputMixin, TerminalMouseMixin,
     #   STELLAR_PARSE_OFF_GUI=1 → 强制开
     PARSE_ON_READER_THREAD = os.environ.get('STELLAR_PARSE_OFF_GUI', '1') != '0'
 
+    # 单次持 _screen_lock feed 的最大字符数。读取端把高速输出攒到 256KB 一块，
+    # pyte 整块 feed 要 200~300ms，paintEvent/滚动在锁上等同样久；按 16K 分片
+    # 后每次持锁 ~15ms，片间让 GUI 线程插队（实测 16KB 纯文本 15~18ms）。
+    _FEED_SLICE_CHARS = 16 * 1024
+    _FEED_SLICE_YIELD_S = float(os.environ.get('STELLAR_FEED_SLICE_YIELD_S', '0.001'))
+
     # 输出规则提醒（进程级共享，由 MainWindow 从配置载入）：输出命中任一
     # 正则 → alert_matched 信号（标签橙点 + 导航提醒）。典型用途：后台
     # 标签里 claude 跑测试崩了（Traceback/FAILED），人在别的 tab 不知道。
@@ -491,8 +497,9 @@ class TerminalWidget(TerminalInputMixin, TerminalMouseMixin,
     # 预编译正则表达式（用于过滤不支持的转义序列）
     _RE_SYNC_OUTPUT = re.compile(r'\x1b\[\?2026[hl]')
     _RE_KITTY_KEYBOARD = re.compile(r'\x1b\[[\?<>=]+u')
+    # 注意：\x1b[>…c/m/u/q 必须在 feed 前剥掉——pyte 的 CSI 解析会忽略 '>'，
+    # 把 \x1b[>4;2m 当成 SGR 4;2、把 \x1b[>c 当成主 DA 查询。
     _RE_TERMINAL_QUERY = re.compile(r'\x1b\[>[\d;]*[cmuq]')
-    _RE_FOCUS_REPORT = re.compile(r'\x1b\[\?1004[hl]')
     _RE_CURSOR_STYLE = re.compile(r'\x1b\[\d* q')  # DECSCUSR: CSI Ps SP q
     _RE_OSC_HYPERLINK = re.compile(r'\x1b\]8;[^;\x07\x1b]*;[^\x07\x1b]*(?:\x07|\x1b\\)')
     _RE_OSC_HYPERLINK_END = re.compile(r'\x1b\]8;;(?:\x07|\x1b\\)')
@@ -500,7 +507,6 @@ class TerminalWidget(TerminalInputMixin, TerminalMouseMixin,
     # 捕获所有其他未处理的 OSC 序列 (OSC 7=CWD, 133=shell integration 等)
     # 防止 Linux 上 shell 发送的 OSC 序列中的数字泄漏到显示缓冲区
     _RE_OSC_OTHER = re.compile(r'\x1b\]\d+;[^\x07\x1b]*(?:\x07|\x1b\\)')
-    _RE_DA_QUERY = re.compile(r'\x1b\[0?c')
     _RE_DA2_QUERY = re.compile(r'\x1b\[>0?c')        # Secondary DA 查询
     _RE_XTVERSION_QUERY = re.compile(r'\x1b\[>\d*q')  # XTVERSION 查询
     # DCS (Device Control String): \x1bP ... ST — pyte 不支持，内容会泄漏到显示缓冲区
@@ -589,6 +595,12 @@ class TerminalWidget(TerminalInputMixin, TerminalMouseMixin,
 
         # 恢复正常的pyte行为 - 不再干预清除操作
         # Claude Code的TUI需要正常的清除功能才能正确显示
+        # DSR/DA 应答：pyte 在流内原位触发 report_device_* 钩子 → 这里写回进程
+        # （经方法转发而非直接绑 _write_to_backend，测试里替换 _write_to_backend 仍生效）
+        self.screen.process_input_writer = self._forward_process_input
+        # 鼠标/焦点上报模式由 screen 的 set_mode/reset_mode 钩子追踪（跨块可靠），
+        # feed 后按代数同步到 widget 属性（terminal_mouse/scroll 读 widget 属性）
+        self._tracked_mode_gen_seen = self.screen._tracked_mode_gen
         self.stream = pyte.Stream(self.screen)
         # pyte 在 UTF-8 模式（默认）下会刻意忽略 DEC 特殊图形字符集
         # （ESC(0 / ESC)0 指定与 SI/SO 切换），而 ncurses 在
@@ -1177,6 +1189,13 @@ class TerminalWidget(TerminalInputMixin, TerminalMouseMixin,
             self._pending_user_command = True
         return ok
 
+    def _forward_process_input(self, data: str):
+        """screen 的 DSR/DA 应答出口（在 feed 线程、持 _screen_lock 时被调）。
+
+        _write_to_backend 只写 pty/ssh 通道，不碰 _screen_lock，不会自锁。
+        """
+        self._write_to_backend(data.encode())
+
     def resizeEvent(self, event: QResizeEvent):
         """窗口大小变化 - 使用防抖机制避免频繁重绘导致闪烁"""
         super().resizeEvent(event)
@@ -1312,28 +1331,14 @@ class TerminalWidget(TerminalInputMixin, TerminalMouseMixin,
             logger.exception(f"Output error: {e}")
 
     def _process_output_text(self, text: str):
-        """过滤/应答终端查询并 feed 进 pyte。
+        """过滤终端查询/噪声序列并 feed 进 pyte。
 
-        DSR（\x1b[6n）要按查询点**之前**已上屏的内容作答：把前缀先走完整条
-        流水线 feed 进去，再读光标回复，再处理剩余部分。以前用 feed 之前的
-        光标位置作答，"…text\x1b[6n" 同块到达时答的是旧行列，依赖 DSR 定位的
-        TUI（zsh/fish 提示框架、部分 Ink 应用）会错位。
+        DSR（\x1b[6n / \x1b[5n）、DA（\x1b[c）、鼠标/焦点上报模式（?1000-1006 /
+        ?1004）都交给 pyte 解析后走 CompatibleHistoryScreen 的钩子：解析器是
+        增量状态机，序列被读取块边界拆开也能拼上；DSR 在流内原位作答，天然
+        按查询点**之前**已上屏的内容给光标位置。以前在块内找子串既漏跨块又要
+        手工切块递归。
         """
-        if '\x1b[6n' in text:
-            head, _sep, tail = text.partition('\x1b[6n')
-            if head:
-                self._process_output_text(head)
-            with self._screen_lock:
-                row = self.screen.cursor.y + 1  # 1-based
-                col = self.screen.cursor.x + 1  # 1-based
-            self._write_to_backend(f'\x1b[{row};{col}R'.encode())
-            if not tail:
-                return
-            if '\x1b[6n' in tail:
-                self._process_output_text(tail)
-                return
-            text = tail
-
         # ssh 密码提示一次性自动回填（Remote 面板里已输入过该主机密码）
         if getattr(self, '_pending_ssh_password', None):
             self._maybe_autofill_password(text)
@@ -1352,16 +1357,10 @@ class TerminalWidget(TerminalInputMixin, TerminalMouseMixin,
 
         # 没有 ESC 的纯文本块（大多数输出）直接跳过下面十几趟正则全扫
         if '\x1b' in text:
-            # 响应设备属性查询 (DA - Device Attributes)
-            # \x1b[c 或 \x1b[0c 查询终端类型
-            if '\x1b[c' in text or '\x1b[0c' in text:
-                # 回复为 VT220 兼容终端
-                self._write_to_backend(b'\x1b[?62;c')
-                text = self._RE_DA_QUERY.sub('', text)
-
             # 响应 Secondary DA 查询 (\x1b[>c 或 \x1b[>0c)
             # Claude Code / Ink 用此检测终端类型和版本来决定渲染模式。
             # 不回复会导致超时→回退到精简布局（无 box-drawing 边框）。
+            # （pyte 会忽略 '>' 把它当主 DA，无法在钩子里区分，仍用子串扫描）
             if self._RE_DA2_QUERY.search(text):
                 # 回复为 VT520 兼容 (65), 版本 100
                 self._write_to_backend(b'\x1b[>65;100;0c')
@@ -1373,24 +1372,10 @@ class TerminalWidget(TerminalInputMixin, TerminalMouseMixin,
             if self._RE_XTVERSION_QUERY.search(text):
                 self._write_to_backend(b'\x1bP>|SmartTerminal(1.0)\x1b\\')
 
-            # 响应 DSR 操作状态查询 (\x1b[5n) — 回复 "OK"
-            # crossterm 等库会用此查询来确认终端就绪
-            if '\x1b[5n' in text:
-                self._write_to_backend(b'\x1b[0n')
-                text = text.replace('\x1b[5n', '')
-
             # 只过滤pyte完全不支持且会导致问题的序列（使用预编译正则）
             text = self._RE_SYNC_OUTPUT.sub('', text)      # Sync output (不支持)
             text = self._RE_KITTY_KEYBOARD.sub('', text)   # Kitty keyboard protocol
             text = self._RE_TERMINAL_QUERY.sub('', text)   # 终端查询响应（已回复，过滤掉不传给pyte）
-            # 焦点上报开关：记下最后一次的状态再剥掉（pyte 不认）。开着 = 前台是
-            # Claude Code 这类 TUI，点击定位光标要闭嘴（见 _move_cursor_to_click）。
-            if '\x1b[?1004' in text:
-                on_pos = text.rfind('\x1b[?1004h')
-                off_pos = text.rfind('\x1b[?1004l')
-                if on_pos >= 0 or off_pos >= 0:
-                    self._focus_report_mode = on_pos > off_pos
-                text = self._RE_FOCUS_REPORT.sub('', text)     # Focus reporting
             text = self._RE_CURSOR_STYLE.sub('', text)     # 光标样式
 
             # OSC序列（使用预编译正则）
@@ -1412,14 +1397,6 @@ class TerminalWidget(TerminalInputMixin, TerminalMouseMixin,
             text = self._RE_APC.sub('', text)               # APC 应用程序命令
             text = self._RE_PM.sub('', text)                # PM 隐私消息
 
-            # 检测鼠标模式启用/禁用
-            # 鼠标模式序列: \x1b[?1000h (启用), \x1b[?1000l (禁用)
-            # 也有 1002, 1003, 1006 等变体
-            if '\x1b[?1000h' in text or '\x1b[?1002h' in text or '\x1b[?1003h' in text or '\x1b[?1006h' in text:
-                self._mouse_mode = True
-            if '\x1b[?1000l' in text or '\x1b[?1002l' in text or '\x1b[?1003l' in text or '\x1b[?1006l' in text:
-                self._mouse_mode = False
-
         # 仅过滤纯噪声：UTF-8 解码失败产生的替换字符（不是程序真正输出的内容）
         # 注意：不要过滤可显示的 Unicode 符号（如 ⏺ U+23FA），否则 codex /
         # claude code 这类用 BMP 符号做行首/状态标记的工具会丢失关键信息。
@@ -1440,29 +1417,43 @@ class TerminalWidget(TerminalInputMixin, TerminalMouseMixin,
             self._debug_capture_file.flush()
 
         # feed 及其直接依赖的历史行数读取在锁内完成，保证与跨线程读取者
-        # （openai_server worker）互斥，不会读到 mutate 到一半的屏幕。
-        with self._screen_lock:
-            # 记录 feed 前的历史行数，用于滚动位置稳定化
-            old_total = self.screen._total_history_lines
+        # （openai_server worker、GUI 线程 paintEvent/选区）互斥，不会读到
+        # mutate 到一半的屏幕。大块按 _FEED_SLICE_CHARS 分片、片间释放锁，
+        # GUI 线程最多等一片（~15ms）而不是整块（256KB 要 200~300ms）。
+        # pyte Stream 是增量状态机，ESC 序列切在片中间也能续接。
+        # lines_added 按片累加：每片在自己的持锁区间内取差值，异步 reflow 若
+        # 插在片间修正了 _total_history_lines 不会被算进来——与整块原子时
+        # "只计本次 feed 新增"的语义一致。
+        lines_added = 0
+        step = self._FEED_SLICE_CHARS
+        n = len(text)
+        pos = 0
+        screen = self.screen
+        lock = self._screen_lock
+        while True:
+            piece = text if n <= step else text[pos:pos + step]
+            pos += step
+            last = pos >= n
+            with lock:
+                old_total = screen._total_history_lines
+                self._feed_locked(piece)
+                lines_added += screen._total_history_lines - old_total
+                if last:
+                    # 顺手刷新显示用的历史行数缓存（len() 一次，几乎免费）
+                    self._history_count_cached = self._history_count_locked()
+            if last:
+                break
+            # 片间真让出：RLock 不公平，释放后立刻重进锁，GUI 线程即使已在等
+            # 也抢不到（macOS 上 sleep(0) 不换线程），短睡才能把锁让出去
+            time.sleep(self._FEED_SLICE_YIELD_S)
 
-            # 送入pyte处理（带错误恢复）
-            try:
-                self.stream.feed(text)
-            except Exception as feed_err:
-                # pyte 处理异常时尝试逐字符恢复，避免丢失整块数据
-                logger.warning(f"[Terminal] stream.feed error: {feed_err}, attempting char-by-char recovery")
-                if self._debug_capture_enabled and self._debug_capture_file:
-                    self._debug_capture_file.write(f"FEED ERROR: {feed_err}\n")
-                for ch in text:
-                    try:
-                        self.stream.feed(ch)
-                    except Exception:
-                        logger.debug("_on_output: suppressed exception", exc_info=True)
-
-            new_total = self.screen._total_history_lines
-            lines_added = new_total - old_total
-            # 顺手刷新显示用的历史行数缓存（len() 一次，几乎免费）
-            self._history_count_cached = self._history_count_locked()
+        # 鼠标/焦点上报模式：screen 钩子里追踪，按代数同步到 widget 属性
+        # （读取线程写、GUI 线程读，都是简单赋值；不清零测试/外部直接设的值）
+        gen = screen._tracked_mode_gen
+        if gen != self._tracked_mode_gen_seen:
+            self._tracked_mode_gen_seen = gen
+            self._mouse_mode = screen._mouse_mode
+            self._focus_report_mode = screen._focus_report
 
         # 滚动位置稳定化：用户回滚浏览时新输出不应让显示内容跳动。补偿逻辑
         # 改 scroll_offset，而 scroll_offset 由 GUI 线程独占读写——读取线程
@@ -1484,6 +1475,21 @@ class TerminalWidget(TerminalInputMixin, TerminalMouseMixin,
         # 同线程发射时是直连(等价于原地调用)，无额外延迟。
         if text:
             self._output_activity.emit(len(text))
+
+    def _feed_locked(self, text: str):
+        """把一片文本送入 pyte（调用方须持 _screen_lock），带逐字符错误恢复。"""
+        try:
+            self.stream.feed(text)
+        except Exception as feed_err:
+            # pyte 处理异常时尝试逐字符恢复，避免丢失整块数据
+            logger.warning(f"[Terminal] stream.feed error: {feed_err}, attempting char-by-char recovery")
+            if self._debug_capture_enabled and self._debug_capture_file:
+                self._debug_capture_file.write(f"FEED ERROR: {feed_err}\n")
+            for ch in text:
+                try:
+                    self.stream.feed(ch)
+                except Exception:
+                    logger.debug("_on_output: suppressed exception", exc_info=True)
 
     def _on_output_activity(self, n: int):
         """GUI 线程：标记有输出活动并重置“执行完毕”空闲计时器。"""
@@ -1585,7 +1591,9 @@ class TerminalWidget(TerminalInputMixin, TerminalMouseMixin,
     def _on_process_finished(self, status: int):
         """进程结束"""
         # 程序被杀/崩溃时来不及发 \x1b[?1004l：这里复位，下一个 shell 的点击定位才正常
+        # （screen 侧同步复位、不改代数：下次真的收到 ?1004h 才会再同步成 True）
         self._focus_report_mode = False
+        self.screen._focus_report = False
         self.session_ended.emit()
         # 关闭诊断捕获文件
         if self._debug_capture_file:

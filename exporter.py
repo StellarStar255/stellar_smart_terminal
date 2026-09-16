@@ -568,21 +568,27 @@ class Exporter:
         return all(c in deco_chars for c in stripped)
 
     def _clean_whitespace(self, text: str) -> str:
-        """清理多余的空白和重复内容"""
+        """清理多余的空白和重复内容
+
+        去重只针对**相邻**的重复行（TUI 重绘把同一行连续吐两遍就是这种）。
+        以前是整段范围的集合去重：代码里第二个 `}`、日志里重复出现的
+        `[INFO] ...` 行全被吞掉，三种导出格式都受影响。
+        """
         import re
 
         lines = text.split('\n')
         cleaned_lines = []
-        seen_content = set()  # 用于去重
+        last_content = None  # 上一行保留下来的非空内容（相邻去重用）
 
         for line in lines:
             clean_line = strip_ansi(line)
             stripped = clean_line.strip()
 
-            # 空行：只保留一个
+            # 空行：只保留一个；空行隔开的相同内容不算相邻重复
             if stripped == '':
                 if cleaned_lines and cleaned_lines[-1] != '':
                     cleaned_lines.append('')
+                last_content = None
                 continue
 
             # 跳过UI元素行
@@ -602,10 +608,10 @@ class Exporter:
             if stripped in ['└', '├', '|', '│']:
                 continue
 
-            # 去重：跳过已出现的相同内容
-            if stripped in seen_content:
+            # 相邻去重：紧接着上一行的相同内容跳过
+            if stripped == last_content:
                 continue
-            seen_content.add(stripped)
+            last_content = stripped
 
             cleaned_lines.append(clean_line.rstrip())
 

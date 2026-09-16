@@ -279,22 +279,32 @@ class TabSplitMixin:
         title = self.tab_widget.tabText(idx)
         was_current = self.tab_widget.currentIndex() == idx
 
-        # 先把旧页面从 tab 中摘下（removeTab 不销毁控件，Python 引用仍在），再重组
-        self.tab_widget.removeTab(idx)
-        if before:
-            outer.addWidget(new_terminal)
-            outer.addWidget(old_page)
-        else:
-            outer.addWidget(old_page)
-            outer.addWidget(new_terminal)
-        old_page.show()
+        # 先把旧页面从 tab 中摘下（removeTab 不销毁控件，Python 引用仍在），再重组。
+        # removeTab/insertTab/setCurrentIndex 各自都会发 currentChanged（单标签
+        # 时是 -1 → idx），而此时 tab_splitters[idx] 还指着旧页面 → _on_tab_changed
+        # 连跑数次、其中一次带 -1。与 _close_tab 同法：屏蔽信号，重组完映射就绪
+        # 后手动同步一次（映射按 idx 存，tab_terminals/tab_cwds 在此不变，故等价）。
+        self.tab_widget.blockSignals(True)
+        try:
+            self.tab_widget.removeTab(idx)
+            if before:
+                outer.addWidget(new_terminal)
+                outer.addWidget(old_page)
+            else:
+                outer.addWidget(old_page)
+                outer.addWidget(new_terminal)
+            old_page.show()
 
-        self.tab_widget.insertTab(idx, outer, title)
-        self._restore_tab_close_button(idx)
-        if was_current:
-            self.tab_widget.setCurrentIndex(idx)
+            self.tab_widget.insertTab(idx, outer, title)
+            self._restore_tab_close_button(idx)
+            if was_current:
+                self.tab_widget.setCurrentIndex(idx)
+        finally:
+            self.tab_widget.blockSignals(False)
 
         self.tab_splitters[idx] = outer
+        if was_current:
+            self._on_tab_changed(idx)
 
         if orientation == Qt.Orientation.Horizontal:
             size = outer.width() if outer.width() > 0 else 800
@@ -686,11 +696,20 @@ class TabSplitMixin:
         # 移除标签页。removeTab 会同步发出 currentChanged，而此时 tab_cwds 等映射
         # 还是旧索引 → _on_tab_changed 会用新索引查到被关 tab 的目录，导致
         # Directory/Current 回退到旧路径。先屏蔽信号，重建映射后再手动同步一次。
+        page = self.tab_widget.widget(index)
         self.tab_widget.blockSignals(True)
         try:
             self.tab_widget.removeTab(index)
         finally:
             self.tab_widget.blockSignals(False)
+
+        # removeTab 不销毁页面：splitter 连同里面已 cleanup 的终端仍挂在
+        # stacked widget 下，每关一个标签就泄漏一整套 TerminalWidget。这里
+        # 只销毁本页自己的东西——被搬到别的窗口的终端在 _detach_pane /
+        # _take_tab_out 里早已 setParent(None)，不在这棵子树上。
+        if page is not None:
+            page.setParent(None)
+            page.deleteLater()
 
         # 更新映射（重建索引）
         self._rebuild_tab_mappings()
@@ -736,6 +755,10 @@ class TabSplitMixin:
                 # 若这是最后一个标签页，这一步会退出整个窗口 → 一律二次确认，
                 # 避免一次误触把整个窗口（布局/会话）丢掉。有进程在跑时用更强措辞。
                 if self.tab_widget.count() == 1:
+                    # _force_closing 会让 closeEvent 跳过编辑器的保存提示，
+                    # 所以这里先替它问一遍：取消 → 什么都不关。
+                    if not self._prompt_editor_save_before_window_close():
+                        return
                     has_running_process = any(t.is_running() for t in terminals)
                     msg = (t("msg.confirm_close_last_tab") if has_running_process
                            else t("msg.confirm_close_window"))
@@ -746,7 +769,9 @@ class TabSplitMixin:
                     )
                     if reply != QMessageBox.StandardButton.Yes:
                         return
-                    # 已经确认过了，self.close() 触发的 closeEvent 不必再问一次
+                    # 已经确认过了，self.close() 触发的 closeEvent 不必再问一次。
+                    # 强制路径不再刷编辑器的崩溃恢复备份，这里补上（同 force_close_with_save）。
+                    self._flush_editor_autosave_quietly()
                     self._force_closing = True
 
                 self._close_tab(idx, auto_create_new=False)
@@ -756,6 +781,27 @@ class TabSplitMixin:
         else:
             # 没有标签页了，关闭整个窗口
             self.close()
+
+    def _prompt_editor_save_before_window_close(self) -> bool:
+        """关窗前替 closeEvent 走一遍编辑器的保存提示；返回 False = 用户取消。"""
+        area = getattr(self, 'editor_area', None)
+        if area is None:
+            return True
+        try:
+            return bool(area.prompt_save_all())
+        except Exception as e:
+            logger.warning(f"[Close] editor save prompt failed: {e}")
+            return True
+
+    def _flush_editor_autosave_quietly(self):
+        """刷编辑器的崩溃恢复备份；任何异常都不能阻断关窗。"""
+        area = getattr(self, 'editor_area', None)
+        if area is None:
+            return
+        try:
+            area.flush_autosave_all()
+        except Exception as e:
+            logger.warning(f"[Close] editor autosave flush failed: {e}")
 
     def _align_child_with_parent_geometry(self, new_window, abort_check=None):
         """让子窗口与本窗口逐像素重合（位置+尺寸），并持续校正 macOS 的异步微调。"""
@@ -1544,6 +1590,7 @@ class TabSplitMixin:
             self._close_current_split()
         close.triggered.connect(_close)
         menu.exec(global_pos)
+        self._release_context_menu(menu)
 
     def _refresh_pane_handles(self, idx):
         """第 idx 页：多窗格 → 每个窗格显示把手；单窗格 → 收起。"""
@@ -2423,6 +2470,17 @@ class TabSplitMixin:
         close_action.triggered.connect(lambda: self._close_tab(tab_index))
 
         menu.exec(tab_bar.mapToGlobal(pos))
+        self._release_context_menu(menu)
+
+    @staticmethod
+    def _release_context_menu(menu):
+        """exec 返回时被点的那项的槽已跑完，菜单可以销毁了。
+        不销毁的话每次右键都在窗口下多留一套 QMenu（父对象是窗口，活到关窗）。"""
+        try:
+            if not sip.isdeleted(menu):
+                menu.deleteLater()
+        except RuntimeError:
+            pass
 
     def _apply_tab_name(self, index, name):
         """统一应用标签名：非空则「锁定」为自定义名，留空则解除锁定恢复默认编号。"""

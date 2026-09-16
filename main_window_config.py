@@ -147,11 +147,16 @@ class ConfigMixin:
                 if not config.get('split_spring_default_on_migrated'):
                     self._explorer_split_horizontal = True
                     self._spring_mode_enabled = True
-                    app_config.update_config(
-                        {'split_spring_default_on_migrated': True,
-                         'explorer_split_horizontal': True,
-                         'spring_mode_enabled': True},
-                        description='split/spring default-on migration')
+                    # 写盘失败（只读目录/磁盘满）不该让后面几十个键全部退回默认
+                    try:
+                        app_config.update_config(
+                            {'split_spring_default_on_migrated': True,
+                             'explorer_split_horizontal': True,
+                             'spring_mode_enabled': True},
+                            description='split/spring default-on migration')
+                    except Exception:
+                        logger.warning("split/spring migration write failed",
+                                       exc_info=True)
                 # 加载 AI 行内补全开关
                 self._ai_completion_enabled = config.get('ai_completion_enabled', self._ai_completion_enabled)
                 self._editor_word_wrap = config.get('editor_word_wrap', self._editor_word_wrap)
@@ -226,7 +231,18 @@ class ConfigMixin:
                 host_class(self)._sidebar_height_sync = bool(
                     config.get('sidebar_height_sync', False))
         except Exception:
+            # 以前这里静默吞掉：某个键类型不对（如 working_dir_freq 存成 list）
+            # 后面几十个键全退回默认，用户只看到"设置丢了"而日志一字没有
+            logger.warning("config load failed, falling back to defaults "
+                           "for remaining keys", exc_info=True)
             self.presets = []
+            # 下面的目录历史整理依赖这几个容器的类型，坏值一律退回默认
+            if not isinstance(self.working_dir_history, list):
+                self.working_dir_history = []
+            if not isinstance(self._working_dir_freq, dict):
+                self._working_dir_freq = {}
+            if not isinstance(self._dir_history_removed, set):
+                self._dir_history_removed = set()
 
         # 确保当前目录在历史中。
         # 例外：文件系统根目录（mac 打包 app 从 Dock/Finder/升级脚本启动时

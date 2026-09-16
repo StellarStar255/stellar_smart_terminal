@@ -272,18 +272,22 @@ def mfa_login(cfg: HostConfig, code: str = "", password: str = "",
         _write_secret_files(tmpdir, code, password)
         persist = _persist_value(hours)
         qos = interactive_ipqos(cfg)
+        # 上次主连接死了会留下 socket 文件：不清掉，ssh 会「disabling
+        # multiplexing」退化成普通连接、返回 0——假成功 + 一条永生的后台 ssh
+        _clear_stale_socket(cfg, ctl)
         args = _master_args(cfg, ctl, persist, batch=False, qos=qos)
         proc = subprocess.run(
             args, env=_login_env(askpass),
             stdin=subprocess.DEVNULL, stdout=subprocess.PIPE,
             stderr=subprocess.PIPE, timeout=LOGIN_TIMEOUT,
         )
+        err = (proc.stderr or b"").decode("utf-8", "replace").strip()
         if proc.returncode == 0:
+            _reject_degraded_master(cfg, ctl, err)
             logger.info("[SSH-CTL] %s: master connection up (persist=%s)",
                         cfg.alias, persist)
             _mark_master_qos(cfg, ctl, qos)
             return ctl
-        err = (proc.stderr or b"").decode("utf-8", "replace").strip()
         tail = " · ".join([l for l in err.split("\n") if l.strip()][-3:])
         raise RuntimeError(tail or f"ssh 退出码 {proc.returncode}")
     except subprocess.TimeoutExpired:
@@ -313,10 +317,16 @@ def interactive_ipqos(cfg: HostConfig) -> str:
     流量与用户手敲的 ssh 完全同级。按 `ssh -G <目标>` 取值而不是写死，
     这样与用户本机 OpenSSH 版本及 ~/.ssh/config 里的 IPQoS 设置一致。
     """
+    return _probe_ipqos(cfg)[0]
+
+
+def _probe_ipqos(cfg: HostConfig) -> tuple:
+    """(交互档, 是否为探测失败的回退值)。interactive_ipqos 只要前者；
+    master_is_pre_qos 还要知道后者——回退值不能拿去和记账比。"""
     target = ssh_target(cfg)
     cached = _IPQOS_CACHE.get(target)
     if cached:
-        return cached
+        return cached, False
     val = ""
     try:
         proc = subprocess.run(
@@ -334,9 +344,9 @@ def interactive_ipqos(cfg: HostConfig) -> str:
         # 的默认档），**不是**旧的 af21——一次瞬时失败不能把主连接标成低优先级
         # DSCP，那正是要避免的「转发比手敲 ssh 慢」。且**不缓存**回退值：下次
         # 重试，免得一次抖动把整个进程里之后建的所有主连接都钉成回退档。
-        return "ef"
+        return "ef", True
     _IPQOS_CACHE[target] = val
-    return val
+    return val, False
 
 
 def _qos_marker_path(ctl: str) -> str:
@@ -382,7 +392,13 @@ def master_is_pre_qos(cfg: HostConfig) -> bool:
     marked = _read_master_qos(ctl)
     if not marked:
         return True                          # 修复前的老连接，没记账
-    return marked != interactive_ipqos(cfg)  # 记的档与当前交互档不一致
+    current, fallback = _probe_ipqos(cfg)
+    if fallback:
+        # ssh -G 这次没跑成，拿不到「现在该用的档」——不知道就当没过期。
+        # 回退值不缓存（见 _probe_ipqos），要是拿它来比，记账是 af21 的老版本
+        # 主连接每次连接都会被判成不一致、反复重建，把搭在上面的终端全掐断。
+        return False
+    return marked != current                 # 记的档与当前交互档不一致
 
 
 def refresh_master(cfg: HostConfig, password: str = "",
@@ -395,6 +411,8 @@ def refresh_master(cfg: HostConfig, password: str = "",
             if not os.path.exists(ctl):
                 break
             time.sleep(0.1)
+        # 等完还在 = 主连接早死了、exit 没人应，留下的是陈旧 socket
+        _clear_stale_socket(cfg, ctl)
     return ensure_master(cfg, password=password, hours=hours)
 
 
@@ -421,6 +439,10 @@ def _master_args(cfg: HostConfig, ctl: str, persist: str, batch: bool,
             args += ["-o", f"Port={int(cfg.port)}"]
         if cfg.identity_file and os.path.isfile(cfg.identity_file):
             args += ["-o", f"IdentityFile={cfg.identity_file}"]
+            if batch:
+                # 零交互的密钥尝试只用指定的这把：agent 里的公钥会被逐个试，
+                # 正是把堡垒机 MaxAuthTries 打满/被限速的场景（同 _base_args）
+                args += ["-o", "IdentitiesOnly=yes"]
     args += ["-N", "-f", ssh_target(cfg)]
     return args
 
@@ -437,17 +459,19 @@ def start_master_with_keys(cfg: HostConfig, hours: int = DEFAULT_KEEP_HOURS) -> 
     if not ctl:
         raise RuntimeError("ControlPath 建不出来（临时目录路径太长）")
     qos = interactive_ipqos(cfg)
+    _clear_stale_socket(cfg, ctl)      # 见 mfa_login 里的说明
     args = _master_args(cfg, ctl, _persist_value(hours), batch=True, qos=qos)
     try:
         proc = subprocess.run(args, stdin=subprocess.DEVNULL, stdout=subprocess.PIPE,
                               stderr=subprocess.PIPE, timeout=LOGIN_TIMEOUT)
     except subprocess.TimeoutExpired:
         raise RuntimeError("连接超时")
+    err = (proc.stderr or b"").decode("utf-8", "replace").strip()
     if proc.returncode == 0:
+        _reject_degraded_master(cfg, ctl, err)
         logger.info("[SSH-CTL] %s: master connection up via keys", cfg.alias)
         _mark_master_qos(cfg, ctl, qos)
         return ctl
-    err = (proc.stderr or b"").decode("utf-8", "replace").strip()
     tail = " · ".join([l for l in err.split("\n") if l.strip()][-2:])
     raise RuntimeError(tail or f"ssh 退出码 {proc.returncode}")
 
@@ -456,18 +480,20 @@ def ensure_master(cfg: HostConfig, password: str = "",
                   hours: int = DEFAULT_KEEP_HOURS) -> str:
     """确保这台主机有一条活着的主连接（端口转发要挂在它上面）。
 
-    不需要动态码的普通主机也能用：先试密钥 / agent（零交互）；不行且给了
-    密码就用密码建；两样都没有抛 NeedsPassword，让 UI 去要密码。返回 ControlPath。
+    不需要动态码的普通主机也能用：给了密码（面板缓存的 / 用户刚输的）就直接
+    用密码建——那说明这台机器密钥本来就不过，再拿密钥去撞一次只会白吃一次
+    MaxAuthTries；没密码先试密钥 / agent（零交互），不行抛 NeedsPassword，
+    让 UI 去要密码。返回 ControlPath。
     """
     if master_alive(cfg):
         return control_path_for(cfg)
+    _clear_stale_socket(cfg, checked_dead=True)
+    if password:
+        return mfa_login(cfg, code="", password=password, hours=hours)
     try:
         return start_master_with_keys(cfg, hours)
     except RuntimeError as e:
-        key_err = str(e)
-    if password:
-        return mfa_login(cfg, code="", password=password, hours=hours)
-    raise NeedsPassword(key_err)
+        raise NeedsPassword(str(e))
 
 
 def master_socket_exists(cfg: HostConfig) -> bool:
@@ -517,6 +543,142 @@ def master_exit(cfg: HostConfig) -> bool:
     except Exception:
         logger.debug("master_exit failed", exc_info=True)
         return False
+
+
+_MASTER_PID_RE = re.compile(r"pid=(\d+)")
+
+
+def master_pid(cfg: HostConfig) -> int:
+    """活着的主连接的 pid（`ssh -O check` 成功时 stderr 是
+    `Master running (pid=NNN)`）；主连接不在 / 拿不到返回 0。"""
+    if not is_supported():
+        return 0
+    ctl = control_path_for(cfg)
+    if not ctl or not os.path.exists(ctl):
+        return 0
+    try:
+        proc = subprocess.run(
+            ["ssh", "-O", "check", "-o", f"ControlPath={ctl}", ssh_target(cfg)],
+            stdin=subprocess.DEVNULL, stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE, timeout=8,
+        )
+    except Exception:
+        logger.debug("master_pid check failed", exc_info=True)
+        return 0
+    if proc.returncode != 0:
+        return 0
+    text = (proc.stderr or b"").decode("utf-8", "replace") + \
+        (proc.stdout or b"").decode("utf-8", "replace")
+    m = _MASTER_PID_RE.search(text)
+    return int(m.group(1)) if m else 0
+
+
+def _processes_with_control_path(ctl: str) -> list:
+    """命令行里带 `ControlPath=<ctl>` 的进程 → [(pid, 命令行)]。
+
+    用 `ps -axo pid=,command=` 而不是 pgrep：macOS 的 pgrep 没有 -a、Linux
+    的 -l 只给进程名，两边都拿不到完整命令行；这里要靠命令行分辨主连接 /
+    搭车的终端 / 一次性的 -O 控制命令。拿不到返回空表。
+    """
+    if not ctl:
+        return []
+    needle = f"ControlPath={ctl}"
+    try:
+        proc = subprocess.run(["ps", "-axo", "pid=,command="],
+                              stdin=subprocess.DEVNULL, stdout=subprocess.PIPE,
+                              stderr=subprocess.DEVNULL, timeout=5)
+    except Exception:
+        logger.debug("_processes_with_control_path: ps failed", exc_info=True)
+        return []
+    rows = []
+    for line in (proc.stdout or b"").decode("utf-8", "replace").splitlines():
+        parts = line.strip().split(None, 1)
+        if len(parts) < 2 or not parts[0].isdigit():
+            continue
+        cmd = parts[1]
+        # 精确到整个参数：ControlPath=/tmp/x/c-ab 不能匹配到 c-abc
+        if needle + " " in cmd + " ":
+            rows.append((int(parts[0]), cmd))
+    return rows
+
+
+def master_riders(cfg: HostConfig) -> list:
+    """搭在这台主机主连接上的**终端 ssh**的 pid 列表（跨窗口）。
+
+    终端标签的 ssh 由 build_ssh_terminal_command 生成：`ControlMaster=no`
+    + 同一个 ControlPath，没有 BatchMode（那是面板后台命令 / 转发操作的
+    一次性进程）、也不是 `-O` 控制命令。重建主连接会把它们全部掐断，所以
+    重建前要先看一眼有没有人搭车。
+    """
+    if not is_supported():
+        return []
+    ctl = control_path_for(cfg)
+    pids = []
+    for pid, cmd in _processes_with_control_path(ctl):
+        if pid == os.getpid():
+            continue
+        if "ControlMaster=yes" in cmd or "BatchMode=yes" in cmd:
+            continue
+        if " -O " in f" {cmd} ":
+            continue
+        pids.append(pid)
+    return pids
+
+
+def _clear_stale_socket(cfg: HostConfig, ctl: str = "", *,
+                        checked_dead: bool = False) -> bool:
+    """socket 文件在、主连接却不应答 → 陈旧 socket，unlink（连同 .qos 记账）。
+
+    OpenSSH 遇到 ControlPath 已存在会 `disabling multiplexing` 后照常连、返回 0：
+    建连看起来成功，实际上是一条 `-N -f` 的普通后台连接，永远没人收它。
+    checked_dead=True 表示调用方刚做过 master_alive() 且为假，省一次 -O check。
+    返回是否真的清掉了什么。
+    """
+    ctl = ctl or control_path_for(cfg)
+    if not ctl or not os.path.exists(ctl):
+        return False
+    if not checked_dead and master_alive(cfg):
+        return False
+    cleared = False
+    for path in (ctl, _qos_marker_path(ctl)):
+        try:
+            os.unlink(path)
+            cleared = True
+        except FileNotFoundError:
+            pass   # .qos 记账文件本来就可能不存在（老版本建的主连接没记账）
+        except OSError as e:
+            logger.warning("[SSH-CTL] %s: cannot remove stale %s: %s",
+                           cfg.alias, path, e)
+    if cleared:
+        logger.info("[SSH-CTL] %s: removed stale control socket %s", cfg.alias, ctl)
+    return cleared
+
+
+_MUX_DISABLED_RE = re.compile(r"disabling multiplexing|already exists", re.IGNORECASE)
+
+
+def _reject_degraded_master(cfg: HostConfig, ctl: str, stderr: str) -> None:
+    """建主连接的 ssh 返回 0 但 stderr 说 multiplexing 被关掉 → 这不是主连接。
+
+    `-N -f` 已经把它转到后台、父进程退出，拿不到 pid；按命令行找
+    （ControlMaster=yes + 同一个 ControlPath），排除 -O check 报的真主连接
+    （并发建连撞上时那条是好的），其余杀掉，再抛错让调用方重试。
+    """
+    if not _MUX_DISABLED_RE.search(stderr or ""):
+        return
+    keep = master_pid(cfg)
+    for pid, cmd in _processes_with_control_path(ctl):
+        if pid in (keep, os.getpid()) or "ControlMaster=yes" not in cmd:
+            continue
+        try:
+            _kill_wait(pid)
+            logger.info("[SSH-CTL] %s: killed degraded background ssh pid %s",
+                        cfg.alias, pid)
+        except RuntimeError as e:
+            logger.warning("[SSH-CTL] %s: %s", cfg.alias, e)
+    raise RuntimeError(
+        "控制套接字被占用，ssh 退化成了普通连接（disabling multiplexing），"
+        "没有建成主连接；已清理，请重试")
 
 
 # ---------- 端口转发（挂在已有主连接上） ----------
@@ -644,18 +806,23 @@ def _kill_wait(pid: int, timeout: float = 2.0) -> None:
             time.sleep(0.05)
 
 
-def forward_force_apply(cfg: HostConfig, spec: dict) -> str:
+def forward_force_apply(cfg: HostConfig, spec: dict, mfa: bool = False,
+                        password: str = "") -> str:
     """端口被 ssh 进程占着时的「强制释放并启用」。
 
     最常见的情形：这台主机的常驻主连接上早就挂着同一条转发（应用重启后
     内存里的登记没了，主连接还活着），再 Start 一次就撞到自己。所以先在
     主连接上 `-O cancel` 同一条规则再重试；还不行才结束占着端口的 ssh
-    进程（若那是某台主机的主连接，那台主机的会话会一并断开）。占端口的
-    不是 ssh 进程时不动它——那可能是用户自己的服务。
+    进程。占端口的不是 ssh 进程时不动它——那可能是用户自己的服务。
+
+    本主机自己的主连接（`-O check` 报的 pid）绝不杀：`-O cancel` 撤不掉
+    多半是 ~/.ssh/config 里写死的 LocalForward，非 MFA 主机走 refresh_master
+    换一条新主连接，MFA 主机只能提示用户重登（重建要重输码）。
     """
     kind = str(spec.get("type") or "L").upper()
     host = spec.get("bind_host") or "127.0.0.1"
     port = spec.get("bind_port")
+    killed = False
     if kind != "R" and local_port_busy(host, port):
         try:
             forward_apply(cfg, spec, cancel=True)
@@ -664,12 +831,30 @@ def forward_force_apply(cfg: HostConfig, spec: dict) -> str:
             logger.debug("forward_force_apply: cancel on master failed: %s", e)
         if local_port_busy(host, port):
             holders = port_holders(port)
-            if holders and all(n == "ssh" for n, _ in holders):
-                for _, pid in holders:
-                    _kill_wait(pid)
-            else:
+            if not (holders and all(n == "ssh" for n, _ in holders)):
                 raise LocalPortBusy(port, holders)
-    return forward_apply(cfg, spec, cancel=False)
+            own = master_pid(cfg)
+            own_holds = bool(own) and any(pid == own for _, pid in holders)
+            if own_holds and mfa:
+                raise RuntimeError(
+                    f"本机端口 {port} 被 {cfg.alias} 自己的主连接占着，"
+                    f"-O cancel 撤不掉；请「退出主连接」后重新 MFA 登录再启用")
+            for _, pid in holders:
+                if pid != own:
+                    _kill_wait(pid)
+                    killed = True
+            if own_holds:
+                refresh_master(cfg, password=password)
+    try:
+        return forward_apply(cfg, spec, cancel=False)
+    except MasterNotRunning:
+        if not killed:
+            raise
+        # 刚结束的那条 ssh 就是这台主机（已经死掉/陈旧）的主连接：说清楚
+        # 发生了什么，别甩「先做一次 MFA 登录」——普通主机根本没有 MFA
+        raise RuntimeError(
+            f"已结束占着本机端口 {port} 的 ssh 进程，但 {cfg.alias} "
+            f"的主连接不在了——请先建立主连接再启用转发") from None
 
 
 def forward_apply(cfg: HostConfig, spec: dict, cancel: bool = False) -> str:
@@ -772,6 +957,10 @@ class ControlMasterSession(QObject):
 
     def _do_connect(self, code: str, password: str, keep_hours: int):
         if not master_alive(self.host_config):
+            if not code and not password:
+                # 只想复用主连接（面板重连 / 粘图的临时会话）却发现它死了：
+                # 报「主连接已断开」而不是 mfa_login 的「没填动态码」
+                raise MasterNotRunning(self._MASTER_GONE_MSG)
             mfa_login(self.host_config, code=code, password=password,
                       hours=keep_hours)
         self._aborted = False
@@ -1244,6 +1433,6 @@ __all__ = [
     "ControlMasterSession", "MasterNotRunning", "FORWARD_TYPES",
     "control_path_for", "forward_apply", "forward_args", "forward_label",
     "is_supported", "local_port_busy", "mfa_login", "master_alive",
-    "master_exit", "master_socket_exists", "parse_ls_output", "ssh_target",
-    "who_holds_port",
+    "master_exit", "master_pid", "master_riders", "master_socket_exists",
+    "parse_ls_output", "ssh_target", "who_holds_port",
 ]

@@ -2785,6 +2785,12 @@ class FileEditorWidget(QWidget):
         self._in_image_mode = False
         self._image_pixmap = None
         self._stack.setCurrentIndex(0)
+        # 上一个文件的预览态必须在填充新内容之前清掉：否则下面 setPlainText
+        # 触发的 _on_text_changed 会看到旧的 _in_md_preview=True，把新文件
+        # （哪怕是 1.6MB 的 .py）按 markdown 白渲染一遍；超阈值的 .md 走
+        # "默认源码视图"分支时更是没人重置它，源码视图里每敲一键都在重渲染
+        # 隐藏的预览页。装载完再由下面的 _set_md_preview 决定是否进预览。
+        self._reset_md_preview_state()
 
         # 加载文件内容。
         # 关键：整段置于 _loading 保护下。此前 _current_file / _original_content
@@ -2925,17 +2931,25 @@ class FileEditorWidget(QWidget):
         if current and current in paths:
             self._close_editor()
 
+    def _reset_md_preview_state(self):
+        """退出预览态的静默版：只清标志与按钮勾选，不切页、不动焦点、不渲染。
+
+        open_file 在装载新内容前调用（见那里的注释）；与 _set_md_preview(False)
+        的区别是后者会 editor.setFocus()——装载中间态不应挂任何焦点变化。
+        """
+        self._in_md_preview = False
+        if self.md_btn.isChecked():
+            self.md_btn.blockSignals(True)
+            self.md_btn.setChecked(False)
+            self.md_btn.blockSignals(False)
+
     def _set_md_support(self, supported: bool):
         """标记当前文件是否支持 Markdown 预览，并同步按钮可见性。"""
         supported = bool(supported)
         self._md_preview_supported = supported
         self.md_btn.setVisible(supported)
         if not supported:
-            self._in_md_preview = False
-            if self.md_btn.isChecked():
-                self.md_btn.blockSignals(True)
-                self.md_btn.setChecked(False)
-                self.md_btn.blockSignals(False)
+            self._reset_md_preview_state()
             self._md_browser.clear()
 
     def _set_html_support(self, supported: bool):
@@ -4230,8 +4244,10 @@ class FileEditorWidget(QWidget):
     def _on_text_changed(self):
         """文本变化时更新标题"""
         self._update_title()
-        # 预览可见时缓冲区只可能被程序改动（外部变更重载/恢复备份）→ 同步重渲染
-        if self._in_md_preview:
+        # 预览可见时缓冲区只可能被程序改动（外部变更重载/恢复备份）→ 同步重渲染。
+        # open_file 装载中的 setPlainText 不算：那时是否进预览还没决定，
+        # 由 open_file 装载完成后统一处理（避免同一次打开渲染多遍）。
+        if self._in_md_preview and not self._loading:
             self._render_md_preview()
 
     def _update_title(self):
