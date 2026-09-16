@@ -17,6 +17,11 @@ sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 os.environ.setdefault('QT_QPA_PLATFORM', 'offscreen')
 
 
+def _norm(p):
+    # git rev-parse 在 Windows 上给正斜杠，tempfile 给反斜杠：比较前归一化
+    return os.path.normcase(os.path.normpath(p))
+
+
 def _init_repo(path):
     subprocess.run(['git', '-C', path, 'init', '-b', 'main'],
                    check=True, capture_output=True)
@@ -69,7 +74,7 @@ class TestSetRepositoryShortCircuit(unittest.TestCase):
             lambda: self.gm.set_repository(os.path.join(self.repo, 'sub', 'deep')))
         self.assertTrue(ok)
         self.assertEqual(procs, 0)
-        self.assertEqual(self.gm._repo_path, self.repo)
+        self.assertEqual(_norm(self.gm._repo_path), _norm(self.repo))
 
     def test_switching_repo_still_detects(self):
         self.assertTrue(self.gm.set_repository(self.repo))
@@ -77,13 +82,13 @@ class TestSetRepositoryShortCircuit(unittest.TestCase):
             other = os.path.realpath(other)
             _init_repo(other)
             self.assertTrue(self.gm.set_repository(other))
-            self.assertEqual(self.gm._repo_path, other)
+            self.assertEqual(_norm(self.gm._repo_path), _norm(other))
             self.gm._stop_watching()
         # 非仓库 → False，之后回到原仓库仍能正确识别
         with tempfile.TemporaryDirectory(prefix='not_repo_') as plain:
             self.assertFalse(self.gm.set_repository(plain))
         self.assertTrue(self.gm.set_repository(self.repo))
-        self.assertEqual(self.gm._repo_path, self.repo)
+        self.assertEqual(_norm(self.gm._repo_path), _norm(self.repo))
 
 
 if __name__ == '__main__':
