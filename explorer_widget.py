@@ -2518,6 +2518,9 @@ class ExplorerPanel(QWidget, explorer_common.TransferJobHost):
                         action, sticky = decision
                         if sticky:
                             sticky_decision = action
+                        if action == "skip":
+                            self._skip_job_row(job, row)
+                            continue
                         if action == "overwrite":
                             overwrite = True
                         else:  # keep
@@ -2556,6 +2559,9 @@ class ExplorerPanel(QWidget, explorer_common.TransferJobHost):
                         action, sticky = decision
                         if sticky:
                             sticky_decision = action
+                        if action == "skip":
+                            self._skip_job_row(job, row)
+                            continue
                         if action == "overwrite":
                             if os.path.isdir(dst) and not os.path.islink(dst):
                                 shutil.rmtree(dst)

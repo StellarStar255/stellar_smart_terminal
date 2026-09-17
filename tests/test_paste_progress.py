@@ -17,6 +17,8 @@ from pathlib import Path
 
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
+from i18n import t  # noqa: E402
+
 
 class _FakeRemoteSession:
     """submit 立即完成的假会话；stat/listdir 返回可控结果，其余只记录。"""
@@ -310,6 +312,62 @@ class TestOverwriteConflictStaysInTheWindow(_Base):
                          "覆盖前的 stat/remove 也该画进统一窗口，不许弹框")
         self.assertEqual(len(self.jobs), 1)
         self.assertEqual(self.jobs[0].final_status, ["done"] * 5)
+
+
+class TestSkipConflict(_Base):
+    """冲突框选「跳过」：该条目不传、不删、不加尾缀，其余条目照常。
+
+    用户要求：往远端复制时冲突不能只有覆盖 / 取消（保留二者）三选，
+    要能跳过已存在的文件继续传剩下的。
+    """
+
+    class _Ent:
+        def __init__(self, name):
+            self.name = name
+            self.is_dir = False
+            self.is_link = False
+            self.path = "/dst/" + name
+
+    def test_skip_all_uploads_nothing_and_marks_rows_skipped(self):
+        items = self._local_files(3)
+        names = [os.path.basename(p) for _k, p in items]
+        dst = _FakeRemoteSession(alias="dst", entries=[self._Ent(n) for n in names])
+        dst.remove = lambda path: (_ for _ in ()).throw(AssertionError("skip 不该删"))
+        panel = self._panel(dst)
+        panel._resolve_paste_conflict = lambda name, sticky: ("skip", True)
+
+        self._paste(panel, items)
+
+        called = [n for n, _a in dst.calls]
+        self.assertEqual([n for n in called if n.startswith("upload")], [],
+                         "全部跳过就一个都不该传")
+        self.assertEqual(self.warnings, [])
+        self.assertEqual(len(self.jobs), 1)
+        self.assertEqual(self.jobs[0].final_status, ["skipped"] * 3)
+        self.assertEqual(self.jobs[0].row_status_text(0), t("transfer.state_skipped_user"))
+
+    def test_skip_one_conflict_still_transfers_the_rest(self):
+        items = self._local_files(3)
+        names = [os.path.basename(p) for _k, p in items]
+        # 只有第 2 个在远端已存在
+        dst = _FakeRemoteSession(alias="dst", entries=[self._Ent(names[1])])
+        asked = []
+
+        def _resolve(name, sticky):
+            asked.append(name)
+            return ("skip", False)
+        panel = self._panel(dst)
+        panel._resolve_paste_conflict = _resolve
+
+        self._paste(panel, items)
+
+        self.assertEqual(asked, [names[1]], "只该为真冲突的那个弹一次")
+        uploaded = [a for n, a in dst.calls if n.startswith("upload")]
+        flat = repr(uploaded)
+        self.assertIn(names[0], flat)
+        self.assertIn(names[2], flat)
+        self.assertNotIn(names[1], flat, "跳过的那个不该被传")
+        self.assertEqual(self.jobs[0].final_status, ["done", "skipped", "done"])
 
 
 class TestOverwriteSkipsUselessDeletes(_Base):

@@ -4158,6 +4158,9 @@ class RemoteExplorerPanel(QWidget, explorer_common.TransferJobHost):
                         action, sticky = decision
                         if sticky:
                             sticky_decision = action
+                        if action == "skip":
+                            self._skip_job_row(job, row)
+                            continue
                         if action == "overwrite":
                             # 普通文件盖普通文件不用先删，上传本身就是覆盖写
                             if self._overwrite_needs_delete(
@@ -4203,6 +4206,9 @@ class RemoteExplorerPanel(QWidget, explorer_common.TransferJobHost):
                         action, sticky = decision
                         if sticky:
                             sticky_decision = action
+                        if action == "skip":
+                            self._skip_job_row(job, row)
+                            continue
                         if action == "overwrite":
                             self._remote_remove(sess, dst)
                             existing.discard(name)

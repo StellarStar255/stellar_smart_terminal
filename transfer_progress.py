@@ -272,6 +272,23 @@ class TransferProgressDialog(QDialog):
             self._frac = 0.0
         self._sync_summary()
 
+    def skip_row(self, index: int):
+        """用户在冲突框里选了「跳过」：该行既不算完成也不算失败，记「已跳过」。
+
+        与 finish_all 里给没做成的条目补的「已取消」同一状态值、不同文案：
+        前者是用户主动的选择，后者是中途取消/中断的兜底。
+        """
+        if not (0 <= index < len(self._states)):
+            return
+        if self._states[index] in (STATE_DONE, STATE_FAILED, STATE_SKIPPED):
+            return
+        self._states[index] = STATE_SKIPPED
+        self._set_status_text(index, t("transfer.state_skipped_user"))
+        if index in self._active:
+            self._active = [i for i in self._active if i != index]
+            self._frac = 0.0
+        self._sync_summary()
+
     def finish_rows(self, indices, error_by_index: Optional[dict] = None):
         for i in indices:
             self.finish_row(i, (error_by_index or {}).get(i))

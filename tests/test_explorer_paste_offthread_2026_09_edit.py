@@ -115,6 +115,23 @@ class TestClipboardPaste(_Base):
         self.assertFalse(os.path.exists(os.path.join(dst, 'old.txt')))
         self.assertTrue(os.path.isfile(os.path.join(dst, 'f.txt')))
 
+    def test_skip_conflict_leaves_target_untouched(self):
+        """冲突框选「跳过」：目标原样保留、不复制、不报错。"""
+        dst = os.path.join(self.target, 'srcdir')
+        os.makedirs(dst)
+        with open(os.path.join(dst, 'old.txt'), 'w') as f:
+            f.write('old')
+        explorer_clipboard.set_items([("local", self.src)])
+        with mock.patch.object(explorer_common, 'resolve_paste_conflict',
+                               return_value=('skip', False)), \
+                mock.patch.object(QMessageBox, 'warning') as warn:
+            self.panel._clipboard_paste_into(self.target)
+        self.assertFalse(warn.called, "跳过不该报错")
+        self.assertTrue(os.path.exists(os.path.join(dst, 'old.txt')), "跳过不该动目标")
+        self.assertFalse(os.path.exists(os.path.join(dst, 'f.txt')), "跳过不该复制")
+        self.assertFalse(os.path.exists(os.path.join(self.target, 'srcdir (1)')),
+                         "跳过不该加尾缀另存")
+
     def test_overwrite_failure_is_reported_not_copied(self):
         """覆盖前的 rmtree 失败：条目记为失败，不会再往已存在的目标上复制。"""
         dst = os.path.join(self.target, 'srcdir')

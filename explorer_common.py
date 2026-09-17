@@ -46,7 +46,7 @@ def _suspend_topmost_job(parent):
 
 def resolve_paste_conflict(parent, name: str,
                            sticky: Optional[str]) -> Optional[Tuple[str, bool]]:
-    """粘贴目标已存在时的三选一对话框（覆盖 / 保留二者 / 取消）。
+    """粘贴目标已存在时的对话框（保留二者 / 跳过 / 覆盖 / 取消）。
 
     本地和远程 explorer 语义完全一致，故共用。只依赖 parent 作为对话框父级，
     不触碰任何 explorer 特有状态。
@@ -54,21 +54,24 @@ def resolve_paste_conflict(parent, name: str,
     Args:
         parent: 对话框的父 QWidget。
         name: 冲突的条目名，用于提示文案。
-        sticky: 若为 'overwrite'/'keep'（用户勾了"应用到剩余"）则直接复用，
-            不再弹窗。
+        sticky: 若为 'overwrite'/'keep'/'skip'（用户勾了"应用到剩余"）则
+            直接复用，不再弹窗。
 
     Returns:
         ('overwrite', sticky_bool) — 覆盖
         ('keep',      sticky_bool) — 保留二者（调用方据此加 (N) 尾缀）
+        ('skip',      sticky_bool) — 跳过这一条（不动目标，继续剩余）
         None                        — 取消，中止剩余粘贴
     """
-    if sticky in ("overwrite", "keep"):
+    if sticky in ("overwrite", "keep", "skip"):
         return (sticky, True)
     box = QMessageBox(parent)
     box.setWindowTitle(t("paste.conflict_title"))
     box.setText(t("paste.conflict_msg", name=name))
     box.setIcon(QMessageBox.Icon.Question)
     keep_btn = box.addButton(t("paste.btn_keep_both"), QMessageBox.ButtonRole.AcceptRole)
+    # 用户要求：冲突时能「跳过」这一条继续传剩下的，而不是只有覆盖/取消
+    skip_btn = box.addButton(t("paste.btn_skip"), QMessageBox.ButtonRole.ActionRole)
     overwrite_btn = box.addButton(t("paste.btn_overwrite"), QMessageBox.ButtonRole.DestructiveRole)
     cancel_btn = box.addButton(t("paste.btn_cancel"), QMessageBox.ButtonRole.RejectRole)
     box.setDefaultButton(keep_btn)
@@ -88,7 +91,12 @@ def resolve_paste_conflict(parent, name: str,
     clicked = box.clickedButton()
     if clicked is cancel_btn or clicked is None:
         return None
-    action = "overwrite" if clicked is overwrite_btn else "keep"
+    if clicked is overwrite_btn:
+        action = "overwrite"
+    elif clicked is skip_btn:
+        action = "skip"
+    else:
+        action = "keep"
     return (action, apply_all.isChecked())
 
 
@@ -533,6 +541,19 @@ class TransferJobHost:
                 job.finish_row(row, error)
         except RuntimeError:
             logger.debug("_finish_job_row: dialog gone", exc_info=True)
+
+    @staticmethod
+    def _skip_job_row(job: Optional[TransferProgressDialog], row: int):
+        """用户在冲突框里选了「跳过」：把该行标成已跳过（窗口可能已被销毁）。"""
+        from PyQt6 import sip
+
+        if job is None:
+            return
+        try:
+            if not sip.isdeleted(job):
+                job.skip_row(row)
+        except RuntimeError:
+            logger.debug("_skip_job_row: dialog gone", exc_info=True)
 
     def _await_remote(self, sess, fn, *args, label: str):
         """提交单个远端操作，在事件循环等待中返回结果。

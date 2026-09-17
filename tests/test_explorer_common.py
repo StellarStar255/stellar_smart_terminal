@@ -27,7 +27,7 @@ class _FakeCheckBox:
 
 class _FakeMsgBox:
     """记录 addButton 顺序，exec 时返回预设点击。"""
-    _click = None          # 'keep' / 'overwrite' / 'cancel' / None
+    _click = None          # 'keep' / 'overwrite' / 'skip' / 'cancel' / None
     _apply_all = False
 
     def __init__(self, parent=None):
@@ -41,8 +41,9 @@ class _FakeMsgBox:
 
     def addButton(self, text, role):
         btn = _FakeButton(role)
-        # 用 role 的字符串区分 keep/overwrite/cancel
-        name = {'AcceptRole': 'keep', 'DestructiveRole': 'overwrite',
+        # 用 role 的字符串区分 keep/skip/overwrite/cancel
+        name = {'AcceptRole': 'keep', 'ActionRole': 'skip',
+                'DestructiveRole': 'overwrite',
                 'RejectRole': 'cancel'}[role.name if hasattr(role, 'name') else str(role)]
         self._buttons[name] = btn
         return btn
@@ -103,6 +104,20 @@ class TestResolvePasteConflict(unittest.TestCase):
         _FakeMsgBox._apply_all = True
         self.assertEqual(self.mod.resolve_paste_conflict(None, 'a.txt', None),
                          ('keep', True))
+
+    def test_sticky_skip_shortcircuits(self):
+        _FakeMsgBox._click = 'cancel'
+        self.assertEqual(self.mod.resolve_paste_conflict(None, 'a.txt', 'skip'),
+                         ('skip', True))
+
+    def test_dialog_skip(self):
+        """用户要求：冲突时可以选「跳过」——不覆盖、不加尾缀、也不中止剩余。"""
+        _FakeMsgBox._click = 'skip'
+        self.assertEqual(self.mod.resolve_paste_conflict(None, 'a.txt', None),
+                         ('skip', False))
+        _FakeMsgBox._apply_all = True
+        self.assertEqual(self.mod.resolve_paste_conflict(None, 'a.txt', None),
+                         ('skip', True))
 
     def test_dialog_cancel_returns_none(self):
         _FakeMsgBox._click = 'cancel'
