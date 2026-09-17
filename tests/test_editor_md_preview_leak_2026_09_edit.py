@@ -55,17 +55,22 @@ class MdPreviewLeakTest(unittest.TestCase):
     def _preview_pane(self):
         pane = self._pane()
         pane.open_file(self._write('a.md', "# A\n\ntext\n"))
-        self.assertTrue(pane._in_md_preview, "前置：小 md 默认进预览")
+        # md 打开默认是源码视图（用户要求），这里手动切进预览态做前置
+        pane._set_md_preview(True)
+        self.assertTrue(pane._in_md_preview, "前置：手动切进预览")
         return pane
 
-    def test_preview_then_open_other_md_renders_once(self):
+    def test_preview_then_open_other_md_opens_source_without_render(self):
+        """预览态下切到另一个 md：按默认回源码视图，一次都不渲染。"""
         pane = self._preview_pane()
         with patch.object(pane, '_render_md_document',
                           wraps=pane._render_md_document) as render:
             pane.open_file(self._write('b.md', "# B\n\nother\n"))
-        self.assertEqual(render.call_count, 1,
+        self.assertEqual(render.call_count, 0,
                          f"预览态切换 md 文件渲染了 {render.call_count} 次")
-        self.assertTrue(pane._in_md_preview)
+        self.assertFalse(pane._in_md_preview)
+        self.assertFalse(pane.md_btn.isChecked())
+        self.assertEqual(pane._stack.currentIndex(), 0)
 
     def test_preview_then_open_non_md_renders_zero(self):
         pane = self._preview_pane()

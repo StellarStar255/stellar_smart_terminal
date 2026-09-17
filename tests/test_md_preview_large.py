@@ -65,6 +65,7 @@ class MdPreviewLargeTest(unittest.TestCase):
         """
         pane = self._pane()
         pane.open_file(self._write('a.md', _SECTION * 40))
+        pane._set_md_preview(True)   # md 打开默认源码视图，手动进预览
         self.assertTrue(pane._in_md_preview)
         doc = pane._md_browser.document()
         doc.size()   # 强制完成整篇布局：修复前 O(n²) 的触发条件
@@ -77,7 +78,7 @@ class MdPreviewLargeTest(unittest.TestCase):
         self.assertIn('▎', doc.toPlainText())
 
     def test_huge_markdown_opens_in_source_mode(self):
-        """超过阈值的 .md 不默认进预览（渲染秒级会卡住），◎ 手动仍可切。"""
+        """大 .md 打开停在源码视图（渲染秒级会卡住），◎ 手动仍可切且带沙漏。"""
         import file_editor
         with patch.object(file_editor, '_MD_AUTO_PREVIEW_MAX_BYTES', 1000):
             pane = self._pane()
@@ -90,15 +91,11 @@ class MdPreviewLargeTest(unittest.TestCase):
             self.assertTrue(pane._in_md_preview)
             self.assertIn('▎', pane._md_browser.document().toPlainText())
 
-            # 阈值以内的照旧默认进预览
-            pane2 = self._pane()
-            pane2.open_file(self._write('small.md', "# hi\n"))
-            self.assertTrue(pane2._in_md_preview)
-
     def test_viewport_refit_skips_rerender_without_images(self):
         """没有图片的文档，视口变宽（滚动条出现）不再整篇重渲染。"""
         pane = self._pane()
         pane.open_file(self._write('noimg.md', _SECTION * 5))
+        pane._set_md_preview(True)   # md 打开默认源码视图，手动进预览
         self.assertFalse(pane._md_has_images)
         pane._md_last_render_width = -1   # 模拟视口宽度变了
         with patch.object(pane, '_render_md_preview') as render:

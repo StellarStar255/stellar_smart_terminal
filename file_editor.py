@@ -43,10 +43,11 @@ _AUTOSAVE_INTERVAL_MS = 30 * 1000
 # 模块级共享：同一文件在不同窗格间切换也能延续位置；仅内存态，不落盘。
 _VIEW_STATE_REGISTRY: dict = {}
 _VIEW_STATE_MAX = 200  # 防无限增长；超限时淘汰最早记录的文件
-# Markdown 超过此大小不再默认进渲染预览，先开源码视图（◎ 手动切预览仍可用）。
+# Markdown 超过此大小算"大文档"：手动切预览时给沙漏光标。
 # 预览渲染是 GUI 线程同步做的：setMarkdown + 六道排版精修 + 代码高亮，
-# 全部线性但常数不小（实测 2.3MB/11 万行约 3 秒，慢机器成倍），
-# 超大文件默认进预览等于打开即卡住。
+# 全部线性但常数不小（实测 2.3MB/11 万行约 3 秒，慢机器成倍）。
+# （历史上这也是"打开即自动进预览"的上限；现在 .md 打开一律停在源码
+# 视图，见 open_file，该阈值只剩沙漏一个用途。）
 _MD_AUTO_PREVIEW_MAX_BYTES = 512 * 1024
 
 
@@ -2827,15 +2828,14 @@ class FileEditorWidget(QWidget):
         if hasattr(self, 'search_bar') and not self.search_bar.isHidden():
             self.search_bar.close_search()
 
-        # Markdown 文件默认进渲染预览（Typora 式阅读视图），点 ◎ 切回源码编辑；
+        # Markdown 文件打开默认停在源码视图（用户要求：点开就能直接编辑），
+        # 点 ◎ / 快捷键才进渲染预览；上面的 _reset_md_preview_state 已保证
+        # 从预览态切换文件时也回到源码视图，不继承上一个文件的预览态。
         # HTML 文件复用同一个 ◎ 按钮，但走系统浏览器预览（Qt 富文本渲染不了
         # 真实网页的 CSS/JS，内嵌 WebEngine 又太重）
         suffix = Path(file_path).suffix.lower()
-        is_md = suffix in ('.md', '.markdown')
-        self._set_md_support(is_md)
+        self._set_md_support(suffix in ('.md', '.markdown'))
         self._set_html_support(suffix in ('.html', '.htm'))
-        if is_md and len(raw) <= _MD_AUTO_PREVIEW_MAX_BYTES:
-            self._set_md_preview(True, sync_scroll=False)
 
         # 恢复上次离开该文件时的视图位置（光标 + 滚动）
         self._restore_view_state(file_path)
