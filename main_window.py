@@ -74,7 +74,8 @@ from main_window_tabs import TabSplitMixin  # 标签页与分屏（从 main_wind
 from main_window_menus import MenusMixin  # 原生菜单栏（从 main_window 拆出）
 import themes  # 主题配色表（纯数据，从 main_window 拆出）
 from i18n import t, set_language
-from utils import get_config_path, list_notify_sounds, play_notify_sound
+from utils import (get_config_path, list_notify_sounds, play_notify_sound,
+                   rect_visible_on_any_screen)
 import app_config
 from app_logging import get_logger
 
@@ -465,8 +466,11 @@ class MainWindow(ThemeMixin, ToolbarMixin, ConfigMixin, ExplorerPanelMixin,
 
         # 恢复窗口几何（仅主窗口，不用于拖拽分离的 tab 窗口）
         if not initial_tab_data:
-            if self._saved_window_geometry:
-                self.setGeometry(*self._saved_window_geometry)
+            geo = self._saved_window_geometry
+            # 只在某块显示器上露得出来时才套用（副屏拔掉后别把窗口恢复到
+            # 看不见的坐标；副屏还在时负坐标/大坐标照常恢复）
+            if geo and len(geo) == 4 and rect_visible_on_any_screen(*geo):
+                self.setGeometry(*geo)
             if self._saved_window_maximized:
                 self.showMaximized()
 
@@ -641,15 +645,31 @@ class MainWindow(ThemeMixin, ToolbarMixin, ConfigMixin, ExplorerPanelMixin,
         """设置 macOS 原生窗口属性，使其在 Mission Control 中正确显示"""
         if not _macos_native_available():
             return
+        # 只有 cocoa 平台插件下 winId 才是 NSView 指针；offscreen（测试）/
+        # 其它 QPA 下拿它去解 objc 对象会直接段错误
+        try:
+            if QApplication.platformName() != 'cocoa':
+                return
+        except Exception:
+            return
 
         try:
-            from AppKit import NSApp
-            window_title = self.windowTitle()
+            # 首选：winId 就是本窗口的 NSView 指针，直接取它的 NSWindow——
+            # 不依赖标题（标题随标签页变化，且多窗口可能同名）
+            ns_window = self._native_ns_window()
+            if ns_window is not None:
+                self._apply_macos_window_behavior(ns_window)
+                logger.debug("已设置窗口属性（winId）: %s", self.windowTitle())
+                return
 
-            # 遍历所有 NSApp 窗口，找到匹配的并设置属性
-            for ns_window in NSApp.windows():
+            # 退路：按标题在 NSApplication 的窗口表里找。`from AppKit import NSApp`
+            # 拿到的模块级变量可能是 None（日志里出现过三次 'NoneType' has no
+            # attribute 'windows'），sharedApplication() 在 Qt 起来后必然非空
+            from AppKit import NSApplication
+            ns_app = NSApplication.sharedApplication()
+            window_title = self.windowTitle()
+            for ns_window in ns_app.windows():
                 try:
-                    # 通过标题匹配
                     if ns_window.title() == window_title:
                         self._apply_macos_window_behavior(ns_window)
                         logger.debug(f"已设置窗口属性: {window_title}")
@@ -658,7 +678,7 @@ class MainWindow(ThemeMixin, ToolbarMixin, ConfigMixin, ExplorerPanelMixin,
                     continue
 
             # 如果没找到匹配的，对所有标准窗口应用设置
-            for ns_window in NSApp.windows():
+            for ns_window in ns_app.windows():
                 try:
                     # 跳过没有标题的窗口（可能是系统窗口）
                     if ns_window.title():
@@ -668,6 +688,17 @@ class MainWindow(ThemeMixin, ToolbarMixin, ConfigMixin, ExplorerPanelMixin,
 
         except Exception as e:
             logger.warning(f"设置 macOS 窗口属性失败: {e}")
+
+    def _native_ns_window(self):
+        """本窗口对应的 NSWindow（经 winId → NSView → window()）；拿不到返回 None。"""
+        try:
+            import objc
+            view = objc.objc_object(c_void_p=int(self.winId()))
+            ns_window = view.window()
+            return ns_window if ns_window is not None else None
+        except Exception:
+            logger.debug("_native_ns_window: lookup via winId failed", exc_info=True)
+            return None
 
     def _apply_macos_window_behavior(self, ns_window):
         """应用 macOS 窗口行为设置"""
@@ -4216,6 +4247,12 @@ class MainWindow(ThemeMixin, ToolbarMixin, ConfigMixin, ExplorerPanelMixin,
         click_fwd_act.setChecked(self._mouse_click_forward_enabled)
         click_fwd_act.setToolTip(t("settings.mouse_click_forward_tooltip"))
         click_fwd_act.toggled.connect(self._set_mouse_click_forward)
+        # Markdown 默认预览（默认关：点开即编辑；开了小于阈值的 .md 打开即进预览）
+        md_prev_act = menu.addAction(t("settings.md_default_preview"))
+        md_prev_act.setCheckable(True)
+        md_prev_act.setChecked(self._md_default_preview)
+        md_prev_act.setToolTip(t("settings.md_default_preview_tooltip"))
+        md_prev_act.toggled.connect(self._set_md_default_preview)
         # 系统右键菜单：从文件管理器中「在 Stellar 终端中打开」目录
         import shell_integration
         if shell_integration.is_supported():
@@ -4596,6 +4633,24 @@ class MainWindow(ThemeMixin, ToolbarMixin, ConfigMixin, ExplorerPanelMixin,
         TerminalWidget.PARSE_ON_READER_THREAD = bool(enabled)
         self._save_config()
         self.statusbar.showMessage(t("settings.parse_off_gui_applied"), 4000)
+
+    def _set_md_default_preview(self, enabled: bool):
+        """切换「Markdown 默认预览」：进程级开关装在编辑器类上（新打开的 .md
+        立即生效），广播到其它窗口防旧值回写，并落盘。"""
+        from file_editor import FileEditorWidget
+        enabled = bool(enabled)
+        self._md_default_preview = enabled
+        FileEditorWidget.MD_DEFAULT_PREVIEW = enabled
+        app = QApplication.instance()
+        if app:
+            for widget in app.topLevelWidgets():
+                if widget is self or not isinstance(widget, MainWindow):
+                    continue
+                widget._md_default_preview = enabled
+        self._save_config()
+        self.statusbar.showMessage(
+            t("settings.md_default_preview_on" if enabled
+              else "settings.md_default_preview_off"), 4000)
 
     def _set_mouse_click_forward(self, enabled: bool):
         """切换「鼠标点击转发给 TUI」。立即对所有窗口的所有终端生效并落盘。

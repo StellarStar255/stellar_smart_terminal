@@ -1108,14 +1108,11 @@ class WindowNavigatorPanel(QWidget):
                 geo = config.get('navigator_geometry')
                 if not self._embedded and geo and len(geo) == 4:
                     x, y, w, h = geo
-                    # 确保窗口在屏幕可见范围内
-                    from PyQt6.QtWidgets import QApplication
-                    screen = QApplication.primaryScreen()
-                    if screen:
-                        screen_rect = screen.availableGeometry()
-                        if (x + w > 0 and x < screen_rect.width() and
-                                y + h > 0 and y < screen_rect.height()):
-                            self.setGeometry(x, y, max(w, 200), max(h, 150))
+                    # 确保窗口在某块显示器上露得出来（以前只看主屏：放在
+                    # 左侧副屏的导航窗每次启动都被拉回主屏）
+                    from utils import rect_visible_on_any_screen
+                    if rect_visible_on_any_screen(x, y, max(w, 200), max(h, 150)):
+                        self.setGeometry(x, y, max(w, 200), max(h, 150))
         except Exception:
             logger.debug("_load_navigator_config: suppressed exception", exc_info=True)
 

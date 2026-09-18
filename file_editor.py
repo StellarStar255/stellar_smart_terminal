@@ -1892,6 +1892,11 @@ class _PaneTabBar(QTabBar):
 class FileEditorWidget(QWidget):
     """文件编辑器组件"""
 
+    # 「Markdown 默认预览」进程级开关（主窗口按配置装上，菜单切换时改写）：
+    # False = 点开 .md 停在源码视图（v1.31.1 起的默认）；True = 小于
+    # _MD_AUTO_PREVIEW_MAX_BYTES 的 .md 打开即进渲染预览
+    MD_DEFAULT_PREVIEW = False
+
     # 信号
     file_saved = pyqtSignal(str)  # 文件保存信号
     editor_closed = pyqtSignal()  # 编辑器关闭信号
@@ -2831,11 +2836,16 @@ class FileEditorWidget(QWidget):
         # Markdown 文件打开默认停在源码视图（用户要求：点开就能直接编辑），
         # 点 ◎ / 快捷键才进渲染预览；上面的 _reset_md_preview_state 已保证
         # 从预览态切换文件时也回到源码视图，不继承上一个文件的预览态。
+        # 开了「Markdown 默认预览」设置（MD_DEFAULT_PREVIEW）则恢复老行为：
+        # 小于阈值的 .md 打开即进预览，超大文件仍先开源码视图（渲染秒级会卡）。
         # HTML 文件复用同一个 ◎ 按钮，但走系统浏览器预览（Qt 富文本渲染不了
         # 真实网页的 CSS/JS，内嵌 WebEngine 又太重）
         suffix = Path(file_path).suffix.lower()
-        self._set_md_support(suffix in ('.md', '.markdown'))
+        is_md = suffix in ('.md', '.markdown')
+        self._set_md_support(is_md)
         self._set_html_support(suffix in ('.html', '.htm'))
+        if is_md and self.MD_DEFAULT_PREVIEW and len(raw) <= _MD_AUTO_PREVIEW_MAX_BYTES:
+            self._set_md_preview(True, sync_scroll=False)
 
         # 恢复上次离开该文件时的视图位置（光标 + 滚动）
         self._restore_view_state(file_path)
