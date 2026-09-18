@@ -10,6 +10,7 @@ ControlMasterSession；connect_async() 无码无密码必失败，connect_failed
 import os
 import sys
 import tempfile
+import time
 import unittest
 from concurrent.futures import Future
 from unittest import mock
@@ -79,6 +80,16 @@ class _FakeTerm(QObject):
     remote_upload_done = pyqtSignal(str, str)
 
 
+def _pump_until(app, cond, timeout=5.0):
+    """带截止的等待：ps 探测/上传都在工作线程，固定次数 processEvents 靠不住。"""
+    deadline = time.monotonic() + timeout
+    while not cond() and time.monotonic() < deadline:
+        app.processEvents()
+        time.sleep(0.01)
+    app.processEvents()
+    return cond()
+
+
 class _Win(RemotePanelMixin, QObject):
     def __init__(self):
         super().__init__()
@@ -108,10 +119,26 @@ class AdhocSessionCache(unittest.TestCase):
     def test_dead_cached_session_is_disconnected_before_replacement(self):
         first = self.win._remote_session_for_host(self.host)
         self.assertIs(first, _FakeAdhoc.instances[0])
-        second = self.win._remote_session_for_host(self.host)   # first 仍未 alive
+        # 连上过、之后主连接死了（is_alive 变 False、且不再处于连接中）
+        first.alive = True
+        first.connected.emit()
+        self.app.processEvents()
+        first.alive = False
+        second = self.win._remote_session_for_host(self.host)
         self.assertIsNot(second, first)
         self.assertIn('disconnect', first.calls, "被换掉的旧实例必须 disconnect（关 executor）")
         self.assertIs(self.win._upload_sessions['gpu13'], second)
+
+    def test_connecting_session_is_reused_not_disconnected(self):
+        """连续粘两张图：第一条临时会话还在连接中（is_alive 尚为 False），
+        第二次粘贴必须复用它——以前会把它 disconnect（abort 杀掉正在跑的
+        ssh）换一条新的，第一张图就传废了。"""
+        first = self.win._remote_session_for_host(self.host)
+        second = self.win._remote_session_for_host(self.host)   # 还没 connected / failed
+        self.assertIs(second, first)
+        self.assertNotIn('disconnect', first.calls)
+        self.assertEqual(len(_FakeAdhoc.instances), 1)
+        self.assertEqual(first.calls.count('connect'), 1)
 
     def test_connect_failed_evicts_cache_and_tells_the_user(self):
         sess = self.win._remote_session_for_host(self.host)
@@ -141,7 +168,8 @@ class DeadSessionJobFallsBack(unittest.TestCase):
         host = HostConfig(alias='gpu13', hostname='10.0.0.1')
         sess = _FakeAdhoc(host)
         sess.alive = False
-        win._ssh_host_for_terminal = lambda term: host
+        win._known_remote_hosts = lambda: [host]
+        win._ssh_args_under = lambda pid, processes=None: "ssh -tt gpu13"
         win._remote_session_for_host = lambda h: sess
         term = _FakeTerm()
         results = []
@@ -152,7 +180,7 @@ class DeadSessionJobFallsBack(unittest.TestCase):
             fh.write(b'\x89PNG')
 
         self.assertTrue(win._upload_pasted_media_for_terminal(term, local))
-        self.app.processEvents()
+        _pump_until(self.app, lambda: results)
         self.assertEqual(results, [(local, '')], "会话死了 → 回退敲本地路径")
         self.assertNotIn('home', sess.calls)
         self.assertFalse(any(isinstance(c, tuple) and c[0] in ('mkdir', 'upload')
@@ -193,7 +221,8 @@ class IdlePanelSessionReconnects(unittest.TestCase):
     def _run(self, sess):
         win = _Win()
         host = HostConfig(alias='gpu13', hostname='10.0.0.1')
-        win._ssh_host_for_terminal = lambda term: host
+        win._known_remote_hosts = lambda: [host]
+        win._ssh_args_under = lambda pid, processes=None: "ssh -tt gpu13"
         win._remote_session_for_host = lambda h: sess
         term = _FakeTerm()
         results = []
@@ -203,7 +232,7 @@ class IdlePanelSessionReconnects(unittest.TestCase):
         with open(local, 'wb') as fh:
             fh.write(b'\x89PNG')
         self.assertTrue(win._upload_pasted_media_for_terminal(term, local))
-        self.app.processEvents()
+        _pump_until(self.app, lambda: results)
         return local, results
 
     def test_idle_session_reconnects_then_uploads(self):
@@ -222,3 +251,92 @@ class IdlePanelSessionReconnects(unittest.TestCase):
         self.assertEqual(results, [(local, '')], "重连失败 → 回退敲本地路径")
         self.assertFalse(any(isinstance(c, tuple) and c[0] in ('mkdir', 'upload')
                              for c in sess.calls), sess.calls)
+
+
+class _FakePanel(QObject):
+    """替身 Remote 面板：只有粘图引导用到的几个成员。"""
+    host_connected = pyqtSignal(object)
+    error_occurred = pyqtSignal(str)
+
+    def __init__(self):
+        super().__init__()
+        self._session = None
+        self._current_path = '/proj'
+        self.connect_calls = []
+        self.next_session = None     # _connect_to 后立刻挂上的会话（None = 用户取消了登录框）
+
+    def _connect_to(self, host, **kw):
+        self.connect_calls.append(host.alias)
+        self._session = self.next_session
+
+
+class NoSessionAsksToConnect(unittest.TestCase):
+    """终端在 ssh 里、但面板没连着这台机器也没有主连接：问一句「连接并上传？」，
+    同意就连面板、连上后补传一次；拒绝 / 连接失败 / 取消登录框 → 退回本地路径。"""
+
+    @classmethod
+    def setUpClass(cls):
+        cls.app = QApplication.instance() or QApplication([])
+
+    def setUp(self):
+        self.host = HostConfig(alias='gpu13', hostname='10.0.0.1')
+        self.win = _Win()
+        self.panel = _FakePanel()
+        self.win.remote_panel = self.panel
+        self.win.remote_panel_visible = True
+        self.win._ensure_remote_panel = lambda: self.panel
+        self.win._toggle_remote_panel = lambda: None
+        self.win._known_remote_hosts = lambda: [self.host]
+        self.win._ssh_args_under = lambda pid, processes=None: "ssh -tt gpu13"
+        for p_ in (mock.patch('ssh_control.is_supported', return_value=True),
+                   mock.patch('ssh_control.master_socket_exists', return_value=False)):
+            p_.start()
+            self.addCleanup(p_.stop)
+        self.term = _FakeTerm()
+        self.results = []
+        self.term.remote_upload_done.connect(
+            lambda local, remote: self.results.append((local, remote)))
+        tmp = tempfile.mkdtemp(prefix='paste-')
+        self.local = os.path.join(tmp, 'shot.png')
+        with open(self.local, 'wb') as fh:
+            fh.write(b'\x89PNG')
+
+    def test_accept_connects_panel_and_uploads_after_connected(self):
+        self.win._ask_connect_for_paste = lambda host: True
+        sess = _FakeAdhoc(self.host)
+        sess.alive = True
+        self.panel.next_session = sess
+        self.assertTrue(self.win._upload_pasted_media_for_terminal(self.term, self.local))
+        _pump_until(self.app, lambda: self.panel.connect_calls, timeout=5)
+        self.assertEqual(self.panel.connect_calls, ['gpu13'])
+        self.assertEqual(self.results, [], "连上之前不该敲任何路径")
+        self.panel.host_connected.emit(self.host)
+        _pump_until(self.app, lambda: self.results)
+        self.assertEqual(self.results, [(self.local, '/proj/.images/shot.png')])
+        self.assertIn(('upload', self.local, '/proj/.images/shot.png'), sess.calls)
+
+    def test_decline_types_local_path_without_connecting(self):
+        self.win._ask_connect_for_paste = lambda host: False
+        self.assertTrue(self.win._upload_pasted_media_for_terminal(self.term, self.local))
+        _pump_until(self.app, lambda: self.results)
+        self.assertEqual(self.results, [(self.local, '')])
+        self.assertEqual(self.panel.connect_calls, [])
+
+    def test_connect_failure_falls_back_to_local_path(self):
+        self.win._ask_connect_for_paste = lambda host: True
+        sess = _FakeAdhoc(self.host)          # 连接中（alive=False）
+        self.panel.next_session = sess
+        self.assertTrue(self.win._upload_pasted_media_for_terminal(self.term, self.local))
+        _pump_until(self.app, lambda: self.panel.connect_calls)
+        self.panel.error_occurred.emit('auth failed')
+        _pump_until(self.app, lambda: self.results)
+        self.assertEqual(self.results, [(self.local, '')])
+        self.assertFalse(any(isinstance(c, tuple) and c[0] == 'upload' for c in sess.calls))
+
+    def test_cancelled_login_dialog_falls_back_immediately(self):
+        self.win._ask_connect_for_paste = lambda host: True
+        self.panel.next_session = None       # _connect_to 回来 _session 仍是 None：用户取消了 MFA 框
+        self.assertTrue(self.win._upload_pasted_media_for_terminal(self.term, self.local))
+        self.assertTrue(_pump_until(self.app, lambda: self.results, timeout=5),
+                        "取消登录框后不该等 60s 超时才回退")
+        self.assertEqual(self.results, [(self.local, '')])
