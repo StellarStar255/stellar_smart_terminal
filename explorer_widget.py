@@ -1177,7 +1177,8 @@ class ExplorerPanel(QWidget, explorer_common.TransferJobHost):
     def _handle_drop_copy(self, src_paths: list, target_dir: str):
         """把从其他面板/Finder 拖入的文件复制到 target_dir。
 
-        - 已存在的目标默认询问覆盖
+        - 已存在的目标走和粘贴同一个冲突框（保留二者 / 跳过 / 覆盖 / 取消，
+          可对剩余冲突应用相同操作）
         - 目录递归复制
         """
         errors = []
@@ -1185,27 +1186,37 @@ class ExplorerPanel(QWidget, explorer_common.TransferJobHost):
         # 先在 GUI 线程把冲突问完；覆盖删除 + 大小统计 + 真正的复制都整批
         # 交给工作线程（这里只跑事件循环画进度）
         pairs: list = []   # (src, dst, overwrite)
+        sticky_decision = None
+
+        def local_name_exists(name: str) -> bool:
+            return os.path.exists(os.path.join(target_dir, name))
+
         for src in src_paths:
             try:
                 if not os.path.exists(src):
                     errors.append(f"{os.path.basename(src)}: not found")
                     continue
-                dst = os.path.join(target_dir, os.path.basename(src))
+                name = os.path.basename(src.rstrip(os.sep)) or os.path.basename(src)
+                dst = os.path.join(target_dir, name)
                 if os.path.abspath(src) == os.path.abspath(dst):
                     skipped += 1
                     continue
                 overwrite = False
                 if os.path.exists(dst):
-                    reply = QMessageBox.question(
-                        self, t("explorer.overwrite_title"),
-                        f"{os.path.basename(dst)} already exists in this folder. Overwrite?",
-                        QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No,
-                        QMessageBox.StandardButton.No,
-                    )
-                    if reply != QMessageBox.StandardButton.Yes:
+                    decision = self._resolve_paste_conflict(name, sticky_decision)
+                    if decision is None:
+                        break            # 取消：剩余条目一律不复制
+                    action, sticky = decision
+                    if sticky:
+                        sticky_decision = action
+                    if action == "skip":
                         skipped += 1
                         continue
-                    overwrite = True
+                    if action == "overwrite":
+                        overwrite = True
+                    else:  # keep both → (N) 尾缀另存
+                        name = explorer_clipboard.next_free_name(name, local_name_exists)
+                        dst = os.path.join(target_dir, name)
                 pairs.append((src, dst, overwrite))
             except Exception as e:
                 errors.append(f"{os.path.basename(src)}: {e}")

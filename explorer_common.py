@@ -21,8 +21,38 @@ from PyQt6.QtWidgets import (
 from i18n import t
 from transfer_progress import TransferProgressDialog
 from app_logging import get_logger
+import app_config
 
 logger = get_logger(__name__)
+
+# 冲突框「记住上次选择」：默认按钮跟着用户上次点的动作走（keep / skip /
+# overwrite；取消永远不当默认）。进程内存一份，另落到配置里跨重启保留。
+_CONFLICT_DEFAULT_KEY = 'paste_conflict_default'
+_CONFLICT_ACTIONS = ('keep', 'skip', 'overwrite')
+_last_conflict_action = None
+
+
+def _default_conflict_action() -> str:
+    global _last_conflict_action
+    if _last_conflict_action is None:
+        try:
+            saved = app_config.read_config().get(_CONFLICT_DEFAULT_KEY)
+        except Exception:
+            saved = None
+        _last_conflict_action = saved if saved in _CONFLICT_ACTIONS else 'keep'
+    return _last_conflict_action
+
+
+def _remember_conflict_action(action: str):
+    global _last_conflict_action
+    if action not in _CONFLICT_ACTIONS or action == _last_conflict_action:
+        return
+    _last_conflict_action = action
+    try:
+        app_config.update_config({_CONFLICT_DEFAULT_KEY: action},
+                                 description='paste conflict default')
+    except Exception:
+        logger.debug("remember conflict action: config write failed", exc_info=True)
 
 
 def _suspend_topmost_job(parent):
@@ -74,7 +104,9 @@ def resolve_paste_conflict(parent, name: str,
     skip_btn = box.addButton(t("paste.btn_skip"), QMessageBox.ButtonRole.ActionRole)
     overwrite_btn = box.addButton(t("paste.btn_overwrite"), QMessageBox.ButtonRole.DestructiveRole)
     cancel_btn = box.addButton(t("paste.btn_cancel"), QMessageBox.ButtonRole.RejectRole)
-    box.setDefaultButton(keep_btn)
+    # 默认按钮 = 上次的选择（首次为保留二者），连着处理一批同类冲突时回车即可
+    box.setDefaultButton({'keep': keep_btn, 'skip': skip_btn,
+                          'overwrite': overwrite_btn}[_default_conflict_action()])
     apply_all = QCheckBox(t("paste.apply_to_all"))
     box.setCheckBox(apply_all)
     # 传输进度窗口是置顶的，会盖住这个模态框让人点不到（按钮点不着 =
@@ -97,6 +129,7 @@ def resolve_paste_conflict(parent, name: str,
         action = "skip"
     else:
         action = "keep"
+    _remember_conflict_action(action)
     return (action, apply_all.isChecked())
 
 
