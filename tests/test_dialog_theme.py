@@ -114,7 +114,8 @@ class TestMessageBoxAndMenusFollowTheme(unittest.TestCase):
         from main_window_theme import menu_qss
         light = menu_qss(LIGHT)
         dark = menu_qss(DARK)
-        self.assertIn(LIGHT["bg_light"], light)
+        # 浅色主题的菜单底用纯白（bg_medium），深色主题用 bg_light
+        self.assertIn(f'background-color: {LIGHT["bg_medium"]}', light)
         self.assertIn(LIGHT["text"], light)
         self.assertNotIn(DARK["bg_light"], light)
         self.assertIn(DARK["bg_light"], dark)

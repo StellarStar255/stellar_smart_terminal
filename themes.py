@@ -113,28 +113,31 @@ THEMES = {
     },
     "浅色": {
         "name": "浅色",
-        "bg_darkest": "#e8ebef",      # 主背景 - 浅灰色
-        "bg_dark": "#dde1e6",         # 工具栏背景 - 稍深灰
-        "bg_medium": "#d0d5dc",       # 输入框/状态栏背景 - 中等灰
-        "bg_light": "#c1c7cf",        # 边框高亮
-        "bg_lighter": "#b0b8c2",      # 装饰元素
-        "bg_hover": "#c8cdd4",        # 悬停状态
-        "accent": "#0d6efd",
-        "accent_hover": "#0b5ed7",
-        "accent_pressed": "#0a58ca",
-        "text": "#1a1d21",            # 主文字 - 深色
-        "text_dim": "#3d4450",        # 次要文字 - 也要深一点
-        "border": "#9aa3af",          # 边框 - 深一点
-        "success": "#198754",
-        "success_hover": "#157347",
-        "danger": "#dc3545",
-        "danger_hover": "#bb2d3b",
-        "terminal_bg": "#f0f2f5",     # 终端背景 - 非常浅的灰
-        "terminal_fg": "#1e1e1e",
+        # macOS 风格浅色：近白的层级面板 + 中性灰按钮 + 单一蓝色强调色。
+        # 深色主题里 darkest→hover 是"由暗到亮"的层级；浅色反过来，
+        # darkest 是最灰的窗口底、medium 是纯白的输入区/列表。
+        "bg_darkest": "#ececef",      # 窗口底 / 标签条 / 日志区
+        "bg_dark": "#f5f5f7",         # 工具栏 / 面板 / 标签页 pane / 消息框
+        "bg_medium": "#ffffff",       # 输入框 / 列表 / 状态栏 / 面板标题栏
+        "bg_light": "#e3e3e8",        # 按下态 / 标签 hover / 分隔
+        "bg_lighter": "#e8e8ed",      # 中性按钮底
+        "bg_hover": "#dcdce2",        # 中性按钮 hover
+        "accent": "#007aff",          # macOS 系统蓝
+        "accent_hover": "#2b8cff",
+        "accent_pressed": "#0062cc",
+        "text": "#1d1d1f",            # 主文字（Apple 标准深灰）
+        "text_dim": "#6e6e73",        # 次要文字
+        "border": "#d1d1d6",          # 发丝线边框
+        "success": "#2ea043",         # 白字可读的绿
+        "success_hover": "#3fb950",
+        "danger": "#e0383e",
+        "danger_hover": "#f0555b",
+        "terminal_bg": "#ffffff",
+        "terminal_fg": "#1d1d1f",
         "is_light_theme": True,  # 标记这是浅色主题
         # 浅色主题专用的 ANSI 终端颜色（深色文字）
         "terminal_colors": {
-            "black": "#1e1e1e",
+            "black": "#1d1d1f",
             "red": "#c41a16",
             "green": "#007400",
             "brown": "#a85400",
@@ -142,11 +145,11 @@ THEMES = {
             "blue": "#0451a5",
             "magenta": "#bc05bc",
             "cyan": "#0598bc",
-            "white": "#6e6e6e",
-            "default": "#1e1e1e",
+            "white": "#6e6e73",
+            "default": "#1d1d1f",
         },
         "terminal_bright_colors": {
-            "black": "#4e4e4e",
+            "black": "#4e4e52",
             "red": "#de3124",
             "green": "#00a800",
             "brown": "#cc6600",
@@ -154,10 +157,10 @@ THEMES = {
             "blue": "#2f86d2",
             "magenta": "#d416d4",
             "cyan": "#00a8a8",
-            "white": "#3e3e3e",
+            "white": "#3e3e42",
         },
-        "selection_color": (0, 90, 180, 80),  # 深蓝色选区
-        "cursor_color": (50, 50, 50, 200),  # 深色光标
+        "selection_color": (0, 122, 255, 55),  # 系统蓝选区
+        "cursor_color": (29, 29, 31, 200),  # 深色光标
     },
     "粉红": {
         "name": "粉红",
@@ -181,3 +184,42 @@ THEMES = {
         "terminal_fg": "#f0d8e8",
     },
 }
+
+
+def is_light(theme: dict) -> bool:
+    """该主题是否为浅色主题（浅色下品牌色按钮/彩色文字要走中性化处理）。"""
+    return bool(theme.get('is_light_theme'))
+
+
+def _rel_luminance(r: float, g: float, b: float) -> float:
+    """WCAG 相对亮度（分量为 0～1）。"""
+    def ch(v):
+        return v / 12.92 if v <= 0.03928 else ((v + 0.055) / 1.055) ** 2.4
+    return 0.2126 * ch(r) + 0.7152 * ch(g) + 0.0722 * ch(b)
+
+
+def readable_on_light(color_hex: str, min_contrast: float = 4.5) -> str:
+    """把窗口色这类"为深色背景挑的亮色"压暗到白底上可读（对比度 ≥ 4.5:1）。
+
+    窗口色（#667eea/#22c55e/#facc15…）是按深色底选的高亮度色，直接当浅色
+    主题里的文字色对比度只有 2～3:1（导航列表里的绿字/黄字几乎看不见）。
+    这里只逐级压 HSL 亮度、不动色相，窗口之间仍靠颜色区分；黄色这类本身
+    亮度就高的色相会被压得更狠。非法输入原样返回。
+    """
+    import colorsys
+    s = str(color_hex or '').strip()
+    if len(s) != 7 or not s.startswith('#'):
+        return color_hex
+    try:
+        r, g, b = (int(s[i:i + 2], 16) / 255.0 for i in (1, 3, 5))
+    except ValueError:
+        return color_hex
+    if (1.05 / (_rel_luminance(r, g, b) + 0.05)) >= min_contrast:
+        return s.lower()
+    h, l, sat = colorsys.rgb_to_hls(r, g, b)
+    while l > 0.02:
+        l -= 0.02
+        r, g, b = colorsys.hls_to_rgb(h, l, sat)
+        if (1.05 / (_rel_luminance(r, g, b) + 0.05)) >= min_contrast:
+            break
+    return '#%02x%02x%02x' % (round(r * 255), round(g * 255), round(b * 255))

@@ -1130,10 +1130,19 @@ class GitCommitWidget(QFrame):
 
     @staticmethod
     def _generate_btn_style(theme: dict) -> str:
+        # 浅色主题：次要操作走中性底，Commit 是提交区唯一的填色主按钮；
+        # 深色主题保留紫色品牌底。
+        if theme.get('is_light_theme'):
+            bg, fg, hover, pressed = (theme.get('bg_lighter', '#e8e8ed'),
+                                      theme.get('text', '#1d1d1f'),
+                                      theme.get('bg_hover', '#dcdce2'),
+                                      theme.get('bg_light', '#e3e3e8'))
+        else:
+            bg, fg, hover, pressed = '#7c3aed', 'white', '#8b5cf6', '#6d28d9'
         return f"""
             QPushButton {{
-                background-color: #7c3aed;
-                color: white;
+                background-color: {bg};
+                color: {fg};
                 border: none;
                 border-radius: 4px;
                 padding: 8px 16px;
@@ -1141,10 +1150,10 @@ class GitCommitWidget(QFrame):
                 font-weight: bold;
             }}
             QPushButton:hover {{
-                background-color: #8b5cf6;
+                background-color: {hover};
             }}
             QPushButton:pressed {{
-                background-color: #6d28d9;
+                background-color: {pressed};
             }}
             QPushButton:disabled {{
                 background-color: {theme.get('bg_lighter', '#3d3d5c')};
@@ -1207,10 +1216,18 @@ class GitCommitWidget(QFrame):
             }}
         """)
 
+        # Push：深色主题绿底黑字；浅色主题与 Pull 同为中性按钮（绿字点出方向）
+        if theme.get('is_light_theme'):
+            _push_bg, _push_fg, _push_hover = (theme.get('bg_lighter', '#e8e8ed'),
+                                               theme.get('success', '#2ea043'),
+                                               theme.get('bg_hover', '#dcdce2'))
+        else:
+            _push_bg, _push_fg, _push_hover = (theme.get('success', '#4ade80'), '#000',
+                                               theme.get('success_hover', '#22c55e'))
         self.push_btn.setStyleSheet(f"""
             QPushButton {{
-                background-color: {theme.get('success', '#4ade80')};
-                color: #000;
+                background-color: {_push_bg};
+                color: {_push_fg};
                 border: none;
                 border-radius: 4px;
                 padding: 8px 16px;
@@ -1218,7 +1235,7 @@ class GitCommitWidget(QFrame):
                 font-weight: bold;
             }}
             QPushButton:hover {{
-                background-color: {theme.get('success_hover', '#22c55e')};
+                background-color: {_push_hover};
             }}
         """)
 

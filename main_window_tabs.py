@@ -76,14 +76,7 @@ class TabSplitMixin:
             # 创建新的分屏容器
             splitter = QSplitter(Qt.Orientation.Horizontal)
             splitter.setHandleWidth(2)
-            splitter.setStyleSheet("""
-                QSplitter::handle {
-                    background-color: #3d3d5c;
-                }
-                QSplitter::handle:hover {
-                    background-color: #667eea;
-                }
-            """)
+            splitter.setStyleSheet(self._pane_splitter_qss())
 
             # 创建第一个终端
             terminal = self._create_terminal()
@@ -101,21 +94,7 @@ class TabSplitMixin:
         # 添加自定义关闭按钮到标签页
         close_btn = QPushButton("×")
         close_btn.setFixedSize(20, 20)
-        close_btn.setStyleSheet("""
-            QPushButton {
-                background-color: #e74c3c;
-                color: white;
-                border: none;
-                border-radius: 10px;
-                font-size: 16px;
-                font-family: 'Segoe UI Emoji', 'Apple Color Emoji', 'Noto Color Emoji', Arial, sans-serif;
-                padding: 0;
-                margin: 0;
-            }
-            QPushButton:hover {
-                background-color: #ff6b6b;
-            }
-        """)
+        close_btn.setStyleSheet(self._tab_close_btn_qss())
         close_btn.clicked.connect(lambda checked, i=idx: self._close_tab_by_button(i))
         self.tab_widget.tabBar().setTabButton(idx, QTabBar.ButtonPosition.RightSide, close_btn)
 
@@ -222,35 +201,14 @@ class TabSplitMixin:
         """创建一个带统一手柄样式的 QSplitter"""
         splitter = QSplitter(orientation)
         splitter.setHandleWidth(2)
-        splitter.setStyleSheet("""
-            QSplitter::handle {
-                background-color: #3d3d5c;
-            }
-            QSplitter::handle:hover {
-                background-color: #667eea;
-            }
-        """)
+        splitter.setStyleSheet(self._pane_splitter_qss())
         return splitter
 
     def _restore_tab_close_button(self, idx):
         """为第 idx 个标签页重新创建右上角的关闭按钮（removeTab 会丢弃原按钮）"""
         close_btn = QPushButton("×")
         close_btn.setFixedSize(20, 20)
-        close_btn.setStyleSheet("""
-            QPushButton {
-                background-color: #e74c3c;
-                color: white;
-                border: none;
-                border-radius: 10px;
-                font-size: 16px;
-                font-family: 'Segoe UI Emoji', 'Apple Color Emoji', 'Noto Color Emoji', Arial, sans-serif;
-                padding: 0;
-                margin: 0;
-            }
-            QPushButton:hover {
-                background-color: #ff6b6b;
-            }
-        """)
+        close_btn.setStyleSheet(self._tab_close_btn_qss())
         close_btn.clicked.connect(lambda checked, i=idx: self._close_tab_by_button(i))
         self.tab_widget.tabBar().setTabButton(idx, QTabBar.ButtonPosition.RightSide, close_btn)
 

@@ -9,10 +9,11 @@ from PyQt6 import sip
 from PyQt6.QtCore import QPoint, QTimer, Qt
 from PyQt6.QtGui import QColor, QIcon, QPainter, QPalette, QPixmap
 from PyQt6.QtWidgets import (
-    QApplication, QHBoxLayout, QMenu, QPushButton, QVBoxLayout, QWidget,
-    QWidgetAction,
+    QApplication, QHBoxLayout, QMenu, QPushButton, QSplitter, QVBoxLayout,
+    QWidget, QWidgetAction,
 )
 from i18n import t
+from themes import is_light, readable_on_light
 
 # 弹出菜单 / 消息框的 QSS 由主题推导并按用到的颜色值缓存：以前每次 popup 都
 # 重建一段写死深色的字符串，主题遍历也触不到它们。
@@ -26,10 +27,11 @@ def _theme_key(theme: dict, *names) -> tuple:
 def menu_qss(theme: dict, padding: str = "4px", radius: str = "6px") -> str:
     """临时 QMenu（设置菜单、排序子菜单、★ 快捷方式、颜色选择器）的统一样式。"""
     key = ("menu", padding, radius) + _theme_key(
-        theme, 'bg_light', 'text', 'border', 'accent', 'text_dim')
+        theme, 'bg_light', 'bg_medium', 'text', 'border', 'accent', 'text_dim')
     qss = _QSS_CACHE.get(key)
     if qss is None:
-        bg = theme.get('bg_light', '#2d2d44')
+        # 浅色主题：菜单用纯白（bg_medium），灰底菜单在浅色下显得脏
+        bg = theme.get('bg_medium' if is_light(theme) else 'bg_light', '#2d2d44')
         qss = f"""
             QMenu {{
                 background-color: {bg};
@@ -147,6 +149,116 @@ def message_box_qss(theme: dict, check_image: str = "") -> str:
     return qss
 
 
+def brand_button_qss(theme: dict, bg: str, hover: str, checked: str = None,
+                     *, padding: str = "8px 15px", radius: str = "4px",
+                     extra: str = "", text_color: str = "white") -> str:
+    """品牌色/功能色按钮（Explorer 绿、Git 橙、Split 紫…）的主题化样式。
+
+    深色主题保留原有的彩色底（深底上一排彩块是有层次的）；浅色主题走
+    macOS 风格：全部中性灰底 + 深色文字，只有 checked（面板已打开）才上
+    强调色 —— 浅色底上一排饱和彩块看起来像出了 bug，也没有"高级感"。
+    """
+    if is_light(theme):
+        qss = f"""
+            QPushButton {{
+                background-color: {theme['bg_lighter']};
+                color: {theme['text']};
+                border: none;
+                border-radius: {radius};
+                padding: {padding};
+                {extra}
+            }}
+            QPushButton:hover {{
+                background-color: {theme['bg_hover']};
+            }}
+            QPushButton:pressed {{
+                background-color: {theme['bg_light']};
+            }}
+        """
+        if checked:
+            qss += f"""
+            QPushButton:checked {{
+                background-color: {theme['accent']};
+                color: #ffffff;
+            }}
+            QPushButton:checked:hover {{
+                background-color: {theme['accent_hover']};
+            }}
+            """
+        return qss
+    qss = f"""
+        QPushButton {{
+            background-color: {bg};
+            color: {text_color};
+            border: none;
+            border-radius: {radius};
+            padding: {padding};
+            {extra}
+        }}
+        QPushButton:hover {{
+            background-color: {hover};
+        }}
+    """
+    if checked:
+        qss += f"""
+        QPushButton:checked {{
+            background-color: {checked};
+        }}
+        """
+    return qss
+
+
+def tab_close_qss(theme: dict) -> str:
+    """标签页右上角 × 按钮：深色主题保留红色圆点；浅色主题是灰色 ×，
+    hover 才变红 —— 每个标签挂一颗红球在浅色底上非常刺眼。"""
+    font = "font-family: 'Segoe UI Emoji', 'Apple Color Emoji', 'Noto Color Emoji', Arial, sans-serif;"
+    if is_light(theme):
+        return f"""
+            QPushButton {{
+                background-color: transparent;
+                color: {theme['text_dim']};
+                border: none;
+                border-radius: 10px;
+                font-size: 16px;
+                {font}
+                padding: 0;
+                margin: 0;
+            }}
+            QPushButton:hover {{
+                background-color: {theme['danger']};
+                color: #ffffff;
+            }}
+        """
+    return f"""
+        QPushButton {{
+            background-color: #e74c3c;
+            color: white;
+            border: none;
+            border-radius: 10px;
+            font-size: 16px;
+            {font}
+            padding: 0;
+            margin: 0;
+        }}
+        QPushButton:hover {{
+            background-color: #ff6b6b;
+        }}
+    """
+
+
+def pane_splitter_qss(theme: dict) -> str:
+    """分屏 QSplitter 手柄：以前构造时写死深色（#3d3d5c），浅色主题下每个
+    分屏之间横着一道深线。"""
+    return f"""
+        QSplitter::handle {{
+            background-color: {theme.get('border', '#3d3d5c')};
+        }}
+        QSplitter::handle:hover {{
+            background-color: {theme.get('accent', '#667eea')};
+        }}
+    """
+
+
 # 进程级共享类属性（全局导航器）经 window_host.host_class(self) 落到真正的
 # MainWindow 上，不 import main_window。
 from window_host import host_class
@@ -194,6 +306,9 @@ class ThemeMixin:
             return
 
         t = self.THEMES[theme_name]
+        light = is_light(t)
+        # 浅色主题用发丝线（1px）边框，2px 深灰框在浅色底上过重
+        bw = "1px" if light else "2px"
 
         # 主题会重写大量控件样式表。先把上次缩放过的控件还原成"未缩放基准"再清缓存：
         # _scale_gui_font_sizes 缓存未命中时会把控件当前样式当基准，若此时还停在已缩放
@@ -260,7 +375,7 @@ class ThemeMixin:
             }}
             QLineEdit {{
                 background-color: {t['bg_medium']};
-                border: 2px solid {t['border']};
+                border: {bw} solid {t['border']};
                 border-radius: 4px;
                 padding: 6px;
                 color: {t['text']};
@@ -291,12 +406,12 @@ class ThemeMixin:
             QCheckBox::indicator {{
                 width: 16px;
                 height: 16px;
-                border: 2px solid {t['border']};
+                border: {bw} solid {t['border']};
                 border-radius: 3px;
                 background-color: {t['bg_medium']};
             }}
             QCheckBox::indicator:checked {{
-                border: 2px solid {t['accent']};
+                border: {bw} solid {t['accent']};
                 background-color: {t['accent']};
             }}
         """ + self._message_box_qss(t))
@@ -495,10 +610,12 @@ class ThemeMixin:
             }}
         """)
 
-        # 切换按钮样式
+        # 切换按钮样式（浅色主题：唯一的主操作用强调蓝，而不是又一块绿）
+        _sw_bg, _sw_hover = ((t['accent'], t['accent_hover']) if light
+                             else (t['success'], t['success_hover']))
         self.apply_dir_btn.setStyleSheet(f"""
             QPushButton {{
-                background-color: {t['success']};
+                background-color: {_sw_bg};
                 color: white;
                 padding: 4px 12px;
                 font-size: 12px;
@@ -506,27 +623,17 @@ class ThemeMixin:
                 border-radius: 4px;
             }}
             QPushButton:hover {{
-                background-color: {t['success_hover']};
+                background-color: {_sw_hover};
             }}
         """)
 
         # 当前目录标签样式
         self.current_dir_label.setStyleSheet(f"color: {t['accent']}; font-size: 11px;")
 
-        # 历史目录按钮样式
-        self.dir_dropdown_btn.setStyleSheet(f"""
-            QPushButton {{
-                background-color: {t['accent']};
-                color: white;
-                border: none;
-                border-radius: 6px;
-                font-size: 14px;
-                padding: 2px;
-            }}
-            QPushButton:hover {{
-                background-color: {t['accent_hover']};
-            }}
-        """)
+        # 历史目录按钮样式（浅色主题走中性按钮）
+        self.dir_dropdown_btn.setStyleSheet(brand_button_qss(
+            t, t['accent'], t['accent_hover'],
+            padding="2px", radius="6px", extra="font-size: 14px;"))
 
         # 预设切换按钮样式 - 浅色主题使用浅灰色
         if t.get('is_light_theme'):
@@ -694,25 +801,13 @@ class ThemeMixin:
                 }}
             """)
         if hasattr(self, '_explorer_title'):
-            self._explorer_title.setStyleSheet("color: #22c55e; font-weight: bold;")
+            self._explorer_title.setStyleSheet(
+                f"color: {t['text'] if light else '#22c55e'}; font-weight: bold;")
 
         # Explorer 切换按钮样式
         if hasattr(self, 'explorer_toggle_btn'):
-            self.explorer_toggle_btn.setStyleSheet("""
-                QPushButton {
-                    background-color: #22c55e;
-                    color: white;
-                    border: none;
-                    border-radius: 4px;
-                    padding: 8px 15px;
-                }
-                QPushButton:hover {
-                    background-color: #4ade80;
-                }
-                QPushButton:checked {
-                    background-color: #16a34a;
-                }
-            """)
+            self.explorer_toggle_btn.setStyleSheet(
+                brand_button_qss(t, '#22c55e', '#4ade80', '#16a34a'))
 
         # Git 面板样式
         if hasattr(self, 'git_panel'):
@@ -731,58 +826,29 @@ class ThemeMixin:
                 }}
             """)
         if hasattr(self, '_git_title'):
-            self._git_title.setStyleSheet("color: #f97316; font-weight: bold;")
+            self._git_title.setStyleSheet(
+                f"color: {t['text'] if light else '#f97316'}; font-weight: bold;")
 
         # Git 切换按钮样式
         if hasattr(self, 'git_toggle_btn'):
-            self.git_toggle_btn.setStyleSheet("""
-                QPushButton {
-                    background-color: #f97316;
-                    color: white;
-                    border: none;
-                    border-radius: 4px;
-                    padding: 8px 15px;
-                }
-                QPushButton:hover {
-                    background-color: #fb923c;
-                }
-                QPushButton:checked {
-                    background-color: #ea580c;
-                }
-            """)
+            self.git_toggle_btn.setStyleSheet(
+                brand_button_qss(t, '#f97316', '#fb923c', '#ea580c'))
 
         # VS Code 打开按钮样式
         if hasattr(self, 'vscode_open_btn'):
-            self.vscode_open_btn.setStyleSheet("""
-                QPushButton {
-                    background-color: #007ACC;
-                    color: white;
-                    border: none;
-                    border-radius: 4px;
-                    padding: 8px 15px;
-                }
-                QPushButton:hover {
-                    background-color: #1a8ad4;
-                }
-            """)
+            self.vscode_open_btn.setStyleSheet(
+                brand_button_qss(t, '#007ACC', '#1a8ad4'))
 
         # Cursor 打开按钮样式
         if hasattr(self, 'cursor_open_btn'):
-            self.cursor_open_btn.setStyleSheet("""
-                QPushButton {
-                    background-color: #7c3aed;
-                    color: white;
-                    border: none;
-                    border-radius: 4px;
-                    padding: 8px 15px;
-                }
-                QPushButton:hover {
-                    background-color: #8b5cf6;
-                }
-            """)
+            self.cursor_open_btn.setStyleSheet(
+                brand_button_qss(t, '#7c3aed', '#8b5cf6'))
 
-        # 工具栏设置按钮样式
+        # 工具栏设置按钮样式（齿轮图标构造时是白色，浅色底上会消失）
         if hasattr(self, 'toolbar_settings_btn'):
+            from git_widget import _make_git_tool_icon
+            self.toolbar_settings_btn.setIcon(_make_git_tool_icon(
+                'gear', t['text'] if light else '#eaeaea', 16))
             self.toolbar_settings_btn.setStyleSheet(f"""
                 QPushButton {{
                     background-color: {t['bg_lighter']};
@@ -811,7 +877,7 @@ class ThemeMixin:
             self.preset_combo.setStyleSheet(f"""
                 QComboBox {{
                     background-color: {t['bg_medium']};
-                    border: 2px solid {t['border']};
+                    border: {bw} solid {t['border']};
                     border-radius: 6px;
                     padding: 8px 12px;
                     padding-right: 36px;
@@ -950,12 +1016,12 @@ class ThemeMixin:
                 height: 16px;
             }}
             QCheckBox::indicator:unchecked {{
-                border: 2px solid {t['border']};
+                border: {bw} solid {t['border']};
                 border-radius: 3px;
                 background-color: {t['bg_medium']};
             }}
             QCheckBox::indicator:checked {{
-                border: 2px solid {t['accent']};
+                border: {bw} solid {t['accent']};
                 border-radius: 3px;
                 background-color: {t['accent']};
             }}
@@ -967,24 +1033,48 @@ class ThemeMixin:
             if _cb is not None:
                 _cb.setStyleSheet(_checkbox_qss)
 
-        # Remote 切换按钮（品牌色固定，但文字需要固定白色 ——
-        # 否则浅色主题下会继承 QToolBar QPushButton 的深色文字）
+        # Remote 切换按钮（深色：品牌色 + 固定白字；浅色：中性按钮）
         if hasattr(self, 'remote_toggle_btn'):
-            self.remote_toggle_btn.setStyleSheet("""
-                QPushButton {
-                    background-color: #38bdf8;
-                    color: white;
-                    border: none;
-                    border-radius: 4px;
-                    padding: 8px 15px;
-                }
-                QPushButton:hover {
-                    background-color: #7dd3fc;
-                }
-                QPushButton:checked {
-                    background-color: #0284c7;
-                }
-            """)
+            self.remote_toggle_btn.setStyleSheet(
+                brand_button_qss(t, '#38bdf8', '#7dd3fc', '#0284c7'))
+
+        # 分屏管理组（Split / V-Split / Close Split / Close Tab）：构造时写死的
+        # 紫/蓝/棕/红底以前从不随主题重设，浅色主题下是四块深色补丁
+        for _name, _bg, _hover in (
+            ('split_btn', '#5a4d7a', '#6a5d8a'),
+            ('split_v_btn', '#4d5a7a', '#5d6a8a'),
+            ('close_split_btn', '#8b5a3a', '#9b6a4a'),
+            ('close_tab_btn', '#8b3a3a', '#9b4a4a'),
+        ):
+            _btn = getattr(self, _name, None)
+            if _btn is not None:
+                _btn.setStyleSheet(brand_button_qss(t, _bg, _hover, text_color=t['text']))
+
+        # LLM 配置按钮（紫底白帽子）：浅色主题中性底 + 强调色帽子
+        _llm = getattr(self, 'llm_config_btn', None)
+        if _llm is not None:
+            from git_widget import _make_git_tool_icon
+            _llm.setIcon(_make_git_tool_icon(
+                'wizard_hat', t['accent'] if light else 'white', 20))
+            _llm.setStyleSheet(brand_button_qss(
+                t, '#7c3aed', '#8b5cf6', padding="0px", radius="6px"))
+
+        # 标签页 × 按钮与分屏手柄：构造时按当时主题生成，切主题后要整批重设
+        _close_qss = tab_close_qss(t)
+        _tab_bar = self.tab_widget.tabBar()
+        for _i in range(_tab_bar.count()):
+            _cb = _tab_bar.tabButton(_i, _tab_bar.ButtonPosition.RightSide)
+            if isinstance(_cb, QPushButton):
+                _cb.setStyleSheet(_close_qss)
+        _split_qss = pane_splitter_qss(t)
+        for _sp in self.tab_widget.findChildren(QSplitter):
+            _sp.setStyleSheet(_split_qss)
+
+        # 窗口标题色/颜色圆点边框跟随主题（浅色主题把窗口色压暗到可读）
+        if hasattr(self, 'title_label'):
+            self._update_title_label_color()
+        if hasattr(self, 'color_btn'):
+            self._update_color_btn_style()
 
         # 命令搜索框（Cmd+K）
         if hasattr(self, 'command_palette'):
@@ -1082,7 +1172,7 @@ class ThemeMixin:
         若直接写死 13px 会把 _scale_gui_font_sizes 放大过的字号打回原形，
         导致「改过颜色的窗口」和「没改过的窗口」标题字号不一致。
         """
-        base_ss = f"color: {self._window_color}; font-size: 13px; font-weight: bold;"
+        base_ss = f"color: {self._themed_window_color()}; font-size: 13px; font-weight: bold;"
         scale = self._current_gui_font_scale()
         scaled_ss = re.sub(
             r'font-size:\s*(\d+)px',
@@ -1095,16 +1185,35 @@ class ThemeMixin:
         # 把已缩放值（15px）误当基准导致二次缩放（15→18px）。
         self._original_widget_styles[id(self.title_label)] = (self.title_label, base_ss)
 
+    def _current_theme_dict(self) -> dict:
+        return self.THEMES.get(getattr(self, 'current_theme', None), self.THEMES["午夜黑"])
+
+    def _themed_window_color(self) -> str:
+        """作为文字色使用的窗口色：浅色主题下压暗到可读，深色主题原样。"""
+        color = self._window_color
+        if is_light(self._current_theme_dict()):
+            return readable_on_light(color)
+        return color
+
+    def _tab_close_btn_qss(self) -> str:
+        """当前主题下标签页 × 按钮的样式（新建标签时用）。"""
+        return tab_close_qss(self._current_theme_dict())
+
+    def _pane_splitter_qss(self) -> str:
+        """当前主题下分屏手柄的样式（新建 splitter 时用）。"""
+        return pane_splitter_qss(self._current_theme_dict())
+
     def _update_color_btn_style(self):
         """更新颜色按钮样式"""
+        th = self._current_theme_dict()
         self.color_btn.setStyleSheet(f"""
             QPushButton {{
                 background-color: {self._window_color};
-                border: 2px solid #3d3d5c;
+                border: 2px solid {th['border']};
                 border-radius: 12px;
             }}
             QPushButton:hover {{
-                border-color: #eaeaea;
+                border-color: {th['accent']};
             }}
         """)
 

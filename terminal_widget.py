@@ -508,6 +508,9 @@ class TerminalWidget(TerminalInputMixin, TerminalMouseMixin,
     # 防止 Linux 上 shell 发送的 OSC 序列中的数字泄漏到显示缓冲区
     _RE_OSC_OTHER = re.compile(r'\x1b\]\d+;[^\x07\x1b]*(?:\x07|\x1b\\)')
     _RE_DA2_QUERY = re.compile(r'\x1b\[>0?c')        # Secondary DA 查询
+    # OSC 10/11/12 颜色查询（\x1b]11;?\x07 或 ST 结尾）：TUI 借此探测终端是
+    # 深色还是浅色底（Claude Code、neovim、delta 等按 OSC 11 自动选配色）
+    _RE_OSC_COLOR_QUERY = re.compile(r'\x1b\](1[012]);\?(\x07|\x1b\\)')
     _RE_XTVERSION_QUERY = re.compile(r'\x1b\[>\d*q')  # XTVERSION 查询
     # DCS (Device Control String): \x1bP ... ST — pyte 不支持，内容会泄漏到显示缓冲区
     # APC (Application Program Command): \x1b_ ... ST
@@ -1330,6 +1333,18 @@ class TerminalWidget(TerminalInputMixin, TerminalMouseMixin,
         except Exception as e:
             logger.exception(f"Output error: {e}")
 
+    def _osc_color_reply(self, code: str, terminator: str) -> bytes:
+        """OSC 10/11/12 查询的应答：\x1b]<code>;rgb:rrrr/gggg/bbbb<ST>。
+
+        用 xterm 的 16 位分量格式（每分量 = 8 位值 ×257），终止符沿用查询
+        的写法（BEL / ST），与 xterm、iTerm2、kitty 的行为一致。
+        """
+        color = {'10': self.fg_color, '11': self.bg_color,
+                 '12': self._cursor_color}.get(code, self.bg_color)
+        rgb = 'rgb:%04x/%04x/%04x' % (
+            color.red() * 257, color.green() * 257, color.blue() * 257)
+        return f'\x1b]{code};{rgb}{terminator}'.encode('ascii')
+
     def _process_output_text(self, text: str):
         """过滤终端查询/噪声序列并 feed 进 pyte。
 
@@ -1371,6 +1386,12 @@ class TerminalWidget(TerminalInputMixin, TerminalMouseMixin,
             # 不回复 → 上层 TUI 超时 → 降级渲染（box-drawing 边框丢失等症状）
             if self._RE_XTVERSION_QUERY.search(text):
                 self._write_to_backend(b'\x1bP>|SmartTerminal(1.0)\x1b\\')
+
+            # 响应 OSC 10/11/12 前景/背景/光标色查询：不回复时 Claude Code 等
+            # 会默认按深色终端渲染，浅色主题下用户消息成了一条条黑底高亮块。
+            # 查询本身随后被 _RE_OSC_OTHER 剥掉，不进 pyte。
+            for _m in self._RE_OSC_COLOR_QUERY.finditer(text):
+                self._write_to_backend(self._osc_color_reply(_m.group(1), _m.group(2)))
 
             # 只过滤pyte完全不支持且会导致问题的序列（使用预编译正则）
             text = self._RE_SYNC_OUTPUT.sub('', text)      # Sync output (不支持)

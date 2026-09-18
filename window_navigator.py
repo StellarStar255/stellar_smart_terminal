@@ -20,6 +20,7 @@ import main_window  # 延迟引用 MainWindow，打破 import 环（仅方法内
 import app_config
 from git_widget import _make_git_tool_icon
 from i18n import t
+from themes import readable_on_light
 from app_logging import get_logger
 
 logger = get_logger(__name__)
@@ -559,6 +560,12 @@ class WindowNavigatorPanel(QWidget):
             return
         self._theme = theme
         self._apply_style()
+        # 列表项的文字色/淡化底色是按主题算出来的画刷，不吃 QSS：
+        # 切主题后必须重算，否则浅色列表里留着深色主题算出的深底
+        try:
+            self._update_all_item_colors()
+        except Exception:
+            logger.debug("apply_theme: item colours failed", exc_info=True)
 
     def _apply_style(self):
         """按 self._theme 重设面板及所有子控件的样式。"""
@@ -755,7 +762,7 @@ class WindowNavigatorPanel(QWidget):
                 else:
                     display_title = title
                 display_title = f"{idx}. {display_title}"
-                color = window.get_window_color()
+                color = self._item_text_color(window.get_window_color())
                 item = QListWidgetItem(display_title)
                 wid = id(window)
                 # 只把 id（Python int）塞进 UserRole；真正的对象通过 weakref 解
@@ -808,16 +815,24 @@ class WindowNavigatorPanel(QWidget):
         theme_color = QColor(color_hex)
         bg_color = QColor(list_bg)
 
-        # 混合主题色和背景色，比例约 40:60（更明显的效果）
-        r = int(theme_color.red() * 0.4 + bg_color.red() * 0.6)
-        g = int(theme_color.green() * 0.4 + bg_color.green() * 0.6)
-        b = int(theme_color.blue() * 0.4 + bg_color.blue() * 0.6)
+        # 混合主题色和背景色：深色主题约 40:60（够明显）；浅色主题只上
+        # 一层淡淡的色（18%），压暗后的文字色配饱和底会像一块彩色补丁
+        k = 0.18 if self._theme.get('is_light_theme') else 0.4
+        r = int(theme_color.red() * k + bg_color.red() * (1 - k))
+        g = int(theme_color.green() * k + bg_color.green() * (1 - k))
+        b = int(theme_color.blue() * k + bg_color.blue() * (1 - k))
 
         result = QColor(r, g, b)
         # 缓存结果（限制缓存大小）
         if len(self._faded_bg_cache) < 50:
             self._faded_bg_cache[cache_key] = result
         return result
+
+    def _item_text_color(self, window_color: str) -> str:
+        """列表项文字色：窗口色在浅色主题下压暗到可读（深色主题原样）。"""
+        if self._theme.get('is_light_theme'):
+            return readable_on_light(window_color)
+        return window_color
 
     def _on_current_item_changed(self, current, previous):
         """选中项变化时更新颜色"""
@@ -872,7 +887,7 @@ class WindowNavigatorPanel(QWidget):
 
             try:
                 is_highlighted = (item == selected_item or item == hovered_item)
-                color = window.get_window_color()
+                color = self._item_text_color(window.get_window_color())
 
                 # 只在颜色变化时更新前景色
                 current_fg = item.foreground().color().name()
