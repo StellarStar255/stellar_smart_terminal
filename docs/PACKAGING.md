@@ -157,6 +157,12 @@ CI(GitHub Actions)需要 4 个 repo secrets(Settings → Secrets → Actions):
 base64 -i cert.p12 | pbcopy   # 粘贴到 MACOS_CERT_P12
 ```
 
+或者一条命令写全 4 个 secrets(交互式输入密码,凭据只经 gh 直达 GitHub):
+
+```bash
+scripts/setup_ci_signing_secrets.sh ~/Desktop/cert.p12
+```
+
 验证签名/公证是否生效(模拟用户首次下载):
 
 ```bash
