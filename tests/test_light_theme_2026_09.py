@@ -193,3 +193,55 @@ class TestOscColorQuery(unittest.TestCase):
 
 if __name__ == '__main__':
     unittest.main()
+
+
+class TestComboPopupSelectedRowVisible(unittest.TestCase):
+    """下拉列表选中项：给 ::item 写了 padding/圆角后 Qt 不画 selection-background-color，
+    选中项变成白字白底（浅色主题下"选项完全看不清"）。用离屏 grab 断言选中行
+    真的画出了强调色。"""
+
+    @classmethod
+    def setUpClass(cls):
+        from PyQt6.QtWidgets import QApplication
+        cls.app = QApplication.instance() or QApplication([])
+        import main_window
+        cls.win = main_window.MainWindow()
+        cls.win.show()
+        cls.app.processEvents()
+
+    @classmethod
+    def tearDownClass(cls):
+        from PyQt6.QtGui import QCloseEvent
+        from PyQt6.QtWidgets import QApplication
+        cls.win._force_closing = True
+        QApplication.sendEvent(cls.win, QCloseEvent())
+        cls.win.deleteLater()
+        cls.app.processEvents()
+        del cls.win
+
+    def _accent_pixels(self, combo, accent):
+        from PyQt6.QtGui import QColor
+        combo.showPopup()
+        for _ in range(5):
+            self.app.processEvents()
+        try:
+            img = combo.view().grab().toImage()
+        finally:
+            combo.hidePopup()
+            self.app.processEvents()
+        target = QColor(accent).rgb() & 0xFFFFFF
+        hits = 0
+        for y in range(0, img.height(), 2):
+            for x in range(0, img.width(), 2):
+                if (img.pixel(x, y) & 0xFFFFFF) == target:
+                    hits += 1
+        return hits
+
+    def test_light_theme_selected_row_paints_accent(self):
+        self.win.current_theme = "浅色"
+        self.win._apply_theme("浅色")
+        self.app.processEvents()
+        for name in ('lang_combo', 'theme_combo', 'preset_combo'):
+            with self.subTest(combo=name):
+                combo = getattr(self.win, name)
+                self.assertGreater(self._accent_pixels(combo, LIGHT['accent']), 20)

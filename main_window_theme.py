@@ -400,6 +400,12 @@ class ThemeMixin:
                 selection-background-color: {t['accent']};
                 border: 1px solid {t['border']};
             }}
+            /* 一旦给 ::item 写了 padding/圆角，Qt 就不再画 selection-background-color，
+               但 selection-color（白）照用 —— 浅色主题下选中项白字白底完全消失 */
+            QComboBox QAbstractItemView::item:selected {{
+                background-color: {t['accent']};
+                color: #ffffff;
+            }}
             QCheckBox {{
                 color: {t['text']};
             }}
@@ -916,6 +922,14 @@ class ThemeMixin:
                     padding: 0px 6px;
                     border-radius: 4px;
                 }}
+                QComboBox QAbstractItemView::item:selected {{
+                    background-color: {t['accent']};
+                    color: #ffffff;
+                }}
+                QComboBox QAbstractItemView::item:hover {{
+                    background-color: {t['accent_hover']};
+                    color: #ffffff;
+                }}
             """)
 
         # 主题下拉框
@@ -953,6 +967,14 @@ class ThemeMixin:
                     padding: 0px 6px;
                     border-radius: 4px;
                 }}
+                QComboBox QAbstractItemView::item:selected {{
+                    background-color: {t['accent']};
+                    color: #ffffff;
+                }}
+                QComboBox QAbstractItemView::item:hover {{
+                    background-color: {t['accent_hover']};
+                    color: #ffffff;
+                }}
             """)
 
         # 语言 / GUI 字号 / 透明度下拉框（构造时共用 _COMBO_STYLE）
@@ -986,6 +1008,14 @@ class ThemeMixin:
                 min-height: 28px;
                 padding: 0px 6px;
                 border-radius: 4px;
+            }}
+            QComboBox QAbstractItemView::item:selected {{
+                background-color: {t['accent']};
+                color: #ffffff;
+            }}
+            QComboBox QAbstractItemView::item:hover {{
+                background-color: {t['accent_hover']};
+                color: #ffffff;
             }}
         """
         for _name in ('lang_combo', 'gui_font_spin', 'opacity_spin'):
