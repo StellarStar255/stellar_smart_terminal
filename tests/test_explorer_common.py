@@ -29,6 +29,7 @@ class _FakeMsgBox:
     """记录 addButton 顺序，exec 时返回预设点击。"""
     _click = None          # 'keep' / 'overwrite' / 'skip' / 'cancel' / None
     _apply_all = False
+    last_default = None    # 最近一次 setDefaultButton 对应的动作名
 
     def __init__(self, parent=None):
         self._buttons = {}
@@ -37,7 +38,11 @@ class _FakeMsgBox:
     def setWindowTitle(self, *a): pass
     def setText(self, *a): pass
     def setIcon(self, *a): pass
-    def setDefaultButton(self, *a): pass
+
+    def setDefaultButton(self, btn):
+        self.default_btn = btn
+        _FakeMsgBox.last_default = next(
+            (n for n, b in self._buttons.items() if b is btn), None)
 
     def addButton(self, text, role):
         btn = _FakeButton(role)
@@ -81,10 +86,25 @@ class TestResolvePasteConflict(unittest.TestCase):
         explorer_common.QCheckBox = lambda *a, **k: _FakeCheckBox()
         _FakeMsgBox._click = None
         _FakeMsgBox._apply_all = False
+        _FakeMsgBox.last_default = None
+        # 「记住上次选择」是模块级状态 + 配置落盘：每个用例从干净状态开始，
+        # 且不真写配置文件
+        explorer_common._last_conflict_action = None
+        self._cfg_writes = []
+        import app_config
+        self._orig_update = app_config.update_config
+        self._orig_read = app_config.read_config
+        app_config.update_config = lambda patch, **k: self._cfg_writes.append(patch) or True
+        app_config.read_config = lambda: {}
 
     def tearDown(self):
         self.mod.QMessageBox = self._orig_box
         self.mod.QCheckBox = self._orig_cb
+        import app_config
+        app_config.update_config = self._orig_update
+        app_config.read_config = self._orig_read
+        explorer_common = self.mod
+        explorer_common._last_conflict_action = None
 
     def test_sticky_shortcircuits_without_dialog(self):
         # sticky 已定 → 不弹窗，直接复用，且 apply-all=True
@@ -118,6 +138,52 @@ class TestResolvePasteConflict(unittest.TestCase):
         _FakeMsgBox._apply_all = True
         self.assertEqual(self.mod.resolve_paste_conflict(None, 'a.txt', None),
                          ('skip', True))
+
+    # ---- 记住上次选择：默认按钮跟着用户上次的动作走 ----
+
+    def test_default_button_is_keep_on_first_use(self):
+        _FakeMsgBox._click = 'keep'
+        self.mod.resolve_paste_conflict(None, 'a.txt', None)
+        self.assertEqual(_FakeMsgBox.last_default, 'keep')
+
+    def test_default_button_follows_last_choice(self):
+        for choice in ('skip', 'overwrite', 'keep'):
+            _FakeMsgBox._click = choice
+            self.mod.resolve_paste_conflict(None, 'a.txt', None)
+            _FakeMsgBox._click = 'cancel'
+            self.mod.resolve_paste_conflict(None, 'b.txt', None)
+            self.assertEqual(_FakeMsgBox.last_default, choice,
+                             f"上次选了 {choice}，这次默认按钮应是它")
+
+    def test_cancel_never_becomes_default(self):
+        _FakeMsgBox._click = 'skip'
+        self.mod.resolve_paste_conflict(None, 'a.txt', None)
+        _FakeMsgBox._click = 'cancel'
+        self.mod.resolve_paste_conflict(None, 'b.txt', None)
+        _FakeMsgBox._click = None      # 直接关掉对话框
+        self.mod.resolve_paste_conflict(None, 'c.txt', None)
+        _FakeMsgBox._click = 'keep'
+        self.mod.resolve_paste_conflict(None, 'd.txt', None)
+        self.assertEqual(_FakeMsgBox.last_default, 'skip')
+
+    def test_last_choice_is_persisted_and_restored(self):
+        import app_config
+        _FakeMsgBox._click = 'overwrite'
+        self.mod.resolve_paste_conflict(None, 'a.txt', None)
+        self.assertIn({'paste_conflict_default': 'overwrite'}, self._cfg_writes)
+        # 新进程：模块状态为空，从配置读回
+        self.mod._last_conflict_action = None
+        app_config.read_config = lambda: {'paste_conflict_default': 'skip'}
+        _FakeMsgBox._click = 'keep'
+        self.mod.resolve_paste_conflict(None, 'b.txt', None)
+        self.assertEqual(_FakeMsgBox.last_default, 'skip')
+
+    def test_garbage_persisted_value_falls_back_to_keep(self):
+        import app_config
+        app_config.read_config = lambda: {'paste_conflict_default': 'cancel'}
+        _FakeMsgBox._click = 'keep'
+        self.mod.resolve_paste_conflict(None, 'a.txt', None)
+        self.assertEqual(_FakeMsgBox.last_default, 'keep')
 
     def test_dialog_cancel_returns_none(self):
         _FakeMsgBox._click = 'cancel'

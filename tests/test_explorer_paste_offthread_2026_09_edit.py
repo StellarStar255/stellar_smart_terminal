@@ -76,19 +76,85 @@ class TestDropCopy(_Base):
         self._assert_off_gui(seen, 'local_entry_size')
         self.assertTrue(os.path.isfile(os.path.join(self.target, 'srcdir', 'f.txt')))
 
-    def test_overwrite_rmtree_off_gui_thread(self):
+    def _make_existing_dst(self):
         dst = os.path.join(self.target, 'srcdir')
         os.makedirs(dst)
         with open(os.path.join(dst, 'old.txt'), 'w') as f:
             f.write('old')
+        return dst
+
+    def test_overwrite_rmtree_off_gui_thread(self):
+        """拖放冲突走和粘贴同一个四选一框（保留二者 / 跳过 / 覆盖 / 取消）。"""
+        dst = self._make_existing_dst()
         patcher, seen = self._spy(shutil, 'rmtree')
         with patcher, mock.patch.object(
-                QMessageBox, 'question',
-                return_value=QMessageBox.StandardButton.Yes):
+                explorer_common, 'resolve_paste_conflict',
+                return_value=('overwrite', False)) as ask, \
+                mock.patch.object(QMessageBox, 'question') as legacy:
             self.panel._handle_drop_copy([self.src], self.target)
+        self.assertFalse(legacy.called, "拖放不该再走老的 是/否 覆盖提问")
+        self.assertEqual(ask.call_args.args[1:], ('srcdir', None))
         self._assert_off_gui(seen, 'shutil.rmtree')
         self.assertFalse(os.path.exists(os.path.join(dst, 'old.txt')))
         self.assertTrue(os.path.isfile(os.path.join(dst, 'f.txt')))
+
+    def test_drop_skip_leaves_target_untouched(self):
+        dst = self._make_existing_dst()
+        with mock.patch.object(explorer_common, 'resolve_paste_conflict',
+                               return_value=('skip', False)), \
+                mock.patch.object(QMessageBox, 'question',
+                                  return_value=QMessageBox.StandardButton.No), \
+                mock.patch.object(QMessageBox, 'warning') as warn:
+            self.panel._handle_drop_copy([self.src], self.target)
+        self.assertFalse(warn.called)
+        self.assertTrue(os.path.exists(os.path.join(dst, 'old.txt')))
+        self.assertFalse(os.path.exists(os.path.join(dst, 'f.txt')))
+        self.assertFalse(os.path.exists(os.path.join(self.target, 'srcdir (1)')))
+
+    def test_drop_keep_both_copies_with_suffix(self):
+        dst = self._make_existing_dst()
+        with mock.patch.object(explorer_common, 'resolve_paste_conflict',
+                               return_value=('keep', False)), \
+                mock.patch.object(QMessageBox, 'question',
+                                  return_value=QMessageBox.StandardButton.No):
+            self.panel._handle_drop_copy([self.src], self.target)
+        self.assertTrue(os.path.exists(os.path.join(dst, 'old.txt')), "原目标不能动")
+        self.assertTrue(os.path.isfile(os.path.join(self.target, 'srcdir (1)', 'f.txt')),
+                        "保留二者 → 加 (1) 尾缀另存")
+
+    def test_drop_cancel_stops_remaining_items(self):
+        """取消：中止剩余条目（后面没冲突的也不再复制）。"""
+        self._make_existing_dst()
+        other = os.path.join(self.tmp, 'other.txt')
+        with open(other, 'w') as f:
+            f.write('x')
+        with mock.patch.object(explorer_common, 'resolve_paste_conflict',
+                               return_value=None), \
+                mock.patch.object(QMessageBox, 'question',
+                                  return_value=QMessageBox.StandardButton.No):
+            self.panel._handle_drop_copy([self.src, other], self.target)
+        self.assertFalse(os.path.exists(os.path.join(self.target, 'other.txt')))
+
+    def test_drop_sticky_decision_asks_once(self):
+        """勾了「对剩余冲突应用相同操作」：第二个冲突不再弹框。"""
+        self._make_existing_dst()
+        src2 = os.path.join(self.tmp, 'srcdir2')
+        os.makedirs(src2)
+        with open(os.path.join(src2, 'g.txt'), 'w') as f:
+            f.write('g')
+        os.makedirs(os.path.join(self.target, 'srcdir2'))
+        calls = []
+
+        def _ask(parent, name, sticky):
+            calls.append((name, sticky))
+            return ('skip', True)
+        with mock.patch.object(explorer_common, 'resolve_paste_conflict',
+                               side_effect=_ask), \
+                mock.patch.object(QMessageBox, 'question',
+                                  return_value=QMessageBox.StandardButton.No):
+            self.panel._handle_drop_copy([self.src, src2], self.target)
+        self.assertEqual(calls, [('srcdir', None), ('srcdir2', 'skip')])
+        self.assertFalse(os.path.exists(os.path.join(self.target, 'srcdir2', 'g.txt')))
 
 
 class TestClipboardPaste(_Base):

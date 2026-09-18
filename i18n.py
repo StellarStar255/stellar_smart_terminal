@@ -497,8 +497,6 @@ TRANSLATIONS = {
     "explorer.paste": {"zh": "粘贴", "en": "Paste"},
     "explorer.paste_with_label": {"zh": "粘贴 ({label})", "en": "Paste ({label})"},
     "explorer.paste_failed": {"zh": "粘贴失败: {error}", "en": "Paste failed: {error}"},
-    "explorer.overwrite_title": {"zh": "目标已存在", "en": "Target exists"},
-    "explorer.overwrite_msg": {"zh": "'{name}' 已存在，是否覆盖？", "en": "'{name}' already exists. Overwrite?"},
     "paste.conflict_title": {"zh": "文件已存在", "en": "File Already Exists"},
     "paste.conflict_msg": {"zh": "「{name}」在目标文件夹中已存在。", "en": "\"{name}\" already exists in the target folder."},
     "paste.btn_overwrite": {"zh": "覆盖", "en": "Overwrite"},
@@ -1021,8 +1019,6 @@ TRANSLATIONS = {
     "remote.copying_title": {"zh": "复制", "en": "Copying"},
     "remote.pasting_progress": {"zh": "正在粘贴到 {dst}…", "en": "Pasting into {dst}…"},
     "remote.session_lost": {"zh": "源 SSH 会话已断开，无法粘贴远程文件。", "en": "Source SSH session is no longer connected; cannot paste remote item."},
-    "remote.overwrite_title": {"zh": "目标已存在", "en": "Target exists"},
-    "remote.overwrite_msg": {"zh": "'{name}' 已存在，是否覆盖？", "en": "'{name}' already exists. Overwrite?"},
     "remote.move_confirm_title": {"zh": "确认移动", "en": "Confirm Move"},
     "remote.move_confirm_msg_one": {
         "zh": "将「{name}」移动到「{target}」？",
