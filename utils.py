@@ -483,3 +483,32 @@ def app_icon_path() -> Path:
         if padded.exists():
             return padded
     return base / 'smart_terminal.png'
+
+
+def rect_visible_on_any_screen(x: int, y: int, w: int, h: int,
+                               min_overlap: int = 40) -> bool:
+    """保存的窗口几何 (x, y, w, h) 在当前任一显示器上是否露出足够抓得到的一块。
+
+    恢复几何前的可见性判断以前只看 primaryScreen：左侧副屏（x 为负）、右侧
+    副屏（x 大于主屏宽）上的窗口每次启动都被拉回主屏。这里改成对
+    QApplication.screens() 逐块比对 availableGeometry，露出的交集至少
+    min_overlap × min_overlap 像素才算可见——只剩一条窄边在屏幕里的窗口
+    用户根本抓不到，按不可见处理让调用方退回默认位置。
+    拿不到任何屏幕（极早期 / 无头环境）时返回 False，调用方走默认几何。
+    """
+    try:
+        from PyQt6.QtCore import QRect
+        from PyQt6.QtWidgets import QApplication
+        screens = QApplication.screens()
+    except Exception:
+        return False
+    rect = QRect(int(x), int(y), max(1, int(w)), max(1, int(h)))
+    for screen in screens or []:
+        try:
+            avail = screen.availableGeometry()
+        except Exception:
+            continue
+        overlap = rect.intersected(avail)
+        if overlap.width() >= min_overlap and overlap.height() >= min_overlap:
+            return True
+    return False

@@ -88,6 +88,10 @@ TRANSLATIONS = {
                "(If macOS shows a security prompt on first click, right-click "
                "the app → Open once to confirm.)")},
     "settings.parse_off_gui": {"zh": "终端解析放到后台线程", "en": "Parse terminals off the GUI thread"},
+    "settings.md_default_preview": {"zh": "Markdown 默认预览", "en": "Open Markdown in preview by default"},
+    "settings.md_default_preview_tooltip": {"zh": "开启后小于 512KB 的 .md 打开即进渲染预览；关闭则停在源码视图，点 ◎ 再预览", "en": "When on, .md files under 512KB open in the rendered preview; when off they open in the source view (click ◎ to preview)"},
+    "settings.md_default_preview_on": {"zh": "已开启：Markdown 打开即进预览", "en": "On: Markdown opens in preview"},
+    "settings.md_default_preview_off": {"zh": "已关闭：Markdown 打开停在源码视图", "en": "Off: Markdown opens in the source view"},
     "settings.workspace_restore": {"zh": "启动时恢复上次窗口布局", "en": "Restore workspace on startup"},
     "alert.menu_toggle": {"zh": "输出提醒（Traceback/FAILED 等）", "en": "Output alerts (Traceback/FAILED, ...)"},
     "alert.menu_toggle_tooltip": {"zh": "终端输出命中规则时点亮标签橙点并提醒（后台跑测试崩了不再错过）", "en": "Light the tab badge and notify when terminal output matches an alert rule (never miss a background failure)"},
