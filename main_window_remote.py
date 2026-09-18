@@ -6,8 +6,9 @@
 """
 import os
 import posixpath
+from concurrent.futures import ThreadPoolExecutor
 from PyQt6 import sip
-from PyQt6.QtCore import QTimer, Qt
+from PyQt6.QtCore import QTimer, Qt, QObject, pyqtSignal
 from i18n import t
 from app_logging import get_logger
 # RemoteExplorerPanel 在 _ensure_remote_panel 里按需 import：它的 import 链
@@ -17,6 +18,16 @@ from app_logging import get_logger
 from window_host import host_class
 
 logger = get_logger(__name__)
+
+
+class _PasteProbeRelay(QObject):
+    """粘图前的 ssh 探测（起一次 ps）在工作线程跑，结果经它回 GUI 线程。
+
+    它归 GUI 线程所有，工作线程 emit 就是队列投递；比 QTimer.singleShot
+    （在没有事件循环的线程里永远不触发）和 invokeMethod（混入类里的槽注册
+    不可靠）都稳。
+    """
+    done = pyqtSignal(object, object, str)   # (term, ssh 命令行或 None, local_path)
 
 
 class RemotePanelMixin:
@@ -329,11 +340,8 @@ class RemotePanelMixin:
         if cache is None:
             cache = self._upload_sessions = {}
         adhoc = cache.get(host_config.alias)
-        try:
-            if adhoc is not None and adhoc.is_alive():
-                return adhoc
-        except Exception:
-            pass
+        if adhoc is not None and self._upload_session_usable(host_config.alias, adhoc):
+            return adhoc
         import ssh_control
         if ssh_control.is_supported() and ssh_control.master_socket_exists(host_config):
             # 缓存里那条已经死了（主连接陈旧、上次连接失败）：先真正关掉——
@@ -346,11 +354,42 @@ class RemotePanelMixin:
                     logger.debug("_remote_session_for_host: old session disconnect failed",
                                  exc_info=True)
             adhoc = ssh_control.ControlMasterSession(host_config, parent=self)
+            adhoc.connected.connect(self._on_upload_session_connected)
             adhoc.connect_failed.connect(self._on_upload_session_failed)
             adhoc.connect_async()      # 单工作线程：后面提交的上传排在连接之后
             cache[host_config.alias] = adhoc
+            self._upload_connecting_set().add(host_config.alias)
             return adhoc
         return None
+
+    def _upload_connecting_set(self) -> set:
+        """还在连接中的临时会话别名集合（connected / connect_failed 到达前）。"""
+        s = getattr(self, '_upload_connecting', None)
+        if s is None:
+            s = self._upload_connecting = set()
+        return s
+
+    def _upload_session_usable(self, alias: str, sess) -> bool:
+        """缓存的临时会话能不能直接复用：已连上，或还在连接中。
+
+        连接中的也复用——它的单工作线程会把这次上传排在连接之后。以前把
+        is_alive()==False 一律当"死了"换新，连续粘两张图时第二次会把第一条
+        正在连接的会话 disconnect（abort 杀掉在跑的 ssh），第一张图就传废了。
+        """
+        try:
+            if sess.is_alive():
+                return True
+        except Exception:
+            return False
+        return alias in self._upload_connecting_set()
+
+    def _on_upload_session_connected(self):
+        """临时会话连上了：不再算"连接中"（之后靠 is_alive 判断）。"""
+        sess = self.sender()
+        cache = getattr(self, '_upload_sessions', None) or {}
+        for alias, cached in list(cache.items()):
+            if cached is sess:
+                self._upload_connecting_set().discard(alias)
 
     def _on_upload_session_failed(self, msg: str):
         """粘图临时会话连不上（多半是主连接已死、socket 陈旧）：清缓存、关会话、
@@ -361,6 +400,7 @@ class RemotePanelMixin:
             if cached is not sess:
                 continue
             cache.pop(alias, None)
+            self._upload_connecting_set().discard(alias)
             try:
                 cached.disconnect()
             except Exception:
@@ -376,21 +416,168 @@ class RemotePanelMixin:
     def _upload_pasted_media_for_terminal(self, term, local_path: str) -> bool:
         """把本地粘贴的文件传到 term 所连的远端。
 
-        目录取 Remote 面板当前浏览的目录下的 .images/（面板一般停在项目目录；
-        Claude Code 读项目目录以外的文件要多点一次授权），面板没连着这台机器
-        就返回 False，终端退回敲本地路径。上传排在面板会话的工作线程上，结束
-        后经 term.remote_upload_done 回 GUI 线程；返回 True 表示已接手。
+        返回 True 表示已接手：结果一律经 term.remote_upload_done 回到 GUI 线程
+        （成功敲远端路径；不在 ssh 里、传不了、用户不想连 → 远端路径为空，
+        终端退回敲本地路径）。只有文件不存在才同步返回 False。
+
+        先在工作线程里做 ssh 探测（要起一次 ps，机器忙时能等上几秒，不能卡
+        GUI），回到 GUI 线程再对主机、找会话、排上传：目录取 Remote 面板当前
+        浏览的目录下的 .images/（面板一般停在项目目录；Claude Code 读项目目录
+        以外的文件要多点一次授权）。面板没连着这台机器也没有主连接可复用时，
+        问用户一句要不要连上再传（见 _offer_connect_for_paste）。
         """
         if not os.path.isfile(local_path):
             return False
-        host = self._ssh_host_for_terminal(term)
+        backend = getattr(term, '_backend', None)
+        shell_pid = getattr(backend, '_child_pid', None)
+        relay = self._paste_probe_relay()
+
+        def _probe():
+            try:
+                args = self._ssh_args_under(shell_pid)
+            except Exception:
+                logger.debug("[RemotePaste] ssh probe failed", exc_info=True)
+                args = None
+            try:
+                relay.done.emit(term, args, local_path)
+            except RuntimeError:
+                pass  # 窗口已销毁：没人等这个结果了
+
+        self._paste_probe_pool().submit(_probe)
+        return True
+
+    def _paste_probe_relay(self):
+        relay = getattr(self, '_paste_relay', None)
+        if relay is None:
+            relay = self._paste_relay = _PasteProbeRelay(self)
+            relay.done.connect(self._on_paste_probe_done)
+        return relay
+
+    def _paste_probe_pool(self):
+        pool = getattr(self, '_paste_probe_executor', None)
+        if pool is None:
+            pool = self._paste_probe_executor = ThreadPoolExecutor(
+                max_workers=1, thread_name_prefix="paste-probe")
+        return pool
+
+    @staticmethod
+    def _paste_fallback(term, local_path: str):
+        """传不了：让终端敲本地路径（远端路径给空串）。"""
+        try:
+            term.remote_upload_done.emit(local_path, "")
+        except RuntimeError:
+            pass  # 终端已销毁
+
+    def _on_paste_probe_done(self, term, args, local_path: str):
+        """ssh 探测回到 GUI 线程：对主机 → 找会话 → 排上传 / 引导连接 / 回退。"""
+        try:
+            if sip.isdeleted(term):
+                return
+        except TypeError:
+            pass  # 非 QObject 的替身
+        host = None
+        if args:
+            preferred = getattr(term, '_ssh_host_config', None)
+            host = self._match_host_for_ssh_args(args, self._known_remote_hosts(), preferred)
         if host is None:
-            return False          # 不在 ssh 里（本地 shell）：照常敲本地路径
+            self._paste_fallback(term, local_path)   # 不在 ssh 里（本地 shell）：照常敲本地路径
+            return
         sess = self._remote_session_for_host(host)
         if sess is None:
-            self.statusbar.showMessage(
-                t("status.remote_paste_no_session", host=host.alias), 8000)
-            return False
+            self._offer_connect_for_paste(term, host, local_path)
+            return
+        self._start_paste_upload(term, host, sess, local_path)
+
+    def _ask_connect_for_paste(self, host) -> bool:
+        """没有可用会话：问一句「连接 {host} 并上传？」。True = 连。"""
+        from PyQt6.QtWidgets import QMessageBox, QWidget
+        box = QMessageBox(self if isinstance(self, QWidget) else None)
+        box.setWindowTitle(t("remote_paste.connect_title"))
+        box.setText(t("remote_paste.connect_msg", host=host.alias))
+        box.setIcon(QMessageBox.Icon.Question)
+        connect_btn = box.addButton(t("remote_paste.btn_connect"),
+                                    QMessageBox.ButtonRole.AcceptRole)
+        box.addButton(t("remote_paste.btn_local"), QMessageBox.ButtonRole.RejectRole)
+        box.setDefaultButton(connect_btn)
+        box.exec()
+        return box.clickedButton() is connect_btn
+
+    _PASTE_CONNECT_TIMEOUT_MS = 60_000
+
+    def _offer_connect_for_paste(self, term, host, local_path: str):
+        """终端在 ssh 里、但面板没连着这台机器也没有主连接可复用。
+
+        以前只在状态栏提示一句就退回本地路径，用户得自己去 Remote 面板连上
+        再粘一次。现在问一句：同意就打开面板连过去，连上后把这张图补传一次；
+        拒绝 / 取消登录框 / 连接失败 / 60s 没连上 → 和以前一样敲本地路径。
+        """
+        if not self._ask_connect_for_paste(host):
+            try:
+                self.statusbar.showMessage(
+                    t("status.remote_paste_no_session", host=host.alias), 8000)
+            except Exception:
+                logger.debug("_offer_connect_for_paste: statusbar unavailable", exc_info=True)
+            self._paste_fallback(term, local_path)
+            return
+        panel = self._ensure_remote_panel()
+        if not getattr(self, 'remote_panel_visible', False):
+            self._toggle_remote_panel()
+
+        state = {'done': False}
+        timer = QTimer(self)
+        timer.setSingleShot(True)
+
+        def _finish(ok: bool):
+            if state['done']:
+                return
+            state['done'] = True
+            timer.stop()
+            for sig, slot in conns:
+                try:
+                    sig.disconnect(slot)
+                except (TypeError, RuntimeError):
+                    pass
+            if not ok:
+                self._skip_auto_ssh_tab_once = False   # 没连上：别把下次真正的连接也压掉
+            try:
+                if sip.isdeleted(term):
+                    return
+            except TypeError:
+                pass
+            if ok:
+                sess = self._remote_session_for_host(host)
+                if sess is not None:
+                    self._start_paste_upload(term, host, sess, local_path)
+                    return
+            self._paste_fallback(term, local_path)
+
+        def _on_connected(cfg):
+            if getattr(cfg, 'alias', None) == host.alias:
+                _finish(True)
+
+        def _on_error(_msg):
+            _finish(False)
+
+        conns = [(panel.host_connected, _on_connected), (panel.error_occurred, _on_error)]
+        for sig, slot in conns:
+            sig.connect(slot)
+        timer.timeout.connect(lambda: _finish(False))
+        timer.start(self._PASTE_CONNECT_TIMEOUT_MS)
+        # 终端本来就在这台机器的 ssh 里，连上面板后别再自动多开一个 SSH 标签
+        self._skip_auto_ssh_tab_once = True
+        try:
+            panel._connect_to(host)
+        except Exception as e:      # noqa: BLE001 — 连接起不来就当失败回退
+            logger.warning(f"[RemotePaste] connect for paste failed: {e}")
+            _finish(False)
+            return
+        if getattr(panel, '_session', None) is None:
+            # _connect_to 回来面板没挂上会话：用户在登录框里取消了，没有半连接
+            # 状态可等，立刻回退（不必干等 60s 超时）
+            _finish(False)
+
+    def _start_paste_upload(self, term, host, sess, local_path: str):
+        """会话已就绪：把上传排到它的工作线程，结束后经 term.remote_upload_done 回 GUI。"""
         panel = getattr(self, 'remote_panel', None)
         panel_sess = getattr(panel, '_session', None) if panel is not None else None
         base = None
@@ -444,7 +631,6 @@ class RemotePanelMixin:
             except RuntimeError:
                 pass  # 终端已销毁
         fut.add_done_callback(_done)
-        return True
 
     def _open_ssh_terminal_tab(self, host_config, remote_cd_path):
         """新开一个 tab 跑 ssh 到远端
