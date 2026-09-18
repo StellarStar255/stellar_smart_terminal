@@ -405,9 +405,17 @@ class RemotePanelMixin:
         def _job():
             alive = getattr(sess, 'is_alive', None)
             if callable(alive) and not alive():
-                # 会话没连上（主连接死了）：别再 home()→"/" 去 mkdir "/.images"，
-                # 直接失败让终端回退敲本地路径
-                raise RuntimeError(f"session to {host.alias} is not connected")
+                # 面板的 paramiko 会话：合盖/换网后 transport 闲置掉线、sftp 句柄
+                # 还在，是最常见的状态——它的各操作本就自带自动重连，这里先显式
+                # 重连一次再传（v1.31.0 曾在此一刀切拦下，粘图全退回本地路径）。
+                # 与 mkdir/upload 一样跑在会话自己的单工作线程上，重连不会并发。
+                reconnect = getattr(sess, '_reconnect_or_fail_fast', None)
+                if callable(reconnect):
+                    reconnect()       # 连不上会抛（OTP 主机只试一次）→ 回退本地路径
+                else:
+                    # 临时 ControlMaster 会话：主连接死了没法自愈，别再
+                    # home()→"/" 去 mkdir "/.images"，直接失败让终端回退敲本地路径
+                    raise RuntimeError(f"session to {host.alias} is not connected")
             rdir = remote_dir
             if not posixpath.isabs(rdir):
                 rdir = posixpath.join(sess.home() or "/", rdir)

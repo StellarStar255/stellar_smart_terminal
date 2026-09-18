@@ -161,3 +161,64 @@ class DeadSessionJobFallsBack(unittest.TestCase):
 
 if __name__ == '__main__':
     unittest.main()
+
+
+class _FakeIdlePanelSession(_FakeAdhoc):
+    """替身 paramiko 面板会话：transport 闲置掉线（is_alive=False），但各操作
+    自带自动重连——_reconnect_or_fail_fast 成功后就活了。"""
+
+    def __init__(self, host_config, reconnect_ok=True):
+        super().__init__(host_config)
+        self.reconnect_ok = reconnect_ok
+
+    def _reconnect_or_fail_fast(self):
+        self.calls.append('reconnect')
+        if not self.reconnect_ok:
+            raise RuntimeError('reconnect failed (gpu13)')
+        self.alive = True
+
+
+class IdlePanelSessionReconnects(unittest.TestCase):
+    """v1.31.0 回归：面板会话闲置掉线后粘图直接退回本地路径。
+
+    合盖/换网后 paramiko transport 死了但 sftp 句柄还在：面板本身下一次操作
+    会自动重连，粘图上传却被 _job 开头的 is_alive 门槛拦下，敲出来的是
+    本地路径。能自愈的会话该先重连再传，连不上才回退。
+    """
+
+    @classmethod
+    def setUpClass(cls):
+        cls.app = QApplication.instance() or QApplication([])
+
+    def _run(self, sess):
+        win = _Win()
+        host = HostConfig(alias='gpu13', hostname='10.0.0.1')
+        win._ssh_host_for_terminal = lambda term: host
+        win._remote_session_for_host = lambda h: sess
+        term = _FakeTerm()
+        results = []
+        term.remote_upload_done.connect(lambda local, remote: results.append((local, remote)))
+        tmp = tempfile.mkdtemp(prefix='paste-')
+        local = os.path.join(tmp, 'shot.png')
+        with open(local, 'wb') as fh:
+            fh.write(b'\x89PNG')
+        self.assertTrue(win._upload_pasted_media_for_terminal(term, local))
+        self.app.processEvents()
+        return local, results
+
+    def test_idle_session_reconnects_then_uploads(self):
+        sess = _FakeIdlePanelSession(HostConfig(alias='gpu13', hostname='10.0.0.1'))
+        local, results = self._run(sess)
+        self.assertIn('reconnect', sess.calls)
+        uploads = [c for c in sess.calls if isinstance(c, tuple) and c[0] == 'upload']
+        self.assertEqual(len(uploads), 1, sess.calls)
+        self.assertEqual(results, [(local, '/.images/shot.png')], "重连成功后该敲远端路径")
+
+    def test_reconnect_failure_still_falls_back_to_local_path(self):
+        sess = _FakeIdlePanelSession(HostConfig(alias='gpu13', hostname='10.0.0.1'),
+                                     reconnect_ok=False)
+        local, results = self._run(sess)
+        self.assertIn('reconnect', sess.calls)
+        self.assertEqual(results, [(local, '')], "重连失败 → 回退敲本地路径")
+        self.assertFalse(any(isinstance(c, tuple) and c[0] in ('mkdir', 'upload')
+                             for c in sess.calls), sess.calls)
