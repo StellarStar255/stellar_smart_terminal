@@ -818,14 +818,17 @@ class ThemeMixin:
                     border-bottom: 1px solid {t['border']};
                 }}
             """)
+        # Explorer 的品牌绿默认是固定色（深色主题间一致）；绿色系主题可用
+        # brand_green 覆盖，否则霓虹绿和低饱和的主题底色撞在一起很扎眼。
+        brand_green = t.get('brand_green') or ('#22c55e', '#4ade80', '#16a34a')
         if hasattr(self, '_explorer_title'):
             self._explorer_title.setStyleSheet(
-                f"color: {t['text'] if light else '#22c55e'}; font-weight: bold;")
+                f"color: {t['text'] if light else brand_green[0]}; font-weight: bold;")
 
         # Explorer 切换按钮样式
         if hasattr(self, 'explorer_toggle_btn'):
             self.explorer_toggle_btn.setStyleSheet(
-                brand_button_qss(t, '#22c55e', '#4ade80', '#16a34a'))
+                brand_button_qss(t, *brand_green))
 
         # Git 面板样式
         if hasattr(self, 'git_panel'):
