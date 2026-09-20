@@ -50,50 +50,29 @@ THEMES = {
     },
     "森林绿": {
         "name": "森林绿",
-        # 低饱和的灰绿层级（Everforest 一路）：以前底色饱和、强调色又是霓虹绿，
-        # 和 Start/Commit 的 success 绿撞成一片。现在强调色是偏青的深祖母绿，
-        # success 是明度更高的草绿，两者能分开；终端前景用暖米色，比浅绿字耐看。
-        "bg_darkest": "#1a2320",
-        "bg_dark": "#222d28",
-        "bg_medium": "#2a3731",
-        "bg_light": "#34443c",
-        "bg_lighter": "#3e5046",
-        "bg_hover": "#4a5e53",
-        "accent": "#2f8f6a",
-        "accent_hover": "#3aa57c",
-        "accent_pressed": "#267a5a",
-        "text": "#e2ebe4",
-        "text_dim": "#91a89b",
-        "border": "#3e5046",
-        "success": "#4caf50",
-        "success_hover": "#5fbf63",
-        "danger": "#e05252",
-        "danger_hover": "#c94444",
-        "terminal_bg": "#1c2521",
-        "terminal_fg": "#d3c6aa",
-        # Explorer 按钮/标题的品牌绿改随主题（默认的霓虹 #22c55e 在这套底色上太扎眼）
-        "brand_green": ("#4caf50", "#5fbf63", "#3d8f41"),
-    },
-    "暖橙": {
-        "name": "暖橙",
-        "bg_darkest": "#1a1008",
-        "bg_dark": "#2a1a10",
-        "bg_medium": "#3a2818",
-        "bg_light": "#4a3828",
-        "bg_lighter": "#5a4838",
-        "bg_hover": "#6a5848",
-        "accent": "#f97316",
-        "accent_hover": "#fb923c",
-        "accent_pressed": "#ea580c",
-        "text": "#fff4e6",
-        "text_dim": "#aa9988",
-        "border": "#5a4838",
-        "success": "#84cc16",
-        "success_hover": "#a3e635",
-        "danger": "#ef4444",
-        "danger_hover": "#dc2626",
-        "terminal_bg": "#1f1610",
-        "terminal_fg": "#f0e0d0",
+        # 深墨绿底 + 单一祖母绿强调色。工具栏的品牌色按钮（Explorer 绿 / Git 橙 /
+        # Remote 青 / Split 紫…）在这套带色相的底上全部走中性底（neutral_buttons），
+        # 只有 checked 才上强调色 —— 有色底上再铺一排彩块怎么调都是花的，
+        # 午夜黑能压住彩块是因为它的底是纯中性色。
+        "bg_darkest": "#0b1712",
+        "bg_dark": "#112219",
+        "bg_medium": "#172e23",
+        "bg_light": "#1e3a2d",
+        "bg_lighter": "#25473a",
+        "bg_hover": "#2e5646",
+        "accent": "#22a06b",
+        "accent_hover": "#2dbd80",
+        "accent_pressed": "#1a8a5a",
+        "text": "#e6f2ea",
+        "text_dim": "#8fb3a0",
+        "border": "#25473a",
+        "success": "#34c97a",
+        "success_hover": "#4ade80",
+        "danger": "#e5484d",
+        "danger_hover": "#f06a6e",
+        "terminal_bg": "#0f1d16",
+        "terminal_fg": "#d6e4da",
+        "neutral_buttons": True,
     },
     "午夜黑": {
         "name": "午夜黑",
@@ -189,6 +168,12 @@ THEMES = {
         "terminal_fg": "#f0d8e8",
     },
 }
+
+
+def neutral_buttons(theme: dict) -> bool:
+    """品牌色按钮是否走中性底（浅色主题一律如此；带色相底色的深色主题可用
+    neutral_buttons 键选择同样处理）。"""
+    return is_light(theme) or bool(theme.get('neutral_buttons'))
 
 
 def is_light(theme: dict) -> bool:

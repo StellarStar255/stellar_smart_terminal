@@ -13,7 +13,7 @@ from PyQt6.QtWidgets import (
     QWidget, QWidgetAction,
 )
 from i18n import t
-from themes import is_light, readable_on_light
+from themes import is_light, neutral_buttons, readable_on_light
 
 # 弹出菜单 / 消息框的 QSS 由主题推导并按用到的颜色值缓存：以前每次 popup 都
 # 重建一段写死深色的字符串，主题遍历也触不到它们。
@@ -158,7 +158,7 @@ def brand_button_qss(theme: dict, bg: str, hover: str, checked: str = None,
     macOS 风格：全部中性灰底 + 深色文字，只有 checked（面板已打开）才上
     强调色 —— 浅色底上一排饱和彩块看起来像出了 bug，也没有"高级感"。
     """
-    if is_light(theme):
+    if neutral_buttons(theme):
         qss = f"""
             QPushButton {{
                 background-color: {theme['bg_lighter']};
@@ -319,6 +319,7 @@ class ThemeMixin:
 
         t = self.THEMES[theme_name]
         light = is_light(t)
+        neutral = neutral_buttons(t)  # 品牌色按钮走中性底（浅色 / 森林绿）
         # 浅色主题用发丝线（1px）边框，2px 深灰框在浅色底上过重
         bw = "1px" if light else "2px"
 
@@ -372,10 +373,14 @@ class ThemeMixin:
                 background-color: {t['danger_hover']};
             }}
             QToolBar QPushButton#logToggleBtn {{
-                background-color: {t['bg_lighter'] if t.get('is_light_theme') else t['accent']};
+                background-color: {t['bg_lighter'] if neutral else t['accent']};
             }}
             QToolBar QPushButton#logToggleBtn:hover {{
-                background-color: {t['bg_hover'] if t.get('is_light_theme') else t['accent_hover']};
+                background-color: {t['bg_hover'] if neutral else t['accent_hover']};
+            }}
+            QToolBar QPushButton#logToggleBtn:checked {{
+                background-color: {t['accent']};
+                color: #ffffff;
             }}
             QToolBar QLabel {{
                 color: {t['text_dim']};
@@ -818,17 +823,15 @@ class ThemeMixin:
                     border-bottom: 1px solid {t['border']};
                 }}
             """)
-        # Explorer 的品牌绿默认是固定色（深色主题间一致）；绿色系主题可用
-        # brand_green 覆盖，否则霓虹绿和低饱和的主题底色撞在一起很扎眼。
-        brand_green = t.get('brand_green') or ('#22c55e', '#4ade80', '#16a34a')
+        # 面板标题：品牌色按钮走中性底的主题（浅色 / 森林绿）标题也用正文色
         if hasattr(self, '_explorer_title'):
             self._explorer_title.setStyleSheet(
-                f"color: {t['text'] if light else brand_green[0]}; font-weight: bold;")
+                f"color: {t['text'] if neutral else '#22c55e'}; font-weight: bold;")
 
         # Explorer 切换按钮样式
         if hasattr(self, 'explorer_toggle_btn'):
             self.explorer_toggle_btn.setStyleSheet(
-                brand_button_qss(t, *brand_green))
+                brand_button_qss(t, '#22c55e', '#4ade80', '#16a34a'))
 
         # Git 面板样式
         if hasattr(self, 'git_panel'):
@@ -848,7 +851,7 @@ class ThemeMixin:
             """)
         if hasattr(self, '_git_title'):
             self._git_title.setStyleSheet(
-                f"color: {t['text'] if light else '#f97316'}; font-weight: bold;")
+                f"color: {t['text'] if neutral else '#f97316'}; font-weight: bold;")
 
         # Git 切换按钮样式
         if hasattr(self, 'git_toggle_btn'):
@@ -1100,7 +1103,7 @@ class ThemeMixin:
         if _llm is not None:
             from git_widget import _make_git_tool_icon
             _llm.setIcon(_make_git_tool_icon(
-                'wizard_hat', t['accent'] if light else 'white', 20))
+                'wizard_hat', t['accent'] if neutral_buttons(t) else 'white', 20))
             _llm.setStyleSheet(brand_button_qss(
                 t, '#7c3aed', '#8b5cf6', padding="0px", radius="6px"))
 
