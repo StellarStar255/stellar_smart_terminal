@@ -50,29 +50,28 @@ THEMES = {
     },
     "森林绿": {
         "name": "森林绿",
-        # 深墨绿底 + 单一祖母绿强调色。工具栏的品牌色按钮（Explorer 绿 / Git 橙 /
-        # Remote 青 / Split 紫…）在这套带色相的底上全部走中性底（neutral_buttons），
-        # 只有 checked 才上强调色 —— 有色底上再铺一排彩块怎么调都是花的，
-        # 午夜黑能压住彩块是因为它的底是纯中性色。
-        "bg_darkest": "#0b1712",
-        "bg_dark": "#112219",
-        "bg_medium": "#172e23",
-        "bg_light": "#1e3a2d",
-        "bg_lighter": "#25473a",
-        "bg_hover": "#2e5646",
-        "accent": "#22a06b",
-        "accent_hover": "#2dbd80",
-        "accent_pressed": "#1a8a5a",
-        "text": "#e6f2ea",
-        "text_dim": "#8fb3a0",
-        "border": "#25473a",
-        "success": "#34c97a",
-        "success_hover": "#4ade80",
-        "danger": "#e5484d",
-        "danger_hover": "#f06a6e",
-        "terminal_bg": "#0f1d16",
-        "terminal_fg": "#d6e4da",
-        "neutral_buttons": True,
+        # 思路同午夜黑：底是"几乎中性"的近黑，只带一点绿色调，这样工具栏的彩色
+        # 品牌按钮才压得住；强调色用 Spotify 那种成熟的绿（#1db954）而不是霓虹绿，
+        # Start/Commit 的 success 与强调色同色，整个界面只有一种绿。
+        # 曾试过深墨绿底 + 中性按钮，用户反馈"有黑白的感觉"——别再走回去。
+        "bg_darkest": "#0a0f0c",
+        "bg_dark": "#101713",
+        "bg_medium": "#16201a",
+        "bg_light": "#1f2d25",
+        "bg_lighter": "#293a30",
+        "bg_hover": "#35493d",
+        "accent": "#1db954",
+        "accent_hover": "#1ed760",
+        "accent_pressed": "#169c46",
+        "text": "#e8ede9",
+        "text_dim": "#8b9a91",
+        "border": "#293a30",
+        "success": "#1db954",
+        "success_hover": "#1ed760",
+        "danger": "#ef4444",
+        "danger_hover": "#f87171",
+        "terminal_bg": "#0d1210",
+        "terminal_fg": "#e0e6e2",
     },
     "午夜黑": {
         "name": "午夜黑",
