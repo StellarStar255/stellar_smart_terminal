@@ -274,8 +274,20 @@ class ThemeMixin:
         self._color_picker_expanded = False  # 窗口颜色选择菜单是否展开更多颜色
 
     def _on_icon_tint_changed(self, state):
-        """图标蒙版开关变更"""
+        """图标蒙版开关变更 — 同主题一样是全局配置，联动到所有窗口"""
         self._use_icon_tint = (state == Qt.CheckState.Checked.value)
+        cls = host_class(self)
+        app = QApplication.instance()
+        for widget in (app.topLevelWidgets() if app else []):
+            if widget is self or not isinstance(widget, cls):
+                continue
+            widget._use_icon_tint = self._use_icon_tint
+            cb = getattr(widget, 'icon_tint_checkbox', None)
+            if cb is not None:
+                cb.blockSignals(True)
+                cb.setChecked(self._use_icon_tint)
+                cb.blockSignals(False)
+            widget._update_app_icon_by_theme()
         self._update_app_icon_by_theme()
         self._save_config()
 

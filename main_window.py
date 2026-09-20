@@ -1792,6 +1792,32 @@ class MainWindow(ThemeMixin, ToolbarMixin, ConfigMixin, ExplorerPanelMixin,
                         self._select_combo_value(widget.opacity_spin, self._window_opacity)
                         widget._window_opacity = self._window_opacity
 
+    def _apply_theme_to_all_windows(self, theme_key: str):
+        """把主题应用到所有 MainWindow 窗口。
+
+        主题是全局配置（config 只存一份 'theme'），只换当前窗口会让其他窗口
+        停留在旧主题上，直到它们重启才对齐。每个窗口各自跑 _apply_theme——
+        它用 self.findChildren / self.tab_terminals 只能触到本窗口的控件，
+        所以必须逐窗口分别应用；其他窗口的主题下拉框静默对齐，避免信号回环。
+        """
+        if theme_key not in self.THEMES:
+            return
+        app = QApplication.instance()
+        windows = [w for w in (app.topLevelWidgets() if app else [])
+                   if isinstance(w, MainWindow)]
+        if self not in windows:
+            windows.append(self)
+        for widget in windows:
+            widget.current_theme = theme_key
+            combo = getattr(widget, 'theme_combo', None)
+            if widget is not self and combo is not None:
+                combo.blockSignals(True)
+                idx = combo.findData(theme_key)
+                if idx >= 0:
+                    combo.setCurrentIndex(idx)
+                combo.blockSignals(False)
+            widget._apply_theme(theme_key)
+
     def _on_pin_row2_changed(self, state):
         """固定/取消固定第二排工具栏"""
         self._pin_toolbar_row2 = bool(state)
@@ -4782,7 +4808,7 @@ class MainWindow(ThemeMixin, ToolbarMixin, ConfigMixin, ExplorerPanelMixin,
         theme_key = self.theme_combo.currentData()
         if theme_key and theme_key in self.THEMES:
             self.current_theme = theme_key
-            self._apply_theme(theme_key)
+            self._apply_theme_to_all_windows(theme_key)
             self._save_config()
             display_name = t(f"theme.{theme_key}")
             self.statusbar.showMessage(t("theme.switched", name=display_name), 3000)
