@@ -48,30 +48,29 @@ THEMES = {
         "terminal_bg": "#1a1625",
         "terminal_fg": "#e0d6f0",
     },
-    "森林绿": {
-        "name": "森林绿",
-        # 思路同午夜黑：底是"几乎中性"的近黑，只带一点绿色调，这样工具栏的彩色
-        # 品牌按钮才压得住；强调色用 Spotify 那种成熟的绿（#1db954）而不是霓虹绿，
-        # Start/Commit 的 success 与强调色同色，整个界面只有一种绿。
-        # 曾试过深墨绿底 + 中性按钮，用户反馈"有黑白的感觉"——别再走回去。
-        "bg_darkest": "#0a0f0c",
-        "bg_dark": "#101713",
-        "bg_medium": "#16201a",
-        "bg_light": "#1f2d25",
-        "bg_lighter": "#293a30",
-        "bg_hover": "#35493d",
-        "accent": "#1db954",
-        "accent_hover": "#1ed760",
-        "accent_pressed": "#169c46",
-        "text": "#e8ede9",
-        "text_dim": "#8b9a91",
-        "border": "#293a30",
-        "success": "#1db954",
-        "success_hover": "#1ed760",
+    "琥珀": {
+        "name": "琥珀",
+        # 暖色主题：底是带一点暖褐调子的近黑（同午夜黑的思路，底接近中性才压得住
+        # 工具栏的彩色品牌按钮），强调色是琥珀色，Start/Commit 保持绿色与之区分。
+        # 这个位置以前是"森林绿"，绿色三版都不合用户眼，2026-09-20 换成暖色。
+        "bg_darkest": "#0f0d0b",
+        "bg_dark": "#171310",
+        "bg_medium": "#1f1a16",
+        "bg_light": "#2a231d",
+        "bg_lighter": "#362d25",
+        "bg_hover": "#443a30",
+        "accent": "#f59e0b",
+        "accent_hover": "#fbbf24",
+        "accent_pressed": "#d97706",
+        "text": "#f2ece4",
+        "text_dim": "#a09384",
+        "border": "#362d25",
+        "success": "#22c55e",
+        "success_hover": "#4ade80",
         "danger": "#ef4444",
         "danger_hover": "#f87171",
-        "terminal_bg": "#0d1210",
-        "terminal_fg": "#e0e6e2",
+        "terminal_bg": "#121009",
+        "terminal_fg": "#e8e0d4",
     },
     "午夜黑": {
         "name": "午夜黑",

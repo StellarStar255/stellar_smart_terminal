@@ -409,7 +409,7 @@ TRANSLATIONS = {
     "theme.label": {"zh": "主题:", "en": "Theme:"},
     "theme.深蓝": {"zh": "深蓝", "en": "Deep Blue"},
     "theme.暗夜紫": {"zh": "暗夜紫", "en": "Night Purple"},
-    "theme.森林绿": {"zh": "森林绿", "en": "Forest Green"},
+    "theme.琥珀": {"zh": "琥珀", "en": "Amber"},
     "theme.暖橙": {"zh": "暖橙", "en": "Warm Orange"},
     "theme.午夜黑": {"zh": "午夜黑", "en": "Midnight Black"},
     "theme.浅色": {"zh": "浅色", "en": "Light"},

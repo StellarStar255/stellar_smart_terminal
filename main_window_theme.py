@@ -319,7 +319,7 @@ class ThemeMixin:
 
         t = self.THEMES[theme_name]
         light = is_light(t)
-        neutral = neutral_buttons(t)  # 品牌色按钮走中性底（浅色 / 森林绿）
+        neutral = neutral_buttons(t)  # 品牌色按钮走中性底（目前只有浅色主题）
         # 浅色主题用发丝线（1px）边框，2px 深灰框在浅色底上过重
         bw = "1px" if light else "2px"
 
@@ -823,7 +823,7 @@ class ThemeMixin:
                     border-bottom: 1px solid {t['border']};
                 }}
             """)
-        # 面板标题：品牌色按钮走中性底的主题（浅色 / 森林绿）标题也用正文色
+        # 面板标题：品牌色按钮走中性底的主题（浅色）标题也用正文色
         if hasattr(self, '_explorer_title'):
             self._explorer_title.setStyleSheet(
                 f"color: {t['text'] if neutral else '#22c55e'}; font-weight: bold;")
