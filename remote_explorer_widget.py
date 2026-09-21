@@ -46,6 +46,7 @@ from ssh_session import (
 )
 from git_widget import _make_git_tool_icon  # 复用统一风格的矢量线条图标
 from utils import parse_search_tokens, name_matches_tokens
+from widgets import suppress_popup_flash
 import app_config
 from app_logging import get_logger
 
@@ -367,6 +368,7 @@ class _MfaLoginDialog(QDialog):
             keep_lbl.setObjectName("field")
             layout.addWidget(keep_lbl)
             self._keep_combo = QComboBox()
+            suppress_popup_flash(self._keep_combo)
             want = self.DEFAULT_KEEP_SECS if keep_secs is None else keep_secs
             for i, (secs, key) in enumerate(self.KEEP_CHOICES):
                 self._keep_combo.addItem(t(key), secs)
@@ -507,6 +509,7 @@ class _ForwardsDialog(QDialog):
         form = QHBoxLayout()
         form.setSpacing(6)
         self._type = QComboBox()
+        suppress_popup_flash(self._type)
         for key, label_key in (("L", "remote.fwd_type_local"),
                                ("R", "remote.fwd_type_remote"),
                                ("D", "remote.fwd_type_socks")):

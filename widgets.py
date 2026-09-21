@@ -5,7 +5,7 @@
 import time
 
 from PyQt6.QtWidgets import (
-    QApplication, QCheckBox, QComboBox, QCompleter, QLineEdit,
+    QApplication, QCheckBox, QComboBox, QCompleter, QLineEdit, QProxyStyle,
     QStyle, QStyledItemDelegate, QStyleOptionButton, QStyleOptionComboBox,
     QStylePainter, QTabBar, QWidget
 )
@@ -201,11 +201,57 @@ class MultiKeywordCompleter(QCompleter):
         return [path or ""]
 
 
+
+class _NoPopupFlashStyle(QProxyStyle):
+    """把 SH_Menu_FlashTriggeredItem 关掉的代理样式（其余全部透传给平台样式）。
+
+    QComboBox::hidePopup 若查到该提示为真（macOS 样式默认为真），关闭列表前会先
+    “去掉选中高亮 → 等 60ms → 重新高亮 → 等 20ms → 才真正隐藏”，这是模仿原生菜单
+    的“选中项闪一下”效果。但我们的下拉用的是 QSS 定制的列表弹窗，闪烁在这里只表现
+    为：点空白处关闭时蓝色高亮条灭一下、亮一下，然后列表才消失，看起来像坏了。
+    """
+
+    def styleHint(self, hint, option=None, widget=None, returnData=None):
+        if hint == QStyle.StyleHint.SH_Menu_FlashTriggeredItem:
+            return 0
+        return super().styleHint(hint, option, widget, returnData)
+
+
+_no_popup_flash_style = None
+
+
+def suppress_popup_flash(combo):
+    """让 combo 关闭下拉列表时不做“选中项闪烁”，点击外部/选中项后列表立即隐藏。
+
+    实现是给控件挂一个共享的 _NoPopupFlashStyle（不带 base 的 QProxyStyle 会自己
+    创建一份平台默认样式，与应用当前样式一致）。设置了样式表时 Qt 会自动用
+    QStyleSheetStyle 包住它，QSS 外观不受影响（已用 grab() 逐像素比对验证）。
+    """
+    global _no_popup_flash_style
+    style = _no_popup_flash_style
+    if style is not None:
+        try:
+            from PyQt6 import sip
+            if sip.isdeleted(style):
+                style = None
+        except ImportError:
+            pass
+    if style is None:
+        style = _no_popup_flash_style = _NoPopupFlashStyle()
+        app = QApplication.instance()
+        if app is not None:
+            # 生命周期跟随 QApplication，避免被 Python GC 提前回收
+            style.setParent(app)
+    combo.setStyle(style)
+
+
 class QuietPopupComboBox(QComboBox):
     """关闭 popup 时不让列表当前项做最后一次高亮重绘（消失瞬间蓝色高亮条闪烁）。
 
     实现：进入 hidePopup 时冻结列表 view 的重绘（setUpdatesEnabled(False)）并保持
-    冻结，由下次 showPopup 在重新显示前恢复（setUpdatesEnabled(True)）。
+    冻结，由下次 showPopup 在重新显示前恢复（setUpdatesEnabled(True)）。另外挂
+    suppress_popup_flash：macOS 样式的“选中项闪烁”会把真正隐藏推迟 80ms，即使冻结
+    了重绘，列表也会在点击后停留一会儿才消失。
 
     关键：绝不在 hidePopup 里用 QTimer.singleShot 提前恢复更新——macOS 上原生弹窗
     隐藏是异步的，列表窗口可能还在屏上停留一帧；而 setUpdatesEnabled(True) 会隐式
@@ -216,6 +262,10 @@ class QuietPopupComboBox(QComboBox):
     另：绝不能在 hidePopup 里清空 view 的当前项/选区——鼠标点选某一项时，Qt 的弹窗
     容器正是在 hidePopup 过程中读取 view 的当前项来提交选择；若提前清空，combo 会以
     无效索引提交（currentIndex 变 -1），导致选中的路径丢失、输入框被清空。"""
+
+    def __init__(self, parent=None):
+        super().__init__(parent)
+        suppress_popup_flash(self)
 
     def showPopup(self):
         view = self.view()
@@ -254,6 +304,8 @@ class CenteredComboBox(QComboBox):
         self.view().setTextElideMode(Qt.TextElideMode.ElideNone)
         self.view().setHorizontalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAlwaysOff)
         self._minimum_popup_width = 0
+        # 点空白处关闭时不做“高亮灭一下亮一下再消失”的闪烁（macOS 样式默认行为）
+        suppress_popup_flash(self)
 
     def setMinimumPopupWidth(self, width: int):
         self._minimum_popup_width = max(0, width)

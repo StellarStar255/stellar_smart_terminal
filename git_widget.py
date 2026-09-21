@@ -176,6 +176,7 @@ def _make_git_tool_icon(kind: str, color: str, px: int = 16) -> QIcon:
     return QIcon(pm)
 
 from git_manager import GitManager, GitFile, FileStatus
+from widgets import suppress_popup_flash
 from i18n import t, get_language
 import app_config
 from app_logging import get_logger
@@ -2207,6 +2208,7 @@ class GitHeaderWidget(QFrame):
 
         # 分支选择器
         self.branch_combo = QComboBox()
+        suppress_popup_flash(self.branch_combo)
         self.branch_combo.setMinimumWidth(120)
         self.branch_combo.setStyleSheet(f"""
             QComboBox {{
