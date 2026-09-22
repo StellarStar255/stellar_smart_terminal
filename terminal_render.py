@@ -800,6 +800,14 @@ class TerminalRenderMixin:
         # 这里直接映射为终端默认背景色，黑底即"看不见"。
         if is_bg and color == 'black':
             return QColor(self.bg_color)
+        # 真彩色/256 色的**纯黑**背景（48;2;0;0;0、48;5;16）同理折算成终端默认
+        # 底色：Claude Code 的启动 logo 不管终端底色是什么都用 rgb(0,0,0) 画
+        # "眼睛"（实测对 OSC 11 回什么色都一样，它只认自己的 theme 配置），意图是
+        # "透出终端底色"；底色非纯黑的主题（紫/琥珀/粉/浅色）若照画就成了一块块
+        # 黑斑。浅色底上也折：白字压白底的风险由 _ensure_visible 兜住——它按解析
+        # 后的单元格底色校正前景，白字会被压暗而不是消失。
+        if is_bg and self._is_pure_black(color):
+            return QColor(self.bg_color)
 
         # RGB元组 (真彩色 24-bit)
         if isinstance(color, (tuple, list)) and len(color) == 3:
@@ -832,6 +840,15 @@ class TerminalRenderMixin:
             return self._get_256_color(color, bold)
 
         return self.bg_color if is_bg else self.fg_color
+
+    @staticmethod
+    def _is_pure_black(color) -> bool:
+        """颜色值是否为纯黑 rgb(0,0,0)（pyte 真彩色/256 色给 '000000'，也兼容 '#000000'、元组、索引 16）。"""
+        if isinstance(color, (tuple, list)):
+            return len(color) == 3 and not any(color)
+        if isinstance(color, str):
+            return color.lstrip('#') == '000000'
+        return isinstance(color, int) and color == 16
 
     def _get_256_color(self, idx: int, bold: bool = False) -> QColor:
         """获取256色 - 保持原始色彩"""
