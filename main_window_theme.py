@@ -312,6 +312,42 @@ class ThemeMixin:
         check_image = f"image: url({check_url});" if check_url else ""
         return message_box_qss(theme, check_image)
 
+    @staticmethod
+    def _sync_app_palette(t: dict):
+        """应用级 QPalette / colorScheme 跟随主题。
+
+        documentMode 标签栏空白区、菜单栏等"原生绘制"区域用的是 QPalette 而
+        非 QSS（app.py 启动时设的是硬编码深色调色板，浅色主题下这些区域会
+        留下一条深色，且给 QTabBar 设 QSS 会禁用 autoFillBackground，局部
+        填充救不回来）。多窗口共享同一主题，改应用级调色板是安全的。
+        """
+        _pal = QPalette()
+        _pal.setColor(QPalette.ColorRole.Window, QColor(t['bg_dark']))
+        _pal.setColor(QPalette.ColorRole.WindowText, QColor(t['text']))
+        _pal.setColor(QPalette.ColorRole.Base, QColor(t['bg_medium']))
+        _pal.setColor(QPalette.ColorRole.AlternateBase, QColor(t['bg_dark']))
+        _pal.setColor(QPalette.ColorRole.ToolTipBase, QColor(t['bg_light']))
+        _pal.setColor(QPalette.ColorRole.ToolTipText, QColor(t['text']))
+        _pal.setColor(QPalette.ColorRole.Text, QColor(t['text']))
+        _pal.setColor(QPalette.ColorRole.Button, QColor(t['bg_light']))
+        _pal.setColor(QPalette.ColorRole.ButtonText, QColor(t['text']))
+        _pal.setColor(QPalette.ColorRole.Link, QColor(t['accent']))
+        _pal.setColor(QPalette.ColorRole.Highlight, QColor(t['accent']))
+        _pal.setColor(QPalette.ColorRole.HighlightedText, QColor('#ffffff'))
+        _app = QApplication.instance()
+        if _app is None:
+            return
+        _app.setPalette(_pal)
+        # 强制原生外观（NSAppearance）跟随主题（Qt 6.8+）：conda 版 Qt 在
+        # macOS 深色系统外观下会按原生外观画 documentMode 标签栏空白区等
+        # 区域，连 QPalette 都绕过；colorScheme 是唯一对所有构建都生效的开关
+        try:
+            _app.styleHints().setColorScheme(
+                Qt.ColorScheme.Light if t.get('is_light_theme')
+                else Qt.ColorScheme.Dark)
+        except AttributeError:
+            pass  # Qt < 6.8 没有 setColorScheme，保持系统外观
+
     def _apply_theme(self, theme_name: str):
         """应用主题到整个界面"""
         if theme_name not in self.THEMES:
@@ -322,6 +358,12 @@ class ThemeMixin:
         neutral = neutral_buttons(t)  # 品牌色按钮走中性底（目前只有浅色主题）
         # 浅色主题用发丝线（1px）边框，2px 深灰框在浅色底上过重
         bw = "1px" if light else "2px"
+
+        # 必须先于下面所有 setStyleSheet：被样式表接管的控件（WA_StyleSheet，
+        # 如菜单栏）不吃应用级调色板的传播，只在重新 polish 时按"此刻"的
+        # 应用调色板取色。若先重设样式表、后换调色板，逐窗口联动时先处理的
+        # 窗口就会永远停在旧主题色上（Ubuntu 双窗口菜单栏颜色不一致）。
+        self._sync_app_palette(t)
 
         # 主题会重写大量控件样式表。先把上次缩放过的控件还原成"未缩放基准"再清缓存：
         # _scale_gui_font_sizes 缓存未命中时会把控件当前样式当基准，若此时还停在已缩放
@@ -485,37 +527,6 @@ class ThemeMixin:
                 color: {t['text']};
             }}
         """)
-        # 应用级 QPalette 跟随主题：documentMode 标签栏空白区等"原生绘制"
-        # 区域用的是 QPalette 而非 QSS（app.py 启动时设的是硬编码深色调色板，
-        # 浅色主题下这些区域会留下一条深色，且给 QTabBar 设 QSS 会禁用
-        # autoFillBackground，局部填充救不回来）。多窗口共享同一主题，改
-        # 应用级调色板是安全的。
-        _pal = QPalette()
-        _pal.setColor(QPalette.ColorRole.Window, QColor(t['bg_dark']))
-        _pal.setColor(QPalette.ColorRole.WindowText, QColor(t['text']))
-        _pal.setColor(QPalette.ColorRole.Base, QColor(t['bg_medium']))
-        _pal.setColor(QPalette.ColorRole.AlternateBase, QColor(t['bg_dark']))
-        _pal.setColor(QPalette.ColorRole.ToolTipBase, QColor(t['bg_light']))
-        _pal.setColor(QPalette.ColorRole.ToolTipText, QColor(t['text']))
-        _pal.setColor(QPalette.ColorRole.Text, QColor(t['text']))
-        _pal.setColor(QPalette.ColorRole.Button, QColor(t['bg_light']))
-        _pal.setColor(QPalette.ColorRole.ButtonText, QColor(t['text']))
-        _pal.setColor(QPalette.ColorRole.Link, QColor(t['accent']))
-        _pal.setColor(QPalette.ColorRole.Highlight, QColor(t['accent']))
-        _pal.setColor(QPalette.ColorRole.HighlightedText, QColor('#ffffff'))
-        _app = QApplication.instance()
-        if _app is not None:
-            _app.setPalette(_pal)
-            # 强制原生外观（NSAppearance）跟随主题（Qt 6.8+）：conda 版 Qt 在
-            # macOS 深色系统外观下会按原生外观画 documentMode 标签栏空白区等
-            # 区域，连 QPalette 都绕过；colorScheme 是唯一对所有构建都生效的开关
-            try:
-                _app.styleHints().setColorScheme(
-                    Qt.ColorScheme.Light if t.get('is_light_theme')
-                    else Qt.ColorScheme.Dark)
-            except AttributeError:
-                pass  # Qt < 6.8 没有 setColorScheme，保持系统外观
-
         # 信息栏样式
         self.info_frame.setStyleSheet(f"""
             QFrame {{
