@@ -420,8 +420,15 @@ class CommandPalette(QWidget):
             logger.warning(f"[CommandPalette] command failed: {cmd.title}: {e}")
 
     def eventFilter(self, obj, ev):
+        # 析构期间子控件按任意顺序销毁：list_widget 先没了，视口销毁时还会给
+        # 本过滤器送 ChildRemoved 等事件，这里访问已删对象抛 RuntimeError；
+        # PyQt 对虚函数里的未捕获异常直接 qFatal（关窗口时偶发整进程 abort）。
+        try:
+            viewport = self.list_widget.viewport()
+        except RuntimeError:
+            return False
         # 列表视口的 hover：让光标所在项成为当前项，高亮自然跟随鼠标。
-        if obj is self.list_widget.viewport():
+        if obj is viewport:
             if ev.type() in (QEvent.Type.HoverMove, QEvent.Type.MouseMove):
                 it = self.list_widget.itemAt(ev.position().toPoint())
                 if it is not None:

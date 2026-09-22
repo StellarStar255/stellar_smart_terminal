@@ -62,6 +62,8 @@ class DialogCloseShortcutFilter(QObject):
 
 from app_logging import setup_logging, get_logger
 from main_window import MainWindow
+from onboarding_tour import should_show_onboarding
+import app_config
 from i18n import t
 
 logger = get_logger(__name__)
@@ -651,6 +653,11 @@ def main():
     # --working-dir 显式指定目录启动（Finder 右键等）时尊重用户意图，不恢复。
     if not MainWindow.restore_windows_after_update(window) and not cli_working_dir:
         MainWindow.restore_workspace_on_start(window)
+
+    # 首次启动（配置里还没有"教程已看过"标记）：等布局稳定后弹互动教程。
+    # 只在首个窗口弹；看完/退出都会写标记，之后从「帮助 › 新手教程」重看。
+    if should_show_onboarding(app_config.read_config()):
+        window.schedule_onboarding_tour(800)
 
     # 安装 Ctrl+C (SIGINT) 处理器：在终端里按两次 Ctrl+C 可保存并退出
     install_sigint_handler(app)

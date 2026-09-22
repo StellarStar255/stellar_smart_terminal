@@ -1127,6 +1127,9 @@ class ThemeMixin:
         # 命令搜索框（Cmd+K）
         if hasattr(self, 'command_palette'):
             self.command_palette.apply_theme(t)
+        tour = getattr(self, '_onboarding_tour', None)
+        if tour is not None:
+            tour.apply_theme(t)
 
         # 窗口导航面板：内嵌面板 + 全局浮动面板
         if getattr(self, 'nav_panel', None) is not None:

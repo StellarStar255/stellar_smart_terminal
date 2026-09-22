@@ -238,6 +238,7 @@ class MenusMixin:
 
     def _build_help_menu(self, menubar):
         menu = menubar.addMenu(t("menu.help"))
+        self._own_action(menu, "onboarding.menu_item", self.start_onboarding_tour)
         self._shortcut_menu_action(menu, "cheatsheet", "shortcuts.act.cheatsheet")
         self._own_action(menu, "shortcuts.menu_item", self._show_shortcut_settings)
         menu.addSeparator()

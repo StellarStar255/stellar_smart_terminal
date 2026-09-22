@@ -74,6 +74,7 @@ py-modules = [
     "main_window_theme",
     "main_window_toolbar",
     "main_window_update",
+    "onboarding_tour",
     "openai_server",
     "pasted_images_dialog",
     "remote_bookmarks",

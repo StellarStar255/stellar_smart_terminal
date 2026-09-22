@@ -1709,6 +1709,34 @@ class MainWindow(ThemeMixin, ToolbarMixin, ConfigMixin, ExplorerPanelMixin,
             (t("shortcuts.group.editor"), editor_rows),
         ]
 
+    # ---------- 首次启动互动教程 ----------
+
+    def start_onboarding_tour(self):
+        """开始（或重新开始）新手教程；帮助菜单和首次启动都走这里。"""
+        from onboarding_tour import OnboardingTour
+        old = getattr(self, '_onboarding_tour', None)
+        if old is not None and old.is_active():
+            old.skip()
+        tour = OnboardingTour(self)
+        self._onboarding_tour = tour
+        tour.finished.connect(self._on_onboarding_finished)
+        tour.start()
+        return tour
+
+    def _on_onboarding_finished(self):
+        self._onboarding_tour = None
+
+    def schedule_onboarding_tour(self, delay_ms: int = 800):
+        """窗口显示后延迟弹教程（等布局稳定，定位才准）。
+
+        用挂在窗口上的 QTimer 而不是裸 singleShot：窗口先销毁时回调不会打在
+        已删对象上（与自动检查更新的定时器同一教训）。
+        """
+        self._onboarding_timer = QTimer(self)
+        self._onboarding_timer.setSingleShot(True)
+        self._onboarding_timer.timeout.connect(self.start_onboarding_tour)
+        self._onboarding_timer.start(delay_ms)
+
     def _show_shortcut_cheatsheet(self):
         """打开快捷键速查表（非模态；重复触发时刷新数据并提到前台）。"""
         old = getattr(self, '_cheatsheet_dialog', None)
@@ -5004,6 +5032,9 @@ class MainWindow(ThemeMixin, ToolbarMixin, ConfigMixin, ExplorerPanelMixin,
                 logger.debug("_apply_language: suppressed exception", exc_info=True)
         if hasattr(self, 'editor_area'):
             self.editor_area.apply_language()
+        tour = getattr(self, '_onboarding_tour', None)
+        if tour is not None:
+            tour.retranslate()
 
 
 

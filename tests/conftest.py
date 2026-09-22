@@ -101,7 +101,17 @@ def _dispose_module_toplevels():
     app = QApplication.instance()
     if app is None:
         return
-    for w in list(app.topLevelWidgets()):
-        if id(w) in before or sip.isdeleted(w):
+    # 先销毁主窗口，再处理其余顶层控件。topLevelWidgets() 的顺序不确定，而
+    # 工作目录补全器的弹出列表（QCompleter popup）、命令面板的弹层都是"归属于
+    # 主窗口子对象、但自身是顶层"的控件：若它们先被删，主窗口关闭时子控件的
+    # Hide 事件再流经补全器/面板的 eventFilter 就踩到悬空指针——本地偶发
+    # SIGSEGV（QCompleter::eventFilter ← hideChildren ← ~QMainWindow）。主窗口
+    # 先删会连带删掉补全器和它的弹窗，后面循环里 sip.isdeleted 自然跳过。
+    from PyQt6.QtWidgets import QMainWindow
+    pending = [w for w in app.topLevelWidgets()
+               if id(w) not in before and not sip.isdeleted(w)]
+    pending.sort(key=lambda w: 0 if isinstance(w, QMainWindow) else 1)
+    for w in pending:
+        if sip.isdeleted(w):
             continue
         _dispose_widget(app, w)
