@@ -138,6 +138,20 @@ class TourOnMainWindowTest(unittest.TestCase):
         finally:
             btn.show()
 
+    def test_card_tall_enough_for_long_wrapped_body(self):
+        """正文很长（英文右键菜单那步）时卡片高度要按换行后的实际高度算，不能被截字。"""
+        tour = self._start()
+        ov = tour.overlay
+        long_body = ' '.join(['Quick Commands run any preset in one click;'] * 14)
+        ov.set_content(counter='Step 1 of 2', title='Title', body=long_body, hint='hint',
+                       can_prev=True, next_text='Next', skip_text='Exit', prev_text='Back')
+        ov.set_hole(None)
+        _pump()
+        need = ov.card.layout().totalHeightForWidth(ov.card.width())
+        self.assertGreaterEqual(ov.card.height(), need)
+        body = ov.body_label
+        self.assertGreaterEqual(body.height(), body.heightForWidth(body.width()))
+
     # ----- 互动 -----
 
     def test_quick_launch_step_advances_when_popup_opens(self):
@@ -170,6 +184,34 @@ class TourOnMainWindowTest(unittest.TestCase):
         self.assertEqual(self.win.tab_widget.count(), before + 1)
         tour._tick()
         self.assertTrue(tour._done_flag)
+
+    def test_context_menu_step_advances_when_window_menu_pops_up(self):
+        from PyQt6.QtWidgets import QMenu
+        tour = self._start()
+        keys = [s.key for s in tour.steps]
+        self.assertEqual(keys.index('context_menu'), keys.index('terminal') + 1)
+        tour._goto(keys.index('context_menu'))
+        tour._tick()
+        self.assertFalse(tour._done_flag)
+        # 别的窗口/无主的菜单不算
+        stray = QMenu()
+        stray.addAction('x')
+        stray.popup(QPoint(10, 10))
+        _pump()
+        tour._tick()
+        self.assertFalse(tour._done_flag)
+        stray.close()
+        # 终端右键菜单以主窗口为 parent
+        menu = QMenu(self.win)
+        menu.addAction('x')
+        menu.popup(self.win.mapToGlobal(QPoint(200, 300)))
+        _pump()
+        try:
+            tour._tick()
+            self.assertTrue(tour._done_flag)
+        finally:
+            menu.close()
+            _pump()
 
     # ----- 收尾 -----
 

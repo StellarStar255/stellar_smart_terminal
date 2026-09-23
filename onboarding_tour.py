@@ -21,7 +21,7 @@ from typing import Callable, Optional
 from PyQt6.QtCore import Qt, QEvent, QObject, QPoint, QRect, QTimer, pyqtSignal
 from PyQt6.QtGui import QColor, QPainter, QPainterPath, QPen, QRegion, QKeyEvent
 from PyQt6.QtWidgets import (
-    QFrame, QHBoxLayout, QLabel, QPushButton, QVBoxLayout, QWidget,
+    QApplication, QFrame, QHBoxLayout, QLabel, QMenu, QPushButton, QVBoxLayout, QWidget,
 )
 
 import app_config
@@ -124,6 +124,21 @@ def _palette_focused(win) -> bool:
         return False
 
 
+def _context_menu_open(win) -> bool:
+    """终端右键菜单开着没有。
+
+    菜单是 menu.exec() 的模态弹层，轮询计时器在它的嵌套事件循环里照常触发，
+    所以菜单开着的时候就能判定完成。只认挂在本窗口下的 QMenu（终端右键菜单
+    以窗口为 parent），别的窗口的菜单不算。
+    """
+    popup = QApplication.activePopupWidget()
+    try:
+        parent = popup.parentWidget() if isinstance(popup, QMenu) else None
+        return parent is not None and parent.window() is win
+    except RuntimeError:
+        return False
+
+
 class _Baseline:
     """互动条件里"比开始时多了一个"这类判断，需要记住进入该步时的基线。"""
 
@@ -155,6 +170,7 @@ def build_steps(baseline: _Baseline) -> list[TourStep]:
         TourStep('settings', ['gui_font_spin', 'opacity_spin', 'lang_combo',
                               'pin_row2_checkbox', 'toolbar_settings_btn']),
         TourStep('terminal', ['tab_widget']),
+        TourStep('context_menu', ['tab_widget'], done_when=_context_menu_open),
         TourStep('done'),
     ]
 
@@ -329,7 +345,11 @@ class OnboardingOverlay(QWidget):
 
     def _place_card(self):
         self.card.adjustSize()
-        cw, ch = self.card.width(), self.card.sizeHint().height()
+        cw = self.card.width()
+        # 高度按固定宽度下换行后的实际高度算：换行 QLabel 的 sizeHint 是按启发式宽度
+        # 估的，正文一长（英文右键菜单那步）卡片就矮了，上下截字
+        ch = max(self.card.sizeHint().height(),
+                 self.card.layout().totalHeightForWidth(cw))
         self.card.resize(cw, ch)
         full = self.rect()
         if self._hole is None:

@@ -1408,7 +1408,10 @@ TRANSLATIONS = {
     "onboarding.settings.title": {"zh": "界面设置", "en": "Interface settings"},
     "onboarding.settings.body": {"zh": "GUI Font 只改界面字号（终端字号用 ⌘+ / ⌘-）；Opacity 调窗口透明度；Language 切换中英文；Pin 固定显示工具栏第二行。齿轮里有更多设置，包括工具栏按钮的显示与排序、设置导入导出、检查更新。", "en": "GUI Font changes only the interface font (terminal font uses ⌘+ / ⌘-); Opacity adjusts window transparency; Language switches Chinese / English; Pin keeps the second toolbar row visible. The gear holds more: which toolbar buttons show and in what order, settings import/export, and update checks."},
     "onboarding.terminal.title": {"zh": "终端区", "en": "Terminal area"},
-    "onboarding.terminal.body": {"zh": "右键有复制、粘贴、搜索等菜单；双击选词、三击选行；⌘+ / ⌘- 缩放字号；点击链接直接打开；把文件拖进来会粘贴路径。", "en": "Right-click for copy, paste, search and more; double-click selects a word, triple-click a line; ⌘+ / ⌘- zoom the font; click links to open them; drop a file to paste its path."},
+    "onboarding.terminal.body": {"zh": "双击选词、三击选行，选中即可 ⌘C 复制；⌘+ / ⌘- 缩放字号；点击链接直接打开；把文件拖进来会粘贴路径。", "en": "Double-click selects a word, triple-click a line, then ⌘C to copy; ⌘+ / ⌘- zoom the font; click links to open them; drop a file to paste its path."},
+    "onboarding.context_menu.title": {"zh": "终端右键菜单（好用的都藏在这）", "en": "Terminal right-click menu (hidden gems)"},
+    "onboarding.context_menu.body": {"zh": "快速命令一键执行预设；本地快速命令是存在项目目录里的专属命令，换目录自动切换；打开 / 复制当前目录；搜索回滚历史；刷新终端修复花屏；清空回滚历史释放内存；分屏、移动、重命名分屏；调滚动灵敏度。", "en": "Quick Commands run any preset; Local Quick Commands are per-project commands saved in the project folder; open or copy the current directory; search the scrollback; Refresh fixes a garbled screen; Clear Scrollback frees memory; split, move or rename panes; tune the scroll speed."},
+    "onboarding.context_menu.hint": {"zh": "👉 在终端里点一下右键试试", "en": "👉 Right-click inside the terminal"},
     "onboarding.done.title": {"zh": "完成！", "en": "All set!"},
     "onboarding.done.body": {"zh": "主要功能就这些。想再看一遍随时从「帮助 › 新手教程」打开。祝使用愉快！", "en": "That's the tour. You can reopen it any time from Help › Tutorial. Enjoy!"},
 }

@@ -27,6 +27,20 @@ An interactive tour pops up on first launch, walking you through Quick Launch (�
 
 </details>
 
+### 终端右键菜单 / Terminal right-click menu
+
+很多好用的功能藏在终端右键里：快速命令一键执行预设、跟着项目目录走的本地快速命令、搜索回滚历史、复制当前路径、分屏、调滚动灵敏度……
+
+Plenty of handy tools live in the terminal's right-click menu: run presets in one click, per-project local quick commands, scrollback search, copy the current path, split panes, scroll speed and more.
+
+![终端右键菜单演示](assets/context-menu-zh.gif)
+
+<details><summary>English version</summary>
+
+![Terminal right-click menu](assets/context-menu-en.gif)
+
+</details>
+
 ## Features / 功能
 
 - **Multi-tab Terminal / 多标签终端** — session management / 会话管理
