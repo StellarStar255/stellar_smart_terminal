@@ -36,6 +36,8 @@ WIN_W, WIN_H = (1280, 800) if MODE == 'tour' else (1280, 840)
 OUT_W = 1000          # GIF 输出宽度（README 里够清楚）
 MOVE_FRAMES = 14      # 光标一次移动的帧数
 MOVE_MS = 30
+# 停留时长系数：教程 GIF 放 README，整段压到 45 秒左右（光标移动不压，只压卡片停留）
+PACE = 0.6 if MODE == 'tour' else 1.0
 
 # ---- 演示环境：数据目录、演示项目（带 git 历史和本地快速命令）、干净的 zsh 提示符 ----
 DEMO = tempfile.mkdtemp(prefix='stellar-demo-')
@@ -218,7 +220,8 @@ def snap(hold_ms: int = MOVE_MS):
 
 
 def hold(ms: int):
-    """停留 ms：拍一帧并把这段时间让给事件循环（输出、动画照常进行）。"""
+    """停留 ms（按 PACE 缩放）：拍一帧并把这段时间让给事件循环（输出、动画照常进行）。"""
+    ms = int(ms * PACE)
     snap(ms)
     yield ms
 
