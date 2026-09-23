@@ -13,6 +13,20 @@ A PyQt6-based smart terminal with file explorer, Git GUI, LLM proxy, and VS Code
 > 多面板布局：文件管理 / Git、代码编辑器与多标签终端集成在一个窗口中。
 > Multi-pane layout: file explorer / Git, code editor, and multi-tab terminal in one window.
 
+## Tutorial / 新手教程
+
+首次启动会弹出互动教程，手把手带你认识 ⚡ 快速切目录、分屏、侧栏、命令面板等功能；之后可从「帮助 › 新手教程」随时重看。
+
+An interactive tour pops up on first launch, walking you through Quick Launch (⚡), split panes, side panels, the command palette and more. Replay it anytime from Help › Tutorial.
+
+![新手教程演示](assets/onboarding-zh.gif)
+
+<details><summary>English version</summary>
+
+![Onboarding tour](assets/onboarding-en.gif)
+
+</details>
+
 ## Features / 功能
 
 - **Multi-tab Terminal / 多标签终端** — session management / 会话管理
