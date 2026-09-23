@@ -14,5 +14,21 @@
          （配套的用途文案见 spec 里的 NSAppleEventsUsageDescription）。 -->
     <key>com.apple.security.automation.apple-events</key>
     <true/>
+    <!-- Hardened Runtime 的受保护资源豁免：缺哪项，本应用及在终端里启动的
+         程序（responsible process = 本 .app）访问对应资源就被系统直接拒绝，
+         连授权弹窗都不出（如 OpenCV 报 "not authorized to capture video"）。
+         光有 spec 里的 NS*UsageDescription 不够，两者缺一不可。 -->
+    <key>com.apple.security.device.camera</key>
+    <true/>
+    <key>com.apple.security.device.audio-input</key>
+    <true/>
+    <key>com.apple.security.personal-information.location</key>
+    <true/>
+    <key>com.apple.security.personal-information.addressbook</key>
+    <true/>
+    <key>com.apple.security.personal-information.calendars</key>
+    <true/>
+    <key>com.apple.security.personal-information.photos-library</key>
+    <true/>
 </dict>
 </plist>
