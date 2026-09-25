@@ -216,6 +216,37 @@ class TestMoveTabBetweenWindows(unittest.TestCase):
         self.assertTrue(sip.isdeleted(c) or not c.isVisible())
         self._assert_mappings_consistent(a)
 
+    def test_drop_hint_shows_insert_caret_on_strip_and_label_on_page(self):
+        """落点高亮：标签栏上是插入光标竖线（落在标签边界），内容区是带说明的圆角区域。"""
+        from PyQt6.QtCore import Qt
+        from widgets import DropHintOverlay
+        from i18n import t
+        b = self.win_b
+        while b.tab_widget.count() < 2:
+            b._add_new_tab(tab_name=f"h{b.tab_widget.count()}")
+        bar = b.tab_widget.tabBar()
+        r1 = bar.tabRect(1)
+        pos = bar.mapToGlobal(QPoint(r1.left() + 3, r1.center().y()))   # 插到第 1 个前面
+        b._show_tab_drop_hint('strip', None, pos)
+        hint = b._tab_drop_hint
+        self.assertIsInstance(hint, DropHintOverlay)
+        self.assertEqual(hint._mode, 'strip')
+        boundary = hint.mapFromGlobal(bar.mapToGlobal(QPoint(r1.left(), 0))).x()
+        self.assertEqual(hint._caret_x, boundary)
+        # 光标移到最后一个标签右侧空白 → 竖线跟到末尾
+        far = bar.mapToGlobal(QPoint(bar.width() - 2, r1.center().y()))
+        b._update_tab_drop_caret(far)
+        last = bar.tabRect(bar.count() - 1)
+        self.assertEqual(hint._caret_x,
+                         hint.mapFromGlobal(bar.mapToGlobal(QPoint(last.right() + 1, 0))).x())
+        b._show_tab_drop_hint('page')
+        self.assertEqual((hint._mode, hint._label), ('page', t("tab.drop_as_new_tab")))
+        self.assertIsNone(hint._caret_x)
+        b._show_tab_drop_hint('split', (Qt.Orientation.Horizontal, False))
+        self.assertEqual(hint._mode, 'area')
+        self.assertFalse(hint.grab().isNull())
+        b._hide_tab_drop_hint()
+
 
 if __name__ == '__main__':
     unittest.main()

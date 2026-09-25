@@ -573,6 +573,91 @@ class TabCloseButton(QAbstractButton):
         p.end()
 
 
+class DropHintOverlay(QWidget):
+    """拖标签 / 窗格时，落点上的高亮提示（自绘，替代原来的半透明蓝块 + 方框）。
+
+    三种样子：
+    - 'strip'：标签栏上一层极淡的底色 + 一根发光的竖线（插入光标），标出松手后
+      标签会插到哪两个标签之间；随光标移动（set_caret_x）。
+    - 'area'：分屏 / 窗格落区——内缩的圆角区域，淡色填充 + 细边。
+    - 'page'：落在别的窗口内容区——同 'area'，正中再加一个说明胶囊（label）。
+    对鼠标透明，只负责画。
+    """
+
+    def __init__(self, parent, accent: str = '#667eea', text: str = '#ffffff'):
+        super().__init__(parent)
+        self.setAttribute(Qt.WidgetAttribute.WA_TransparentForMouseEvents)
+        self.setAttribute(Qt.WidgetAttribute.WA_TranslucentBackground)
+        self._accent = QColor(accent)
+        self._text = QColor(text)
+        self._mode = 'area'
+        self._caret_x = None
+        self._label = ''
+
+    def set_colors(self, accent: str, text: str = '#ffffff'):
+        self._accent = QColor(accent)
+        self._text = QColor(text)
+        self.update()
+
+    def set_mode(self, mode: str, label: str = ''):
+        self._mode = mode
+        self._label = label
+        if mode != 'strip':
+            self._caret_x = None
+        self.update()
+
+    def set_caret_x(self, x):
+        """插入光标的横坐标（本控件坐标）；None = 不画。"""
+        if x != self._caret_x:
+            self._caret_x = x
+            self.update()
+
+    def _tint(self, alpha):
+        c = QColor(self._accent)
+        c.setAlpha(alpha)
+        return c
+
+    def paintEvent(self, event):
+        p = QPainter(self)
+        p.setRenderHint(QPainter.RenderHint.Antialiasing)
+        r = QRectF(self.rect())
+        if self._mode == 'strip':
+            p.fillRect(r, self._tint(28))
+            if self._caret_x is not None:
+                x = max(3.0, min(r.width() - 3.0, float(self._caret_x)))
+                top, bottom = r.top() + 5, r.bottom() - 5
+                p.setPen(Qt.PenStyle.NoPen)
+                # 外层柔光 + 实心竖线 + 两端小圆点
+                p.setBrush(self._tint(60))
+                p.drawRoundedRect(QRectF(x - 4, top - 1, 8, bottom - top + 2), 4, 4)
+                p.setBrush(self._accent)
+                p.drawRoundedRect(QRectF(x - 1.5, top, 3, bottom - top), 1.5, 1.5)
+                p.drawEllipse(QPointF(x, top), 3, 3)
+                p.drawEllipse(QPointF(x, bottom), 3, 3)
+            p.end()
+            return
+        area = r.adjusted(6, 6, -6, -6)
+        p.setBrush(self._tint(38))
+        p.setPen(QPen(self._tint(200), 1.5))
+        p.drawRoundedRect(area, 10, 10)
+        if self._mode == 'page' and self._label:
+            from PyQt6.QtGui import QFont, QFontMetrics
+            font = QFont(self.font())
+            font.setPixelSize(13)
+            font.setWeight(QFont.Weight.DemiBold)
+            fm = QFontMetrics(font)
+            w = fm.horizontalAdvance(self._label) + 32
+            h = fm.height() + 16
+            pill = QRectF(area.center().x() - w / 2, area.center().y() - h / 2, w, h)
+            p.setPen(Qt.PenStyle.NoPen)
+            p.setBrush(self._accent)
+            p.drawRoundedRect(pill, h / 2, h / 2)
+            p.setPen(self._text)
+            p.setFont(font)
+            p.drawText(pill, int(Qt.AlignmentFlag.AlignCenter), self._label)
+        p.end()
+
+
 class TabDragPreview(QWidget):
     """拖标签 / 窗格 / 导航条目时跟着光标的「迷你窗口」。
 

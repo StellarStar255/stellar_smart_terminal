@@ -10,7 +10,7 @@ import time
 from PyQt6 import sip
 from PyQt6.QtCore import QPoint, QRect, QTimer, Qt
 from PyQt6.QtGui import QCursor
-from PyQt6.QtWidgets import (QApplication, QMenu, QMessageBox, QSplitter, QTabBar, QWidget)
+from PyQt6.QtWidgets import (QApplication, QMenu, QMessageBox, QSplitter, QTabBar)
 from dialogs import get_default_shell
 from i18n import t
 from widgets import InlineRenameEdit, TabCloseButton, TabDragPreview
@@ -1083,35 +1083,59 @@ class TabSplitMixin:
             return None
         return i if local.x() < bar.tabRect(i).center().x() else i + 1
 
-    def _show_tab_drop_hint(self, kind='strip', zone=None):
-        """盖一层半透明高亮：并成标签时罩住标签栏，并成分屏时罩住目标页的那半边。"""
+    def _show_tab_drop_hint(self, kind='strip', zone=None, global_pos=None):
+        """落点高亮（widgets.DropHintOverlay）：标签栏 → 淡底 + 插入光标竖线；
+        分屏 / 窗格落区 → 圆角淡色区域；别的窗口内容区 → 圆角区域 + 说明胶囊。"""
+        from widgets import DropHintOverlay
         hint = getattr(self, '_tab_drop_hint', None)
         if hint is None or sip.isdeleted(hint):
-            hint = QWidget(self.tab_widget)
-            hint.setAttribute(Qt.WidgetAttribute.WA_TransparentForMouseEvents)
-            hint.setAttribute(Qt.WidgetAttribute.WA_StyledBackground, True)
-            hint.setStyleSheet(
-                "background-color: rgba(102, 126, 234, 0.35);"
-                "border: 2px solid #667eea;")
+            hint = DropHintOverlay(self.tab_widget)
             self._tab_drop_hint = hint
+        hint.set_colors(self._current_theme_dict().get('accent', '#667eea'))
         if kind == 'split' and zone is not None:
             geo = self._split_zone_rect(zone)
             if geo is None:
                 return
+            hint.set_mode('area')
         elif kind == 'pane' and zone is not None:
             geo = self._pane_zone_rect(zone)
             if geo is None:
                 return
+            hint.set_mode('area')
         elif kind == 'page':
-            # 落在别的窗口内容区：整块标签区都亮起——「松手就并进这个窗口」
-            geo = QRect(0, 0, self.tab_widget.width(), self.tab_widget.height())
+            # 落在别的窗口内容区：整页亮起 + 说明——「松手就并进这个窗口」
+            page = self._tab_page_rect()
+            if page is None:
+                return
+            geo = QRect(self.tab_widget.mapFromGlobal(page.topLeft()), page.size())
+            hint.set_mode('page', t("tab.drop_as_new_tab"))
         else:
             strip = self._tab_drop_strip_rect()
             top_left = self.tab_widget.mapFromGlobal(strip.topLeft())
             geo = QRect(top_left.x(), top_left.y(), strip.width(), strip.height())
+            hint.set_mode('strip')
         hint.setGeometry(geo)
+        if kind == 'strip':
+            self._update_tab_drop_caret(global_pos if global_pos is not None else QCursor.pos())
         hint.show()
         hint.raise_()
+
+    def _update_tab_drop_caret(self, global_pos):
+        """标签栏落点：插入光标竖线移到松手后标签会插入的位置。"""
+        hint = getattr(self, '_tab_drop_hint', None)
+        if hint is None or sip.isdeleted(hint) or hint._mode != 'strip':
+            return
+        bar = self.tab_widget.tabBar()
+        n = bar.count()
+        if n == 0:
+            hint.set_caret_x(None)
+            return
+        ins = self._tab_insert_index_at(global_pos)
+        if ins is None or ins >= n:
+            x = bar.tabRect(n - 1).right() + 1
+        else:
+            x = bar.tabRect(ins).left()
+        hint.set_caret_x(hint.mapFromGlobal(bar.mapToGlobal(QPoint(x, 0))).x())
 
     def _hide_tab_drop_hint(self):
         hint = getattr(self, '_tab_drop_hint', None)
@@ -1389,6 +1413,8 @@ class TabSplitMixin:
                         preview.show()
                 hit = self._tab_drop_hit_at(pos, dragging_index=index)
                 self._set_drag_hit(state, hit)
+                if hit is not None and hit[1] == 'strip':
+                    hit[0]._update_tab_drop_caret(pos)
                 self._drag_hover_switch_tab(state, hit, pos, index)
                 return
             timer.stop()
@@ -1711,6 +1737,8 @@ class TabSplitMixin:
                         preview.show()
                 hit = self._pane_drop_hit_at(pos, terminal)
                 self._set_drag_hit(state, hit)
+                if hit is not None and hit[1] == 'strip':
+                    hit[0]._update_tab_drop_caret(pos)
                 # 悬停在本窗口标签栏的某个标签上 → 页面切过去，可以挪到别的标签页里
                 self._drag_hover_switch_tab(state, hit, pos, -1)
                 return

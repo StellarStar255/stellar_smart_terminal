@@ -1208,6 +1208,7 @@ TRANSLATIONS = {
     "common.close": {"zh": "关闭", "en": "Close"},
 
     # ===== Tab 右键菜单 =====
+    "tab.drop_as_new_tab": {"zh": "松手并入为新标签", "en": "Drop to add as a new tab"},
     "tab.rename": {"zh": "重命名标签", "en": "Rename Tab"},
     "tab.rename_title": {"zh": "重命名标签页", "en": "Rename Tab"},
     "tab.rename_prompt": {"zh": "输入新名称:", "en": "Enter new name:"},
