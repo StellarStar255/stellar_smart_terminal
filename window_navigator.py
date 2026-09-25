@@ -79,6 +79,7 @@ class NavListWidget(QListWidget):
         self._ghost = None        # 跟随光标的拖影卡片（widgets.TabDragPreview）
         self.indicator_color = QColor('#667eea')
         self.ghost_theme = None   # 面板 _apply_style 灌入当前主题，拖影卡片按它配色
+        self.thumbnail_provider = None  # wid → QPixmap：拖影里显示的窗口缩略图（面板提供）
 
     def is_dragging(self) -> bool:
         return self._drag_row is not None
@@ -95,7 +96,15 @@ class NavListWidget(QListWidget):
         from widgets import TabDragPreview
         # 标题去掉列表里的「N. 」序号；圆点用条目文字色（即窗口色）
         title = re.sub(r'^\d+\.\s*', '', item.text())
-        ghost = TabDragPreview(title, self.ghost_theme, item.foreground().color().name())
+        thumb = None
+        wid = item.data(Qt.ItemDataRole.UserRole)
+        if self.thumbnail_provider is not None and wid is not None:
+            try:
+                thumb = self.thumbnail_provider(wid)
+            except Exception:
+                logger.debug("NavListWidget: thumbnail failed", exc_info=True)
+        ghost = TabDragPreview(title, self.ghost_theme, item.foreground().color().name(),
+                               thumbnail=thumb)
         self._ghost = ghost
         self._move_ghost(QCursor.pos())
         ghost.show()
@@ -321,6 +330,7 @@ class WindowNavigatorPanel(QWidget):
         self.window_list = NavListWidget()
         # 拖出列表、在另一块显示器上松手 → 把该窗口搬过去
         self.window_list.dropped_outside.connect(self._on_item_dropped_outside)
+        self.window_list.thumbnail_provider = self._window_thumbnail
         # 使用自定义 delegate 禁用默认选中高亮
         self.window_list.setItemDelegate(NoHighlightDelegate(self.window_list))
         # 启用拖拽排序
@@ -421,6 +431,16 @@ class WindowNavigatorPanel(QWidget):
         if not self._embedded:
             wins.append(self)
         return wins
+
+    def _window_thumbnail(self, wid):
+        """拖影「迷你窗口」里的内容：对应窗口的缩略截图。"""
+        from widgets import TabDragPreview
+        ref = self._window_refs.get(wid)
+        window = ref() if ref is not None else None
+        if window is None or sip.isdeleted(window) or not window.isVisible():
+            return None
+        return window.grab().scaledToWidth(
+            TabDragPreview.WIDTH * 2, Qt.TransformationMode.SmoothTransformation)
 
     def _on_item_dropped_outside(self, wid, global_pos):
         """条目被拖到列表外松手：窗口搬到松手处（同屏只挪位置，跨屏按比例缩放）。

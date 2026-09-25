@@ -1343,8 +1343,17 @@ class TabSplitMixin:
         """标签栏拖出阈值后进入影子拖拽，直到松开鼠标。"""
         if index < 0 or index >= self.tab_widget.count():
             return
-        preview = TabDragPreview(self.tab_widget.tabText(index),
-                                 self._current_theme_dict(), self._themed_window_color())
+        # 缩略图要在下面切到邻页之前截：此刻被拖的页还显示着
+        thumb = None
+        page = self.tab_widget.widget(index)
+        try:
+            if page is not None and page.isVisible():
+                thumb = page.grab().scaledToWidth(
+                    TabDragPreview.WIDTH * 2, Qt.TransformationMode.SmoothTransformation)
+        except Exception:
+            thumb = None
+        preview = TabDragPreview(self.tab_widget.tabText(index), self._current_theme_dict(),
+                                 self._themed_window_color(), thumbnail=thumb)
         # 拖的是当前页：页面区先切到邻页——正在拖的这页不能和自己分屏，
         # 显示出来的必须是"要并进去的那页"。松手后它若还留在本窗口再切回来。
         dragged_page = self.tab_widget.widget(index)
@@ -1654,7 +1663,7 @@ class TabSplitMixin:
             return
         try:
             pixmap = terminal.grab().scaledToWidth(
-                TabDragPreview.THUMB_W * 2, Qt.TransformationMode.SmoothTransformation)
+                TabDragPreview.WIDTH * 2, Qt.TransformationMode.SmoothTransformation)
         except Exception:
             pixmap = None
         title = getattr(terminal, '_split_label', '') or \

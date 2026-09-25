@@ -38,14 +38,19 @@ class TestTabDragPreview(unittest.TestCase):
         # 整个小窗（含阴影边）都不能盖住光标，否则 topLevelAt(光标) 会查到它
         self.assertFalse(c.frameGeometry().contains(QPoint(500, 400)))
 
-    def test_thumbnail_adds_height_and_paints(self):
+    def test_mini_window_body_follows_thumbnail_aspect(self):
         from PyQt6.QtGui import QColor, QPixmap
-        thumb = QPixmap(480, 300)
-        thumb.fill(QColor('#123'))
+        from widgets import TabDragPreview
         plain = self._card('pane')
-        with_thumb = self._card('pane', thumbnail=thumb)
-        self.assertGreater(with_thumb.height(), plain.height() + 100)
-        self.assertFalse(with_thumb.grab().isNull())
+        self.assertEqual(plain._body_h, TabDragPreview.DEFAULT_BODY_H)  # 无图也有「窗口内容」区
+        wide = QPixmap(520, 260)          # 2:1 → 内容区高 = 宽 / 2
+        wide.fill(QColor('#123'))
+        self.assertEqual(self._card('w', thumbnail=wide)._body_h, TabDragPreview.WIDTH // 2)
+        tall = QPixmap(520, 2000)         # 超高截图封顶
+        tall.fill(QColor('#123'))
+        c = self._card('t', thumbnail=tall)
+        self.assertEqual(c._body_h, TabDragPreview.MAX_BODY_H)
+        self.assertFalse(c.grab().isNull())
 
     def test_navigator_drag_uses_card_with_theme_and_clean_title(self):
         from PyQt6.QtCore import Qt
@@ -57,7 +62,13 @@ class TestTabDragPreview(unittest.TestCase):
         lw = wn.NavListWidget()
         self.addCleanup(lw.deleteLater)
         lw.ghost_theme = {'bg_light': '#101010', 'text': '#fafafa', 'accent': '#ff00ff'}
+        from PyQt6.QtGui import QPixmap
+        shot = QPixmap(520, 300)
+        shot.fill(QColor('#224'))
+        asked = []
+        lw.thumbnail_provider = lambda wid: (asked.append(wid), shot)[1]
         it = QListWidgetItem('3. stellar_search_everything')
+        it.setData(Qt.ItemDataRole.UserRole, 77)
         it.setForeground(QColor('#22c55e'))
         lw.addItem(it)
         lw.show()
@@ -67,7 +78,9 @@ class TestTabDragPreview(unittest.TestCase):
         self.assertIsInstance(lw._ghost, TabDragPreview)
         self.assertEqual(lw._ghost._title, 'stellar_search_everything')
         self.assertEqual(lw._ghost._dot.name(), '#22c55e')
-        self.assertEqual(lw._ghost._bg.name(), '#101010')
+        self.assertEqual(lw._ghost._title_bg.name(), '#101010')
+        self.assertEqual(asked, [77])                  # 拖影里是该窗口的缩略图
+        self.assertIsNotNone(lw._ghost._thumb)
 
 
     def test_tabs_use_vector_close_button_that_follows_theme(self):

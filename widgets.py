@@ -574,19 +574,23 @@ class TabCloseButton(QAbstractButton):
 
 
 class TabDragPreview(QWidget):
-    """拖标签 / 窗格 / 导航条目时跟着光标的那张卡片。
+    """拖标签 / 窗格 / 导航条目时跟着光标的「迷你窗口」。
 
-    不再直接截图（截出来带着半截关闭按钮、顶边色条，还被裁掉一块），而是按主题
-    自绘：圆角卡片 + 柔和阴影 + 窗口色圆点 + 省略号截断的标题；拖窗格时下面再
-    附一张缩略图。独立置顶无边框小窗、对鼠标透明、不抢焦点；卡片落在光标右下方，
+    做成一个小窗口的样子，一眼就知道拖的是窗口：标题栏（红黄绿三个圆点 +
+    窗口色圆点 + 省略号截断的标题）+ 窗口内容缩略图（没有缩略图时画几行
+    占位的文字线）。按主题配色，圆角、细描边、柔和阴影。
+    独立置顶无边框小窗、对鼠标透明、不抢焦点；落在光标右下方，
     QApplication.topLevelAt(光标) 永远查不到它自己。
     """
 
-    SHADOW = 10          # 四周给阴影留的透明边
+    SHADOW = 12          # 四周给阴影留的透明边
     RADIUS = 8
-    CURSOR_OFFSET = QPoint(14, 10)   # 卡片左上角相对光标的位置
-    MAX_TEXT_W = 300
-    THUMB_W = 240
+    CURSOR_OFFSET = QPoint(14, 10)   # 迷你窗口左上角相对光标的位置
+    WIDTH = 300          # 迷你窗口宽度
+    TITLE_H = 24         # 标题栏高度
+    MAX_BODY_H = 170
+    DEFAULT_BODY_H = 120
+    MAX_TEXT_W = 300     # 标题文字截断宽度上限（实际还受 WIDTH 限制）
 
     def __init__(self, title: str, theme: dict = None, dot_color: str = None,
                  thumbnail=None):
@@ -596,74 +600,103 @@ class TabDragPreview(QWidget):
         self.setAttribute(Qt.WidgetAttribute.WA_TransparentForMouseEvents)
         self.setAttribute(Qt.WidgetAttribute.WA_ShowWithoutActivating)
         th = theme or {}
-        self._bg = QColor(th.get('bg_light', '#2d2d44'))
+        self._body_bg = QColor(th.get('bg_dark', '#1a1a2e'))
+        self._title_bg = QColor(th.get('bg_light', '#2d2d44'))
         self._fg = QColor(th.get('text', '#eaeaea'))
+        self._dim = QColor(th.get('text_dim', '#888888'))
         self._accent = QColor(th.get('accent', '#667eea'))
         self._dot = QColor(dot_color) if dot_color else QColor(self._accent)
         self._thumb = thumbnail if thumbnail is not None and not thumbnail.isNull() else None
 
         from PyQt6.QtGui import QFont, QFontMetrics
         font = QFont(self.font())
-        font.setPixelSize(13)
+        font.setPixelSize(12)
         font.setWeight(QFont.Weight.DemiBold)
         self._font = font
-        fm = QFontMetrics(font)
-        self._title = fm.elidedText(title or '', Qt.TextElideMode.ElideMiddle, self.MAX_TEXT_W)
-        self._row_h = max(30, fm.height() + 14)
-        text_w = fm.horizontalAdvance(self._title)
-        card_w = 12 + 8 + 8 + text_w + 14          # 左边距 + 圆点 + 间距 + 文字 + 右边距
-        card_h = self._row_h
+        # 标题可用宽度：扣掉三色圆点区（~52）+ 窗口色圆点（~14）+ 右边距
+        text_room = min(self.MAX_TEXT_W, self.WIDTH - 52 - 14 - 10)
+        self._title = QFontMetrics(font).elidedText(
+            title or '', Qt.TextElideMode.ElideMiddle, text_room)
+
         if self._thumb is not None:
-            card_w = max(card_w, self.THUMB_W + 16)
             dpr = self._thumb.devicePixelRatio() or 1.0
             tw = self._thumb.width() / dpr
-            self._thumb_h = int(self._thumb.height() / dpr * (card_w - 16) / max(1.0, tw))
-            card_h += self._thumb_h + 8
-        self._card_w, self._card_h = int(card_w), int(card_h)
+            th_ = self._thumb.height() / dpr
+            body_h = int(th_ * self.WIDTH / max(1.0, tw))
+            self._body_h = max(60, min(self.MAX_BODY_H, body_h))
+        else:
+            self._body_h = self.DEFAULT_BODY_H
+        self._card_w = self.WIDTH
+        self._card_h = self.TITLE_H + self._body_h
         m = self.SHADOW
         self.resize(self._card_w + 2 * m, self._card_h + 2 * m)
 
     def follow(self, cursor_pos: QPoint):
-        """把卡片放到光标右下方（扣掉阴影边，卡片本身落在 CURSOR_OFFSET 处）。"""
+        """把迷你窗口放到光标右下方（扣掉阴影边，窗口本身落在 CURSOR_OFFSET 处）。"""
         m = self.SHADOW
         self.move(cursor_pos + self.CURSOR_OFFSET - QPoint(m, m))
 
     def paintEvent(self, event):
         p = QPainter(self)
         p.setRenderHint(QPainter.RenderHint.Antialiasing)
+        p.setRenderHint(QPainter.RenderHint.SmoothPixmapTransform)
         m = self.SHADOW
         card = QRectF(m, m, self._card_w, self._card_h)
         # 柔和阴影：由外向内一圈圈加深、略向下偏
         p.setPen(Qt.PenStyle.NoPen)
         for i in range(m, 0, -1):
-            a = int(34 * (1 - i / m) ** 2) + 2
+            a = int(40 * (1 - i / m) ** 2) + 2
             p.setBrush(QColor(0, 0, 0, a))
-            p.drawRoundedRect(card.adjusted(-i, -i + 2, i, i + 2),
+            p.drawRoundedRect(card.adjusted(-i, -i + 3, i, i + 3),
                               self.RADIUS + i, self.RADIUS + i)
-        # 卡片本体
-        bg = QColor(self._bg)
-        bg.setAlpha(245)
-        border = QColor(self._accent)
-        border.setAlpha(170)
-        p.setBrush(bg)
-        p.setPen(QPen(border, 1))
-        p.drawRoundedRect(card.adjusted(0.5, 0.5, -0.5, -0.5), self.RADIUS, self.RADIUS)
+        # 整体圆角裁切：标题栏 + 内容区
+        clip = QPainterPath()
+        clip.addRoundedRect(card, self.RADIUS, self.RADIUS)
+        p.save()
+        p.setClipPath(clip)
+        p.fillRect(card, self._body_bg)
+        title = QRectF(card.left(), card.top(), card.width(), self.TITLE_H)
+        p.fillRect(title, self._title_bg)
+        body = QRectF(card.left(), card.top() + self.TITLE_H, card.width(), self._body_h)
+        if self._thumb is not None:
+            # 缩略图按宽度铺满，超高部分从顶部截取（看得到窗口上半部分）
+            src_w = self._thumb.width()
+            src_h = min(self._thumb.height(), src_w * body.height() / body.width())
+            p.drawPixmap(body, self._thumb, QRectF(0, 0, src_w, src_h))
+        else:
+            # 占位：几行长短不一的淡色「文字线」，像一个终端窗口
+            line = QColor(self._dim)
+            line.setAlpha(70)
+            p.setBrush(line)
+            y = body.top() + 14
+            for frac in (0.62, 0.45, 0.78, 0.34, 0.55, 0.7):
+                if y + 4 > body.bottom() - 8:
+                    break
+                p.drawRoundedRect(QRectF(body.left() + 12, y, (body.width() - 24) * frac, 4), 2, 2)
+                y += 14
+        # 标题栏与内容区之间的分隔线
+        sep = QColor(0, 0, 0, 60)
+        p.fillRect(QRectF(card.left(), body.top() - 1, card.width(), 1), sep)
+        p.restore()
+        # 红黄绿三个圆点
+        cy = card.top() + self.TITLE_H / 2
+        for i, c in enumerate(('#ff5f57', '#febc2e', '#28c840')):
+            p.setBrush(QColor(c))
+            p.drawEllipse(QPointF(card.left() + 12 + i * 14, cy), 4.5, 4.5)
         # 窗口色圆点 + 标题
-        cy = m + self._row_h / 2
-        p.setPen(Qt.PenStyle.NoPen)
+        x = card.left() + 12 + 3 * 14 + 4
         p.setBrush(self._dot)
-        p.drawEllipse(QPointF(m + 12 + 4, cy), 4, 4)
+        p.drawEllipse(QPointF(x + 4, cy), 3.5, 3.5)
         p.setPen(self._fg)
         p.setFont(self._font)
-        p.drawText(QRectF(m + 12 + 8 + 8, m, self._card_w - 42, self._row_h),
+        p.drawText(QRectF(x + 12, card.top(), card.right() - (x + 12) - 8, self.TITLE_H),
                    int(Qt.AlignmentFlag.AlignVCenter | Qt.AlignmentFlag.AlignLeft), self._title)
-        # 窗格缩略图（圆角裁切）
-        if self._thumb is not None:
-            r = QRectF(m + 8, m + self._row_h, self._card_w - 16, self._thumb_h)
-            path = QPainterPath()
-            path.addRoundedRect(r, 5, 5)
-            p.setClipPath(path)
-            p.drawPixmap(r.toRect(), self._thumb)
+        # 描边
+        border = QColor(self._accent)
+        border.setAlpha(150)
+        p.setBrush(Qt.BrushStyle.NoBrush)
+        p.setPen(QPen(border, 1))
+        p.drawRoundedRect(card.adjusted(0.5, 0.5, -0.5, -0.5), self.RADIUS, self.RADIUS)
         p.end()
 
 
