@@ -1102,6 +1102,9 @@ class TabSplitMixin:
             geo = self._pane_zone_rect(zone)
             if geo is None:
                 return
+        elif kind == 'page':
+            # 落在别的窗口内容区：整块标签区都亮起——「松手就并进这个窗口」
+            geo = QRect(0, 0, self.tab_widget.width(), self.tab_widget.height())
         else:
             strip = self._tab_drop_strip_rect()
             top_left = self.tab_widget.mapFromGlobal(strip.topLeft())
@@ -1294,7 +1297,8 @@ class TabSplitMixin:
 
     def _tab_drop_hit_at(self, global_pos, dragging_index=None):
         """拖着标签松手会发生什么：(window, 'strip', None) 并成标签 / 同窗口重排，
-        (window, 'split', (orientation, before)) 并入分屏，None 什么都不发生。
+        (window, 'page', None) 落在别的窗口内容区 → 追加成它的新标签，
+        (window, 'split', (orientation, before)) 并入分屏，None 落在空白处。
 
         以光标下**最上层**的窗口为准（QApplication.topLevelAt）——几何相交的
         窗口可能被别的窗口盖着；离屏/拿不到时退回按几何找。dragging_index 是
@@ -1327,6 +1331,12 @@ class TabSplitMixin:
                             and self.tab_widget.currentIndex() == dragging_index):
                         return None
                     return (w, 'split', zone)
+                # 别的窗口的内容区中间（不靠边、不在标签栏）：并成它的新标签，
+                # 不用非得瞄准标签栏
+                if w is not self:
+                    page = w._tab_page_rect()
+                    if page is not None and page.contains(global_pos):
+                        return (w, 'page', None)
             except RuntimeError:
                 continue   # C++ 对象已销毁
         return None
@@ -1453,15 +1463,18 @@ class TabSplitMixin:
         if index < 0 or index >= self.tab_widget.count():
             return
         if hit is None:
-            # 空白处：拆成新窗口，出现在松手处（唯一的标签拆不了，什么都不做）
+            # 空白处：拆成新窗口，出现在松手处。唯一的标签就是整个窗口——
+            # 拆不出新窗口，改为把本窗口搬到松手处（和拖浏览器唯一标签一样）
             if self.tab_widget.count() > 1:
                 self._detach_tab(index, pos, drop_pos=pos)
+            elif not self.frameGeometry().contains(pos):
+                self._move_window_to_drop(pos)
             return
         target, kind, zone = hit
         if sip.isdeleted(target):
             return
-        if kind == 'strip':
-            insert_at = target._tab_insert_index_at(pos)
+        if kind in ('strip', 'page'):
+            insert_at = target._tab_insert_index_at(pos) if kind == 'strip' else None
             if target is self:
                 count = self.tab_widget.count()
                 ins = count if insert_at is None else insert_at
@@ -1505,6 +1518,15 @@ class TabSplitMixin:
         new_window.resize(w, h)
         new_window.move(x, y)
         new_window.show()
+
+    def _move_window_to_drop(self, drop_pos):
+        """只有一个标签时拖到空白处：整个窗口搬到松手处（标签栏落在光标下）。
+        最大化/全屏的先还原，再按 _place_detached_at 的规则定尺寸和位置。"""
+        if self.isFullScreen() or self.isMaximized():
+            self.showNormal()
+        self._place_detached_at(self, drop_pos)
+        self.raise_()
+        self.activateWindow()
 
     # ---------- 窗格把手：拖着把手把窗格挪到任意位置 ----------
     #

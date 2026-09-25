@@ -94,9 +94,23 @@ class TestMoveTabBetweenWindows(unittest.TestCase):
         strip_b = b._tab_drop_strip_rect()
         hit = a._tab_drop_hit_at(strip_b.center())
         self.assertEqual((hit[0], hit[1]), (b, 'strip'))
-        # 页面正中（不靠任何边）不算
-        mid = b.mapToGlobal(QPoint(b.width() // 2, b.height() // 2))
-        self.assertIsNone(a._tab_drop_hit_at(mid))
+        # 别的窗口页面正中（不靠边、不在标签栏）：并成它的新标签
+        page_b = b._tab_page_rect()
+        self.assertEqual(a._tab_drop_hit_at(page_b.center()), (b, 'page', None))
+        # 自己窗口的页面正中：什么都不发生
+        page_a = a._tab_page_rect()
+        self.assertIsNone(a._tab_drop_hit_at(page_a.center(), dragging_index=None))
+
+    def test_finish_drag_on_page_of_other_window_appends_tab(self):
+        a, b = self.win_a, self.win_b
+        a._add_new_tab(tab_name="into-body")
+        idx = a.tab_widget.count() - 1
+        b_before = b.tab_widget.count()
+        a._finish_tab_drag(idx, b._tab_page_rect().center(), (b, 'page', None))
+        self.assertEqual(b.tab_widget.count(), b_before + 1)
+        self.assertEqual(b.tab_widget.tabText(b.tab_widget.count() - 1), "into-body")
+        self._assert_mappings_consistent(a)
+        self._assert_mappings_consistent(b)
 
     def test_finish_drag_on_strip_of_other_window_moves_tab(self):
         a, b = self.win_a, self.win_b
@@ -145,7 +159,7 @@ class TestMoveTabBetweenWindows(unittest.TestCase):
         QApplication.sendEvent(new[0], QCloseEvent())
         new[0].deleteLater()
 
-    def test_sole_tab_dropped_in_the_open_stays(self):
+    def test_sole_tab_dropped_in_the_open_moves_whole_window(self):
         b = self.win_b
         while b.tab_widget.count() > 1:
             b._close_tab(b.tab_widget.count() - 1, auto_create_new=False)
@@ -156,10 +170,17 @@ class TestMoveTabBetweenWindows(unittest.TestCase):
                     and w.isVisible() and not getattr(w, '_closing_in_progress', False)}
         self.app.processEvents()
         wins_before = live()
-        b._finish_tab_drag(0, QPoint(50, 50), None)
+        before = b.frameGeometry()
+        drop = QPoint(700, 400)
+        self.assertFalse(before.contains(drop))
+        b._finish_tab_drag(0, drop, None)
         self.app.processEvents()
         self.assertEqual(b.tab_widget.count(), 1)
-        self.assertEqual(live() - wins_before, set())
+        self.assertEqual(live() - wins_before, set())   # 不拆新窗口
+        # 唯一的标签 = 整个窗口：窗口搬到松手处（松手点落在新位置的窗口里）
+        self.assertNotEqual(b.frameGeometry().topLeft(), before.topLeft())
+        self.assertTrue(b.frameGeometry().contains(drop), (b.frameGeometry(), drop))
+        b.move(before.topLeft())
 
     def test_insert_index_follows_cursor_half(self):
         b = self.win_b
