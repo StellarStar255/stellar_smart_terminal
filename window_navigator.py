@@ -21,6 +21,7 @@ import app_config
 from git_widget import _make_git_tool_icon
 from i18n import t
 from themes import readable_on_light
+from window_group_move import GroupMoveGrip
 from app_logging import get_logger
 
 logger = get_logger(__name__)
@@ -167,7 +168,16 @@ class WindowNavigatorPanel(QWidget):
 
         # 标题
         self.title_label = QLabel(t("window.navigator_list_title"))
-        layout.addWidget(self.title_label)
+        # 标题行右侧：整组搬家把手——抓住它一次拖动列表里的全部窗口（换显示器用）
+        title_row = QHBoxLayout()
+        title_row.setContentsMargins(0, 0, 0, 0)
+        title_row.addWidget(self.title_label)
+        title_row.addStretch()
+        self.group_move_grip = GroupMoveGrip(self._group_move_windows)
+        self.group_move_grip.setToolTip(t("window.group_move_tooltip"))
+        self.group_move_grip.moved.connect(self._force_refresh)
+        title_row.addWidget(self.group_move_grip)
+        layout.addLayout(title_row)
 
         # 搜索框
         self.search_input = QLineEdit()
@@ -263,6 +273,21 @@ class WindowNavigatorPanel(QWidget):
         self.drag_hint_label.setAlignment(Qt.AlignmentFlag.AlignCenter)
         self.drag_hint_label.setVisible(False)
         layout.addWidget(self.drag_hint_label)
+
+    def _group_move_windows(self):
+        """整组拖动的对象：当前列表里列出的全部窗口（内嵌面板即本屏窗口）；
+        浮动面板自己也跟着走。"""
+        wins = []
+        for i in range(self.window_list.count()):
+            w = self._resolve_window(self.window_list.item(i))
+            if w is not None:
+                wins.append(w)
+        pinned = self._pinned_window()
+        if pinned is not None and pinned not in wins:
+            wins.append(pinned)
+        if not self._embedded:
+            wins.append(self)
+        return wins
 
     def _show_settings_menu(self):
         """弹出设置菜单：排序方式（时间/名称/手动）+ 刷新。"""
@@ -596,6 +621,7 @@ class WindowNavigatorPanel(QWidget):
 
         self.title_label.setStyleSheet(
             f"color: {th['accent']}; font-weight: bold; font-size: {self._sf(13)}px;")
+        self.group_move_grip.set_colors(th['text_dim'], th['accent'])
 
         self.search_input.setStyleSheet(f"""
             QLineEdit {{

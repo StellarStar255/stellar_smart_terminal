@@ -244,6 +244,7 @@ TRANSLATIONS = {
     "window.compact_display": {"zh": "简洁显示", "en": "Compact"},
     "window.compact_tooltip": {"zh": "只显示文件夹名", "en": "Show folder name only"},
     "window.font_size_tooltip": {"zh": "列表字体大小", "en": "List font size"},
+    "window.group_move_tooltip": {"zh": "按住拖动：列表里的所有窗口一起移动（换到另一块显示器时自动按比例铺开）。单个窗口照常拖标题栏。", "en": "Drag to move every window in this list together (dropping on another display rescales the layout to fit it). Drag a title bar as usual to move a single window."},
     "window.drag_hint": {"zh": "↕ 拖拽项目调整顺序", "en": "↕ Drag items to reorder"},
     "window.sort_time": {"zh": "时间↑", "en": "Time↑"},
     "window.sort_name": {"zh": "名称↓", "en": "Name↓"},

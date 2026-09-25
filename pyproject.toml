@@ -96,6 +96,7 @@ py-modules = [
     "transfer_progress",
     "utils",
     "widgets",
+    "window_group_move",
     "window_host",
     "window_navigator",
 ]
