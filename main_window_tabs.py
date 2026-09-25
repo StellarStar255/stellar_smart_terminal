@@ -8,7 +8,7 @@ orientation/drag)。纯方法搬迁，行为不变；detach 构造新窗口/进�
 import os
 import time
 from PyQt6 import sip
-from PyQt6.QtCore import QPoint, QRect, QTimer, Qt
+from PyQt6.QtCore import QPoint, QRect, QRectF, QTimer, Qt
 from PyQt6.QtGui import QCursor
 from PyQt6.QtWidgets import (QApplication, QMenu, QMessageBox, QSplitter, QTabBar)
 from dialogs import get_default_shell
@@ -1120,22 +1120,36 @@ class TabSplitMixin:
         hint.show()
         hint.raise_()
 
-    def _update_tab_drop_caret(self, global_pos):
-        """标签栏落点：插入光标竖线移到松手后标签会插入的位置。"""
+    def _update_tab_drop_caret(self, global_pos, title=None):
+        """标签栏落点：插到两个标签之间 → 标签缝里一根细插入线；追加到末尾 →
+        最后一个标签右边画出「标签占位」（写着 title）。"""
         hint = getattr(self, '_tab_drop_hint', None)
         if hint is None or sip.isdeleted(hint) or hint._mode != 'strip':
             return
+        if title is not None:
+            self._tab_drop_title = title
         bar = self.tab_widget.tabBar()
         n = bar.count()
-        if n == 0:
-            hint.set_caret_x(None)
-            return
         ins = self._tab_insert_index_at(global_pos)
-        if ins is None or ins >= n:
-            x = bar.tabRect(n - 1).right() + 1
-        else:
+        if n > 0 and ins is not None and ins < n:
             x = bar.tabRect(ins).left()
-        hint.set_caret_x(hint.mapFromGlobal(bar.mapToGlobal(QPoint(x, 0))).x())
+            hint.set_caret_x(hint.mapFromGlobal(bar.mapToGlobal(QPoint(x, 0))).x())
+            return
+        # 末尾：占位紧跟最后一个标签，宽度按标题估算，高度同未选中标签
+        title = getattr(self, '_tab_drop_title', '') or ''
+        fm = bar.fontMetrics()
+        w = max(100, min(220, fm.horizontalAdvance(title) + 44))
+        if n > 0:
+            last = bar.tabRect(n - 1)
+            x0, top, bottom = last.right() + 3, last.top() + 4, last.bottom()
+        else:
+            x0, top, bottom = 0, 4, bar.height()
+        tl = hint.mapFromGlobal(bar.mapToGlobal(QPoint(x0, top)))
+        h = bottom - top + 1
+        w = min(w, max(40, hint.width() - tl.x() - 2))
+        theme = self._current_theme_dict()
+        hint.set_slot(QRectF(tl.x(), tl.y(), w, h), title, bar.font(),
+                      theme.get('text', '#eaeaea'))
 
     def _hide_tab_drop_hint(self):
         hint = getattr(self, '_tab_drop_hint', None)
@@ -1386,7 +1400,8 @@ class TabSplitMixin:
                     TabDragPreview.WIDTH * 2, Qt.TransformationMode.SmoothTransformation)
         except Exception:
             thumb = None
-        preview = TabDragPreview(self.tab_widget.tabText(index), self._current_theme_dict(),
+        drag_title = self.tab_widget.tabText(index)
+        preview = TabDragPreview(drag_title, self._current_theme_dict(),
                                  self._themed_window_color(), thumbnail=thumb)
         # 拖的是当前页：页面区先切到邻页——正在拖的这页不能和自己分屏，
         # 显示出来的必须是"要并进去的那页"。松手后它若还留在本窗口再切回来。
@@ -1414,7 +1429,7 @@ class TabSplitMixin:
                 hit = self._tab_drop_hit_at(pos, dragging_index=index)
                 self._set_drag_hit(state, hit)
                 if hit is not None and hit[1] == 'strip':
-                    hit[0]._update_tab_drop_caret(pos)
+                    hit[0]._update_tab_drop_caret(pos, drag_title)
                 self._drag_hover_switch_tab(state, hit, pos, index)
                 return
             timer.stop()
@@ -1738,7 +1753,7 @@ class TabSplitMixin:
                 hit = self._pane_drop_hit_at(pos, terminal)
                 self._set_drag_hit(state, hit)
                 if hit is not None and hit[1] == 'strip':
-                    hit[0]._update_tab_drop_caret(pos)
+                    hit[0]._update_tab_drop_caret(pos, title)
                 # 悬停在本窗口标签栏的某个标签上 → 页面切过去，可以挪到别的标签页里
                 self._drag_hover_switch_tab(state, hit, pos, -1)
                 return

@@ -577,8 +577,9 @@ class DropHintOverlay(QWidget):
     """拖标签 / 窗格时，落点上的高亮提示（自绘，替代原来的半透明蓝块 + 方框）。
 
     三种样子：
-    - 'strip'：标签栏上一层极淡的底色 + 一根发光的竖线（插入光标），标出松手后
-      标签会插到哪两个标签之间；随光标移动（set_caret_x）。
+    - 'strip'：标签栏落点。追加到末尾时，在最后一个标签右边画一个「标签占位」
+      （和真标签同形状、淡色填充、写着被拖标签的标题——松手它就出现在这儿）；
+      插到两个标签之间时，只在标签缝里画一根细插入线。标签栏本身不染色。
     - 'area'：分屏 / 窗格落区——内缩的圆角区域，淡色填充 + 细边。
     - 'page'：落在别的窗口内容区——同 'area'，正中再加一个说明胶囊（label）。
     对鼠标透明，只负责画。
@@ -592,7 +593,10 @@ class DropHintOverlay(QWidget):
         self._text = QColor(text)
         self._mode = 'area'
         self._caret_x = None
-        self._label = ''
+        self._slot = None         # QRectF：末尾的「标签占位」
+        self._slot_title = ''
+        self._slot_font = None
+        self._text_dim = QColor(text)
 
     def set_colors(self, accent: str, text: str = '#ffffff'):
         self._accent = QColor(accent)
@@ -604,36 +608,76 @@ class DropHintOverlay(QWidget):
         self._label = label
         if mode != 'strip':
             self._caret_x = None
+            self._slot = None
         self.update()
 
     def set_caret_x(self, x):
-        """插入光标的横坐标（本控件坐标）；None = 不画。"""
-        if x != self._caret_x:
+        """两标签之间的插入线横坐标（本控件坐标）；设了就不画末尾占位。"""
+        if x != self._caret_x or self._slot is not None:
             self._caret_x = x
+            self._slot = None
             self.update()
+
+    def set_slot(self, rect, title: str = '', font=None, text_color=None):
+        """末尾「标签占位」（本控件坐标的 QRectF）；设了就不画插入线。"""
+        self._slot = rect
+        self._slot_title = title
+        self._slot_font = font
+        if text_color is not None:
+            self._text_dim = QColor(text_color)
+        self._caret_x = None
+        self.update()
 
     def _tint(self, alpha):
         c = QColor(self._accent)
         c.setAlpha(alpha)
         return c
 
+    def _paint_slot(self, p):
+        """末尾的标签占位：上圆角下直角，与真标签同形；淡色底 + 细边 + 淡标题。"""
+        r = QRectF(self._slot)
+        rad = 7.0
+        path = QPainterPath()
+        path.moveTo(r.left(), r.bottom())
+        path.lineTo(r.left(), r.top() + rad)
+        path.quadTo(r.left(), r.top(), r.left() + rad, r.top())
+        path.lineTo(r.right() - rad, r.top())
+        path.quadTo(r.right(), r.top(), r.right(), r.top() + rad)
+        path.lineTo(r.right(), r.bottom())
+        p.setBrush(self._tint(45))
+        pen = QPen(self._tint(170), 1.2)
+        p.setPen(pen)
+        p.drawPath(path)
+        # 顶边一条强调色，呼应选中标签的样子
+        p.setPen(Qt.PenStyle.NoPen)
+        p.setBrush(self._accent)
+        p.drawRoundedRect(QRectF(r.left() + rad - 2, r.top(), r.width() - 2 * rad + 4, 2), 1, 1)
+        if self._slot_title:
+            from PyQt6.QtGui import QFontMetrics
+            font = self._slot_font or self.font()
+            fm = QFontMetrics(font)
+            text_r = r.adjusted(12, 2, -12, 0)
+            c = QColor(self._text_dim)
+            c.setAlpha(210)
+            p.setPen(c)
+            p.setFont(font)
+            p.drawText(text_r, int(Qt.AlignmentFlag.AlignVCenter | Qt.AlignmentFlag.AlignLeft),
+                       fm.elidedText(self._slot_title, Qt.TextElideMode.ElideRight,
+                                     int(text_r.width())))
+
     def paintEvent(self, event):
         p = QPainter(self)
         p.setRenderHint(QPainter.RenderHint.Antialiasing)
         r = QRectF(self.rect())
         if self._mode == 'strip':
-            p.fillRect(r, self._tint(28))
-            if self._caret_x is not None:
-                x = max(3.0, min(r.width() - 3.0, float(self._caret_x)))
-                top, bottom = r.top() + 5, r.bottom() - 5
+            if self._slot is not None:
+                self._paint_slot(p)
+            elif self._caret_x is not None:
+                x = max(2.0, min(r.width() - 2.0, float(self._caret_x)))
+                top, bottom = r.top() + 7, r.bottom() - 5
                 p.setPen(Qt.PenStyle.NoPen)
-                # 外层柔光 + 实心竖线 + 两端小圆点
-                p.setBrush(self._tint(60))
-                p.drawRoundedRect(QRectF(x - 4, top - 1, 8, bottom - top + 2), 4, 4)
                 p.setBrush(self._accent)
-                p.drawRoundedRect(QRectF(x - 1.5, top, 3, bottom - top), 1.5, 1.5)
-                p.drawEllipse(QPointF(x, top), 3, 3)
-                p.drawEllipse(QPointF(x, bottom), 3, 3)
+                p.drawRoundedRect(QRectF(x - 1, top, 2, bottom - top), 1, 1)
             p.end()
             return
         area = r.adjusted(6, 6, -6, -6)

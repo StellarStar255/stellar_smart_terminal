@@ -217,7 +217,8 @@ class TestMoveTabBetweenWindows(unittest.TestCase):
         self._assert_mappings_consistent(a)
 
     def test_drop_hint_shows_insert_caret_on_strip_and_label_on_page(self):
-        """落点高亮：标签栏上是插入光标竖线（落在标签边界），内容区是带说明的圆角区域。"""
+        """落点高亮：插在标签之间 → 细插入线（落在标签边界）；追加末尾 → 标签占位；
+        内容区 → 带说明的圆角区域。"""
         from PyQt6.QtCore import Qt
         from widgets import DropHintOverlay
         from i18n import t
@@ -233,12 +234,18 @@ class TestMoveTabBetweenWindows(unittest.TestCase):
         self.assertEqual(hint._mode, 'strip')
         boundary = hint.mapFromGlobal(bar.mapToGlobal(QPoint(r1.left(), 0))).x()
         self.assertEqual(hint._caret_x, boundary)
-        # 光标移到最后一个标签右侧空白 → 竖线跟到末尾
+        self.assertIsNone(hint._slot)
+        # 光标移到最后一个标签右侧空白 → 不画插入线，改画末尾「标签占位」，写着被拖标签名
         far = bar.mapToGlobal(QPoint(bar.width() - 2, r1.center().y()))
-        b._update_tab_drop_caret(far)
+        b._update_tab_drop_caret(far, "dragged-tab")
         last = bar.tabRect(bar.count() - 1)
-        self.assertEqual(hint._caret_x,
-                         hint.mapFromGlobal(bar.mapToGlobal(QPoint(last.right() + 1, 0))).x())
+        self.assertIsNone(hint._caret_x)
+        self.assertIsNotNone(hint._slot)
+        self.assertEqual(hint._slot_title, "dragged-tab")
+        last_right = hint.mapFromGlobal(bar.mapToGlobal(QPoint(last.right(), 0))).x()
+        self.assertGreater(hint._slot.left(), last_right)          # 紧跟在最后一个标签后
+        self.assertLess(hint._slot.left(), last_right + 10)
+        self.assertLessEqual(hint._slot.right(), hint.width())
         b._show_tab_drop_hint('page')
         self.assertEqual((hint._mode, hint._label), ('page', t("tab.drop_as_new_tab")))
         self.assertIsNone(hint._caret_x)
