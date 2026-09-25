@@ -6,6 +6,7 @@
 这里对 MainWindow 用延迟模块引用（只在方法内访问 main_window.MainWindow）。
 """
 import os
+import re
 
 from PyQt6 import sip
 from PyQt6.QtCore import Qt, QEvent, QModelIndex, QPoint, QSize, QTimer, pyqtSignal
@@ -75,8 +76,9 @@ class NavListWidget(QListWidget):
         super().__init__(parent)
         self._drag_row = None     # 正在拖的行；None = 没在拖
         self._drop_row = None     # 列表内的插入位置（插在该行之前；== count 表示末尾）
-        self._ghost = None        # 跟随光标的拖影小窗
+        self._ghost = None        # 跟随光标的拖影卡片（widgets.TabDragPreview）
         self.indicator_color = QColor('#667eea')
+        self.ghost_theme = None   # 面板 _apply_style 灌入当前主题，拖影卡片按它配色
 
     def is_dragging(self) -> bool:
         return self._drag_row is not None
@@ -90,11 +92,10 @@ class NavListWidget(QListWidget):
             return
         self._drag_row = row
         self._drop_row = None
-        ghost = QLabel(None, Qt.WindowType.ToolTip | Qt.WindowType.FramelessWindowHint)
-        ghost.setAttribute(Qt.WidgetAttribute.WA_TransparentForMouseEvents, True)
-        ghost.setAttribute(Qt.WidgetAttribute.WA_ShowWithoutActivating, True)
-        ghost.setPixmap(self.viewport().grab(self.visualItemRect(item)))
-        ghost.setWindowOpacity(0.85)
+        from widgets import TabDragPreview
+        # 标题去掉列表里的「N. 」序号；圆点用条目文字色（即窗口色）
+        title = re.sub(r'^\d+\.\s*', '', item.text())
+        ghost = TabDragPreview(title, self.ghost_theme, item.foreground().color().name())
         self._ghost = ghost
         self._move_ghost(QCursor.pos())
         ghost.show()
@@ -103,7 +104,7 @@ class NavListWidget(QListWidget):
 
     def _move_ghost(self, gpos):
         if self._ghost is not None:
-            self._ghost.move(gpos + QPoint(12, 8))
+            self._ghost.follow(gpos)
 
     def _end_drag(self):
         self._drag_row = None
@@ -774,6 +775,7 @@ class WindowNavigatorPanel(QWidget):
             f"color: {th['accent']}; font-weight: bold; font-size: {self._sf(13)}px;")
         self.group_move_grip.set_colors(th['text_dim'], th['accent'])
         self.window_list.indicator_color = QColor(th['accent'])
+        self.window_list.ghost_theme = dict(th)
 
         self.search_input.setStyleSheet(f"""
             QLineEdit {{

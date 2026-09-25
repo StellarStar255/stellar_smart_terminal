@@ -1345,18 +1345,12 @@ class TabSplitMixin:
     # 的标签栏 / 页面边缘就高亮哪里；松手时：标签栏 → 并成标签（同窗口 =
     # 重排），页面边缘 → 并入分屏，空白处 → 在松手处拆成新窗口。
 
-    _TAB_DRAG_PREVIEW_OFFSET = QPoint(14, 10)
-
     def _begin_tab_drag(self, index, global_pos):
         """标签栏拖出阈值后进入影子拖拽，直到松开鼠标。"""
         if index < 0 or index >= self.tab_widget.count():
             return
-        bar = self.tab_widget.tabBar()
-        try:
-            pixmap = bar.grab(bar.tabRect(index))
-        except Exception:
-            pixmap = None
-        preview = TabDragPreview(pixmap) if pixmap is not None and not pixmap.isNull() else None
+        preview = TabDragPreview(self.tab_widget.tabText(index),
+                                 self._current_theme_dict(), self._themed_window_color())
         # 拖的是当前页：页面区先切到邻页——正在拖的这页不能和自己分屏，
         # 显示出来的必须是"要并进去的那页"。松手后它若还留在本窗口再切回来。
         dragged_page = self.tab_widget.widget(index)
@@ -1377,7 +1371,7 @@ class TabSplitMixin:
             pos = QCursor.pos()
             if QApplication.mouseButtons() & Qt.MouseButton.LeftButton:
                 if preview is not None:
-                    preview.move(pos + self._TAB_DRAG_PREVIEW_OFFSET)
+                    preview.follow(pos)
                     if not preview.isVisible():
                         preview.show()
                 hit = self._tab_drop_hit_at(pos, dragging_index=index)
@@ -1666,10 +1660,13 @@ class TabSplitMixin:
             return
         try:
             pixmap = terminal.grab().scaledToWidth(
-                220, Qt.TransformationMode.SmoothTransformation)
+                TabDragPreview.THUMB_W * 2, Qt.TransformationMode.SmoothTransformation)
         except Exception:
             pixmap = None
-        preview = TabDragPreview(pixmap) if pixmap is not None and not pixmap.isNull() else None
+        title = getattr(terminal, '_split_label', '') or \
+            self.tab_widget.tabText(self.tab_widget.currentIndex())
+        preview = TabDragPreview(title, self._current_theme_dict(),
+                                 self._themed_window_color(), thumbnail=pixmap)
         state = {'hit': None, 'hover_tab': -1, 'hover_since': 0.0}
         timer = QTimer()
         timer.setInterval(16)
@@ -1684,7 +1681,7 @@ class TabSplitMixin:
             pos = QCursor.pos()
             if QApplication.mouseButtons() & Qt.MouseButton.LeftButton:
                 if preview is not None:
-                    preview.move(pos + self._TAB_DRAG_PREVIEW_OFFSET)
+                    preview.follow(pos)
                     if not preview.isVisible():
                         preview.show()
                 hit = self._pane_drop_hit_at(pos, terminal)

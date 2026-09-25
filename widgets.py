@@ -515,26 +515,96 @@ class DetachableTabBar(QTabBar):
 
 
 class TabDragPreview(QWidget):
-    """拖标签时跟着光标的那张半透明"影子"（标签的截图）。
+    """拖标签 / 窗格 / 导航条目时跟着光标的那张卡片。
 
-    独立的置顶无边框小窗、对鼠标透明、不抢焦点；放在光标右下方一点，
-    这样 QApplication.topLevelAt(光标) 永远查不到它自己。
+    不再直接截图（截出来带着半截关闭按钮、顶边色条，还被裁掉一块），而是按主题
+    自绘：圆角卡片 + 柔和阴影 + 窗口色圆点 + 省略号截断的标题；拖窗格时下面再
+    附一张缩略图。独立置顶无边框小窗、对鼠标透明、不抢焦点；卡片落在光标右下方，
+    QApplication.topLevelAt(光标) 永远查不到它自己。
     """
 
-    def __init__(self, pixmap):
+    SHADOW = 10          # 四周给阴影留的透明边
+    RADIUS = 8
+    CURSOR_OFFSET = QPoint(14, 10)   # 卡片左上角相对光标的位置
+    MAX_TEXT_W = 300
+    THUMB_W = 240
+
+    def __init__(self, title: str, theme: dict = None, dot_color: str = None,
+                 thumbnail=None):
         super().__init__(None, Qt.WindowType.ToolTip | Qt.WindowType.FramelessWindowHint
                          | Qt.WindowType.WindowStaysOnTopHint)
         self.setAttribute(Qt.WidgetAttribute.WA_TranslucentBackground)
         self.setAttribute(Qt.WidgetAttribute.WA_TransparentForMouseEvents)
         self.setAttribute(Qt.WidgetAttribute.WA_ShowWithoutActivating)
-        self._pixmap = pixmap
-        dpr = pixmap.devicePixelRatio() or 1.0
-        self.resize(max(1, int(pixmap.width() / dpr)), max(1, int(pixmap.height() / dpr)))
+        th = theme or {}
+        self._bg = QColor(th.get('bg_light', '#2d2d44'))
+        self._fg = QColor(th.get('text', '#eaeaea'))
+        self._accent = QColor(th.get('accent', '#667eea'))
+        self._dot = QColor(dot_color) if dot_color else QColor(self._accent)
+        self._thumb = thumbnail if thumbnail is not None and not thumbnail.isNull() else None
+
+        from PyQt6.QtGui import QFont, QFontMetrics
+        font = QFont(self.font())
+        font.setPixelSize(13)
+        font.setWeight(QFont.Weight.DemiBold)
+        self._font = font
+        fm = QFontMetrics(font)
+        self._title = fm.elidedText(title or '', Qt.TextElideMode.ElideMiddle, self.MAX_TEXT_W)
+        self._row_h = max(30, fm.height() + 14)
+        text_w = fm.horizontalAdvance(self._title)
+        card_w = 12 + 8 + 8 + text_w + 14          # 左边距 + 圆点 + 间距 + 文字 + 右边距
+        card_h = self._row_h
+        if self._thumb is not None:
+            card_w = max(card_w, self.THUMB_W + 16)
+            dpr = self._thumb.devicePixelRatio() or 1.0
+            tw = self._thumb.width() / dpr
+            self._thumb_h = int(self._thumb.height() / dpr * (card_w - 16) / max(1.0, tw))
+            card_h += self._thumb_h + 8
+        self._card_w, self._card_h = int(card_w), int(card_h)
+        m = self.SHADOW
+        self.resize(self._card_w + 2 * m, self._card_h + 2 * m)
+
+    def follow(self, cursor_pos: QPoint):
+        """把卡片放到光标右下方（扣掉阴影边，卡片本身落在 CURSOR_OFFSET 处）。"""
+        m = self.SHADOW
+        self.move(cursor_pos + self.CURSOR_OFFSET - QPoint(m, m))
 
     def paintEvent(self, event):
         p = QPainter(self)
-        p.setOpacity(0.85)
-        p.drawPixmap(0, 0, self._pixmap)
+        p.setRenderHint(QPainter.RenderHint.Antialiasing)
+        m = self.SHADOW
+        card = QRectF(m, m, self._card_w, self._card_h)
+        # 柔和阴影：由外向内一圈圈加深、略向下偏
+        p.setPen(Qt.PenStyle.NoPen)
+        for i in range(m, 0, -1):
+            a = int(34 * (1 - i / m) ** 2) + 2
+            p.setBrush(QColor(0, 0, 0, a))
+            p.drawRoundedRect(card.adjusted(-i, -i + 2, i, i + 2),
+                              self.RADIUS + i, self.RADIUS + i)
+        # 卡片本体
+        bg = QColor(self._bg)
+        bg.setAlpha(245)
+        border = QColor(self._accent)
+        border.setAlpha(170)
+        p.setBrush(bg)
+        p.setPen(QPen(border, 1))
+        p.drawRoundedRect(card.adjusted(0.5, 0.5, -0.5, -0.5), self.RADIUS, self.RADIUS)
+        # 窗口色圆点 + 标题
+        cy = m + self._row_h / 2
+        p.setPen(Qt.PenStyle.NoPen)
+        p.setBrush(self._dot)
+        p.drawEllipse(QPointF(m + 12 + 4, cy), 4, 4)
+        p.setPen(self._fg)
+        p.setFont(self._font)
+        p.drawText(QRectF(m + 12 + 8 + 8, m, self._card_w - 42, self._row_h),
+                   int(Qt.AlignmentFlag.AlignVCenter | Qt.AlignmentFlag.AlignLeft), self._title)
+        # 窗格缩略图（圆角裁切）
+        if self._thumb is not None:
+            r = QRectF(m + 8, m + self._row_h, self._card_w - 16, self._thumb_h)
+            path = QPainterPath()
+            path.addRoundedRect(r, 5, 5)
+            p.setClipPath(path)
+            p.drawPixmap(r.toRect(), self._thumb)
         p.end()
 
 
