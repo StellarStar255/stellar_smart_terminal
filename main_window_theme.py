@@ -208,44 +208,6 @@ def brand_button_qss(theme: dict, bg: str, hover: str, checked: str = None,
     return qss
 
 
-def tab_close_qss(theme: dict) -> str:
-    """标签页右上角 × 按钮：深色主题保留红色圆点；浅色主题是灰色 ×，
-    hover 才变红 —— 每个标签挂一颗红球在浅色底上非常刺眼。"""
-    font = "font-family: 'Segoe UI Emoji', 'Apple Color Emoji', 'Noto Color Emoji', Arial, sans-serif;"
-    if is_light(theme):
-        return f"""
-            QPushButton {{
-                background-color: transparent;
-                color: {theme['text_dim']};
-                border: none;
-                border-radius: 10px;
-                font-size: 16px;
-                {font}
-                padding: 0;
-                margin: 0;
-            }}
-            QPushButton:hover {{
-                background-color: {theme['danger']};
-                color: #ffffff;
-            }}
-        """
-    return f"""
-        QPushButton {{
-            background-color: #e74c3c;
-            color: white;
-            border: none;
-            border-radius: 10px;
-            font-size: 16px;
-            {font}
-            padding: 0;
-            margin: 0;
-        }}
-        QPushButton:hover {{
-            background-color: #ff6b6b;
-        }}
-    """
-
-
 def pane_splitter_qss(theme: dict) -> str:
     """分屏 QSplitter 手柄：以前构造时写死深色（#3d3d5c），浅色主题下每个
     分屏之间横着一道深线。"""
@@ -507,20 +469,20 @@ class ThemeMixin:
             QTabBar::tab {{
                 background-color: {t['bg_medium']};
                 color: {t['text_dim']};
-                padding: 7px 18px;
-                margin-right: 0px;
-                margin-top: 3px;
-                border-top-left-radius: 4px;
-                border-top-right-radius: 4px;
-                border-top: 3px solid transparent;
+                padding: 6px 4px 6px 14px;
+                margin-right: 2px;
+                margin-top: 4px;
+                border-top-left-radius: 7px;
+                border-top-right-radius: 7px;
+                border-top: 2px solid transparent;
             }}
             QTabBar::tab:selected {{
                 background-color: {t['bg_dark']};
                 color: {t['text']};
-                font-weight: bold;
+                font-weight: 600;
                 margin-top: 0px;
                 padding-top: 10px;
-                border-top: 3px solid {t['accent']};
+                border-top: 2px solid {t['accent']};
             }}
             QTabBar::tab:hover:!selected {{
                 background-color: {t['bg_light']};
@@ -1119,12 +1081,12 @@ class ThemeMixin:
                 t, '#7c3aed', '#8b5cf6', padding="0px", radius="6px"))
 
         # 标签页 × 按钮与分屏手柄：构造时按当时主题生成，切主题后要整批重设
-        _close_qss = tab_close_qss(t)
+        from widgets import TabCloseButton
         _tab_bar = self.tab_widget.tabBar()
         for _i in range(_tab_bar.count()):
             _cb = _tab_bar.tabButton(_i, _tab_bar.ButtonPosition.RightSide)
-            if isinstance(_cb, QPushButton):
-                _cb.setStyleSheet(_close_qss)
+            if isinstance(_cb, TabCloseButton):
+                _cb.set_theme(t)
         _split_qss = pane_splitter_qss(t)
         for _sp in self.tab_widget.findChildren(QSplitter):
             _sp.setStyleSheet(_split_qss)
@@ -1257,9 +1219,6 @@ class ThemeMixin:
             return readable_on_light(color)
         return color
 
-    def _tab_close_btn_qss(self) -> str:
-        """当前主题下标签页 × 按钮的样式（新建标签时用）。"""
-        return tab_close_qss(self._current_theme_dict())
 
     def _pane_splitter_qss(self) -> str:
         """当前主题下分屏手柄的样式（新建 splitter 时用）。"""

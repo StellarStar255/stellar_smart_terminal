@@ -10,11 +10,10 @@ import time
 from PyQt6 import sip
 from PyQt6.QtCore import QPoint, QRect, QTimer, Qt
 from PyQt6.QtGui import QCursor
-from PyQt6.QtWidgets import (QApplication, QMenu, QMessageBox, QPushButton,
-                             QSplitter, QTabBar, QWidget)
+from PyQt6.QtWidgets import (QApplication, QMenu, QMessageBox, QSplitter, QTabBar, QWidget)
 from dialogs import get_default_shell
 from i18n import t
-from widgets import InlineRenameEdit, TabDragPreview
+from widgets import InlineRenameEdit, TabCloseButton, TabDragPreview
 from app_logging import get_logger
 # 进程级共享类属性 / 构造新窗口经 window_host.host_class(self) 落到真 MainWindow
 from window_host import host_class
@@ -92,11 +91,7 @@ class TabSplitMixin:
         self.tab_cwds[idx] = tab_cwd if tab_cwd else self._window_cwd  # 存储独立工作目录
 
         # 添加自定义关闭按钮到标签页
-        close_btn = QPushButton("×")
-        close_btn.setFixedSize(20, 20)
-        close_btn.setStyleSheet(self._tab_close_btn_qss())
-        close_btn.clicked.connect(lambda checked, i=idx: self._close_tab_by_button(i))
-        self.tab_widget.tabBar().setTabButton(idx, QTabBar.ButtonPosition.RightSide, close_btn)
+        self._restore_tab_close_button(idx)
 
         # 切换到新标签页
         self.tab_widget.setCurrentIndex(idx)
@@ -206,9 +201,8 @@ class TabSplitMixin:
 
     def _restore_tab_close_button(self, idx):
         """为第 idx 个标签页重新创建右上角的关闭按钮（removeTab 会丢弃原按钮）"""
-        close_btn = QPushButton("×")
-        close_btn.setFixedSize(20, 20)
-        close_btn.setStyleSheet(self._tab_close_btn_qss())
+        close_btn = TabCloseButton()
+        close_btn.set_theme(self._current_theme_dict())
         close_btn.clicked.connect(lambda checked, i=idx: self._close_tab_by_button(i))
         self.tab_widget.tabBar().setTabButton(idx, QTabBar.ButtonPosition.RightSide, close_btn)
 

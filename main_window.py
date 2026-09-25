@@ -910,21 +910,21 @@ class MainWindow(ThemeMixin, ToolbarMixin, ConfigMixin, ExplorerPanelMixin,
             QTabBar::tab {
                 background-color: #0f1626;
                 color: #888;
-                padding: 7px 18px;
-                margin-right: 0px;
-                margin-top: 3px;
-                border-top-left-radius: 4px;
-                border-top-right-radius: 4px;
-                border-top: 3px solid transparent;
+                padding: 6px 4px 6px 14px;
+                margin-right: 2px;
+                margin-top: 4px;
+                border-top-left-radius: 7px;
+                border-top-right-radius: 7px;
+                border-top: 2px solid transparent;
                 min-width: 100px;
             }
             QTabBar::tab:selected {
                 background-color: #1a1a2e;
                 color: #ffffff;
-                font-weight: bold;
+                font-weight: 600;
                 margin-top: 0px;
                 padding-top: 10px;
-                border-top: 3px solid #667eea;
+                border-top: 2px solid #667eea;
             }
             QTabBar::tab:hover:!selected {
                 background-color: #1e2a4a;

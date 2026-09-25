@@ -70,5 +70,26 @@ class TestTabDragPreview(unittest.TestCase):
         self.assertEqual(lw._ghost._bg.name(), '#101010')
 
 
+    def test_tabs_use_vector_close_button_that_follows_theme(self):
+        """标签 × 是自绘 TabCloseButton（不是红球 QPushButton），切主题会重新取色。"""
+        from PyQt6.QtGui import QColor
+        from PyQt6.QtWidgets import QTabBar
+        import main_window
+        from widgets import TabCloseButton
+        w = main_window.MainWindow()
+        self.addCleanup(w.deleteLater)
+        w._add_new_tab(tab_name='t')
+        bar = w.tab_widget.tabBar()
+        for i in range(bar.count()):
+            self.assertIsInstance(bar.tabButton(i, QTabBar.ButtonPosition.RightSide),
+                                  TabCloseButton)
+        for name in ('浅色', '午夜黑'):
+            w._apply_theme(name)
+            btn = bar.tabButton(bar.count() - 1, QTabBar.ButtonPosition.RightSide)
+            self.assertEqual(btn._x.name(), QColor(w.THEMES[name]['text_dim']).name())
+        # 右侧自带留白：× 不再贴着标签边缘
+        self.assertGreaterEqual(btn.width() - TabCloseButton.DIAMETER, TabCloseButton.RIGHT_GUTTER)
+
+
 if __name__ == '__main__':
     unittest.main()

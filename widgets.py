@@ -5,7 +5,7 @@
 import time
 
 from PyQt6.QtWidgets import (
-    QApplication, QCheckBox, QComboBox, QCompleter, QLineEdit, QProxyStyle,
+    QAbstractButton, QApplication, QCheckBox, QComboBox, QCompleter, QLineEdit, QProxyStyle,
     QStyle, QStyledItemDelegate, QStyleOptionButton, QStyleOptionComboBox,
     QStylePainter, QTabBar, QWidget
 )
@@ -512,6 +512,65 @@ class DetachableTabBar(QTabBar):
         if self._original_cursor:
             self.setCursor(self._original_cursor)
             self._original_cursor = None
+
+
+class TabCloseButton(QAbstractButton):
+    """标签页右侧的关闭按钮：矢量画的细 ×，平时灰色，悬停才浮出红色圆底。
+
+    以前是 20×20 的红色实心圆 + 字符「×」（靠 emoji 字体渲染，位置飘），而且
+    贴着标签右边缘、看上去被挤出标签外。现在控件右侧自带 RIGHT_GUTTER 的空白，
+    × 离标签边缘有呼吸感；本身就是 setTabButton 的那个控件（关闭逻辑靠
+    sender() is tabButton 识别，不能再包一层容器）。
+    """
+
+    DIAMETER = 16
+    RIGHT_GUTTER = 6
+    # QTabBar 把按钮在整个标签框里垂直居中，而标题文字受 margin-top/padding
+    # 影响落得偏低：× 在控件内下移这么多，才与标题文字对齐
+    Y_NUDGE = 3
+
+    def __init__(self, parent=None):
+        super().__init__(parent)
+        self.setCursor(Qt.CursorShape.PointingHandCursor)
+        self.setFocusPolicy(Qt.FocusPolicy.NoFocus)
+        self.setFixedSize(self.DIAMETER + 2 + self.RIGHT_GUTTER,
+                          self.DIAMETER + 2 + 2 * self.Y_NUDGE)
+        self.setAttribute(Qt.WidgetAttribute.WA_Hover, True)
+        self._x = QColor('#888888')
+        self._hover_bg = QColor('#e74c3c')
+        self._hover_x = QColor('#ffffff')
+
+    def set_theme(self, theme: dict):
+        """按主题取色：× 用次要文字色，悬停圆底用危险色、× 变白。"""
+        self._x = QColor(theme.get('text_dim', '#888888'))
+        self._hover_bg = QColor(theme.get('danger', '#e74c3c'))
+        self._hover_x = QColor('#ffffff')
+        self.update()
+
+    def sizeHint(self):
+        return self.size()
+
+    def paintEvent(self, event):
+        p = QPainter(self)
+        p.setRenderHint(QPainter.RenderHint.Antialiasing)
+        d = self.DIAMETER
+        circle = QRectF(1, (self.height() - d) / 2 + self.Y_NUDGE, d, d)
+        hovered = self.underMouse() or self.isDown()
+        if hovered:
+            bg = QColor(self._hover_bg)
+            if self.isDown():
+                bg = bg.darker(115)
+            p.setPen(Qt.PenStyle.NoPen)
+            p.setBrush(bg)
+            p.drawEllipse(circle)
+        pen = QPen(self._hover_x if hovered else self._x, 1.6)
+        pen.setCapStyle(Qt.PenCapStyle.RoundCap)
+        p.setPen(pen)
+        c = circle.center()
+        r = 3.6
+        p.drawLine(QPointF(c.x() - r, c.y() - r), QPointF(c.x() + r, c.y() + r))
+        p.drawLine(QPointF(c.x() - r, c.y() + r), QPointF(c.x() + r, c.y() - r))
+        p.end()
 
 
 class TabDragPreview(QWidget):

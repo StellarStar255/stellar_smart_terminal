@@ -114,12 +114,18 @@ class TestBrandButtonQss(unittest.TestCase):
         self.assertIn('color: white', qss)
 
     def test_tab_close_button(self):
-        from main_window_theme import tab_close_qss
-        light = tab_close_qss(LIGHT)
-        self.assertNotIn('#e74c3c', light)
-        self.assertIn(LIGHT['text_dim'], light)
-        self.assertIn(LIGHT['danger'], light)   # hover 才变红
-        self.assertIn('#e74c3c', tab_close_qss(DARK))
+        """× 平时是次要文字色（不再挂红球），hover 才浮出危险色圆底——深浅主题一致。"""
+        from PyQt6.QtGui import QColor
+        from PyQt6.QtWidgets import QApplication
+        from widgets import TabCloseButton
+        # 挂到类上：局部变量出作用域时 QApplication 会被回收，残留控件随后段错误
+        type(self)._qt_app = QApplication.instance() or QApplication([])
+        for theme in (LIGHT, DARK):
+            b = TabCloseButton()
+            b.set_theme(theme)
+            self.assertEqual(b._x.name(), QColor(theme['text_dim']).name())
+            self.assertEqual(b._hover_bg.name(), QColor(theme.get('danger', '#e74c3c')).name())
+            b.deleteLater()
 
     def test_pane_splitter_follows_theme(self):
         from main_window_theme import pane_splitter_qss
