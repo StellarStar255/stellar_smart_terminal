@@ -244,7 +244,7 @@ TRANSLATIONS = {
     "window.compact_display": {"zh": "简洁显示", "en": "Compact"},
     "window.compact_tooltip": {"zh": "只显示文件夹名", "en": "Show folder name only"},
     "window.font_size_tooltip": {"zh": "列表字体大小", "en": "List font size"},
-    "window.group_move_tooltip": {"zh": "按住拖动：列表里的所有窗口一起移动（换到另一块显示器时自动按比例铺开）。把列表里的单个条目拖到另一块显示器上松手，只搬那一个窗口；单个窗口也照常拖标题栏。", "en": "Drag to move every window in this list together (dropping on another display rescales the layout to fit it). To move one window, drag its list entry onto another display, or drag its title bar as usual."},
+    "window.group_move_tooltip": {"zh": "按住拖动：列表里的所有窗口一起移动（换到另一块显示器时自动按比例铺开）。把列表里的单个条目拖出本窗口、在任意位置（含另一块显示器）松手，只搬那一个窗口过去；单个窗口也照常拖标题栏。", "en": "Drag to move every window in this list together (dropping on another display rescales the layout to fit it). To move one window, drag its list entry out of this window and drop it anywhere (including another display), or drag its title bar as usual."},
     "window.move_to_display": {"zh": "移到显示器", "en": "Move to Display"},
     "window.move_to_display_current": {"zh": "{name}（当前）", "en": "{name} (current)"},
     "window.move_to_display_single": {"zh": "只接了一块显示器", "en": "Only one display is connected"},

@@ -8,8 +8,6 @@
 - 拖动途中按 Esc 取消，所有窗口弹回原位；
 不用把手时，窗口标题栏照常单独拖动，互不影响。
 """
-import sys
-
 from PyQt6 import sip
 from PyQt6.QtCore import QPoint, QRect, QSize, Qt, QTimer, pyqtSignal
 from PyQt6.QtGui import QColor, QPainter
@@ -33,57 +31,6 @@ def map_rect_between(rect: QRect, src: QRect, dst: QRect) -> QRect:
     x = max(dst.left(), min(x, dst.left() + dst.width() - w))
     y = max(dst.top(), min(y, dst.top() + dst.height() - h))
     return QRect(x, y, w, h)
-
-
-_mac_cg = None
-
-
-def _mac_input_state():
-    """(左键按着, Esc 按着)：直接问 CoreGraphics 的物理输入状态。"""
-    global _mac_cg
-    import ctypes
-    if _mac_cg is None:
-        cg = ctypes.CDLL('/System/Library/Frameworks/CoreGraphics.framework/CoreGraphics')
-        cg.CGEventSourceButtonState.restype = ctypes.c_bool
-        cg.CGEventSourceButtonState.argtypes = [ctypes.c_int32, ctypes.c_uint32]
-        cg.CGEventSourceKeyState.restype = ctypes.c_bool
-        cg.CGEventSourceKeyState.argtypes = [ctypes.c_int32, ctypes.c_uint16]
-        _mac_cg = cg
-    # 0 = kCGEventSourceStateCombinedSessionState；0 = 左键；53 = kVK_Escape
-    return (_mac_cg.CGEventSourceButtonState(0, 0),
-            _mac_cg.CGEventSourceKeyState(0, 53))
-
-
-def _win_input_state():
-    import ctypes
-    user32 = ctypes.windll.user32
-    # GetAsyncKeyState 看物理按键；左右键互换时物理左键对应 VK_RBUTTON
-    vk_primary = 0x02 if user32.GetSystemMetrics(23) else 0x01  # SM_SWAPBUTTON
-    return (bool(user32.GetAsyncKeyState(vk_primary) & 0x8000),
-            bool(user32.GetAsyncKeyState(0x1B) & 0x8000))  # VK_ESCAPE
-
-
-def drag_cancelled() -> bool:
-    """QDrag.exec 刚返回时判断：是按 Esc 取消，还是真的松手放下。
-
-    拖到应用外松手与按 Esc 取消，Qt 都只报 IgnoreAction，分不出来。
-    区别在鼠标：Esc 取消时用户手还按着左键，松手放下时左键已抬起；
-    再兼看 Esc 此刻是否按着兜底。macOS/Windows 原生拖拽期间 Qt 收不到
-    鼠标/按键事件，只能直接问系统；其它平台由 Qt 自己跑拖拽循环，看 Qt 的按键状态。
-    """
-    try:
-        if sys.platform == 'darwin':
-            button_down, esc_down = _mac_input_state()
-        elif sys.platform == 'win32':
-            button_down, esc_down = _win_input_state()
-        else:
-            from PyQt6.QtGui import QGuiApplication
-            button_down = bool(QGuiApplication.mouseButtons() & Qt.MouseButton.LeftButton)
-            esc_down = False
-        return bool(button_down or esc_down)
-    except Exception:
-        logger.debug("drag_cancelled: input state unavailable", exc_info=True)
-        return False
 
 
 def _screen_of(window):
@@ -189,6 +136,37 @@ class GroupMoveSession:
 def move_windows_to_screen(windows, target, anchor: QPoint = None) -> int:
     """把窗口搬到 target 屏幕（等比缩放；给 anchor 时落在该点）。返回搬动数。"""
     return GroupMoveSession(windows, QPoint()).relayout_to(target, anchor)
+
+
+def move_window_to_point(window, global_pos: QPoint) -> bool:
+    """列表条目拖出后松手：窗口顶边中点落到松手点（收在该屏可用区内）。
+
+    松手点在别的屏幕上 → 按两屏可用区等比缩放尺寸；同一块屏 → 尺寸不变只挪位置。
+    最大化窗口先还原再落位。返回是否搬动了。
+    """
+    target = QApplication.screenAt(global_pos)
+    if target is None:
+        return False
+    session = GroupMoveSession([window], QPoint())
+    if not session.items:
+        return False
+    w, _pos, geo, src_screen, was_max = session.items[0]
+    if src_screen is not None and src_screen is not target:
+        return session.relayout_to(target, anchor=global_pos) > 0
+    dst = target.availableGeometry()
+    new_geo = QRect(geo)
+    new_geo.moveTopLeft(QPoint(global_pos.x() - geo.width() // 2, global_pos.y() - 10))
+    new_geo = map_rect_between(new_geo, dst, dst)  # 收回屏内
+    try:
+        if was_max:
+            w.showNormal()
+        w.setGeometry(new_geo)
+    except Exception:
+        logger.debug("move_window_to_point: suppressed", exc_info=True)
+        return False
+    placed = [(w, new_geo, False)]
+    QTimer.singleShot(350, lambda: GroupMoveSession._reassert(placed))
+    return True
 
 
 class GroupMoveGrip(QWidget):

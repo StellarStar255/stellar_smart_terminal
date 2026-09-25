@@ -144,41 +144,6 @@ class TestGroupMoveSession(unittest.TestCase):
         self.assertEqual((a.pos(), b.pos()), (pa, pb))
 
 
-class TestDragCancelled(unittest.TestCase):
-    """拖到应用外松手 vs 按 Esc 取消：Qt 都报 IgnoreAction，靠物理输入状态区分。"""
-
-    def _check(self, platform, fn, state):
-        import window_group_move as gm
-        with mock.patch.object(gm.sys, 'platform', platform), \
-                mock.patch.object(gm, fn, return_value=state):
-            return gm.drag_cancelled()
-
-    def test_released_button_is_a_real_drop(self):
-        self.assertFalse(self._check('darwin', '_mac_input_state', (False, False)))
-        self.assertFalse(self._check('win32', '_win_input_state', (False, False)))
-
-    def test_button_still_held_means_esc_cancel(self):
-        self.assertTrue(self._check('darwin', '_mac_input_state', (True, False)))
-        self.assertTrue(self._check('win32', '_win_input_state', (True, False)))
-
-    def test_esc_down_means_cancel(self):
-        self.assertTrue(self._check('darwin', '_mac_input_state', (False, True)))
-        self.assertTrue(self._check('win32', '_win_input_state', (False, True)))
-
-    def test_state_query_failure_falls_back_to_drop(self):
-        import window_group_move as gm
-        with mock.patch.object(gm.sys, 'platform', 'darwin'), \
-                mock.patch.object(gm, '_mac_input_state', side_effect=OSError):
-            self.assertFalse(gm.drag_cancelled())
-
-    @unittest.skipUnless(sys.platform == 'darwin', 'CoreGraphics only on macOS')
-    def test_mac_query_really_works(self):
-        import window_group_move as gm
-        btn, esc = gm._mac_input_state()
-        self.assertIsInstance(btn, bool)
-        self.assertIsInstance(esc, bool)
-
-
 class TestNavigatorGrip(unittest.TestCase):
     @classmethod
     def setUpClass(cls):
@@ -230,51 +195,168 @@ class TestNavigatorGrip(unittest.TestCase):
             nav._on_item_dropped_outside(id(w), QPoint(1500, 300))
         self.assertTrue(QRect(1000, 0, 1000, 800).contains(w.geometry()), w.geometry())
 
-    def test_item_dropped_on_same_screen_does_nothing(self):
+    def test_item_dropped_on_same_screen_moves_window_to_drop_point(self):
         from PyQt6.QtCore import QPoint, QRect
         import window_group_move as gm
         import window_navigator as wn
         nav, w = self._nav_with_window()
         scr = _FakeScreen(QRect(0, 0, 1000, 800))
-        before = w.geometry()
+        size = w.size()
         with mock.patch.object(gm, '_screen_of', return_value=scr), \
                 mock.patch.object(wn.QApplication, 'screenAt', return_value=scr):
             nav._on_item_dropped_outside(id(w), QPoint(700, 300))
+        # 同屏：尺寸不变，顶边中点落到松手点（再收回屏内）
+        self.assertEqual(w.size(), size)
+        self.assertEqual(w.geometry(), QRect(550, 290, 300, 200))
+
+    def test_item_dropped_inside_own_window_does_nothing(self):
+        from PyQt6.QtCore import QRect
+        import window_group_move as gm
+        import window_navigator as wn
+        nav, w = self._nav_with_window()
+        nav.show()
+        self.app.processEvents()
+        scr = _FakeScreen(QRect(0, 0, 4000, 4000))
+        before = w.geometry()
+        with mock.patch.object(gm, '_screen_of', return_value=scr), \
+                mock.patch.object(wn.QApplication, 'screenAt', return_value=scr):
+            nav._on_item_dropped_outside(id(w), nav.frameGeometry().center())
         self.assertEqual(w.geometry(), before)
 
-    def test_list_emits_dropped_outside_only_when_released_outside(self):
-        from PyQt6.QtCore import QPoint, Qt
-        from PyQt6.QtWidgets import QListWidget, QListWidgetItem
+    # ---- 自绘拖拽：用真实鼠标/按键事件驱动 NavListWidget ----
+    def _drag_list(self, ids=(42, 43, 44)):
+        from PyQt6.QtCore import Qt
+        from PyQt6.QtWidgets import QListWidgetItem
         import main_window  # noqa: F401
         import window_navigator as wn
         lw = wn.NavListWidget()
         self.addCleanup(lw.deleteLater)
+        lw.setDragEnabled(True)
+        lw.setDragDropMode(wn.QListWidget.DragDropMode.InternalMove)
         lw.resize(200, 200)
+        for i, wid in enumerate(ids):
+            it = QListWidgetItem(f'item{i}')
+            it.setData(Qt.ItemDataRole.UserRole, wid)
+            lw.addItem(it)
         lw.show()
+        self.app.processEvents()
+        return lw
+
+    def _mouse(self, lw, kind, gpos, buttons=None):
+        from PyQt6.QtCore import QPointF, Qt
+        from PyQt6.QtGui import QMouseEvent
+        if buttons is None:
+            buttons = Qt.MouseButton.LeftButton
+        local = lw.viewport().mapFromGlobal(gpos)
+        return QMouseEvent(kind, QPointF(local), QPointF(gpos), Qt.MouseButton.LeftButton,
+                           buttons, Qt.KeyboardModifier.NoModifier)
+
+    def _row_center(self, lw, row):
+        return lw.viewport().mapToGlobal(lw.visualItemRect(lw.item(row)).center())
+
+    def _start(self, lw, row):
+        from PyQt6.QtCore import Qt
+        lw.setCurrentRow(row)
+        lw.startDrag(Qt.DropAction.MoveAction)
+        self.assertTrue(lw.is_dragging())
+        self.assertIsNotNone(lw._ghost)
+
+    def test_release_outside_emits_drop_immediately(self):
+        from PyQt6.QtCore import QEvent, QPoint, Qt
+        lw = self._drag_list()
+        got = []
+        lw.dropped_outside.connect(lambda wid, p: got.append((wid, p)))
+        self._start(lw, 1)
+        outside = lw.mapToGlobal(QPoint(0, 0)) + QPoint(900, 900)
+        lw.mouseMoveEvent(self._mouse(lw, QEvent.Type.MouseMove, outside))
+        lw.mouseReleaseEvent(self._mouse(lw, QEvent.Type.MouseButtonRelease, outside,
+                                         Qt.MouseButton.NoButton))
+        self.assertEqual(got, [(43, outside)])
+        self.assertFalse(lw.is_dragging())
+        self.assertIsNone(lw._ghost)  # 拖影当场消失，不飞回
+
+    def test_release_inside_list_reorders_and_does_not_emit(self):
+        from PyQt6.QtCore import QEvent, Qt
+        lw = self._drag_list()
+        got, moved = [], []
+        lw.dropped_outside.connect(lambda *a: got.append(a))
+        lw.model().rowsMoved.connect(lambda *a: moved.append(1))
+        self._start(lw, 0)
+        r = lw.visualItemRect(lw.item(2))
+        below_last = lw.viewport().mapToGlobal(r.center() + type(r.center())(0, r.height() // 4))
+        lw.mouseMoveEvent(self._mouse(lw, QEvent.Type.MouseMove, below_last))
+        lw.mouseReleaseEvent(self._mouse(lw, QEvent.Type.MouseButtonRelease, below_last,
+                                         Qt.MouseButton.NoButton))
+        texts = [lw.item(i).text() for i in range(lw.count())]
+        self.assertEqual(got, [])
+        self.assertEqual(moved, [1])  # 面板靠 rowsMoved 切到手动排序
+        self.assertEqual(texts[-1], 'item0')
+
+    def test_esc_cancels_drag_and_release_moves_nothing(self):
+        from PyQt6.QtCore import QEvent, QPoint, Qt
+        from PyQt6.QtGui import QKeyEvent
+        lw = self._drag_list()
+        got, moved = [], []
+        lw.dropped_outside.connect(lambda *a: got.append(a))
+        lw.model().rowsMoved.connect(lambda *a: moved.append(1))
+        self._start(lw, 1)
+        outside = lw.mapToGlobal(QPoint(0, 0)) + QPoint(900, 900)
+        lw.mouseMoveEvent(self._mouse(lw, QEvent.Type.MouseMove, outside))
+        lw.keyPressEvent(QKeyEvent(QEvent.Type.KeyPress, Qt.Key.Key_Escape,
+                                   Qt.KeyboardModifier.NoModifier))
+        self.assertFalse(lw.is_dragging())
+        self.assertIsNone(lw._ghost)
+        lw.mouseReleaseEvent(self._mouse(lw, QEvent.Type.MouseButtonRelease, outside,
+                                         Qt.MouseButton.NoButton))
+        self.assertEqual((got, moved), ([], []))
+
+    def test_esc_reaches_list_through_window_while_focus_elsewhere(self):
+        """真实分发路径：焦点在别的控件上，Esc 发给窗口也要被拖拽中的列表收到。"""
+        from PyQt6.QtCore import Qt
+        from PyQt6.QtTest import QTest
+        from PyQt6.QtWidgets import QLineEdit, QVBoxLayout, QWidget
+        import window_navigator as wn
+        host = QWidget()
+        self.addCleanup(host.deleteLater)
+        lay = QVBoxLayout(host)
+        edit = QLineEdit()
+        lw = wn.NavListWidget()
+        lay.addWidget(edit)
+        lay.addWidget(lw)
+        lw.addItem('x')
+        host.show()
+        edit.setFocus()
+        self.app.processEvents()
+        lw.setCurrentRow(0)
+        lw.startDrag(Qt.DropAction.MoveAction)
+        QTest.keyClick(host.windowHandle(), Qt.Key.Key_Escape)
+        self.app.processEvents()
+        self.assertFalse(lw.is_dragging())
+        self.assertEqual(edit.text(), '')
+
+    def test_drop_signal_keeps_64bit_window_id_end_to_end(self):
+        """真实 id(window) 远超 32 位：信号传到面板后必须还能查到窗口并搬走它。
+        （回归：信号声明成 int 时 id 被截断，面板查不到窗口、拖出静默无效。）"""
+        from PyQt6.QtCore import QEvent, QPoint, QRect, Qt
+        from PyQt6.QtWidgets import QListWidgetItem
+        import window_group_move as gm
+        import window_navigator as wn
+        nav, w = self._nav_with_window()
+        self.assertGreater(id(w), 2 ** 32)  # 64 位 macOS/Linux 上的真实情形
+        lw = nav.window_list
         it = QListWidgetItem('x')
-        it.setData(Qt.ItemDataRole.UserRole, 42)
+        it.setData(Qt.ItemDataRole.UserRole, id(w))
         lw.addItem(it)
         lw.setCurrentItem(it)
-        got = []
-        lw.dropped_outside.connect(lambda wid, p: got.append(wid))
-        inside = lw.viewport().mapToGlobal(lw.viewport().rect().center())
-        outside = lw.viewport().mapToGlobal(lw.viewport().rect().bottomRight()) + QPoint(500, 500)
-        with mock.patch.object(QListWidget, 'startDrag'), \
-                mock.patch.object(wn, 'drag_cancelled', return_value=False):
-            with mock.patch.object(wn.QCursor, 'pos', return_value=inside):
-                lw.startDrag(Qt.DropAction.MoveAction)
-            self.assertEqual(got, [])  # 列表内松手 = 排序，不搬窗口
-            with mock.patch.object(wn.QCursor, 'pos', return_value=outside):
-                lw.startDrag(Qt.DropAction.MoveAction)
-        self.assertEqual(got, [42])
-
-        # 按 Esc 取消：光标虽在列表外（甚至在别的屏上），也不算松手
-        got.clear()
-        with mock.patch.object(QListWidget, 'startDrag'), \
-                mock.patch.object(wn, 'drag_cancelled', return_value=True), \
-                mock.patch.object(wn.QCursor, 'pos', return_value=outside):
-            lw.startDrag(Qt.DropAction.MoveAction)
-        self.assertEqual(got, [])
+        lw.startDrag(Qt.DropAction.MoveAction)
+        outside = nav.frameGeometry().bottomRight() + QPoint(500, 500)
+        src = _FakeScreen(QRect(0, 0, 1000, 800))
+        dst = _FakeScreen(QRect(1000, 0, 4000, 4000))
+        with mock.patch.object(gm, '_screen_of', return_value=src), \
+                mock.patch.object(wn.QApplication, 'screenAt', return_value=dst):
+            lw.mouseReleaseEvent(self._mouse(lw, QEvent.Type.MouseButtonRelease, outside,
+                                             Qt.MouseButton.NoButton))
+        self.assertTrue(QRect(1000, 0, 4000, 4000).contains(w.geometry()), w.geometry())
 
     def test_context_menu_lists_displays(self):
         from PyQt6.QtCore import QPoint

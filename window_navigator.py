@@ -8,7 +8,7 @@
 import os
 
 from PyQt6 import sip
-from PyQt6.QtCore import Qt, QEvent, QPoint, QSize, QTimer, pyqtSignal
+from PyQt6.QtCore import Qt, QEvent, QModelIndex, QPoint, QSize, QTimer, pyqtSignal
 from PyQt6.QtGui import QBrush, QColor, QCursor, QPainter
 from PyQt6.QtWidgets import (
     QApplication, QCheckBox, QHBoxLayout, QLabel, QLineEdit, QListWidget,
@@ -21,7 +21,8 @@ import app_config
 from git_widget import _make_git_tool_icon
 from i18n import t
 from themes import readable_on_light
-from window_group_move import GroupMoveGrip, drag_cancelled, move_windows_to_screen
+from window_group_move import (GroupMoveGrip, move_window_to_point,
+                               move_windows_to_screen)
 from app_logging import get_logger
 
 logger = get_logger(__name__)
@@ -56,23 +57,132 @@ def _window_screen_key(w):
 
 
 class NavListWidget(QListWidget):
-    """窗口列表：列表内拖动照旧是排序；把条目拖出列表、在别的显示器上松手，
-    发 dropped_outside(条目的窗口 id, 松手全局坐标)，由面板把该窗口搬过去。
-    按 Esc 取消拖拽不算松手，窗口不动。"""
+    """窗口列表：拖拽由本控件自己跑，不走系统原生拖放（QDrag）。
 
-    dropped_outside = pyqtSignal(int, QPoint)
+    - 列表内松手 = 排序（model().moveRow，照常发 rowsMoved）；
+    - 拖出本窗口松手 → 发 dropped_outside(窗口 id, 松手全局坐标)，由面板搬窗口；
+    - 拖动途中按 Esc = 取消，什么都不动。
+    不用 QDrag 的原因：macOS 原生拖放落在「不接收」的地方时，拖影会先飞回原处
+    才结束，窗口要等动画放完才动；而且 Esc 取消与真松手系统都只报「未接收」，
+    分不出来。自己跑拖拽，松手即刻生效，Esc 也由 grabKeyboard 直接收到。
+    """
 
+    # 窗口 id 是 64 位的 id(window)；声明成 int 会被 Qt 截成 32 位 C++ int，
+    # 面板拿去查 _window_refs 永远查不到（v1.35.5～1.35.7 拖出没反应的根因）
+    dropped_outside = pyqtSignal(object, QPoint)
+
+    def __init__(self, parent=None):
+        super().__init__(parent)
+        self._drag_row = None     # 正在拖的行；None = 没在拖
+        self._drop_row = None     # 列表内的插入位置（插在该行之前；== count 表示末尾）
+        self._ghost = None        # 跟随光标的拖影小窗
+        self.indicator_color = QColor('#667eea')
+
+    def is_dragging(self) -> bool:
+        return self._drag_row is not None
+
+    # ---- 拖拽生命周期 ----
     def startDrag(self, supported_actions):
-        item = self.currentItem()
+        """QAbstractItemView 判定开始拖拽时调用：改为启动自绘拖拽，立即返回。"""
+        row = self.currentRow()
+        item = self.item(row) if row >= 0 else None
+        if item is None:
+            return
+        self._drag_row = row
+        self._drop_row = None
+        ghost = QLabel(None, Qt.WindowType.ToolTip | Qt.WindowType.FramelessWindowHint)
+        ghost.setAttribute(Qt.WidgetAttribute.WA_TransparentForMouseEvents, True)
+        ghost.setAttribute(Qt.WidgetAttribute.WA_ShowWithoutActivating, True)
+        ghost.setPixmap(self.viewport().grab(self.visualItemRect(item)))
+        ghost.setWindowOpacity(0.85)
+        self._ghost = ghost
+        self._move_ghost(QCursor.pos())
+        ghost.show()
+        # 焦点通常在终端上：拖动期间接管键盘，Esc 才送得到这里
+        self.grabKeyboard()
+
+    def _move_ghost(self, gpos):
+        if self._ghost is not None:
+            self._ghost.move(gpos + QPoint(12, 8))
+
+    def _end_drag(self):
+        self._drag_row = None
+        self._drop_row = None
+        self.releaseKeyboard()
+        if self._ghost is not None:
+            self._ghost.hide()
+            self._ghost.deleteLater()
+            self._ghost = None
+        self.viewport().update()
+
+    def _drop_row_at(self, vpos):
+        """视口坐标 → 插入位置；不在视口里返回 None。"""
+        if not self.viewport().rect().contains(vpos):
+            return None
+        idx = self.indexAt(vpos)
+        if not idx.isValid():
+            return self.count()
+        rect = self.visualRect(idx)
+        return idx.row() + (1 if vpos.y() > rect.center().y() else 0)
+
+    def mouseMoveEvent(self, event):
+        if not self.is_dragging():
+            return super().mouseMoveEvent(event)
+        gpos = event.globalPosition().toPoint()
+        self._move_ghost(gpos)
+        vpos = self.viewport().mapFromGlobal(gpos)
+        # 贴近上下边缘时自动滚动，长列表也能排到看不见的位置
+        sb = self.verticalScrollBar()
+        if self.viewport().rect().contains(QPoint(1, vpos.y())):
+            if vpos.y() < 16:
+                sb.setValue(sb.value() - sb.singleStep())
+            elif vpos.y() > self.viewport().height() - 16:
+                sb.setValue(sb.value() + sb.singleStep())
+        new_row = self._drop_row_at(vpos)
+        if new_row != self._drop_row:
+            self._drop_row = new_row
+            self.viewport().update()
+        event.accept()
+
+    def mouseReleaseEvent(self, event):
+        if not self.is_dragging():
+            return super().mouseReleaseEvent(event)
+        # 不交给基类：否则松手会被当成一次单击而切换窗口
+        src = self._drag_row
+        item = self.item(src)
         wid = item.data(Qt.ItemDataRole.UserRole) if item is not None else None
-        super().startDrag(supported_actions)  # 阻塞到松手
-        if sip.isdeleted(self) or not isinstance(wid, int):
+        gpos = event.globalPosition().toPoint()
+        dst = self._drop_row_at(self.viewport().mapFromGlobal(gpos))
+        self._end_drag()
+        if dst is not None:
+            if dst not in (src, src + 1):
+                self.model().moveRow(QModelIndex(), src, QModelIndex(), dst)
+        elif wid is not None:
+            self.dropped_outside.emit(wid, gpos)
+        event.accept()
+
+    def keyPressEvent(self, event):
+        if self.is_dragging() and event.key() == Qt.Key.Key_Escape:
+            self._end_drag()  # 之后手还按着移动/松手都按普通事件处理，不会搬窗口
+            event.accept()
             return
-        if drag_cancelled():
+        super().keyPressEvent(event)
+
+    def paintEvent(self, event):
+        super().paintEvent(event)
+        if not self.is_dragging() or self._drop_row is None:
             return
-        pos = QCursor.pos()
-        if not self.viewport().rect().contains(self.viewport().mapFromGlobal(pos)):
-            self.dropped_outside.emit(wid, pos)
+        # 列表内插入位置指示线
+        if self._drop_row < self.count():
+            y = self.visualRect(self.model().index(self._drop_row, 0)).top()
+        else:
+            last = self.visualRect(self.model().index(self.count() - 1, 0))
+            y = last.bottom() + 1
+        p = QPainter(self.viewport())
+        p.setPen(Qt.PenStyle.NoPen)
+        p.setBrush(self.indicator_color)
+        p.drawRect(4, max(0, y - 1), self.viewport().width() - 8, 3)
+        p.end()
 
 
 class NoHighlightDelegate(QStyledItemDelegate):
@@ -312,15 +422,18 @@ class WindowNavigatorPanel(QWidget):
         return wins
 
     def _on_item_dropped_outside(self, wid, global_pos):
-        """条目被拖到列表外松手：落在别的显示器上才搬窗口，同屏松手什么都不做。"""
+        """条目被拖到列表外松手：窗口搬到松手处（同屏只挪位置，跨屏按比例缩放）。
+        松手点仍在本面板所在的窗口里时不搬——那里是排序/误拖的安全区。"""
         ref = self._window_refs.get(wid)
         window = ref() if ref is not None else None
         if window is None or sip.isdeleted(window):
             return
-        target = QApplication.screenAt(global_pos)
-        if target is None:
-            return
-        if move_windows_to_screen([window], target, anchor=global_pos):
+        try:
+            if self.window().frameGeometry().contains(global_pos):
+                return
+        except Exception:
+            logger.debug("_on_item_dropped_outside: suppressed", exc_info=True)
+        if move_window_to_point(window, global_pos):
             self._force_refresh()
 
     def _move_window_to_screen(self, window, screen):
@@ -660,6 +773,7 @@ class WindowNavigatorPanel(QWidget):
         self.title_label.setStyleSheet(
             f"color: {th['accent']}; font-weight: bold; font-size: {self._sf(13)}px;")
         self.group_move_grip.set_colors(th['text_dim'], th['accent'])
+        self.window_list.indicator_color = QColor(th['accent'])
 
         self.search_input.setStyleSheet(f"""
             QLineEdit {{
