@@ -257,6 +257,67 @@ class TestMoveTabBetweenWindows(unittest.TestCase):
         self.assertFalse(hint.grab().isNull())
         b._hide_tab_drop_hint()
 
+    def test_horizontal_drag_uses_shadow_drag_not_qt_movable(self):
+        """左右拖也进影子拖拽：Qt 自带的可移动标签会截一张不带 × 的残缺标签图。"""
+        from PyQt6.QtCore import QEvent, QPointF, Qt
+        from PyQt6.QtGui import QMouseEvent
+        a = self.win_a
+        bar = a.tab_widget.tabBar()
+        self.assertFalse(a.tab_widget.isMovable())
+        got = []
+        bar.tab_detach_requested.connect(lambda i, p: got.append(i))
+        r0 = bar.tabRect(0)
+        start = QPointF(r0.center())
+
+        def ev(kind, pt, buttons):
+            return QMouseEvent(kind, pt, bar.mapToGlobal(pt), Qt.MouseButton.LeftButton,
+                               buttons, Qt.KeyboardModifier.NoModifier)
+        bar.mousePressEvent(ev(QEvent.Type.MouseButtonPress, start, Qt.MouseButton.LeftButton))
+        step = QApplication.startDragDistance() + 2
+        bar.mouseMoveEvent(ev(QEvent.Type.MouseMove, start + QPointF(step, 0),
+                              Qt.MouseButton.LeftButton))
+        bar.tab_detach_requested.disconnect()
+        bar.tab_detach_requested.connect(a._begin_tab_drag)
+        self.assertEqual(got, [0])
+
+    def test_reorder_on_own_strip_keeps_page_and_restores_after(self):
+        """在本窗口标签栏上左右排序：页面区不切走（不闪）；离开标签栏才切到邻页；
+        松手重排后页面区回到被拖的那页。"""
+        from unittest import mock
+        from PyQt6.QtCore import Qt
+        import main_window_tabs as mwt
+        a = self.win_a
+        while a.tab_widget.count() < 3:
+            a._add_new_tab(tab_name=f"r{a.tab_widget.count()}")
+        last = a.tab_widget.count() - 1
+        a.tab_widget.setCurrentIndex(last)
+        dragged = a.tab_widget.widget(last)
+        bar = a.tab_widget.tabBar()
+        r0 = bar.tabRect(0)
+        on_strip = bar.mapToGlobal(QPoint(r0.left() + 3, r0.center().y()))   # 插到最前
+        on_page = a._tab_page_rect().center()
+        cursor = {'pos': on_strip, 'btn': Qt.MouseButton.LeftButton}
+        with mock.patch.object(mwt.QCursor, 'pos', side_effect=lambda: cursor['pos']), \
+                mock.patch.object(mwt.QApplication, 'mouseButtons',
+                                  side_effect=lambda: cursor['btn']), \
+                mock.patch.object(mwt.QApplication, 'topLevelAt', return_value=a):
+            # 离屏下前面用例留下的窗口可能叠在同一位置；真实屏幕上光标下最上层就是 a
+            a._begin_tab_drag(last, on_strip)
+            timer = a._tab_drag_timer
+            timer.timeout.emit()
+            self.assertIs(a.tab_widget.currentWidget(), dragged)       # 标签栏上：不切页
+            cursor['pos'] = on_page
+            timer.timeout.emit()
+            self.assertIsNot(a.tab_widget.currentWidget(), dragged)    # 离开标签栏：切到邻页
+            cursor['pos'] = on_strip
+            timer.timeout.emit()
+            cursor['btn'] = Qt.MouseButton.NoButton
+            timer.timeout.emit()                                       # 松手
+        self.assertFalse(timer.isActive())
+        self.assertIs(a.tab_widget.widget(0), dragged)                 # 排到了最前
+        self.assertIs(a.tab_widget.currentWidget(), dragged)           # 页面回到它
+        self._assert_mappings_consistent(a)
+
 
 if __name__ == '__main__':
     unittest.main()

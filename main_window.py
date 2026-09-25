@@ -884,8 +884,10 @@ class MainWindow(ThemeMixin, ToolbarMixin, ConfigMixin, ExplorerPanelMixin,
         self.detachable_tab_bar.tab_rename_requested.connect(self._begin_inline_tab_rename)
 
         self.tab_widget.setTabsClosable(False)  # 禁用内置关闭按钮，使用自定义
-        self.tab_widget.setMovable(True)
-        # 拖动标签重排时 QTabWidget 只同步自己内部的页面顺序；tab_splitters /
+        # 不用 QTabBar 自带的可移动标签：重排也走影子拖拽（DetachableTabBar），
+        # 松手时 moveTab 同样发 tabMoved。
+        self.tab_widget.setMovable(False)
+        # 标签重排时 QTabWidget 只同步自己内部的页面顺序；tab_splitters /
         # tab_terminals / tab_cwds 这些按索引存的映射必须跟着重建，否则分屏、
         # 关闭分屏会作用到**别的标签页**的终端上（分屏「串页」）。
         self.detachable_tab_bar.tabMoved.connect(self._on_tab_moved)

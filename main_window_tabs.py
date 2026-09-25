@@ -1410,12 +1410,14 @@ class TabSplitMixin:
         drag_title = self.tab_widget.tabText(index)
         preview = TabDragPreview(drag_title, self._current_theme_dict(),
                                  self._themed_window_color(), thumbnail=thumb)
-        # 拖的是当前页：页面区先切到邻页——正在拖的这页不能和自己分屏，
-        # 显示出来的必须是"要并进去的那页"。松手后它若还留在本窗口再切回来。
+        # 拖的是当前页：光标一离开本窗口标签栏，页面区就切到邻页——正在拖的这页
+        # 不能和自己分屏，显示出来的必须是"要并进去的那页"。只在标签栏上左右
+        # 排序时不切（否则页面白闪一下）。松手后页面区恢复原样。
         dragged_page = self.tab_widget.widget(index)
         state = {'hit': None,
-                 'restore': self._drag_switch_to_neighbor(index),
+                 'switched': False,
                  'dragged_page': dragged_page,
+                 'orig_page': self.tab_widget.currentWidget(),
                  'hover_tab': -1, 'hover_since': 0.0}
         timer = QTimer()
         timer.setInterval(16)
@@ -1434,6 +1436,11 @@ class TabSplitMixin:
                     if not preview.isVisible():
                         preview.show()
                 hit = self._tab_drop_hit_at(pos, dragging_index=index)
+                on_own_strip = hit is not None and hit[0] is self and hit[1] == 'strip'
+                if not on_own_strip and not state['switched']:
+                    state['switched'] = True
+                    self._drag_switch_to_neighbor(index)
+                    hit = self._tab_drop_hit_at(pos, dragging_index=index)
                 self._set_drag_hit(state, hit)
                 if hit is not None and hit[1] == 'strip':
                     hit[0]._update_tab_drop_caret(pos, drag_title)
@@ -1447,8 +1454,7 @@ class TabSplitMixin:
             try:
                 self._finish_tab_drag(index, pos, hit)
             finally:
-                if state['restore']:
-                    self._drag_restore_current(state['dragged_page'])
+                self._drag_restore_pages(state)
 
         timer.timeout.connect(_tick)
         timer.start()
@@ -1461,6 +1467,16 @@ class TabSplitMixin:
         neighbor = index - 1 if index > 0 else index + 1
         self.tab_widget.setCurrentIndex(neighbor)
         return True
+
+    def _drag_restore_pages(self, state):
+        """松手后页面区恢复：拖的是当前页且它还在本窗口（重排 / 什么都没发生）
+        → 切回它；拖的是后台页 → 切回原来显示的那页（途中悬停可能切走过）。"""
+        if sip.isdeleted(self):
+            return
+        if state['orig_page'] is state['dragged_page']:
+            self._drag_restore_current(state['dragged_page'])
+        elif state['orig_page'] is not None:
+            self._drag_restore_current(state['orig_page'])
 
     def _drag_restore_current(self, dragged_page):
         """松手后被拖的页还在本窗口（重排 / 什么都没发生）→ 切回它。"""
