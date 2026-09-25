@@ -76,14 +76,26 @@ class GroupMoveSession:
     def finish(self, global_pos: QPoint):
         """松手：光标落在别的屏幕上 → 等比重排到该屏；否则保持平移结果。"""
         target = QApplication.screenAt(global_pos)
-        if target is None:
-            return
+        if target is not None:
+            self.relayout_to(target)
+
+    def relayout_to(self, target, anchor: QPoint = None):
+        """把不在 target 上的窗口按原屏 → target 可用区等比重排。
+
+        anchor：单窗口拖出列表时的松手点——窗口顶边中点对准它（仍收在屏内），
+        让窗口落在鼠标放下的地方；不给则保持等比映射的相对位置。
+        返回实际搬动的窗口数。
+        """
         dst = target.availableGeometry()
         placed = []
         for w, _pos, geo, src_screen, was_max in self._alive():
             if src_screen is None or src_screen is target:
                 continue
             new_geo = map_rect_between(geo, src_screen.availableGeometry(), dst)
+            if anchor is not None and not was_max:
+                new_geo.moveTopLeft(QPoint(anchor.x() - new_geo.width() // 2,
+                                           anchor.y() - 10))
+                new_geo = map_rect_between(new_geo, dst, dst)  # 收回屏内
             try:
                 if was_max:
                     # 先回到普通状态落到新屏，再在新屏最大化
@@ -93,10 +105,11 @@ class GroupMoveSession:
                     w.showMaximized()
                 placed.append((w, new_geo, was_max))
             except Exception:
-                logger.debug("GroupMoveSession.finish: suppressed", exc_info=True)
+                logger.debug("GroupMoveSession.relayout_to: suppressed", exc_info=True)
         if placed:
             # 台前调度等系统策略可能在落位后把窗口推挪/压窄：稍后校正一次
             QTimer.singleShot(350, lambda: self._reassert(placed))
+        return len(placed)
 
     @staticmethod
     def _reassert(placed):
@@ -109,6 +122,11 @@ class GroupMoveSession:
                 w.setGeometry(geo)
             except Exception:
                 logger.debug("GroupMoveSession._reassert: suppressed", exc_info=True)
+
+
+def move_windows_to_screen(windows, target, anchor: QPoint = None) -> int:
+    """把窗口搬到 target 屏幕（等比缩放；给 anchor 时落在该点）。返回搬动数。"""
+    return GroupMoveSession(windows, QPoint()).relayout_to(target, anchor)
 
 
 class GroupMoveGrip(QWidget):

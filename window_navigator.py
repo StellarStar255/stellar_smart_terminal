@@ -9,7 +9,7 @@ import os
 
 from PyQt6 import sip
 from PyQt6.QtCore import Qt, QEvent, QPoint, QSize, QTimer, pyqtSignal
-from PyQt6.QtGui import QBrush, QColor, QPainter
+from PyQt6.QtGui import QBrush, QColor, QCursor, QPainter
 from PyQt6.QtWidgets import (
     QApplication, QCheckBox, QHBoxLayout, QLabel, QLineEdit, QListWidget,
     QListWidgetItem, QMenu, QMessageBox, QPushButton, QStyle,
@@ -21,7 +21,7 @@ import app_config
 from git_widget import _make_git_tool_icon
 from i18n import t
 from themes import readable_on_light
-from window_group_move import GroupMoveGrip
+from window_group_move import GroupMoveGrip, move_windows_to_screen
 from app_logging import get_logger
 
 logger = get_logger(__name__)
@@ -53,6 +53,23 @@ def _window_screen_key(w):
         return w._screen_key()
     except Exception:
         return None
+
+
+class NavListWidget(QListWidget):
+    """窗口列表：列表内拖动照旧是排序；把条目拖出列表、在别的显示器上松手，
+    发 dropped_outside(条目的窗口 id, 松手全局坐标)，由面板把该窗口搬过去。"""
+
+    dropped_outside = pyqtSignal(int, QPoint)
+
+    def startDrag(self, supported_actions):
+        item = self.currentItem()
+        wid = item.data(Qt.ItemDataRole.UserRole) if item is not None else None
+        super().startDrag(supported_actions)  # 阻塞到松手
+        if sip.isdeleted(self) or not isinstance(wid, int):
+            return
+        pos = QCursor.pos()
+        if not self.viewport().rect().contains(self.viewport().mapFromGlobal(pos)):
+            self.dropped_outside.emit(wid, pos)
 
 
 class NoHighlightDelegate(QStyledItemDelegate):
@@ -187,7 +204,9 @@ class WindowNavigatorPanel(QWidget):
         layout.addWidget(self.search_input)
 
         # 窗口列表
-        self.window_list = QListWidget()
+        self.window_list = NavListWidget()
+        # 拖出列表、在另一块显示器上松手 → 把该窗口搬过去
+        self.window_list.dropped_outside.connect(self._on_item_dropped_outside)
         # 使用自定义 delegate 禁用默认选中高亮
         self.window_list.setItemDelegate(NoHighlightDelegate(self.window_list))
         # 启用拖拽排序
@@ -288,6 +307,22 @@ class WindowNavigatorPanel(QWidget):
         if not self._embedded:
             wins.append(self)
         return wins
+
+    def _on_item_dropped_outside(self, wid, global_pos):
+        """条目被拖到列表外松手：落在别的显示器上才搬窗口，同屏松手什么都不做。"""
+        ref = self._window_refs.get(wid)
+        window = ref() if ref is not None else None
+        if window is None or sip.isdeleted(window):
+            return
+        target = QApplication.screenAt(global_pos)
+        if target is None:
+            return
+        if move_windows_to_screen([window], target, anchor=global_pos):
+            self._force_refresh()
+
+    def _move_window_to_screen(self, window, screen):
+        if move_windows_to_screen([window], screen):
+            self._force_refresh()
 
     def _show_settings_menu(self):
         """弹出设置菜单：排序方式（时间/名称/手动）+ 刷新。"""
@@ -974,11 +1009,32 @@ class WindowNavigatorPanel(QWidget):
             }}
         """)
 
+        # 「移到显示器 ▸」：列出所有屏幕，窗口当前所在的那块置灰
+        move_menu = menu.addMenu(t("window.move_to_display"))
+        move_menu.setStyleSheet(menu.styleSheet())
+        screens = QApplication.screens()
+        try:
+            cur = window.screen()
+        except Exception:
+            cur = None
+        for scr in screens:
+            label = scr.name() or "?"
+            if scr is cur:
+                label = t("window.move_to_display_current", name=label)
+            act = move_menu.addAction(label)
+            act.setEnabled(scr is not cur)
+            act.triggered.connect(
+                lambda _=False, w=window, sc=scr: self._move_window_to_screen(w, sc))
+        if len(screens) < 2:
+            move_menu.setEnabled(False)
+            move_menu.setToolTip(t("window.move_to_display_single"))
+        menu.addSeparator()
+
         force_close_action = menu.addAction(t("window.force_close"))
         force_close_action.setToolTip(t("window.force_close_tooltip"))
 
         chosen = menu.exec(self.window_list.viewport().mapToGlobal(pos))
-        if chosen is force_close_action:
+        if chosen is force_close_action and not sip.isdeleted(window):
             self._force_close_window(window, item.text())
 
     def _on_quick_close_changed(self, state):

@@ -96,6 +96,18 @@ class TestGroupMoveSession(unittest.TestCase):
             s.finish(QPoint(20, 20))
         self.assertEqual(a.pos(), pa)
 
+    def test_relayout_with_anchor_drops_window_at_cursor(self):
+        from PyQt6.QtCore import QPoint, QRect
+        import window_group_move as gm
+        a, _b = self._make_windows()
+        src = _FakeScreen(QRect(0, 0, 1000, 800))
+        dst = _FakeScreen(QRect(1000, 0, 2000, 1600))
+        with mock.patch.object(gm, '_screen_of', return_value=src):
+            n = gm.move_windows_to_screen([a], dst, anchor=QPoint(2000, 500))
+        self.assertEqual(n, 1)
+        # 尺寸等比放大，顶边中点对准松手点
+        self.assertEqual(a.geometry(), QRect(1700, 490, 600, 400))
+
 
 class TestNavigatorGrip(unittest.TestCase):
     @classmethod
@@ -119,6 +131,88 @@ class TestNavigatorGrip(unittest.TestCase):
             wins = nav._group_move_windows()
         self.assertIn(fake, wins)
         self.assertIn(nav, wins)  # 浮动面板自己也跟着走
+
+    def _nav_with_window(self):
+        from PyQt6.QtCore import QRect
+        from PyQt6.QtWidgets import QWidget
+        import main_window  # noqa: F401
+        from window_navigator import WindowNavigatorPanel
+        import weakref
+        nav = WindowNavigatorPanel()
+        self.addCleanup(nav.deleteLater)
+        w = QWidget()
+        w.force_close_with_save = lambda: None
+        w.setGeometry(QRect(100, 100, 300, 200))
+        w.show()
+        self.addCleanup(w.deleteLater)
+        nav._window_refs = {id(w): weakref.ref(w)}
+        return nav, w
+
+    def test_item_dropped_on_other_screen_moves_that_window(self):
+        from PyQt6.QtCore import QPoint, QRect
+        import window_group_move as gm
+        import window_navigator as wn
+        nav, w = self._nav_with_window()
+        src = _FakeScreen(QRect(0, 0, 1000, 800))
+        dst = _FakeScreen(QRect(1000, 0, 1000, 800))
+        with mock.patch.object(gm, '_screen_of', return_value=src), \
+                mock.patch.object(wn.QApplication, 'screenAt', return_value=dst):
+            nav._on_item_dropped_outside(id(w), QPoint(1500, 300))
+        self.assertTrue(QRect(1000, 0, 1000, 800).contains(w.geometry()), w.geometry())
+
+    def test_item_dropped_on_same_screen_does_nothing(self):
+        from PyQt6.QtCore import QPoint, QRect
+        import window_group_move as gm
+        import window_navigator as wn
+        nav, w = self._nav_with_window()
+        scr = _FakeScreen(QRect(0, 0, 1000, 800))
+        before = w.geometry()
+        with mock.patch.object(gm, '_screen_of', return_value=scr), \
+                mock.patch.object(wn.QApplication, 'screenAt', return_value=scr):
+            nav._on_item_dropped_outside(id(w), QPoint(700, 300))
+        self.assertEqual(w.geometry(), before)
+
+    def test_list_emits_dropped_outside_only_when_released_outside(self):
+        from PyQt6.QtCore import QPoint, Qt
+        from PyQt6.QtWidgets import QListWidget, QListWidgetItem
+        import main_window  # noqa: F401
+        import window_navigator as wn
+        lw = wn.NavListWidget()
+        self.addCleanup(lw.deleteLater)
+        lw.resize(200, 200)
+        lw.show()
+        it = QListWidgetItem('x')
+        it.setData(Qt.ItemDataRole.UserRole, 42)
+        lw.addItem(it)
+        lw.setCurrentItem(it)
+        got = []
+        lw.dropped_outside.connect(lambda wid, p: got.append(wid))
+        inside = lw.viewport().mapToGlobal(lw.viewport().rect().center())
+        outside = lw.viewport().mapToGlobal(lw.viewport().rect().bottomRight()) + QPoint(500, 500)
+        with mock.patch.object(QListWidget, 'startDrag'):
+            with mock.patch.object(wn.QCursor, 'pos', return_value=inside):
+                lw.startDrag(Qt.DropAction.MoveAction)
+            self.assertEqual(got, [])  # 列表内松手 = 排序，不搬窗口
+            with mock.patch.object(wn.QCursor, 'pos', return_value=outside):
+                lw.startDrag(Qt.DropAction.MoveAction)
+        self.assertEqual(got, [42])
+
+    def test_context_menu_lists_displays(self):
+        from PyQt6.QtCore import QPoint
+        from PyQt6.QtWidgets import QMenu
+        nav, w = self._nav_with_window()
+        nav.window_list.addItem('x')
+        menus = []
+
+        def fake_exec(menu, *a, **k):
+            menus.append([act.text() for act in menu.actions()])
+            return None
+        with mock.patch.object(nav, '_resolve_window', return_value=w), \
+                mock.patch.object(QMenu, 'exec', new=fake_exec):
+            rect = nav.window_list.visualItemRect(nav.window_list.item(0))
+            nav._show_window_context_menu(rect.center() if rect.isValid() else QPoint(5, 5))
+        from i18n import t
+        self.assertTrue(menus and t("window.move_to_display") in menus[0], menus)
 
 
 if __name__ == '__main__':
