@@ -246,6 +246,9 @@ class TestMoveTabBetweenWindows(unittest.TestCase):
         self.assertGreater(hint._slot.left(), last_right)          # 紧跟在最后一个标签后
         self.assertLess(hint._slot.left(), last_right + 10)
         self.assertLessEqual(hint._slot.right(), hint.width())
+        # 占位与真标签同宽：拖的标签若与最后一个同名，宽度正好等于它（扣 margin-right）
+        b._update_tab_drop_caret(far, bar.tabText(bar.count() - 1))
+        self.assertEqual(round(hint._slot.width()), last.width() - 2)
         b._show_tab_drop_hint('page')
         self.assertEqual((hint._mode, hint._label), ('page', t("tab.drop_as_new_tab")))
         self.assertIsNone(hint._caret_x)

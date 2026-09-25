@@ -1138,10 +1138,17 @@ class TabSplitMixin:
         # 末尾：占位紧跟最后一个标签，宽度按标题估算，高度同未选中标签
         title = getattr(self, '_tab_drop_title', '') or ''
         fm = bar.fontMetrics()
-        w = max(100, min(220, fm.horizontalAdvance(title) + 44))
+        # 与真标签同宽：参照最后一个标签「去掉它自己的标题后」的宽度（内边距 +
+        # 关闭按钮，已扣掉 margin-right 2），再换上被拖标签的标题
+        if n > 0:
+            chrome = bar.tabRect(n - 1).width() - 2 - fm.horizontalAdvance(bar.tabText(n - 1))
+        else:
+            chrome = 14 + 4 + TabCloseButton.DIAMETER + 2 + TabCloseButton.RIGHT_GUTTER
+        w = max(60, min(240, chrome + fm.horizontalAdvance(title)))
         if n > 0:
             last = bar.tabRect(n - 1)
-            x0, top, bottom = last.right() + 3, last.top() + 4, last.bottom()
+            # tabRect 已含 margin-right，紧接其后正好是标签间距
+            x0, top, bottom = last.right() + 1, last.top() + 4, last.bottom()
         else:
             x0, top, bottom = 0, 4, bar.height()
         tl = hint.mapFromGlobal(bar.mapToGlobal(QPoint(x0, top)))
@@ -1149,7 +1156,7 @@ class TabSplitMixin:
         w = min(w, max(40, hint.width() - tl.x() - 2))
         theme = self._current_theme_dict()
         hint.set_slot(QRectF(tl.x(), tl.y(), w, h), title, bar.font(),
-                      theme.get('text', '#eaeaea'))
+                      theme.get('text_dim', '#888888'), theme.get('bg_medium'))
 
     def _hide_tab_drop_hint(self):
         hint = getattr(self, '_tab_drop_hint', None)

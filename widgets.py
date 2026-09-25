@@ -618,13 +618,15 @@ class DropHintOverlay(QWidget):
             self._slot = None
             self.update()
 
-    def set_slot(self, rect, title: str = '', font=None, text_color=None):
-        """末尾「标签占位」（本控件坐标的 QRectF）；设了就不画插入线。"""
+    def set_slot(self, rect, title: str = '', font=None, text_color=None, tab_bg=None):
+        """末尾「标签占位」（本控件坐标的 QRectF）；设了就不画插入线。
+        text_color：占位里标题 / × 的颜色（次要文字色）；tab_bg：未选中标签的底色。"""
         self._slot = rect
         self._slot_title = title
         self._slot_font = font
         if text_color is not None:
             self._text_dim = QColor(text_color)
+        self._slot_bg = QColor(tab_bg) if tab_bg else None
         self._caret_x = None
         self.update()
 
@@ -634,36 +636,54 @@ class DropHintOverlay(QWidget):
         return c
 
     def _paint_slot(self, p):
-        """末尾的标签占位：上圆角下直角，与真标签同形；淡色底 + 细边 + 淡标题。"""
+        """末尾的标签占位：长得就像一个未选中的真标签（上圆角、无描边），底色里
+        掺一点强调色，顶边一条强调色线，标题 + 淡 ×——「松手它就在这儿」。"""
         r = QRectF(self._slot)
         rad = 7.0
         path = QPainterPath()
-        path.moveTo(r.left(), r.bottom())
+        path.moveTo(r.left(), r.bottom() + 1)
         path.lineTo(r.left(), r.top() + rad)
         path.quadTo(r.left(), r.top(), r.left() + rad, r.top())
         path.lineTo(r.right() - rad, r.top())
         path.quadTo(r.right(), r.top(), r.right(), r.top() + rad)
-        path.lineTo(r.right(), r.bottom())
-        p.setBrush(self._tint(45))
-        pen = QPen(self._tint(170), 1.2)
-        p.setPen(pen)
-        p.drawPath(path)
-        # 顶边一条强调色，呼应选中标签的样子
+        path.lineTo(r.right(), r.bottom() + 1)
+        path.closeSubpath()
+        base = QColor(self._slot_bg) if getattr(self, '_slot_bg', None) else QColor(self._accent)
+        a = self._accent
+        mix = 0.22
+        fill = QColor(int(base.red() * (1 - mix) + a.red() * mix),
+                      int(base.green() * (1 - mix) + a.green() * mix),
+                      int(base.blue() * (1 - mix) + a.blue() * mix), 235)
         p.setPen(Qt.PenStyle.NoPen)
-        p.setBrush(self._accent)
-        p.drawRoundedRect(QRectF(r.left() + rad - 2, r.top(), r.width() - 2 * rad + 4, 2), 1, 1)
+        p.setBrush(fill)
+        p.drawPath(path)
+        # 顶边强调色线：沿着圆角裁出来，和选中标签的 border-top 一个样子
+        p.save()
+        p.setClipPath(path)
+        p.fillRect(QRectF(r.left(), r.top(), r.width(), 2), self._accent)
+        p.restore()
+        # × 的位置与 TabCloseButton 一致（右侧留白 6，直径 16）
+        x_c = r.right() - TabCloseButton.RIGHT_GUTTER - TabCloseButton.DIAMETER / 2
+        y_c = r.center().y() + 1
         if self._slot_title:
             from PyQt6.QtGui import QFontMetrics
             font = self._slot_font or self.font()
             fm = QFontMetrics(font)
-            text_r = r.adjusted(12, 2, -12, 0)
+            text_r = QRectF(r.left() + 14, r.top() + 2, x_c - 12 - (r.left() + 14), r.height() - 2)
             c = QColor(self._text_dim)
-            c.setAlpha(210)
             p.setPen(c)
             p.setFont(font)
             p.drawText(text_r, int(Qt.AlignmentFlag.AlignVCenter | Qt.AlignmentFlag.AlignLeft),
                        fm.elidedText(self._slot_title, Qt.TextElideMode.ElideRight,
                                      int(text_r.width())))
+        xc = QColor(self._text_dim)
+        xc.setAlpha(150)
+        pen = QPen(xc, 1.6)
+        pen.setCapStyle(Qt.PenCapStyle.RoundCap)
+        p.setPen(pen)
+        k = 3.6
+        p.drawLine(QPointF(x_c - k, y_c - k), QPointF(x_c + k, y_c + k))
+        p.drawLine(QPointF(x_c - k, y_c + k), QPointF(x_c + k, y_c - k))
 
     def paintEvent(self, event):
         p = QPainter(self)
