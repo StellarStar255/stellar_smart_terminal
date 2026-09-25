@@ -108,6 +108,41 @@ class TestGroupMoveSession(unittest.TestCase):
         # 尺寸等比放大，顶边中点对准松手点
         self.assertEqual(a.geometry(), QRect(1700, 490, 600, 400))
 
+    def test_cancel_snaps_windows_back(self):
+        from PyQt6.QtCore import QPoint
+        from window_group_move import GroupMoveSession
+        a, b = self._make_windows()
+        pa, pb = a.pos(), b.pos()
+        s = GroupMoveSession([a, b], QPoint(0, 0))
+        s.drag_to(QPoint(300, 200))
+        s.cancel()
+        self.assertEqual((a.pos(), b.pos()), (pa, pb))
+
+    def test_grip_esc_mid_drag_restores_and_ignores_release(self):
+        from PyQt6.QtCore import QEvent, QPoint, QPointF, Qt
+        from PyQt6.QtGui import QKeyEvent, QMouseEvent
+        from window_group_move import GroupMoveGrip
+        a, b = self._make_windows()
+        pa, pb = a.pos(), b.pos()
+        grip = GroupMoveGrip(lambda: [a, b])
+        self.addCleanup(grip.deleteLater)
+
+        def mouse(kind, gx, gy, buttons=Qt.MouseButton.LeftButton):
+            return QMouseEvent(kind, QPointF(1, 1), QPointF(gx, gy),
+                               Qt.MouseButton.LeftButton, buttons,
+                               Qt.KeyboardModifier.NoModifier)
+        grip.mousePressEvent(mouse(QEvent.Type.MouseButtonPress, 10, 10))
+        grip.mouseMoveEvent(mouse(QEvent.Type.MouseMove, 310, 210))
+        self.assertEqual(a.pos(), pa + QPoint(300, 200))
+        grip.keyPressEvent(QKeyEvent(QEvent.Type.KeyPress, Qt.Key.Key_Escape,
+                                     Qt.KeyboardModifier.NoModifier))
+        self.assertEqual((a.pos(), b.pos()), (pa, pb))
+        # 取消后手还按着继续拖、再松手：都不应再动窗口
+        grip.mouseMoveEvent(mouse(QEvent.Type.MouseMove, 500, 400))
+        grip.mouseReleaseEvent(mouse(QEvent.Type.MouseButtonRelease, 500, 400,
+                                     Qt.MouseButton.NoButton))
+        self.assertEqual((a.pos(), b.pos()), (pa, pb))
+
 
 class TestDragCancelled(unittest.TestCase):
     """拖到应用外松手 vs 按 Esc 取消：Qt 都报 IgnoreAction，靠物理输入状态区分。"""

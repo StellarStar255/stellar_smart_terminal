@@ -5,6 +5,7 @@
 - 松手时若光标落在另一块屏幕上，按「源屏可用区 → 目标屏可用区」等比
   重排每个窗口的位置与尺寸（小屏到大屏自动放大），最大化窗口在新屏重新最大化；
 - 全屏窗口（macOS 独立 Space）搬不动，跳过。
+- 拖动途中按 Esc 取消，所有窗口弹回原位；
 不用把手时，窗口标题栏照常单独拖动，互不影响。
 """
 import sys
@@ -126,6 +127,14 @@ class GroupMoveSession:
         for w, pos, _geo, _scr, _mx in self._alive():
             w.move(pos + delta)
 
+    def cancel(self):
+        """Esc 取消：所有窗口回到按下把手时的位置。"""
+        for w, pos, _geo, _scr, _mx in self._alive():
+            try:
+                w.move(pos)
+            except Exception:
+                logger.debug("GroupMoveSession.cancel: suppressed", exc_info=True)
+
     def finish(self, global_pos: QPoint):
         """松手：光标落在别的屏幕上 → 等比重排到该屏；否则保持平移结果。"""
         target = QApplication.screenAt(global_pos)
@@ -242,6 +251,8 @@ class GroupMoveGrip(QWidget):
             logger.debug("GroupMoveGrip: provider failed", exc_info=True)
             windows = []
         self._session = GroupMoveSession(windows, event.globalPosition().toPoint())
+        # 拖动期间接管键盘，Esc 才能送到把手（焦点通常在终端上）
+        self.grabKeyboard()
         self.setCursor(Qt.CursorShape.ClosedHandCursor)
         self.update()
         event.accept()
@@ -255,10 +266,24 @@ class GroupMoveGrip(QWidget):
     def mouseReleaseEvent(self, event):
         if self._session is None or event.button() != Qt.MouseButton.LeftButton:
             return super().mouseReleaseEvent(event)
-        session, self._session = self._session, None
+        session = self._end_session()
         # 把手本身随宿主窗口一起移动，光标位置一律用全局坐标
         session.finish(event.globalPosition().toPoint())
-        self.setCursor(Qt.CursorShape.OpenHandCursor)
-        self.update()
         self.moved.emit()
         event.accept()
+
+    def keyPressEvent(self, event):
+        if self._session is not None and event.key() == Qt.Key.Key_Escape:
+            # 取消后左键仍按着：之后的移动/松手因 _session 为空一律忽略
+            self._end_session().cancel()
+            self.moved.emit()
+            event.accept()
+            return
+        super().keyPressEvent(event)
+
+    def _end_session(self):
+        session, self._session = self._session, None
+        self.releaseKeyboard()
+        self.setCursor(Qt.CursorShape.OpenHandCursor)
+        self.update()
+        return session
