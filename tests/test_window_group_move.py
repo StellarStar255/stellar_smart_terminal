@@ -109,6 +109,41 @@ class TestGroupMoveSession(unittest.TestCase):
         self.assertEqual(a.geometry(), QRect(1700, 490, 600, 400))
 
 
+class TestDragCancelled(unittest.TestCase):
+    """拖到应用外松手 vs 按 Esc 取消：Qt 都报 IgnoreAction，靠物理输入状态区分。"""
+
+    def _check(self, platform, fn, state):
+        import window_group_move as gm
+        with mock.patch.object(gm.sys, 'platform', platform), \
+                mock.patch.object(gm, fn, return_value=state):
+            return gm.drag_cancelled()
+
+    def test_released_button_is_a_real_drop(self):
+        self.assertFalse(self._check('darwin', '_mac_input_state', (False, False)))
+        self.assertFalse(self._check('win32', '_win_input_state', (False, False)))
+
+    def test_button_still_held_means_esc_cancel(self):
+        self.assertTrue(self._check('darwin', '_mac_input_state', (True, False)))
+        self.assertTrue(self._check('win32', '_win_input_state', (True, False)))
+
+    def test_esc_down_means_cancel(self):
+        self.assertTrue(self._check('darwin', '_mac_input_state', (False, True)))
+        self.assertTrue(self._check('win32', '_win_input_state', (False, True)))
+
+    def test_state_query_failure_falls_back_to_drop(self):
+        import window_group_move as gm
+        with mock.patch.object(gm.sys, 'platform', 'darwin'), \
+                mock.patch.object(gm, '_mac_input_state', side_effect=OSError):
+            self.assertFalse(gm.drag_cancelled())
+
+    @unittest.skipUnless(sys.platform == 'darwin', 'CoreGraphics only on macOS')
+    def test_mac_query_really_works(self):
+        import window_group_move as gm
+        btn, esc = gm._mac_input_state()
+        self.assertIsInstance(btn, bool)
+        self.assertIsInstance(esc, bool)
+
+
 class TestNavigatorGrip(unittest.TestCase):
     @classmethod
     def setUpClass(cls):
@@ -189,13 +224,22 @@ class TestNavigatorGrip(unittest.TestCase):
         lw.dropped_outside.connect(lambda wid, p: got.append(wid))
         inside = lw.viewport().mapToGlobal(lw.viewport().rect().center())
         outside = lw.viewport().mapToGlobal(lw.viewport().rect().bottomRight()) + QPoint(500, 500)
-        with mock.patch.object(QListWidget, 'startDrag'):
+        with mock.patch.object(QListWidget, 'startDrag'), \
+                mock.patch.object(wn, 'drag_cancelled', return_value=False):
             with mock.patch.object(wn.QCursor, 'pos', return_value=inside):
                 lw.startDrag(Qt.DropAction.MoveAction)
             self.assertEqual(got, [])  # 列表内松手 = 排序，不搬窗口
             with mock.patch.object(wn.QCursor, 'pos', return_value=outside):
                 lw.startDrag(Qt.DropAction.MoveAction)
         self.assertEqual(got, [42])
+
+        # 按 Esc 取消：光标虽在列表外（甚至在别的屏上），也不算松手
+        got.clear()
+        with mock.patch.object(QListWidget, 'startDrag'), \
+                mock.patch.object(wn, 'drag_cancelled', return_value=True), \
+                mock.patch.object(wn.QCursor, 'pos', return_value=outside):
+            lw.startDrag(Qt.DropAction.MoveAction)
+        self.assertEqual(got, [])
 
     def test_context_menu_lists_displays(self):
         from PyQt6.QtCore import QPoint

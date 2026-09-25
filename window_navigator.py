@@ -21,7 +21,7 @@ import app_config
 from git_widget import _make_git_tool_icon
 from i18n import t
 from themes import readable_on_light
-from window_group_move import GroupMoveGrip, move_windows_to_screen
+from window_group_move import GroupMoveGrip, drag_cancelled, move_windows_to_screen
 from app_logging import get_logger
 
 logger = get_logger(__name__)
@@ -57,7 +57,8 @@ def _window_screen_key(w):
 
 class NavListWidget(QListWidget):
     """窗口列表：列表内拖动照旧是排序；把条目拖出列表、在别的显示器上松手，
-    发 dropped_outside(条目的窗口 id, 松手全局坐标)，由面板把该窗口搬过去。"""
+    发 dropped_outside(条目的窗口 id, 松手全局坐标)，由面板把该窗口搬过去。
+    按 Esc 取消拖拽不算松手，窗口不动。"""
 
     dropped_outside = pyqtSignal(int, QPoint)
 
@@ -66,6 +67,8 @@ class NavListWidget(QListWidget):
         wid = item.data(Qt.ItemDataRole.UserRole) if item is not None else None
         super().startDrag(supported_actions)  # 阻塞到松手
         if sip.isdeleted(self) or not isinstance(wid, int):
+            return
+        if drag_cancelled():
             return
         pos = QCursor.pos()
         if not self.viewport().rect().contains(self.viewport().mapFromGlobal(pos)):
