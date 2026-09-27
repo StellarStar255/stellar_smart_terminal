@@ -27,9 +27,11 @@ from PyQt6.QtWidgets import (
     QApplication, QSizePolicy, QProgressDialog, QStyledItemDelegate,
     QAbstractItemView, QDialog, QComboBox, QCheckBox,
 )
-from PyQt6.QtCore import Qt, pyqtSignal, QTimer, QMimeData, QUrl, QSize, QEvent
+from PyQt6.QtCore import (Qt, pyqtSignal, QTimer, QMimeData, QUrl, QSize, QEvent,
+                          QRectF)
 from PyQt6.QtGui import (QAction, QActionGroup, QCursor, QDrag, QShortcut,
-                         QKeySequence, QDesktopServices)
+                         QKeySequence, QDesktopServices, QIcon, QPainter,
+                         QPen, QPixmap, QColor)
 from PyQt6 import sip  # 用于检查 C++ 对象是否已被删除
 
 from i18n import t
@@ -501,6 +503,9 @@ class _ForwardsDialog(QDialog):
 
         self._list = QListWidget()
         self._list.setMinimumHeight(150)
+        self._list.setIconSize(QSize(10, 10))
+        # 启用/停用只换图标不改文字；再锁定统一行高，任何一行都不会单独变高
+        self._list.setUniformItemSizes(True)
         layout.addWidget(self._list, 1)
         for r in rules or []:
             self._add_item(dict(r))
@@ -575,18 +580,50 @@ class _ForwardsDialog(QDialog):
                 f'{spec.get("bind_host") or "127.0.0.1"}|{spec.get("bind_port")}')
 
     def _add_item(self, spec: dict) -> QListWidgetItem:
-        item = QListWidgetItem(self._item_text(spec))
+        item = QListWidgetItem()
         item.setData(_ROLE_ENTRY, spec)
         self._list.addItem(item)
+        self._refresh_item(item)
         return item
 
     def _item_text(self, spec: dict) -> str:
-        mark = "●" if self.rule_key(spec) in self._active else "○"
         auto = " · " + t("remote.fwd_auto_short") if spec.get("auto") else ""
-        return f"{mark} {ssh_control.forward_label(spec)}{auto}"
+        return f"{ssh_control.forward_label(spec)}{auto}"
+
+    _status_icons: dict = {}
+
+    @classmethod
+    def _status_icon(cls, active: bool) -> QIcon:
+        # 状态点用自绘图标而非 ●/○ 字符：两个字符会回退到行高不同的字体，
+        # 启用后那一行会变高，列表行距参差不齐
+        icon = cls._status_icons.get(active)
+        if icon is None:
+            icon = QIcon()
+            for scale in (1, 2):
+                pm = QPixmap(10 * scale, 10 * scale)
+                pm.setDevicePixelRatio(scale)
+                pm.fill(Qt.GlobalColor.transparent)
+                p = QPainter(pm)
+                p.setRenderHint(QPainter.RenderHint.Antialiasing)
+                if active:
+                    p.setPen(Qt.PenStyle.NoPen)
+                    p.setBrush(QColor("#4ade80"))
+                    p.drawEllipse(1, 1, 8, 8)
+                else:
+                    p.setPen(QPen(QColor("#b8b8cc"), 1.2))
+                    p.setBrush(Qt.BrushStyle.NoBrush)
+                    p.drawEllipse(QRectF(1.5, 1.5, 7.0, 7.0))
+                p.end()
+                icon.addPixmap(pm)
+            cls._status_icons[active] = icon
+        return icon
+
+    def _is_item_active(self, item: QListWidgetItem) -> bool:
+        return self.rule_key(item.data(_ROLE_ENTRY) or {}) in self._active
 
     def _refresh_item(self, item: QListWidgetItem):
         item.setText(self._item_text(item.data(_ROLE_ENTRY)))
+        item.setIcon(self._status_icon(self._is_item_active(item)))
 
     def _sync_dest_enabled(self):
         is_socks = self._type.currentData() == "D"

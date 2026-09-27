@@ -895,10 +895,23 @@ class TestForwardsDialog(unittest.TestCase):
         d._list.setCurrentRow(0)
         d._apply_selected(False)
         self.assertEqual(len(d.active_keys()), 1)
-        self.assertTrue(d._list.item(0).text().startswith('●'))
+        self.assertTrue(d._is_item_active(d._list.item(0)))
         d._apply_selected(True)
         self.assertEqual(d.active_keys(), set())
-        self.assertTrue(d._list.item(0).text().startswith('○'))
+        self.assertFalse(d._is_item_active(d._list.item(0)))
+        d.deleteLater()
+
+    def test_starting_a_rule_keeps_row_layout(self):
+        # 状态点曾是 ●/○ 字符：启用会改该行文字、触发重排，两个字符还回退到
+        # 不同字体，列表在点「启用」的瞬间跳动。现在状态走图标，文字不变
+        d = self._dlg([{'type': 'L', 'bind_port': '8888', 'dest_port': '80'},
+                       {'type': 'L', 'bind_port': '9999', 'dest_port': '90'}])
+        d._list.setCurrentRow(0)
+        before = d._list.item(0).text()
+        d._apply_selected(False)
+        self.assertEqual(d._list.item(0).text(), before)
+        self.assertTrue(d._list.uniformItemSizes())
+        self.assertEqual(d._list.sizeHintForRow(0), d._list.sizeHintForRow(1))
         d.deleteLater()
 
     def test_failed_start_does_not_mark_it_active(self):
