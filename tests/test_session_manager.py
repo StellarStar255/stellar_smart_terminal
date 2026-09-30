@@ -13,6 +13,7 @@ import pytest
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
 import session_manager as sm_mod
+import file_persistence
 from session_manager import SessionEntry, SessionManager
 
 
@@ -251,11 +252,11 @@ def test_save_failure_preserves_previous_session(manager, monkeypatch, failure):
 
     with monkeypatch.context() as m:
         if failure == 'create':
-            m.setattr(sm_mod.tempfile, 'mkstemp', fail)
+            m.setattr(file_persistence.tempfile, 'mkstemp', fail)
         elif failure == 'write':
             m.setattr(sm_mod.json, 'dump', partial_dump)
         else:
-            m.setattr(Path, 'replace', fail)
+            m.setattr(file_persistence.os, 'replace', fail)
         with pytest.raises(OSError):
             manager.save_session(session)
     assert path.read_bytes() == original

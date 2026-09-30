@@ -81,6 +81,18 @@ class TestAtomicSave(_Base):
             self.assertEqual(f.read(), "edited\n")
         self.assertFalse(pane.is_modified())
 
+    def test_windows_replace_denied_never_falls_back_to_truncation(self):
+        area, pane, p = self._area_with_file('original\n')
+        pane.editor.setPlainText('new content\n')
+        with unittest.mock.patch('sys.platform', 'win32'), \
+                unittest.mock.patch('file_persistence.os.replace',
+                                    side_effect=PermissionError('file in use')):
+            self.assertFalse(pane.save_file(silent=True))
+        with open(p) as stream:
+            self.assertEqual(stream.read(), 'original\n')
+        self.assertTrue(pane.is_modified())
+        self.assertTrue(pane.save_file(silent=True))
+
     def test_save_is_atomic_replace(self):
         area, pane, p = self._area_with_file()
         ino = os.stat(p).st_ino

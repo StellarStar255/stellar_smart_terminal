@@ -5,13 +5,13 @@
 import json
 import os
 import re
-import tempfile
 from concurrent.futures import Future, ThreadPoolExecutor
 from pathlib import Path
 from typing import List, Optional, Dict, Any
 from dataclasses import dataclass, field
 
 from app_logging import get_logger
+from file_persistence import atomic_writer
 from utils import (
     get_sessions_dir,
     generate_session_id,
@@ -171,7 +171,6 @@ class SessionManager:
 
     def create_session(self, command: str = "claude") -> Session:
         """创建新会话"""
-        import os
         session = Session(
             session_id=generate_session_id(),
             start_time=format_timestamp(),
@@ -321,18 +320,8 @@ class SessionManager:
 
     def _write_session_data(self, data: dict, session_id: str) -> Path:
         file_path = self.sessions_dir / f"{session_id}.json"
-        # 写入失败必须保留旧记录，不能退回会截断原文件的直接写入。
-        fd, tmp_path = tempfile.mkstemp(
-            dir=self.sessions_dir, suffix='.tmp', prefix='.session_')
-        try:
-            with open(fd, 'w', encoding='utf-8') as f:
-                json.dump(data, f, ensure_ascii=False, separators=(',', ':'))
-                f.flush()
-                os.fsync(f.fileno())
-            Path(tmp_path).replace(file_path)
-        except BaseException:
-            Path(tmp_path).unlink(missing_ok=True)
-            raise
+        with atomic_writer(file_path, prefix='.session_') as stream:
+            json.dump(data, stream, ensure_ascii=False, separators=(',', ':'))
         return file_path
 
     def load_session(self, session_id: str) -> Optional[Session]:

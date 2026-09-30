@@ -5,11 +5,12 @@
 import hashlib
 import json
 import os
-import sys
 import re
 import tempfile
 import time
 from pathlib import Path
+
+from file_persistence import atomic_writer, file_sha256
 
 from PyQt6.QtWidgets import (
     QWidget, QVBoxLayout, QHBoxLayout, QPlainTextEdit,
@@ -4081,49 +4082,10 @@ class FileEditorWidget(QWidget):
             self._highlighter = GenericHighlighter(doc, rules, blocks, self.theme)
 
     def _atomic_write_bytes(self, path: str, data: bytes):
-        """原子写入：写到同目录临时文件 → fsync → os.replace 覆盖目标。
-
-        替代 open(path,'wb').write()——后者会先把原文件 truncate 成 0 再写，
-        若写到一半崩溃 / 磁盘满 / 设备掉线，原文件就被截断或写坏。原子方案
-        保证：要么完整新内容、要么原文件原封不动，绝不出现半截文件。
-        临时文件与目标同目录，确保 os.replace 是同一文件系统内的原子 rename。
-        保存后由 _refresh_known_mtime 重新挂监听（replace 会换 inode）。
-        """
-        # 软链（~/.zshrc -> ~/dotfiles/zshrc 这类）必须写到真实目标：对链接
-        # 本身 os.replace 会把链接换成普通文件，dotfiles 仓库里的文件纹丝不动
-        target = os.path.realpath(path)
-        d = os.path.dirname(target) or '.'
-        fd, tmp = tempfile.mkstemp(dir=d, prefix='.', suffix='.tmp')
-        try:
-            with os.fdopen(fd, 'wb') as f:
-                f.write(data)
-                f.flush()
-                os.fsync(f.fileno())
-            # 尽量保留原文件权限位
-            try:
-                if os.path.exists(target):
-                    os.chmod(tmp, os.stat(target).st_mode & 0o777)
-            except OSError:  # 尽力而为，失败不影响主流程
-                pass
-            try:
-                os.replace(tmp, target)
-            except PermissionError:
-                # 仅 Windows：目标被别的进程占用时 replace 会拒绝 → 退回就地写
-                # （非原子，但总比不保存强）。POSIX 上 replace 失败必须原样抛出，
-                # 原文件保持原封不动（见 test_failed_write_keeps_original）。
-                if sys.platform != 'win32' or not os.path.exists(target):
-                    raise
-                with open(target, 'wb') as f:
-                    f.write(data)
-                    f.flush()
-                    os.fsync(f.fileno())
-                os.unlink(tmp)
-        except Exception:
-            try:
-                os.unlink(tmp)
-            except OSError:  # 尽力而为，失败不影响主流程
-                pass
-            raise
+        """保存到真实目标，保留权限；失败时保留旧文件和编辑缓冲区。"""
+        with atomic_writer(path, binary=True, preserve_mode=True,
+                           follow_symlinks=True) as stream:
+            stream.write(data)
 
     def save_file(self, silent: bool = False) -> bool:
         """保存文件。
@@ -4161,11 +4123,7 @@ class FileEditorWidget(QWidget):
             if (self._disk_content_path == self._current_file
                     and self._disk_content_hash is not None
                     and os.path.isfile(self._current_file)):
-                with open(self._current_file, 'rb') as f:
-                    digest = hashlib.sha256()
-                    for chunk in iter(lambda: f.read(256 * 1024), b''):
-                        digest.update(chunk)
-                    disk_hash = digest.hexdigest()
+                disk_hash = file_sha256(self._current_file)
                 if disk_hash != self._disk_content_hash:
                     if silent:
                         logger.debug("auto-save skipped (disk changed): %s",

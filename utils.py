@@ -12,6 +12,7 @@ from datetime import datetime
 from pathlib import Path
 from typing import List, Set
 from app_logging import get_logger
+from file_persistence import atomic_writer
 logger = get_logger(__name__)
 
 # 支持的文件扩展名
@@ -338,50 +339,19 @@ def read_config_json(file_path: Path):
 
 
 def atomic_write_json(file_path: Path, data) -> bool:
-    """原子写入 JSON 配置文件。
+    """原子保存 UTF-8 JSON；失败返回 False，保持旧配置与其权限不变。
 
-    背景：多个 Smart Terminal 窗口（多进程）共用同一份配置文件。直接
-    `with open(... 'w')` 会先 truncate 再逐步写入，期间另一个进程读到的就是
-    被截断的半截 JSON → 解析失败 → 该进程把它当作"文件损坏"，进而以自己
-    内存里残缺的配置覆盖回磁盘，造成 git_proxy / git_proxies 等"由其它组件
-    维护、本进程不感知"的字段被清空。
-
-    用 tempfile.mkstemp + Path.replace 的"先写临时文件，再原子改名"，
-    其它进程在任意时刻读到的要么是旧的完整文件、要么是新的完整文件，
-    不存在半截窗口。
+    成功后新文件仅属主可读写（mkstemp 的 0600），保护配置中的密钥。
+    跨进程读改写锁由 app_config 管理。
     """
     try:
-        directory = file_path.parent
-        directory.mkdir(parents=True, exist_ok=True)
-        fd, tmp_path = tempfile.mkstemp(
-            dir=str(directory), suffix='.tmp', prefix='.config_'
-        )
-        try:
-            with open(fd, 'w', encoding='utf-8') as f:
-                json.dump(data, f, ensure_ascii=False, indent=2)
-            Path(tmp_path).replace(file_path)
-        except BaseException:
-            Path(tmp_path).unlink(missing_ok=True)
-            raise
-        # 配置可能含明文密钥（LLM 代理 api_key 等），强制仅属主可读写，
-        # 防止旧文件残留的宽松权限或宽 umask 导致同机其它用户读取。
-        try:
-            file_path.chmod(0o600)
-        except OSError:  # 尽力而为，失败不影响主流程
-            pass
+        file_path.parent.mkdir(parents=True, exist_ok=True)
+        with atomic_writer(file_path, prefix='.config_') as stream:
+            json.dump(data, stream, ensure_ascii=False, indent=2)
         return True
     except OSError:
-        # 临时文件创建/重命名失败时回退到直写，至少保证当前进程的设置能落盘
-        try:
-            with open(file_path, 'w', encoding='utf-8') as f:
-                json.dump(data, f, ensure_ascii=False, indent=2)
-            try:
-                file_path.chmod(0o600)
-            except OSError:  # 尽力而为，失败不影响主流程
-                pass
-            return True
-        except OSError:
-            return False
+        logger.warning('Could not save config %s', file_path, exc_info=True)
+        return False
 
 
 # ===== 完成提示音（绿点点亮时播放，可在设置里选） =====
