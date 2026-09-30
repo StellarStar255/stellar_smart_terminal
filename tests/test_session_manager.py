@@ -231,3 +231,36 @@ class TestListSessionsCache:
         result = manager.list_sessions()
         result[0]['command'] = 'hacked'
         assert manager.list_sessions()[0]['command'] == 'claude'
+
+
+@pytest.mark.parametrize('failure', ['create', 'write', 'replace'])
+def test_save_failure_preserves_previous_session(manager, monkeypatch, failure):
+    session = manager.create_session('test')
+    manager.add_output('original')
+    path = manager.save_session(session)
+    original = path.read_bytes()
+    old_sig = manager._last_saved_sig
+    manager.add_output('updated')
+
+    def fail(*args, **kwargs):
+        raise OSError('simulated disk failure')
+
+    def partial_dump(data, f, **kwargs):
+        f.write('{"partial":')
+        raise OSError('disk full')
+
+    with monkeypatch.context() as m:
+        if failure == 'create':
+            m.setattr(sm_mod.tempfile, 'mkstemp', fail)
+        elif failure == 'write':
+            m.setattr(sm_mod.json, 'dump', partial_dump)
+        else:
+            m.setattr(Path, 'replace', fail)
+        with pytest.raises(OSError):
+            manager.save_session(session)
+    assert path.read_bytes() == original
+    assert not list(manager.sessions_dir.glob('.session_*.tmp'))
+    assert manager._last_saved_sig == old_sig
+    manager.auto_save()
+    manager.flush()
+    assert 'updated' in manager.load_session(session.session_id).entries[0].content

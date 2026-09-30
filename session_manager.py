@@ -3,6 +3,7 @@
 负责会话的创建、存储、加载和管理
 """
 import json
+import os
 import re
 import tempfile
 from concurrent.futures import Future, ThreadPoolExecutor
@@ -305,8 +306,9 @@ class SessionManager:
         # 等待在途的后台保存，避免旧快照晚于新数据落盘
         self._wait_pending_save()
         data = session.to_dict()
+        path = self._write_session_data(data, session.session_id)
         self._last_saved_sig = self._session_signature(session)
-        return self._write_session_data(data, session.session_id)
+        return path
 
     def _wait_pending_save(self, timeout: float = 10.0):
         future = self._pending_save
@@ -319,27 +321,18 @@ class SessionManager:
 
     def _write_session_data(self, data: dict, session_id: str) -> Path:
         file_path = self.sessions_dir / f"{session_id}.json"
-        # Write to a temp file first, then atomically replace
+        # 写入失败必须保留旧记录，不能退回会截断原文件的直接写入。
+        fd, tmp_path = tempfile.mkstemp(
+            dir=self.sessions_dir, suffix='.tmp', prefix='.session_')
         try:
-            fd, tmp_path = tempfile.mkstemp(
-                dir=self.sessions_dir, suffix='.tmp', prefix='.session_'
-            )
-            try:
-                with open(fd, 'w', encoding='utf-8') as f:
-                    # 紧凑格式（无 indent）：json 走 C 编码器，序列化比
-                    # indent=2 的纯 Python 编码器快 3~5 倍。大会话每 30s
-                    # 全量重写，这里的差距直接决定后台线程的 GIL 占用。
-                    json.dump(data, f, ensure_ascii=False,
-                              separators=(',', ':'))
-                Path(tmp_path).replace(file_path)
-            except BaseException:
-                Path(tmp_path).unlink(missing_ok=True)
-                raise
-        except OSError:
-            # Fallback to direct write if temp file fails
-            with open(file_path, 'w', encoding='utf-8') as f:
-                json.dump(data, f, ensure_ascii=False,
-                          separators=(',', ':'))
+            with open(fd, 'w', encoding='utf-8') as f:
+                json.dump(data, f, ensure_ascii=False, separators=(',', ':'))
+                f.flush()
+                os.fsync(f.fileno())
+            Path(tmp_path).replace(file_path)
+        except BaseException:
+            Path(tmp_path).unlink(missing_ok=True)
+            raise
         return file_path
 
     def load_session(self, session_id: str) -> Optional[Session]:

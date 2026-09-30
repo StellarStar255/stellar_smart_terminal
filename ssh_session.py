@@ -20,6 +20,7 @@ import stat
 import tarfile
 import threading
 import time
+import uuid
 from concurrent.futures import Future, ThreadPoolExecutor
 from dataclasses import dataclass, field
 from pathlib import Path
@@ -1769,7 +1770,7 @@ class SSHSession(QObject):
         self.invalidate_cache(old)
 
     def upload(self, local_path: str, remote_path: str):
-        """与 ControlMasterSession.upload 同口径：先落 <目标>.part 再改名，半成品
+        """与 ControlMasterSession.upload 同口径：先落独占临时文件再改名，半成品
         不会被别人看见。直接委托 upload_with_progress（它自带 _auto_reconnect）。"""
         self.upload_with_progress(local_path, remote_path, None)
 
@@ -1782,31 +1783,30 @@ class SSHSession(QObject):
         高频回调（每个 chunk 一次）。调用方需要自己做节流，并把更新切回
         UI 线程 —— 线程语义与 download_with_progress 完全一致。
 
-        远端侧原子性：先传到 <目标>.part，传完再 posix_rename 改名；服务器
-        不支持 posix-rename@openssh.com 扩展时回退普通 rename（SFTP rename
-        在目标已存在时会失败，所以先删一次目标）。失败时清理远端 .part。
+        先独占创建随机临时文件，传完再 posix_rename 改名。不支持扩展时
+        尝试普通 rename；若目标已存在则安全失败，绝不先删除原文件。
 
         注意：被 _auto_reconnect 装饰 —— 断线重连后整个文件从头重传，
         progress_cb 的 bytes_done 会从 0 重新涨（可接受）。
         """
         sftp = self._require()
-        tmp_path = remote_path + ".part"
+        tmp_path = posixpath.join(posixpath.dirname(remote_path) or '.',
+                                  f".stellar-upload-{uuid.uuid4().hex}.part")
+        owned = False
         try:
+            with sftp.open(tmp_path, 'wx'):
+                owned = True
             sftp.put(local_path, tmp_path, callback=progress_cb)
             try:
                 sftp.posix_rename(tmp_path, remote_path)
             except OSError:
-                # 服务器不支持 posix_rename 扩展（或目标状态导致失败）→
-                # 回退到「先删目标再 rename」。目标不存在的删除失败忽略。
-                try:
-                    sftp.remove(remote_path)
-                except OSError:  # 尽力而为，失败不影响主流程
-                    pass
+                # 普通 SFTP rename 不覆盖已有目标；失败时保留原文件。
                 sftp.rename(tmp_path, remote_path)
         except Exception:
             # 失败时清理远端半成品（连接已断时删不掉也只能算了）
             try:
-                sftp.remove(tmp_path)
+                if owned:
+                    sftp.remove(tmp_path)
             except Exception:
                 logger.debug("upload_with_progress: suppressed exception", exc_info=True)
             raise

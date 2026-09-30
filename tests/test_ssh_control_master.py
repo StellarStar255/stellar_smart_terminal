@@ -386,7 +386,10 @@ class TestTransfers(unittest.TestCase):
                                        lambda d, t: seen.append((d, t)))
         self.assertEqual(proc.stdin.written, payload)
         # 落 .part 再改名，但只起**一条** ssh —— 批量上传时进程启动是真开销
-        self.assertEqual(cmds, ['cat > /d/up.bin.part && mv -- /d/up.bin.part /d/up.bin'])
+        self.assertEqual(len(cmds), 1)
+        self.assertIn('set -C; exec 3> /d/.stellar-upload-', cmds[0])
+        self.assertIn('trap ', cmds[0])
+        self.assertIn('cat >&3 && mv -- ', cmds[0])
         self.assertEqual(extra, [], '成功路径不该再多一条 ssh')
         self.assertEqual(seen[-1], (len(payload), len(payload)))
 
@@ -399,7 +402,53 @@ class TestTransfers(unittest.TestCase):
         self.sess._run = lambda cmd, timeout=None: ran.append(cmd) or ''
         with self.assertRaises(RuntimeError):
             self.sess.upload_with_progress(local, '/d/up.bin', None)
-        self.assertEqual(ran, ['rm -f -- /d/up.bin.part'])
+        self.assertEqual(ran, [], '远端 trap 清理，不能盲删未取得所有权的文件')
+
+    def test_upload_command_preserves_unrelated_part_and_cleans_failure(self):
+        from pathlib import Path
+        local = Path(self.tmp) / 'source'
+        local.write_bytes(b'new')
+        target = Path(self.tmp) / "target with ' quote"
+        target.write_bytes(b'old')
+        unrelated = Path(str(target) + '.part')
+        unrelated.write_bytes(b'unrelated')
+        commands = []
+        self._arm(_FakeProc(), commands)
+        self.sess.upload(str(local), str(target))
+        self.sess.upload(str(local), str(target))
+        self.assertNotEqual(commands[0], commands[1])
+        result = subprocess.run(['/bin/sh', '-c', commands[0]], input=b'new',
+                                capture_output=True)
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertEqual(target.read_bytes(), b'new')
+        self.assertEqual(unrelated.read_bytes(), b'unrelated')
+        self.assertEqual(list(Path(self.tmp).glob('.stellar-upload-*')), [])
+        # 模拟 rename 失败：已存在的目标必须保持完整，自己的临时文件被清理。
+        result = subprocess.run(['/bin/sh', '-c', 'mv() { return 1; }; ' + commands[1]],
+                                input=b'failed update', capture_output=True)
+        self.assertNotEqual(result.returncode, 0)
+        self.assertEqual(target.read_bytes(), b'new')
+        self.assertEqual(list(Path(self.tmp).glob('.stellar-upload-*')), [])
+
+    def test_upload_command_exclusive_collision_preserves_file(self):
+        from pathlib import Path
+        from types import SimpleNamespace
+        local = Path(self.tmp) / 'source'
+        local.write_bytes(b'new')
+        collision = Path(self.tmp) / '.stellar-upload-collision.part'
+        collision.write_bytes(b'keep')
+        target = Path(self.tmp) / 'target'
+        target.write_bytes(b'original')
+        commands = []
+        self._arm(_FakeProc(), commands)
+        with mock.patch('ssh_control.uuid.uuid4',
+                        return_value=SimpleNamespace(hex='collision')):
+            self.sess.upload(str(local), str(target))
+        result = subprocess.run(['/bin/sh', '-c', commands[0]], input=b'new',
+                                capture_output=True)
+        self.assertNotEqual(result.returncode, 0)
+        self.assertEqual(collision.read_bytes(), b'keep')
+        self.assertEqual(target.read_bytes(), b'original')
 
     def test_abort_kills_running_children(self):
         proc = _FakeProc()

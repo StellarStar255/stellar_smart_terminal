@@ -21,6 +21,11 @@ class _Base(unittest.TestCase):
 
     def setUp(self):
         self._areas = []
+        backup_dir = tempfile.TemporaryDirectory()
+        self.addCleanup(backup_dir.cleanup)
+        patcher = unittest.mock.patch('file_editor._AUTOSAVE_DIR', backup_dir.name)
+        patcher.start()
+        self.addCleanup(patcher.stop)
 
     def tearDown(self):
         # 每个 EditorArea 打开文件后装了 QFileSystemWatcher；os.utime 触发的
@@ -510,5 +515,74 @@ class TestStaleAutosaveRestore(_Base):
                          "磁盘更新时默认按钮应为 No")
 
 
-if __name__ == "__main__":
+
+
+class TestContentConflict(_Base):
+    def test_preserved_or_older_timestamp_blocks_auto_save(self):
+        for delta in (0, -10, 0.0001):
+            with self.subTest(delta=delta):
+                area, pane, p = self._area_with_file('original\n')
+                stamp = os.stat(p).st_mtime_ns
+                pane.editor.setPlainText('local edit\n')
+                with open(p, 'w') as f:
+                    f.write('external edit\n')
+                changed = stamp + int(delta * 1_000_000_000)
+                os.utime(p, ns=(changed, changed))
+                self.assertFalse(pane.save_file(silent=True))
+                with open(p) as f:
+                    self.assertEqual(f.read(), 'external edit\n')
+                self.assertTrue(pane.is_modified())
+
+    def test_timestamp_only_change_does_not_block_save(self):
+        area, pane, p = self._area_with_file('original\n')
+        pane.editor.setPlainText('local edit\n')
+        stamp = os.path.getmtime(p) + 10
+        os.utime(p, (stamp, stamp))
+        self.assertTrue(pane.save_file(silent=True))
+
+    def test_watcher_detects_same_timestamp_content_change(self):
+        area, pane, p = self._area_with_file('original\n')
+        stamp = os.stat(p).st_mtime_ns
+        with open(p, 'w') as f:
+            f.write('external edit\n')
+        os.utime(p, ns=(stamp, stamp))
+        pane._handle_external_change()
+        self.assertEqual(pane.editor.toPlainText(), 'external edit\n')
+        pane.editor.setPlainText('next edit\n')
+        self.assertTrue(pane.save_file(silent=True))
+
+    def test_declining_reload_does_not_authorize_auto_overwrite(self):
+        from PyQt6.QtWidgets import QMessageBox
+        area, pane, p = self._area_with_file('original\n')
+        pane.editor.setPlainText('local edit\n')
+        self._make_disk_newer(pane, p, 'external edit\n')
+        with unittest.mock.patch.object(QMessageBox, 'question',
+                                        return_value=QMessageBox.StandardButton.No):
+            pane._handle_external_change()
+        self.assertFalse(pane.save_file(silent=True))
+
+    def test_failed_save_keeps_disk_baseline_for_retry(self):
+        area, pane, p = self._area_with_file('original\n')
+        baseline = pane._disk_content_hash
+        pane.editor.setPlainText('local edit\n')
+        with unittest.mock.patch.object(pane, '_atomic_write_bytes',
+                                        side_effect=OSError('disk full')):
+            self.assertFalse(pane.save_file(silent=True))
+        self.assertEqual(pane._disk_content_hash, baseline)
+        self.assertIsNone(pane._last_saved_hash)
+        self.assertTrue(pane.save_file(silent=True))
+
+
+    def test_renaming_file_preserves_conflict_baseline(self):
+        area, pane, p = self._area_with_file('original\n')
+        pane.editor.setPlainText('local edit\n')
+        new = p + '.renamed'
+        os.rename(p, new)
+        pane._apply_path_renamed(p, new)
+        with open(new, 'w') as f:
+            f.write('external edit\n')
+        self.assertFalse(pane.save_file(silent=True))
+
+
+if __name__ == '__main__':
     unittest.main()

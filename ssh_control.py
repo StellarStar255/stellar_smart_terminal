@@ -31,6 +31,7 @@ import sys
 import tempfile
 import threading
 import time
+import uuid
 from concurrent.futures import Future, ThreadPoolExecutor
 from types import SimpleNamespace
 from typing import Callable, Optional
@@ -1249,12 +1250,15 @@ class ControlMasterSession(QObject):
     def upload_with_progress(self, local_path: str, remote_path: str,
                              progress_cb=None):
         total = os.path.getsize(local_path)
-        tmp_remote = remote_path + ".part"
+        tmp_remote = posixpath.join(posixpath.dirname(remote_path) or '.',
+                                    f".stellar-upload-{uuid.uuid4().hex}.part")
+        cleanup = shlex.quote(f"rm -f -- {_qpath(tmp_remote)}")
         with self._lock:
             # 先落 .part 再改名（半成品不会被别人看见），但两步放进**同一条**
             # 远端命令：每多一条 ssh 就多一次进程启动，批量上传时这笔开销很实在
             proc = self._spawn(
-                f"cat > {_qpath(tmp_remote)} && mv -- {_qpath(tmp_remote)} "
+                f"set -C; exec 3> {_qpath(tmp_remote)} || exit 1; "
+                f"trap {cleanup} 0; cat >&3 && mv -- {_qpath(tmp_remote)} "
                 f"{_qpath(remote_path)}",
                 stdin=subprocess.PIPE, stdout=subprocess.DEVNULL)
             done = 0
@@ -1277,11 +1281,7 @@ class ControlMasterSession(QObject):
             finally:
                 self._reap(proc)
         if proc.returncode != 0:
-            # 远端半成品清掉，别在目标目录留个 .part
-            try:
-                self._run(f"rm -f -- {_qpath(tmp_remote)}")
-            except Exception:
-                logger.debug("upload cleanup failed", exc_info=True)
+            # 远端 trap 只清理成功独占创建的文件，碰撞失败不能删别人的文件。
             raise RuntimeError(self._explain(err, proc.returncode) or f"上传失败 (exit {proc.returncode})")
         self.invalidate_cache(self._parent(remote_path))
 

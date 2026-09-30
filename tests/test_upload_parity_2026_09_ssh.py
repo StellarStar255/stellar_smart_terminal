@@ -7,6 +7,8 @@ ControlMasterSession.upload 走 `.part` + mv（半成品不会被别人看见）
     QT_QPA_PLATFORM=offscreen python3 -m pytest tests/test_upload_parity_2026_09_ssh.py -q
 """
 import os
+from contextlib import nullcontext
+from unittest.mock import Mock, patch
 import stat
 import sys
 import tempfile
@@ -25,6 +27,10 @@ class _FakeSftp:
         self.calls = []
         self.existing = dict(existing or {})     # path → st_mode
         self.put_fails = put_fails
+
+    def open(self, path, mode):
+        self.calls.append(('open', path, mode))
+        return nullcontext()
 
     def put(self, local, remote, callback=None):
         self.calls.append(('put', local, remote))
@@ -62,6 +68,11 @@ class _Base(unittest.TestCase):
         cls.app = QApplication.instance() or QApplication([])
 
     def _sess(self, sftp):
+        from types import SimpleNamespace
+        uuid_patch = patch('ssh_session.uuid.uuid4',
+                           return_value=SimpleNamespace(hex='test'))
+        uuid_patch.start()
+        self.addCleanup(uuid_patch.stop)
         sess = SSHSession(HostConfig(alias='gpu', hostname='10.0.0.1'))
         sess._sftp = sftp
         self.addCleanup(sess._executor.shutdown, False)
@@ -77,8 +88,9 @@ class UploadIsAtomic(_Base):
         open(local, 'wb').close()
         self._sess(sftp).upload(local, '/data/.images/a.png')
         self.assertEqual(sftp.calls, [
-            ('put', local, '/data/.images/a.png.part'),
-            ('posix_rename', '/data/.images/a.png.part', '/data/.images/a.png'),
+            ('open', '/data/.images/.stellar-upload-test.part', 'wx'),
+            ('put', local, '/data/.images/.stellar-upload-test.part'),
+            ('posix_rename', '/data/.images/.stellar-upload-test.part', '/data/.images/a.png'),
         ])
 
     def test_failed_upload_removes_the_part(self):
@@ -88,8 +100,8 @@ class UploadIsAtomic(_Base):
         open(local, 'wb').close()
         with self.assertRaises(OSError):
             self._sess(sftp).upload(local, '/data/a.png')
-        self.assertIn(('remove', '/data/a.png.part'), sftp.calls)
-        self.assertNotIn(('posix_rename', '/data/a.png.part', '/data/a.png'), sftp.calls)
+        self.assertIn(('remove', '/data/.stellar-upload-test.part'), sftp.calls)
+        self.assertNotIn(('posix_rename', '/data/.stellar-upload-test.part', '/data/a.png'), sftp.calls)
 
 
 class MkdirIsIdempotent(_Base):
@@ -109,6 +121,34 @@ class MkdirIsIdempotent(_Base):
         sftp = _FakeSftp(existing={'/data/.images': stat.S_IFREG | 0o644})
         with self.assertRaises(OSError):
             self._sess(sftp).mkdir('/data/.images')
+
+
+
+
+
+class TestUploadFailureSafety(_Base):
+    def test_rename_failure_never_removes_original(self):
+        sftp = _FakeSftp()
+        sftp.posix_rename = Mock(side_effect=OSError('unsupported'))
+        sftp.rename = Mock(side_effect=OSError('rename failed'))
+        with self.assertRaises(OSError):
+            self._sess(sftp).upload('unused', '/data/a')
+        self.assertNotIn(('remove', '/data/a'), sftp.calls)
+        self.assertIn(('remove', '/data/.stellar-upload-test.part'), sftp.calls)
+
+    def test_exclusive_collision_does_not_delete_existing_temp(self):
+        sftp = _FakeSftp()
+        sftp.open = Mock(side_effect=FileExistsError('exists'))
+        with self.assertRaises(FileExistsError):
+            self._sess(sftp).upload('unused', '/data/a')
+        self.assertEqual(sftp.calls, [])
+
+    def test_unsupported_extension_can_create_new_destination(self):
+        sftp = _FakeSftp()
+        sftp.posix_rename = Mock(side_effect=OSError('unsupported'))
+        self._sess(sftp).upload('unused', '/data/a')
+        self.assertIn(('rename', '/data/.stellar-upload-test.part', '/data/a'), sftp.calls)
+        self.assertFalse(any(call[0] == 'remove' for call in sftp.calls))
 
 
 if __name__ == '__main__':

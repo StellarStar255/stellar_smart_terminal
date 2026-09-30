@@ -1945,6 +1945,8 @@ class FileEditorWidget(QWidget):
         self._file_watcher = QFileSystemWatcher(self)
         self._file_watcher.fileChanged.connect(self._on_watched_file_changed)
         self._known_mtime: float | None = None
+        self._disk_content_hash: str | None = None
+        self._disk_content_path: str | None = None
         # 自身 save 后短暂屏蔽 watcher 触发，避免「自己写自己的文件」也弹"重载"
         # 最近一次保存写下的字节 sha1：watcher 据此识别"这是我自己的保存"，
         # 取代旧的时间窗屏蔽（旧法会漏掉保存后短时间内真实的外部改动）。
@@ -2811,6 +2813,9 @@ class FileEditorWidget(QWidget):
             self._file_eol = _detect_eol(raw)
             self._file_missing = False
             self._original_content = content  # 保存原始内容用于比较
+            self._disk_content_hash = hashlib.sha256(raw).hexdigest()
+            self._disk_content_path = file_path
+            self._last_saved_hash = None
             # 先挂高亮器再填内容：否则旧高亮器先扫一遍、新高亮器再全量重扫
             self._setup_highlighter(file_path)
             # 崩溃恢复：存在更新的自动保存备份 → 询问是否恢复（恢复后为「已修改」态）
@@ -4151,18 +4156,19 @@ class FileEditorWidget(QWidget):
                 except OSError:
                     logger.debug("auto-save empty check failed", exc_info=True)
 
-            # 保存前冲突检测：文件自我们上次读取后在磁盘上变新（其它窗格保存过、
-            # 或外部程序写过，而 watcher 还没来得及提示），直接覆盖会悄悄丢掉那些
-            # 改动 → 先征求用户，默认「否」。这是 watcher 提示之外的最后一道防线。
-            if self._known_mtime is not None and os.path.isfile(self._current_file):
-                try:
-                    disk_mtime = os.path.getmtime(self._current_file)
-                except OSError:
-                    disk_mtime = None
-                if disk_mtime is not None and disk_mtime - self._known_mtime > 0.001:
+            # 比对读取时的字节基线：时间戳可能被同步/恢复工具保留或回退。
+            # 读取失败向外抛出，不能在无法确认磁盘状态时覆盖文件。
+            if (self._disk_content_path == self._current_file
+                    and self._disk_content_hash is not None
+                    and os.path.isfile(self._current_file)):
+                with open(self._current_file, 'rb') as f:
+                    digest = hashlib.sha256()
+                    for chunk in iter(lambda: f.read(256 * 1024), b''):
+                        digest.update(chunk)
+                    disk_hash = digest.hexdigest()
+                if disk_hash != self._disk_content_hash:
                     if silent:
-                        # 磁盘副本更新：静默覆盖会吞掉别处的改动，留给手动保存确认
-                        logger.debug("auto-save skipped (disk newer): %s",
+                        logger.debug("auto-save skipped (disk changed): %s",
                                      self._current_file)
                         return False
                     reply = QMessageBox.question(
@@ -4174,8 +4180,6 @@ class FileEditorWidget(QWidget):
                     )
                     if reply != QMessageBox.StandardButton.Yes:
                         return False
-                    # 用户确认覆盖 → 推进基线，避免本次写完后又自我误判
-                    self._known_mtime = disk_mtime
 
             # 用打开时检测到的编码写回（utf-8-sig 自动带 BOM）；新建文件默认 utf-8
             encoding = self._file_encoding or 'utf-8'
@@ -4191,9 +4195,11 @@ class FileEditorWidget(QWidget):
                 self._file_encoding = encoding
             # 记下我们写下的字节指纹：watcher 据此识别"这是我自己的保存"，而不是
             # 用一个 1.5s 时间窗盲目吞掉这期间的所有事件（那会漏掉真实的外部改动）。
-            self._last_saved_hash = hashlib.sha1(data).hexdigest()
             # 原子写：避免写一半崩溃截断原文件（见 _atomic_write_bytes）
             self._atomic_write_bytes(self._current_file, data)
+            self._last_saved_hash = hashlib.sha1(data).hexdigest()
+            self._disk_content_hash = hashlib.sha256(data).hexdigest()
+            self._disk_content_path = self._current_file
             # 更新原始内容，这样 is_modified() 会返回 False
             self._original_content = content
             self._mark_baseline()
@@ -4548,12 +4554,6 @@ class FileEditorWidget(QWidget):
         except OSError:
             return
 
-        # mtime 未变（仅触摸/属性变更）：仅重新挂监听
-        if self._known_mtime is not None and new_mtime == self._known_mtime:
-            if path not in self._file_watcher.files():
-                self._file_watcher.addPath(path)
-            return
-
         try:
             with open(path, 'rb') as f:
                 raw = f.read()
@@ -4577,6 +4577,8 @@ class FileEditorWidget(QWidget):
 
         # 内容相同（不同进程写入了相同字节）：仅同步 mtime
         if new_content == self.editor.toPlainText():
+            self._disk_content_hash = hashlib.sha256(raw).hexdigest()
+            self._disk_content_path = path
             self._known_mtime = new_mtime
             if path not in self._file_watcher.files():
                 self._file_watcher.addPath(path)
@@ -4591,7 +4593,7 @@ class FileEditorWidget(QWidget):
                 QMessageBox.StandardButton.No,
             )
             if reply != QMessageBox.StandardButton.Yes:
-                # 保留本地，吞掉本轮外部变更，不再反复弹（用户后续保存会覆盖外部）
+                # 保留本地；字节基线保持不变，后续自动保存仍需避让磁盘改动。
                 self._known_mtime = new_mtime
                 if path not in self._file_watcher.files():
                     self._file_watcher.addPath(path)
@@ -4601,6 +4603,8 @@ class FileEditorWidget(QWidget):
         cursor_pos = self.editor.textCursor().position()
         self.editor.setPlainText(new_content)
         self._original_content = new_content
+        self._disk_content_hash = hashlib.sha256(raw).hexdigest()
+        self._disk_content_path = path
         self._file_encoding = new_encoding
         self._file_eol = _detect_eol(raw)
         self._mark_baseline()
@@ -4754,6 +4758,8 @@ class FileEditorWidget(QWidget):
         had_backup = self._last_autosave_hash is not None
         self._remove_autosave_backup(cur)
         self._current_file = mapped
+        if self._disk_content_path == cur:
+            self._disk_content_path = mapped
         self._file_missing = False
         if had_backup and not self._in_image_mode and self.is_modified():
             content = self.editor.toPlainText()
