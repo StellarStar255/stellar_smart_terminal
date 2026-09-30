@@ -596,5 +596,82 @@ class TestContentConflict(_Base):
         self.assertFalse(pane.save_file(silent=True))
 
 
+class TestRecoveryAtomicity(_Base):
+    def test_failed_backup_preserves_old_content_and_timestamp(self):
+        import json
+        from pathlib import Path
+        _, pane, _ = self._area_with_file()
+        pane._write_autosave_backup('old unsaved text', 'old-hash')
+        backup, meta = pane._backup_paths()
+        old = Path(backup).read_bytes()
+        with unittest.mock.patch('file_persistence.os.replace', side_effect=OSError('disk full')):
+            pane._write_autosave_backup('new text', 'new-hash')
+        self.assertEqual(Path(backup).read_bytes(), old)
+        self.assertEqual(pane._last_autosave_hash, 'old-hash')
+        record = json.loads(old.decode().split('\n', 1)[1])
+        self.assertEqual(record['content'], 'old unsaved text')
+        self.assertGreater(record['meta']['timestamp'], 0)
+        self.assertFalse(Path(meta).exists())
+        self.assertEqual(list(Path(backup).parent.iterdir()), [Path(backup)])
+
+    def test_serialization_failure_preserves_previous_backup(self):
+        from pathlib import Path
+        _, pane, _ = self._area_with_file()
+        pane._write_autosave_backup('old', 'old')
+        backup, _ = pane._backup_paths()
+        old = Path(backup).read_bytes()
+        with unittest.mock.patch('file_editor.json.dump', side_effect=OSError('short write')):
+            pane._write_autosave_backup('new', 'new')
+        self.assertEqual(Path(backup).read_bytes(), old)
+
+    def test_legacy_plaintext_recovery_is_supported(self):
+        from pathlib import Path
+        from PyQt6.QtWidgets import QMessageBox
+        _, pane, path = self._area_with_file('disk')
+        backup, _ = pane._backup_paths()
+        Path(backup).parent.mkdir(exist_ok=True)
+        Path(backup).write_text('legacy unsaved', encoding='utf-8')
+        with unittest.mock.patch.object(QMessageBox, 'question', return_value=QMessageBox.StandardButton.Yes):
+            self.assertEqual(pane._maybe_restore_autosave(path, 'disk'), 'legacy unsaved')
+
+    def test_corrupt_envelope_is_not_loaded_as_source(self):
+        from pathlib import Path
+        _, pane, path = self._area_with_file('disk')
+        backup, _ = pane._backup_paths()
+        Path(backup).parent.mkdir(exist_ok=True)
+        Path(backup).write_text('STELLAR_RECOVERY_V1\n{"content":', encoding='utf-8')
+        with unittest.mock.patch('file_editor.QMessageBox.question') as question:
+            self.assertIsNone(pane._maybe_restore_autosave(path, 'disk'))
+            question.assert_not_called()
+
+    def test_sync_status_tracks_current_file_and_retry(self):
+        _, pane, path = self._area_with_file()
+        pane.set_remote_sync_state(path, 'failed', 'upload denied')
+        self.assertEqual(pane.sync_label.toolTip(), 'upload denied')
+        self.assertFalse(pane.sync_retry_btn.isHidden())
+        requests = []
+        pane.remote_sync_retry.connect(requests.append)
+        pane._retry_remote_sync()
+        self.assertEqual(requests, [path])
+        pane._current_file = 'another-local-file.txt'
+        pane._update_title()
+        self.assertTrue(pane.sync_label.isHidden())
+        self.assertTrue(pane.sync_retry_btn.isHidden())
+
+
+    def test_retry_with_dirty_editor_uploads_newest_saved_content(self):
+        from pathlib import Path
+        _, pane, path = self._area_with_file()
+        pane.set_remote_sync_state(path, 'failed', 'disconnected')
+        pane.editor.setPlainText('newest edited content')
+        saves, retries = [], []
+        pane.file_saved.connect(saves.append)
+        pane.remote_sync_retry.connect(retries.append)
+        pane._retry_remote_sync()
+        self.assertEqual(Path(path).read_text(), 'newest edited content')
+        self.assertEqual(saves, [path])
+        self.assertEqual(retries, [])
+
+
 if __name__ == '__main__':
     unittest.main()

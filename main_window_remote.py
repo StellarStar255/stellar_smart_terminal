@@ -840,6 +840,18 @@ class RemotePanelMixin:
         pane.file_saved.connect(on_saved)
         self._remote_save_connections[local_temp_path] = on_saved
 
+        panel = self._ensure_remote_panel()
+        panel.file_sync.register(local_temp_path, host_alias, remote_path, session)
+        pane.set_remote_sync_state(local_temp_path, *panel.file_sync.state(local_temp_path))
+        if getattr(pane, '_remote_sync_panel', None) is not panel:
+            previous = getattr(pane, '_remote_sync_panel', None)
+            if previous is not None:
+                previous.file_sync.state_changed.disconnect(pane.set_remote_sync_state)
+                pane.remote_sync_retry.disconnect(previous.file_sync.retry)
+            panel.file_sync.state_changed.connect(pane.set_remote_sync_state)
+            pane.remote_sync_retry.connect(panel.file_sync.retry)
+            pane._remote_sync_panel = panel
+
         # 让编辑器标题显示远程身份（在 file_label 后追加）
         try:
             current = pane.file_label.text()

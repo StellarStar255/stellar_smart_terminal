@@ -371,6 +371,26 @@ class TestTransfers(unittest.TestCase):
         self.assertFalse(os.path.exists(local))
         self.assertFalse(os.path.exists(local + '.part'))
 
+    def test_download_preserves_preexisting_target_and_unrelated_part(self):
+        from pathlib import Path
+        from ssh_session import RemoteEntry
+        self.sess.stat = lambda p: RemoteEntry(
+            name='f', path=p, is_dir=False, size=10, mtime=0)
+        local = Path(self.tmp) / 'f.bin'
+        part = Path(str(local) + '.part')
+        local.write_bytes(b'original')
+        part.write_bytes(b'unrelated')
+        self._arm(_FakeProc(out=b'partial', rc=1, err=b'denied'), [])
+        with self.assertRaises(RuntimeError):
+            self.sess.download('/f', str(local))
+        self.assertEqual(local.read_bytes(), b'original')
+        self.assertEqual(part.read_bytes(), b'unrelated')
+        self._arm(_FakeProc(out=b'complete'), [])
+        self.sess.download('/f', str(local))
+        self.assertEqual(local.read_bytes(), b'complete')
+        self.assertEqual(part.read_bytes(), b'unrelated')
+        self.assertEqual(sorted(p.name for p in Path(self.tmp).iterdir()), ['f.bin', 'f.bin.part'])
+
     def test_upload_writes_to_part_then_moves_into_place(self):
         payload = b'y' * (ssh_control._CHUNK + 3)
         local = os.path.join(self.tmp, 'up.bin')

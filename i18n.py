@@ -6,6 +6,13 @@
 _current_language = "zh"
 
 TRANSLATIONS = {
+    "remote.sync_recovered": {"zh": "已恢复未上传的修改，请重试同步。", "en": "Unsent changes recovered. Retry to upload."},
+    "remote.sync_disconnected": {"zh": "SSH 连接已断开，请重新连接后重试。", "en": "SSH session disconnected; reconnect and retry."},
+    "remote.sync_pending": {"zh": "等待同步", "en": "Sync pending"},
+    "remote.sync_uploading": {"zh": "正在同步…", "en": "Syncing…"},
+    "remote.sync_failed": {"zh": "同步失败（本地已保存）", "en": "Sync failed (saved locally)"},
+    "remote.sync_synced": {"zh": "已同步", "en": "Synced"},
+    "remote.sync_retry": {"zh": "重试同步", "en": "Retry sync"},
     # ===== app.py =====
     "app.name": {"zh": "智能终端", "en": "Smart Terminal"},
     "app.display_name": {"zh": "Smart Terminal", "en": "Smart Terminal"},

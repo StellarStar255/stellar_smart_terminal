@@ -97,3 +97,6 @@ assets/smart_terminal.icns
 
 # app_config inter-process lock (runtime, never commit)
 .smart_terminal_config.lock
+
+# Durable unsent remote editor content (private application data).
+remote_pending/

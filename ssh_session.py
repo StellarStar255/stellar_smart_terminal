@@ -36,6 +36,7 @@ from paramiko.config import SSHConfig
 # 速度通常快 5–10 倍，且 OpenSSH/Dropbear/sftp-server 都支持 256KB。
 paramiko.sftp_file.SFTPFile.MAX_REQUEST_SIZE = 1024 * 256
 
+from file_persistence import atomic_writer
 from PyQt6.QtCore import QObject, pyqtSignal
 
 from app_logging import get_logger
@@ -2037,10 +2038,8 @@ class SSHSession(QObject):
         self.invalidate_cache(remote_dir)
         self.invalidate_cache(self._parent(remote_dir))
 
-    @_auto_reconnect
     def download(self, remote_path: str, local_path: str):
-        sftp = self._require()
-        sftp.get(remote_path, local_path)
+        self.download_with_progress(remote_path, local_path)
 
     @_auto_reconnect
     def download_with_progress(self, remote_path: str, local_path: str,
@@ -2053,19 +2052,8 @@ class SSHSession(QObject):
         """
         sftp = self._require()
         attr = sftp.stat(remote_path)
-        # 先下到 .part，再原子改名 —— 避免 UI 看到一个尚在写入的半成品图片
-        tmp_path = local_path + ".part"
-        try:
-            sftp.get(remote_path, tmp_path, callback=progress_cb)
-            os.replace(tmp_path, local_path)
-        except Exception:
-            # 失败时清理半成品
-            try:
-                if os.path.exists(tmp_path):
-                    os.remove(tmp_path)
-            except Exception:
-                logger.debug("download_with_progress: suppressed exception", exc_info=True)
-            raise
+        with atomic_writer(local_path, binary=True, prefix='.stellar-download-') as stream:
+            sftp.getfo(remote_path, stream, callback=progress_cb)
         return attr
 
     @_auto_reconnect

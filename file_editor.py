@@ -1405,6 +1405,7 @@ class FileEditorWidget(QWidget):
     MD_DEFAULT_PREVIEW = False
 
     # 信号
+    remote_sync_retry = pyqtSignal(str)
     file_saved = pyqtSignal(str)  # 文件保存信号
     editor_closed = pyqtSignal()  # 编辑器关闭信号
     split_h_requested = pyqtSignal()  # 请求左右分屏（并排）
@@ -1417,6 +1418,7 @@ class FileEditorWidget(QWidget):
     def __init__(self, theme: dict = None, parent=None):
         super().__init__(parent)
         self.theme = theme or {}
+        self._remote_sync_states = {}
         self._current_file = None
         self._original_content = ""  # 保存原始内容用于比较
         # is_modified 的增量判定：基准 revision（装载/保存时的 document().revision()）
@@ -1515,6 +1517,13 @@ class FileEditorWidget(QWidget):
         self.modified_label = QLabel("")
         self.modified_label.setStyleSheet("color: #f59e0b;")
         header_layout.addWidget(self.modified_label)
+        self.sync_label = QLabel('')
+        self.sync_label.hide()
+        header_layout.addWidget(self.sync_label)
+        self.sync_retry_btn = QPushButton(t('remote.sync_retry'))
+        self.sync_retry_btn.hide()
+        self.sync_retry_btn.clicked.connect(self._retry_remote_sync)
+        header_layout.addWidget(self.sync_retry_btn)
 
         # 不再 addStretch：file_label 已用 stretch=1 占满中间空间，按钮自然靠右。
 
@@ -3758,6 +3767,28 @@ class FileEditorWidget(QWidget):
             self.file_label.setToolTip("")
             self.modified_label.setText("")
 
+        self._update_remote_sync_ui()
+
+    def set_remote_sync_state(self, path, state, error=''):
+        self._remote_sync_states[path] = (state, error)
+        self._update_remote_sync_ui()
+
+    def _update_remote_sync_ui(self):
+        status = self._remote_sync_states.get(self._current_file)
+        self.sync_label.setVisible(status is not None)
+        self.sync_retry_btn.setVisible(status is not None and status[0] == 'failed')
+        if status:
+            state, error = status
+            self.sync_label.setText(t('remote.sync_' + state))
+            self.sync_label.setToolTip(error)
+
+    def _retry_remote_sync(self):
+        if self._current_file:
+            if self.is_modified():
+                self.save_file()  # Saving also queues the newest version for upload.
+            else:
+                self.remote_sync_retry.emit(self._current_file)
+
     def _mark_baseline(self, dirty: bool = False):
         """装载/保存后把当前 document revision 记为"干净"基准。
 
@@ -3845,7 +3876,7 @@ class FileEditorWidget(QWidget):
         self._write_autosave_backup(content, digest)
 
     def _write_autosave_backup(self, content: str, digest: str):
-        """把 content 写进备份目录（备份本体固定 utf-8；原文件编码记在 meta 里）"""
+        """把内容和元数据作为一个 UTF-8 记录原子写入备份目录。"""
         paths = self._backup_paths()
         if paths is None:
             return
@@ -3853,16 +3884,22 @@ class FileEditorWidget(QWidget):
         try:
             # mode 仅在新建目录时生效：备份可能含敏感内容，仅本用户可读
             os.makedirs(_AUTOSAVE_DIR, mode=0o700, exist_ok=True)
-            with open(backup_path, 'w', encoding='utf-8') as f:
-                f.write(content)
             meta = {
                 'path': os.path.abspath(self._current_file),
                 'identity': self._backup_identity(self._current_file),
                 'timestamp': time.time(),
                 'encoding': self._file_encoding,
             }
-            with open(meta_path, 'w', encoding='utf-8') as f:
-                json.dump(meta, f, ensure_ascii=False)
+            # One atomic record keeps content and its timestamp consistent.
+            with atomic_writer(backup_path, prefix='.stellar-recovery-') as f:
+                f.write('STELLAR_RECOVERY_V1\n')
+                json.dump({'content': content, 'meta': meta}, f, ensure_ascii=False)
+            try:
+                os.remove(meta_path)
+            except FileNotFoundError:
+                pass  # 新格式不再创建独立元数据文件，缺失是预期情况
+            except OSError:
+                logger.debug('obsolete recovery metadata cleanup failed', exc_info=True)
             self._last_autosave_hash = digest
         except OSError:
             # 写备份失败（磁盘满 / 权限等）不打扰用户，下个周期再试
@@ -3895,8 +3932,17 @@ class FileEditorWidget(QWidget):
         try:
             with open(backup_path, 'r', encoding='utf-8') as f:
                 backup_content = f.read()
-        except OSError:
+        except (OSError, UnicodeError):
             return None
+        meta = None
+        if backup_content.startswith('STELLAR_RECOVERY_V1\n'):
+            try:
+                record = json.loads(backup_content.split('\n', 1)[1])
+                backup_content, meta = record['content'], record['meta']
+                if not isinstance(backup_content, str) or not isinstance(meta, dict):
+                    return None
+            except (ValueError, KeyError, TypeError):
+                return None
         if backup_content == disk_content:
             # 上次其实已保存（或外部已同步），备份没有增量信息
             self._remove_autosave_backup(file_path)
@@ -3905,14 +3951,15 @@ class FileEditorWidget(QWidget):
         ts_text = ""
         backup_ts = None
         try:
-            with open(meta_path, 'r', encoding='utf-8') as f:
-                meta = json.load(f)
+            if meta is None:
+                with open(meta_path, 'r', encoding='utf-8') as f:
+                    meta = json.load(f)
             ts = meta.get('timestamp')
             if ts:
                 backup_ts = float(ts)
                 ts_text = time.strftime(
                     '%Y-%m-%d %H:%M:%S', time.localtime(backup_ts))
-        except (OSError, ValueError, TypeError):  # 备份元数据损坏：按无备份处理
+        except (OSError, ValueError, TypeError, AttributeError, OverflowError):  # 备份元数据损坏：按无备份处理
             pass
 
         # 磁盘文件是否比备份更新：若是，恢复旧备份会覆盖较新的磁盘内容（数据丢失）。

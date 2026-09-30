@@ -35,6 +35,7 @@ from PyQt6.QtGui import (QAction, QActionGroup, QCursor, QDrag, QShortcut,
 from PyQt6 import sip  # 用于检查 C++ 对象是否已被删除
 
 from i18n import t
+from remote_file_sync import RemoteFileSync
 import explorer_clipboard
 import explorer_common
 from explorer_common import _TransferRateTracker, _BYTE_BAR_SCALE  # 共享的测速/刻度
@@ -1291,6 +1292,7 @@ class RemoteExplorerPanel(QWidget, explorer_common.TransferJobHost):
         # 维护已下载的临时文件 -> (host_alias, remote_path) 映射，
         # 便于编辑器保存时调度上传
         self._open_temp_map: dict[str, tuple[str, str]] = {}
+        self.file_sync = RemoteFileSync(self._editor_session_for, self)
         # local_path -> 发起下载时所用的 session（回调时 self._session 可能已切换/断开）
         self._open_session_map: dict[str, "SSHSession"] = {}
         # 新建文件/文件夹后，等刷新把它装进树里再原地重命名（不弹窗）
@@ -4479,6 +4481,12 @@ class RemoteExplorerPanel(QWidget, explorer_common.TransferJobHost):
             host_alias, *entry.path.strip("/").split("/")[:-1])
         local_path = os.path.join(local_dir, entry.name)
 
+        self.file_sync.register(local_path, host_alias, entry.path, sess)
+        if self.file_sync.pending(local_path) and os.path.isfile(local_path):
+            self._open_session_map[local_path] = sess
+            self._file_ready.emit(host_alias, entry.path, local_path)
+            return
+
         # 缓存命中判定：本地存在 + 文件大小 + mtime 都和 entry 匹配 → 直接复用
         try:
             if (os.path.isfile(local_path)
@@ -4612,24 +4620,15 @@ class RemoteExplorerPanel(QWidget, explorer_common.TransferJobHost):
         """主窗口的编辑器保存时调，查 local_path 对应哪个 (host_alias, remote_path)"""
         return self._open_temp_map.get(local_path)
 
-    def upload_after_save(self, local_path: str):
-        """编辑器保存完本地临时文件后，把它推回远端"""
-        mapping = self._open_temp_map.get(local_path)
-        if not mapping:
-            return
-        host_alias, remote_path = mapping
-        if self._session is None or self._session.host_config.alias != host_alias:
-            self._toast_error(f"Session for {host_alias} not active; remote save skipped.")
-            return
-        sess = self._session
-        fut = sess.submit(sess.upload, local_path, remote_path)
+    def _editor_session_for(self, host_alias, original):
+        current = self._session
+        if current is not None and current.host_config.alias == host_alias:
+            return current
+        return original
 
-        def on_done(f):
-            try:
-                f.result()
-            except Exception as e:
-                self._error_signal.emit(str(e))
-        fut.add_done_callback(on_done)
+    def upload_after_save(self, local_path: str):
+        """Keep a stable snapshot until its remote upload succeeds."""
+        self.file_sync.save(local_path)
 
     def _new_file_at(self, parent_path: str, parent_item: Optional[QTreeWidgetItem]):
         """新建文件：用不冲突的默认名建好，刷新后直接进入原地重命名（不弹窗）"""

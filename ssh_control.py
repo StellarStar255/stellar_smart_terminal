@@ -36,6 +36,7 @@ from concurrent.futures import Future, ThreadPoolExecutor
 from types import SimpleNamespace
 from typing import Callable, Optional
 
+from file_persistence import atomic_writer
 from PyQt6.QtCore import QObject, pyqtSignal
 
 from app_logging import get_logger
@@ -1208,12 +1209,11 @@ class ControlMasterSession(QObject):
                                progress_cb=None):
         st = self.stat(remote_path)
         total = st.size or 0
-        tmp_path = local_path + ".part"
-        with self._lock:
-            proc = self._spawn(f"cat -- {_qpath(remote_path)}")
-            done = 0
-            try:
-                with open(tmp_path, "wb") as fh:
+        with atomic_writer(local_path, binary=True, prefix='.stellar-download-') as fh:
+            with self._lock:
+                proc = self._spawn(f"cat -- {_qpath(remote_path)}")
+                done = 0
+                try:
                     while True:
                         chunk = proc.stdout.read(_CHUNK)
                         if not chunk:
@@ -1222,27 +1222,17 @@ class ControlMasterSession(QObject):
                         done += len(chunk)
                         if progress_cb is not None:
                             progress_cb(done, total)
-                err = (proc.stderr.read() or b"").decode("utf-8", "replace")
-                proc.wait(timeout=CMD_TIMEOUT)
-            except Exception:
-                proc.kill()
-                self._cleanup(tmp_path)
-                raise
-            finally:
-                self._reap(proc)
-        if proc.returncode != 0:
-            self._cleanup(tmp_path)
-            raise RuntimeError(self._explain(err, proc.returncode) or f"下载失败 (exit {proc.returncode})")
-        os.replace(tmp_path, local_path)
+                    err = (proc.stderr.read() or b"").decode("utf-8", "replace")
+                    proc.wait(timeout=CMD_TIMEOUT)
+                    if proc.returncode != 0:
+                        raise RuntimeError(self._explain(err, proc.returncode)
+                                           or f"下载失败 (exit {proc.returncode})")
+                except Exception:
+                    proc.kill()
+                    raise
+                finally:
+                    self._reap(proc)
         return SimpleNamespace(st_size=st.size, st_mtime=st.mtime)
-
-    @staticmethod
-    def _cleanup(path: str):
-        try:
-            if os.path.exists(path):
-                os.remove(path)
-        except OSError:
-            logger.debug("cleanup failed: %s", path, exc_info=True)
 
     def upload(self, local_path: str, remote_path: str):
         self.upload_with_progress(local_path, remote_path, None)
