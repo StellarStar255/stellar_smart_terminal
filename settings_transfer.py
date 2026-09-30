@@ -15,48 +15,13 @@ from pathlib import Path
 
 import app_config
 from app_logging import get_logger
+from config_schema import PORTABLE_KEYS, validate_settings
+from file_persistence import atomic_writer
 
 logger = get_logger(__name__)
 
 FORMAT_VERSION = 1
 
-# 可移植键白名单。新增设置项时：跨机器通用的加进来，机器相关的别加。
-PORTABLE_KEYS = (
-    # 预设与 LLM
-    'presets',
-    'llm_configs',
-    'default_llm_config',
-    # 外观
-    'theme',
-    'icon_tint',
-    'language',
-    'gui_font_size',
-    'global_zoom_delta',
-    'window_opacity',
-    # 键位与工具栏布局
-    'keyboard_shortcuts',
-    'toolbar_config',
-    # 终端与行为开关
-    'terminal_scrollback',
-    'notify_sound',
-    'parse_on_reader_thread',
-    'mouse_click_forward_enabled',
-    'spring_mode_enabled',
-    'explorer_split_horizontal',
-    'remote_split_horizontal',
-    'editor_word_wrap',
-    'ai_completion_enabled',
-    'navigator_enabled',
-    'image_prefix_enabled',
-    'image_save_local',
-    'auto_update_check',
-    'workspace_restore_enabled',
-    'output_alert_enabled',
-    'output_alert_patterns',
-    # Git 代理
-    'git_proxy',
-    'git_proxies',
-)
 
 
 def export_settings(path) -> int:
@@ -72,8 +37,9 @@ def export_settings(path) -> int:
         'platform': sys.platform,
         'settings': settings,
     }
-    Path(path).write_text(
-        json.dumps(payload, ensure_ascii=False, indent=2), encoding='utf-8')
+    validate_settings(settings)
+    with atomic_writer(path, prefix='.settings_') as stream:
+        json.dump(payload, stream, ensure_ascii=False, indent=2)
     logger.info("settings exported: %d keys -> %s", len(settings), path)
     return len(settings)
 
@@ -94,11 +60,15 @@ def import_settings(path) -> tuple[int, list]:
         raise ValueError(f"not a valid JSON file: {e}") from e
     if not isinstance(payload, dict) or 'stellar_settings_export' not in payload:
         raise ValueError("not a Stellar settings export file")
+    version = payload['stellar_settings_export']
+    if type(version) is not int or version != FORMAT_VERSION:
+        raise ValueError('unsupported settings export version')
     settings = payload.get('settings')
     if not isinstance(settings, dict):
         raise ValueError("malformed export: 'settings' missing")
 
     patch = {k: v for k, v in settings.items() if k in PORTABLE_KEYS}
+    validate_settings(patch)
     if patch:
         ok = app_config.update_config(patch, description='settings import')
         if not ok:

@@ -333,7 +333,11 @@ def read_config_json(file_path: Path):
             return {}, True
         with open(file_path, 'r', encoding='utf-8') as f:
             data = json.load(f)
-        return (data or {}), True
+        if data is None:  # legacy empty configuration
+            return {}, True
+        if not isinstance(data, dict):
+            return {}, False
+        return data, True
     except (OSError, json.JSONDecodeError, ValueError):
         return {}, False
 

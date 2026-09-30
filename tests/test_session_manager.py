@@ -265,3 +265,85 @@ def test_save_failure_preserves_previous_session(manager, monkeypatch, failure):
     manager.auto_save()
     manager.flush()
     assert 'updated' in manager.load_session(session.session_id).entries[0].content
+
+
+def test_flush_timeout_retains_future_and_sync_save_is_ordered(manager, monkeypatch):
+    import threading
+    from concurrent.futures import ThreadPoolExecutor, TimeoutError
+    session = manager.create_session('test')
+    manager.add_output('old')
+    started, release = threading.Event(), threading.Event()
+    writes = []
+    original_write = manager._write_session_data
+
+    def delayed_write(data, sid):
+        if data['entries'][0]['content'] == 'old':
+            started.set()
+            assert release.wait(5)
+        writes.append(data['entries'][0]['content'])
+        return original_write(data, sid)
+
+    monkeypatch.setattr(manager, '_write_session_data', delayed_write)
+    manager.auto_save()
+    try:
+        assert started.wait(2)
+        pending = manager._pending_save
+        with pytest.raises(TimeoutError):
+            manager.flush(timeout=0.001)
+        assert manager._pending_save is pending
+        assert not pending.done()
+        manager.add_output(' NEW')
+        queued = threading.Event()
+        submit = manager._save_executor.submit
+
+        def track_submit(fn, *args, **kwargs):
+            result = submit(fn, *args, **kwargs)
+            if fn is delayed_write:
+                queued.set()
+            return result
+
+        monkeypatch.setattr(manager._save_executor, 'submit', track_submit)
+        with ThreadPoolExecutor(max_workers=1) as caller:
+            saving = caller.submit(manager.save_session, session)
+            try:
+                assert queued.wait(2), 'sync save must join the same executor queue'
+            finally:
+                release.set()
+            path = saving.result(timeout=5)
+        assert writes == ['old', 'old NEW']
+        assert json.loads(path.read_text())['entries'][0]['content'] == 'old NEW'
+    finally:
+        release.set()
+
+
+def test_background_failure_is_reported_and_auto_save_can_retry(manager, monkeypatch):
+    manager.create_session('test')
+    manager.add_output('recoverable')
+    original = manager._write_session_data
+
+    def fail(*args):
+        raise OSError('disk full')
+
+    monkeypatch.setattr(manager, '_write_session_data', fail)
+    manager.auto_save()
+    with pytest.raises(OSError, match='disk full'):
+        manager.flush()
+    assert manager._last_saved_sig is None
+    monkeypatch.setattr(manager, '_write_session_data', original)
+    manager.auto_save()
+    manager.flush()
+    assert manager.load_session(manager.current_session.session_id).entries[0].content == 'recoverable'
+
+
+def test_final_save_failure_is_not_reported_as_success(manager, monkeypatch):
+    manager.create_session('test')
+    manager.add_output('final')
+
+    def fail(*args):
+        raise OSError('disk full')
+
+    monkeypatch.setattr(manager, '_write_session_data', fail)
+    ended = manager.end_session()
+    with pytest.raises(OSError, match='disk full'):
+        manager.flush()
+    assert ended.entries[0].content == 'final'

@@ -289,9 +289,10 @@ class SessionManager:
             self._write_session_data(data, session_id)
         except Exception as e:
             logger.warning(f"session finalize failed: {e}")
+            raise
 
     def flush(self, timeout: float = 30.0):
-        """等待在途的后台保存/收尾完成（退出前、测试里用）。"""
+        """等待后台保存完成；超时/写入失败向调用方报告，不伪装成功。"""
         self._wait_pending_save(timeout)
 
     _SESSION_ID_RE = re.compile(r'^[\w\-]+$')
@@ -302,21 +303,24 @@ class SessionManager:
 
     def save_session(self, session: Session) -> Path:
         """同步保存会话到文件（原子写入防止损坏）"""
-        # 等待在途的后台保存，避免旧快照晚于新数据落盘
-        self._wait_pending_save()
+        # 同步保存也排入同一队列，不能绕过尚未完成的旧快照。
         data = session.to_dict()
-        path = self._write_session_data(data, session.session_id)
+        future = self._save_executor.submit(
+            self._write_session_data, data, session.session_id)
+        self._pending_save = future
+        path = self._wait_pending_save()
         self._last_saved_sig = self._session_signature(session)
         return path
 
     def _wait_pending_save(self, timeout: float = 10.0):
         future = self._pending_save
-        self._pending_save = None
         if future is not None:
             try:
-                future.result(timeout=timeout)
-            except Exception:
-                logger.debug("_wait_pending_save: suppressed exception", exc_info=True)
+                return future.result(timeout=timeout)
+            finally:
+                # 超时不是完成，保留引用让后续 flush 仍能追踪任务。
+                if future.done() and self._pending_save is future:
+                    self._pending_save = None
 
     def _write_session_data(self, data: dict, session_id: str) -> Path:
         file_path = self.sessions_dir / f"{session_id}.json"
@@ -473,3 +477,4 @@ class SessionManager:
             # 写失败则撤销签名，让下一轮 auto_save 重试
             if self._last_saved_sig == sig:
                 self._last_saved_sig = None
+            raise

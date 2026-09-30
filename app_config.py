@@ -22,6 +22,7 @@ from contextlib import contextmanager
 from pathlib import Path
 
 from app_logging import get_logger
+from config_schema import config_for_read
 from utils import get_config_path, read_config_json, atomic_write_json
 
 logger = get_logger(__name__)
@@ -86,6 +87,9 @@ def read_config() -> dict:
     只读场景不需要锁——原子写保证读到的永远是完整文件。
     """
     cfg, _ok = read_config_json(get_config_path())
+    cfg, invalid = config_for_read(cfg)
+    if invalid:
+        logger.warning('Ignored invalid config fields: %s', ', '.join(invalid))
     return cfg
 
 
