@@ -114,8 +114,7 @@ class TestReaderThreadRaces(_Base):
 
         def appender():
             for n in range(TOTAL):
-                with w._output_buffer_lock:
-                    w._output_buffer.append(f"<{n}>")
+                w._buffer_output(f"<{n}>")
                 if n % 256 == 0:
                     time.sleep(0)  # 让出，增大与 flush 的交错概率
             done.set()

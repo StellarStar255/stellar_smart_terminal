@@ -4626,9 +4626,9 @@ class RemoteExplorerPanel(QWidget, explorer_common.TransferJobHost):
             return current
         return original
 
-    def upload_after_save(self, local_path: str):
+    def upload_after_save(self, local_path: str, data=None):
         """Keep a stable snapshot until its remote upload succeeds."""
-        self.file_sync.save(local_path)
+        self.file_sync.save(local_path, data)
 
     def _new_file_at(self, parent_path: str, parent_item: Optional[QTreeWidgetItem]):
         """新建文件：用不冲突的默认名建好，刷新后直接进入原地重命名（不弹窗）"""

@@ -267,6 +267,7 @@ class InlineCompletionController(QObject):
         self._fg_color = QColor('#abb2bf')  # 正文颜色：行中触发时重画被“推后”的剩余文本
         self._workers = []             # 持有运行中的 worker，防止被 GC
         self._active_worker = None     # 当前在途请求；新请求/撤销时取消它
+        self._request_pending = False
         self._req_suffix = ''
 
         self._timer = QTimer(self)
@@ -290,6 +291,8 @@ class InlineCompletionController(QObject):
             self._timer.stop()
         except RuntimeError:  # Qt 对象已销毁（窗口/面板已关）
             pass
+        self._enabled = False
+        self._request_pending = False
         self._active_worker = None
         for w in list(self._workers):
             try:
@@ -348,6 +351,7 @@ class InlineCompletionController(QObject):
 
     def dismiss(self):
         """清除当前建议，并让在途请求结果作废。"""
+        self._request_pending = False
         self._cancel_active()
         self._anchor_midline = False
         if self._suggestion:
@@ -407,17 +411,28 @@ class InlineCompletionController(QObject):
         cursor = ed.textCursor()
         if cursor.hasSelection():
             return
+        if self._workers:
+            # Cancellation before HTTP headers cannot interrupt the blocking request.
+            # Coalesce new requests until that worker actually exits.
+            self._cancel_active()
+            self._gen += 1
+            self._request_pending = True
+            return
         # 行尾、行中都可触发（FIM 模型本就支持任意 suffix）。
         # 唯一限制：光标正卡在单词中间（前后字符都是标识符字符）时不触发，
         # 避免用户打字打到一半就疯狂发请求。
-        block_text = cursor.block().text()
-        col = cursor.positionInBlock()
-        prev_ch = block_text[col - 1] if col > 0 else ''
-        next_ch = block_text[col] if col < len(block_text) else ''
+        neighbor = QTextCursor(cursor)
+        neighbor.movePosition(QTextCursor.MoveOperation.PreviousCharacter, QTextCursor.MoveMode.KeepAnchor)
+        prev_ch = neighbor.selectedText()
+        neighbor = QTextCursor(cursor)
+        neighbor.movePosition(QTextCursor.MoveOperation.NextCharacter, QTextCursor.MoveMode.KeepAnchor)
+        next_ch = neighbor.selectedText()
         if self._is_word_char(prev_ch) and self._is_word_char(next_ch):
             return
         # 行中触发：光标后本行还有非空白内容 → 只渲染/插入单行建议
-        midline = block_text[col:].strip() != ''
+        line_tail = QTextCursor(cursor)
+        line_tail.movePosition(QTextCursor.MoveOperation.EndOfBlock, QTextCursor.MoveMode.KeepAnchor)
+        midline = bool(line_tail.selectedText().strip())
         cfg = None
         try:
             cfg = ed.ai_get_config()
@@ -426,11 +441,17 @@ class InlineCompletionController(QObject):
         if not cfg or not (cfg.get('api_key') or '').strip():
             return
 
+        self._request_pending = False
         pos = cursor.position()
-        full = ed.toPlainText()
-        # prefix 截尾部（保留靠近光标的），suffix 截头部（保留靠近光标的）
-        prefix = full[:pos][-PREFIX_LIMIT:]
-        suffix = full[pos:pos + SUFFIX_LIMIT]
+        # QTextCursor offsets use UTF-16; select a bounded window, then cap characters.
+        context = QTextCursor(cursor)
+        context.setPosition(max(0, pos - PREFIX_LIMIT * 2))
+        context.setPosition(pos, QTextCursor.MoveMode.KeepAnchor)
+        prefix = context.selectedText().replace('\u2029', '\n').replace('\u2028', '\n')[-PREFIX_LIMIT:]
+        context.setPosition(pos)
+        end = min(ed.document().characterCount() - 1, pos + SUFFIX_LIMIT * 2)
+        context.setPosition(end, QTextCursor.MoveMode.KeepAnchor)
+        suffix = context.selectedText().replace('\u2029', '\n').replace('\u2028', '\n')[:SUFFIX_LIMIT]
         language = 'text'
         try:
             language = ed.ai_get_language()
@@ -462,7 +483,11 @@ class InlineCompletionController(QObject):
             self._workers.remove(worker)
         except ValueError:  # 非法值按未提供处理
             pass
+        if self._active_worker is worker:
+            self._active_worker = None
         worker.deleteLater()
+        if self._request_pending and self._enabled and not self._timer.isActive():
+            QTimer.singleShot(0, self._start_request)
 
     def _on_failed(self, gen: int, msg: str):
         # 静默失败（不打扰编辑），但记一行日志，否则配置错误无从排查

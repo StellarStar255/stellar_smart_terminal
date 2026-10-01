@@ -12,7 +12,7 @@ import codecs
 import itertools
 import threading
 from contextlib import contextmanager
-from collections import OrderedDict
+from collections import OrderedDict, deque
 from typing import Optional, List
 from pathlib import Path
 import unicodedata
@@ -462,6 +462,8 @@ class TerminalWidget(TerminalInputMixin, TerminalMouseMixin,
     # 所以只对「之后新建」的终端生效。值越大越占内存、resize reflow 越慢（O(历史行数)）。
     # 进程级共享：由 MainWindow 从配置读出后覆盖；可在设置里改。
     SCROLLBACK_LINES = 5000
+    # Recording is separate from the parsed screen; keep recent output if GUI stalls.
+    _OUTPUT_BUFFER_MAX_CHARS = 1024 * 1024
 
     # 鲜艳的终端颜色 - One Dark Pro 风格
     DEFAULT_COLORS = {
@@ -707,7 +709,9 @@ class TerminalWidget(TerminalInputMixin, TerminalMouseMixin,
         self.refresh_timer.start(50)  # 20fps 足够流畅
 
         # 输出记录缓冲区 - 批量发送以减少信号开销
-        self._output_buffer = []
+        self._output_buffer = deque()
+        self._output_buffer_chars = 0
+        self._output_buffer_truncated = False
         # 保护 _output_buffer：读取线程 append、GUI 定时器换出，二者需互斥，
         # 否则 join 与 clear 之间 append 的块会被 clear 抹掉 → 录制丢字
         self._output_buffer_lock = threading.Lock()
@@ -1487,8 +1491,7 @@ class TerminalWidget(TerminalInputMixin, TerminalMouseMixin,
         self._content_dirty = True
 
         # 缓冲输出，由定时器统一发送（避免高频输出时的信号风暴）
-        with self._output_buffer_lock:
-            self._output_buffer.append(text)
+        self._buffer_output(text)
 
         # 记录输出活动并重置空闲计时器：停顿超过阈值即视为本轮执行完毕。
         # _activity_idle_timer 是 QTimer，只能在 GUI 线程操作；当本方法跑在读取
@@ -1621,16 +1624,40 @@ class TerminalWidget(TerminalInputMixin, TerminalMouseMixin,
             self._debug_capture_file.close()
             self._debug_capture_file = None
 
+    def _buffer_output(self, text: str):
+        if not text:
+            return
+        limit = self._OUTPUT_BUFFER_MAX_CHARS
+        with self._output_buffer_lock:
+            if len(text) > limit:
+                text = text[-limit:]
+                self._output_buffer_truncated = True
+            self._output_buffer.append(text)
+            self._output_buffer_chars += len(text)
+            excess = self._output_buffer_chars - limit
+            while excess > 0:
+                oldest = self._output_buffer.popleft()
+                removed = min(excess, len(oldest))
+                if removed < len(oldest):
+                    self._output_buffer.appendleft(oldest[removed:])
+                self._output_buffer_chars -= removed
+                excess -= removed
+                self._output_buffer_truncated = True
+
     def _flush_output_buffer(self):
-        """刷新输出缓冲区，批量发送 output_recorded 信号"""
-        # 原子换出：持锁把整个 buffer 换成新列表，锁外再 join/emit，
-        # 避免 join 与 clear 之间读取线程 append 的块丢失
+        """Swap bounded recording chunks under lock, then emit on the GUI thread."""
         with self._output_buffer_lock:
             if not self._output_buffer:
                 return
             buf = self._output_buffer
-            self._output_buffer = []
-        self.output_recorded.emit(''.join(buf))
+            truncated = self._output_buffer_truncated
+            self._output_buffer = deque()
+            self._output_buffer_chars = 0
+            self._output_buffer_truncated = False
+        recorded = ''.join(buf)
+        if truncated:
+            recorded = t('terminal.recording_truncated') + '\n' + recorded
+        self.output_recorded.emit(recorded)
 
     def _debug_save_cache_pixmap(self):
         """保存当前 cache pixmap 为 PNG，便于和屏幕实际显示对比。"""

@@ -6,6 +6,7 @@
 _current_language = "zh"
 
 TRANSLATIONS = {
+    "terminal.recording_truncated": {"zh": "[界面繁忙，较早的录制输出已截断]", "en": "[Earlier recorded output truncated while the interface was busy]"},
     "remote.sync_recovered": {"zh": "已恢复未上传的修改，请重试同步。", "en": "Unsent changes recovered. Retry to upload."},
     "remote.sync_disconnected": {"zh": "SSH 连接已断开，请重新连接后重试。", "en": "SSH session disconnected; reconnect and retry."},
     "remote.sync_pending": {"zh": "等待同步", "en": "Sync pending"},

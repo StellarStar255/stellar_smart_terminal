@@ -829,15 +829,15 @@ class RemotePanelMixin:
         old = self._remote_save_connections.pop(local_temp_path, None)
         if old:
             try:
-                pane.file_saved.disconnect(old)
+                pane.remote_save_requested.disconnect(old)
             except Exception:
                 logger.debug("_open_remote_file_in_editor: suppressed exception", exc_info=True)
-        def on_saved(saved_path: str):
+        def on_saved(saved_path: str, data: bytes):
             if saved_path != local_temp_path:
                 return
             # 把本地临时文件 push 回远端
-            self._ensure_remote_panel().upload_after_save(local_temp_path)
-        pane.file_saved.connect(on_saved)
+            self._ensure_remote_panel().upload_after_save(local_temp_path, data)
+        pane.remote_save_requested.connect(on_saved)
         self._remote_save_connections[local_temp_path] = on_saved
 
         panel = self._ensure_remote_panel()

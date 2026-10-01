@@ -41,9 +41,8 @@ class SessionEntry:
         self.type = type  # 'input' 或 'output'
         self.timestamp = timestamp
         self.files: List[str] = files if files is not None else []
-        self._parts: List[str] = [content] if content else []
-        self._length = len(content)
-        self._truncated = False
+        self._parts: List[str] = []
+        self.content = content
 
     @property
     def content(self) -> str:
@@ -57,9 +56,10 @@ class SessionEntry:
 
     @content.setter
     def content(self, value: str):
+        self._truncated = len(value) > self.MAX_CONTENT_CHARS
+        value = value[-self.MAX_CONTENT_CHARS:] if self._truncated else value
         self._parts = [value] if value else []
         self._length = len(value)
-        self._truncated = False
 
     @property
     def content_length(self) -> int:

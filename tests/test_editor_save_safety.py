@@ -673,5 +673,42 @@ class TestRecoveryAtomicity(_Base):
         self.assertEqual(retries, [])
 
 
+class TestEditorSizeLimits(_Base):
+    def test_growing_external_file_preserves_editor_and_baseline(self):
+        from pathlib import Path
+        _, pane, path = self._area_with_file('original')
+        baseline = pane._disk_content_hash
+        Path(path).write_bytes(b'x' * 32)
+        with unittest.mock.patch('file_editor._MAX_TEXT_FILE_BYTES', 16):
+            with unittest.mock.patch('file_editor.QMessageBox.warning') as warning:
+                pane._handle_external_change()
+                warning.assert_called_once()
+        self.assertEqual(pane.editor.toPlainText(), 'original')
+        self.assertEqual(pane._disk_content_hash, baseline)
+
+    def test_file_growth_after_size_check_is_still_rejected(self):
+        from pathlib import Path
+        _, pane, path = self._area_with_file('original')
+        other = path + '.large'
+        Path(other).write_bytes(b'x' * 32)
+        with unittest.mock.patch('file_editor._MAX_TEXT_FILE_BYTES', 16):
+            with unittest.mock.patch('file_editor.os.path.getsize', return_value=8):
+                with unittest.mock.patch('file_editor.QMessageBox.warning') as warning:
+                    self.assertFalse(pane.open_file(other))
+                    warning.assert_called_once()
+        self.assertEqual(pane.editor.toPlainText(), 'original')
+        self.assertEqual(pane._current_file, path)
+
+
+    def test_remote_save_signal_keeps_original_path_if_listener_switches_file(self):
+        _, pane, path = self._area_with_file('original')
+        pane.editor.setPlainText('saved content')
+        requested = []
+        pane.file_saved.connect(lambda _: setattr(pane, '_current_file', path + '.other'))
+        pane.remote_save_requested.connect(lambda name, data: requested.append((name, data)))
+        self.assertTrue(pane.save_file())
+        self.assertEqual(requested, [(path, b'saved content')])
+
+
 if __name__ == '__main__':
     unittest.main()

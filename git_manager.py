@@ -493,6 +493,57 @@ class GitManager(QObject):
                 time.sleep(delays[attempt])
         return ok, output
 
+    def _communicate_diff(self, proc, timeout):
+        """Drain both pipes while retaining only a bounded prefix of each stream."""
+        output = [None, None]
+        errors = []
+        limits = (MAX_DIFF_CHARS + 1, 128 * 1024 + 1)
+
+        def drain(index, stream):
+            chunks, kept = [], 0
+            try:
+                while True:
+                    chunk = stream.read(64 * 1024)
+                    if not chunk:
+                        break
+                    remaining = limits[index] - kept
+                    if remaining > 0:
+                        chunk = chunk[:remaining]
+                        chunks.append(chunk)
+                        kept += len(chunk)
+                output[index] = ''.join(chunks)
+            except Exception as exc:
+                errors.append(exc)
+            finally:
+                stream.close()
+
+        readers = [threading.Thread(target=drain, args=(i, stream), daemon=True,
+                                    name='git-output-drain')
+                   for i, stream in enumerate((proc.stdout, proc.stderr))]
+        deadline = time.monotonic() + timeout
+        started = []
+        try:
+            for reader in readers:
+                reader.start()
+                started.append(reader)
+            proc.wait(timeout=max(0, deadline - time.monotonic()))
+            for reader in readers:
+                reader.join(max(0, deadline - time.monotonic()))
+            if any(reader.is_alive() for reader in readers):
+                raise subprocess.TimeoutExpired(getattr(proc, 'args', 'git'), timeout)
+            if errors:
+                raise errors[0]
+            return output[0], _cap_output(output[1], 128 * 1024)
+        except Exception:
+            self._kill_proc(proc)
+            try:
+                proc.wait(timeout=3)
+            except subprocess.TimeoutExpired:
+                proc.kill()
+            for reader in started:
+                reader.join(1)
+            raise
+
     def _run_git_once(self, args: list, check: bool, timeout: int,
                       input_text: str) -> Tuple[bool, str]:
         """单次执行 git 命令（无重试），供 _run_git 调用。"""
@@ -502,12 +553,21 @@ class GitManager(QObject):
                 args,
                 stdin=subprocess.PIPE if input_text is not None else None,
             )
+            bounded_output = bool(args) and input_text is None and (
+                args[0] == 'diff' and '--name-only' not in args
+                or args[0] == 'show' and '--patch' in args)
             try:
-                stdout, stderr = proc.communicate(input=input_text, timeout=timeout)
+                if bounded_output:
+                    stdout, stderr = self._communicate_diff(proc, timeout)
+                else:
+                    stdout, stderr = proc.communicate(input=input_text, timeout=timeout)
             except subprocess.TimeoutExpired:
                 self._kill_proc(proc)
                 try:
-                    proc.communicate(timeout=3)
+                    if bounded_output:
+                        proc.wait(timeout=3)
+                    else:
+                        proc.communicate(timeout=3)
                 except Exception:
                     logger.debug("_run_git: suppressed exception", exc_info=True)
                 return False, t("git_mgr.timeout")

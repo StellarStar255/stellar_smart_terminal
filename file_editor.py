@@ -57,6 +57,24 @@ _VIEW_STATE_MAX = 200  # 防无限增长；超限时淘汰最早记录的文件
 _MD_AUTO_PREVIEW_MAX_BYTES = 512 * 1024
 
 
+_MAX_TEXT_FILE_BYTES = 5 * 1024 * 1024
+
+
+class _EditorFileTooLargeError(OSError):
+    def __init__(self, size):
+        self.size = size
+        super().__init__('File exceeds the editor size limit')
+
+
+def _read_editor_bytes(path):
+    # Reading limit+1 also protects against a file growing after stat().
+    with open(path, 'rb') as stream:
+        raw = stream.read(_MAX_TEXT_FILE_BYTES + 1)
+        if len(raw) > _MAX_TEXT_FILE_BYTES:
+            raise _EditorFileTooLargeError(max(len(raw), os.fstat(stream.fileno()).st_size))
+        return raw
+
+
 def _looks_binary(raw: bytes) -> bool:
     """含 NUL 字节即视为二进制（与 git 同款启发式）。
 
@@ -1406,6 +1424,7 @@ class FileEditorWidget(QWidget):
 
     # 信号
     remote_sync_retry = pyqtSignal(str)
+    remote_save_requested = pyqtSignal(str, object)
     file_saved = pyqtSignal(str)  # 文件保存信号
     editor_closed = pyqtSignal()  # 编辑器关闭信号
     split_h_requested = pyqtSignal()  # 请求左右分屏（并排）
@@ -2268,7 +2287,7 @@ class FileEditorWidget(QWidget):
 
         # 检查文件大小，太大的文件不打开
         file_size = os.path.getsize(file_path)
-        if file_size > 5 * 1024 * 1024:  # 5MB 限制
+        if file_size > _MAX_TEXT_FILE_BYTES:
             QMessageBox.warning(self, t("editor.file_too_large_title"),
                               t("editor.file_too_large_msg", size=f"{file_size / 1024 / 1024:.1f}"))
             return False
@@ -2276,8 +2295,11 @@ class FileEditorWidget(QWidget):
         # 读原始字节自行解码（utf-8 → utf-8-sig → gb18030 → latin-1 兜底）；
         # 含 NUL 的二进制文件保持原先「拒绝打开」的行为
         try:
-            with open(file_path, 'rb') as f:
-                raw = f.read()
+            raw = _read_editor_bytes(file_path)
+        except _EditorFileTooLargeError as e:
+            QMessageBox.warning(self, t('editor.file_too_large_title'),
+                                t('editor.file_too_large_msg', size=f'{e.size / 1024 / 1024:.1f}'))
+            return False
         except Exception as e:
             QMessageBox.warning(self, t("editor.error"), t("editor.read_error", error=e))
             return False
@@ -3681,7 +3703,9 @@ class FileEditorWidget(QWidget):
             self._remove_autosave_backup()
             self._refresh_known_mtime()
             self._update_title()
-            self.file_saved.emit(self._current_file)
+            saved_path = self._current_file
+            self.file_saved.emit(saved_path)
+            self.remote_save_requested.emit(saved_path, data)
             return True
         except Exception as e:
             if silent:
@@ -4066,8 +4090,12 @@ class FileEditorWidget(QWidget):
             return
 
         try:
-            with open(path, 'rb') as f:
-                raw = f.read()
+            raw = _read_editor_bytes(path)
+        except _EditorFileTooLargeError as e:
+            QMessageBox.warning(self, t('editor.file_too_large_title'),
+                                t('editor.file_too_large_msg', size=f'{e.size / 1024 / 1024:.1f}'))
+            self._known_mtime = new_mtime
+            return
         except Exception as e:
             QMessageBox.warning(self, t("editor.error"), t("editor.read_error", error=e))
             return
