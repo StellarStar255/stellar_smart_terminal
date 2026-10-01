@@ -1,6 +1,7 @@
 """Serialize editor uploads and publish worker results on the Qt thread."""
 import os
 import json
+import math
 import time
 import shutil
 import tempfile
@@ -55,6 +56,7 @@ class RemoteFileSync(QObject):
         self._capture_failed = set()
         self._pending_dir = os.path.join(get_data_dir(), 'remote_pending')
         self._generation = {}
+        self._snapshot_timestamp = 0.0
         self._capture_sources = {}
         self._capture_jobs = {}
         self._capture_executor = ThreadPoolExecutor(max_workers=1, thread_name_prefix='remote-snapshot')
@@ -95,11 +97,14 @@ class RemoteFileSync(QObject):
                 snapshot = metadata[:-5]
                 if (record.get('host') == host and record.get('remote') == remote
                         and os.path.isfile(snapshot)):
-                    candidates.append((float(record['timestamp']), snapshot))
+                    timestamp = float(record['timestamp'])
+                    if math.isfinite(timestamp):
+                        candidates.append((timestamp, snapshot))
             except (OSError, ValueError, TypeError, KeyError, AttributeError):
                 continue
         if candidates:
-            snapshot = max(candidates)[1]
+            timestamp, snapshot = max(candidates)
+            self._snapshot_timestamp = max(self._snapshot_timestamp, timestamp)
             self._latest[path] = snapshot
             try:
                 with atomic_writer(path, binary=True) as dst, open(snapshot, 'rb') as src:
@@ -155,7 +160,8 @@ class RemoteFileSync(QObject):
         host, remote, _ = self._targets[path]
         generation = self._generation.get(path, 0) + 1
         self._generation[path] = generation
-        self._capture_sources[path] = (generation, data, host, remote, time.time())
+        self._snapshot_timestamp = max(time.time(), math.nextafter(self._snapshot_timestamp, math.inf))
+        self._capture_sources[path] = (generation, data, host, remote, self._snapshot_timestamp)
         self._capture_failed.discard(path)
         self._set_state(path, 'pending')
         self._start_capture(path)

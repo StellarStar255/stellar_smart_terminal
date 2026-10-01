@@ -312,7 +312,7 @@ def test_close_mid_copy_persists_latest_coalesced_version(setup_sync):
         assert gate.wait(3)
         return original(*args)
     try:
-        with patch.object(sync, '_write_snapshot', side_effect=blocked):
+        with patch.object(sync, '_write_snapshot', side_effect=blocked), patch('remote_file_sync.time.time', return_value=1000):
             sync.save(str(local), b'first')
             assert entered.wait(1)
             sync.save(str(local), b'latest saved before closing')
