@@ -178,6 +178,7 @@ class TerminalScrollSearchMixin:
         if new_offset != self.scroll_offset:
             self.scroll_offset = new_offset
             self._scroll_accum = 0.0
+            self._update_drag_selection_after_scroll()
             # scroll_offset 变化使 render_state 中的 start_line 失配 → 整屏重绘
             self._invalidate_render_cache()
 
@@ -306,6 +307,9 @@ class TerminalScrollSearchMixin:
 
         # 只有在滚动位置实际改变时才更新
         if old_offset != self.scroll_offset:
+            if self._is_selecting:
+                self._last_mouse_pos = event.position().toPoint()
+                self._update_drag_selection_after_scroll()
             self._invalidate_render_cache()
         event.accept()
 
@@ -313,6 +317,7 @@ class TerminalScrollSearchMixin:
         """滚动到底部（最新内容）"""
         if self.scroll_offset != 0:
             self.scroll_offset = 0
+            self._update_drag_selection_after_scroll()
             self._invalidate_render_cache()
 
     # ---------- 命令标记（Alt+↑/↓ 跳转 + 滚动条刻度） ----------

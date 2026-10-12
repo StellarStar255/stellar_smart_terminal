@@ -73,16 +73,14 @@ class TerminalMouseMixin:
             if self.scroll_offset < max_scroll:
                 self.scroll_offset = min(self.scroll_offset + step, max_scroll)
                 # 更新选择终点（扩展到新滚动位置的顶部）
-                if self._last_mouse_pos:
-                    self._selection_end = self._pos_to_absolute_cell(self._last_mouse_pos)
+                self._update_drag_selection_after_scroll()
                 self._invalidate_render_cache()
         else:
             # 向下滚动（回到最新）
             if self.scroll_offset > 0:
                 self.scroll_offset = max(self.scroll_offset - step, 0)
                 # 更新选择终点（扩展到新滚动位置的底部）
-                if self._last_mouse_pos:
-                    self._selection_end = self._pos_to_absolute_cell(self._last_mouse_pos)
+                self._update_drag_selection_after_scroll()
                 self._invalidate_render_cache()
 
     def _pos_to_cell(self, pos: QPoint) -> tuple:
@@ -98,8 +96,8 @@ class TerminalMouseMixin:
     def _pos_to_absolute_cell(self, pos: QPoint) -> tuple:
         """将鼠标位置转换为绝对行号坐标 (absolute_row, col) - 用于跨页选择
 
-        使用上次渲染时记录的 display_start，确保鼠标坐标与屏幕显示内容一致。
-        避免因新输出导致 history_count 变化而产生偏移。
+        按下时使用已渲染的视口；拖动中使用当前视口，避免滚动后尚未
+        paint 就收到下一次移动/释放事件时仍引用上一帧的位置。
         """
         x = pos.x() - self.PADDING
         y = pos.y() - self.PADDING - self._header_h
@@ -107,10 +105,16 @@ class TerminalMouseMixin:
         col = max(0, min(int(x / self.char_width), self.term_cols - 1))
         display_row = max(0, min(int(y / self.char_height), self.term_rows - 1))
 
-        # 使用上次实际渲染的 display_start，保证与屏幕内容一致
-        absolute_row = self._rendered_display_start + display_row
+        display_start = (self._get_display_info()[2] if self._is_selecting
+                         else self._rendered_display_start)
+        absolute_row = display_start + display_row
 
         return (absolute_row, col)
+
+    def _update_drag_selection_after_scroll(self):
+        """视口滚动时，拖动终点跟随鼠标，已完成选区保持原来的文本坐标。"""
+        if self._is_selecting and self._last_mouse_pos is not None:
+            self._selection_end = self._pos_to_absolute_cell(self._last_mouse_pos)
 
     def _absolute_to_display_row(self, absolute_row: int) -> int:
         """将绝对行号转换为显示区域内的相对行号，如果不在显示区域则返回 -1"""
@@ -189,6 +193,7 @@ class TerminalMouseMixin:
         force_local_selection = (event.modifiers() & Qt.KeyboardModifier.ShiftModifier) or self.scroll_offset > 0
 
         if event.button() == Qt.MouseButton.LeftButton:
+            self._last_mouse_pos = event.pos()
             current_time = time.time()
             cell = self._pos_to_cell(event.pos())  # 相对坐标，用于点击检测
             abs_cell = self._pos_to_absolute_cell(event.pos())  # 绝对坐标，用于选择
@@ -298,10 +303,11 @@ class TerminalMouseMixin:
             edge_zone = 24  # 进入边缘的阈值（像素）
             widget_height = self.height()
 
-            if y < edge_zone:
+            top_edge = self.PADDING + self._header_h + edge_zone
+            if y < top_edge:
                 # 鼠标在顶部边缘 / 已拉出 widget 上方 - 向上滚动（查看历史）
                 self._auto_scroll_direction = -1
-                self._auto_scroll_pull = edge_zone - y  # y 越小（甚至为负）值越大
+                self._auto_scroll_pull = top_edge - y
                 if not self._auto_scroll_timer.isActive():
                     self._auto_scroll_timer.start(30)  # 间隔更小，反馈更跟手
             elif y > widget_height - edge_zone:

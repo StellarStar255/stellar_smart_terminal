@@ -79,6 +79,7 @@ class _Base(unittest.TestCase):
         w._app_wheel_accum = 0.0
         w.scroll_offset = 0
         w._mouse_mode = False
+        w._is_selecting = False
         return w
 
 
