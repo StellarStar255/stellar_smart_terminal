@@ -57,9 +57,9 @@ class TestSessionEntryContent:
         monkeypatch.setattr(SessionEntry, 'MAX_CONTENT_CHARS', 10)
         entry = SessionEntry(type='output', content='aaaa', timestamp='t')
         entry.append_content('bbbb')
-        entry.append_content('cccc')  # 总 12 > 10，最旧分段 aaaa 被丢弃
-        assert entry.content == SessionEntry.TRUNCATION_MARK + 'bbbbcccc'
-        assert entry.content_length == 8
+        entry.append_content('cccc')  # Keep exactly the newest ten characters.
+        assert entry.content == SessionEntry.TRUNCATION_MARK + 'aabbbbcccc'
+        assert entry.content_length == 10
 
     def test_single_oversized_part_sliced(self, monkeypatch):
         monkeypatch.setattr(SessionEntry, 'MAX_CONTENT_CHARS', 10)
@@ -347,3 +347,43 @@ def test_final_save_failure_is_not_reported_as_success(manager, monkeypatch):
     with pytest.raises(OSError, match='disk full'):
         manager.flush()
     assert ended.entries[0].content == 'final'
+
+
+def test_cap_preserves_recent_content_after_snapshot_join(monkeypatch):
+    monkeypatch.setattr(SessionEntry, 'MAX_CONTENT_CHARS', 10)
+    entry = SessionEntry('output', '0123456789')
+    entry.to_dict()  # Autosave joins segments before later output arrives.
+    entry.append_content('a')
+    assert entry.content == SessionEntry.TRUNCATION_MARK + '123456789a'
+    entry.append_content('bcdefghijkl')
+    assert entry.content == SessionEntry.TRUNCATION_MARK + 'cdefghijkl'
+
+
+def test_incremental_total_matches_content_after_eviction(manager, monkeypatch):
+    monkeypatch.setattr(SessionEntry, 'MAX_CONTENT_CHARS', 10)
+    monkeypatch.setattr(manager, 'MAX_SESSION_CHARS', 18)
+    session = manager.create_session('test')
+    for i in range(100):
+        manager.add_input(str(i))
+        manager.add_output('abc')
+        manager.add_output('defghijkl')
+        assert session._total_chars == sum(entry.content_length for entry in session.entries)
+        assert session._total_chars <= 18
+    restored = type(session).from_dict(session.to_dict())
+    assert restored._total_chars == sum(entry.content_length for entry in restored.entries)
+
+
+def test_rolling_cap_after_autosave_does_not_copy_entire_entry():
+    import tracemalloc
+    entry = SessionEntry('output', 'x' * SessionEntry.MAX_CONTENT_CHARS)
+    snapshot = entry.to_dict()
+    tracemalloc.start()
+    try:
+        entry.append_content('y')
+        _, peak = tracemalloc.get_traced_memory()
+    finally:
+        tracemalloc.stop()
+    assert peak < 512 * 1024, 'Rolling eviction copied the multi-megabyte autosave snapshot'
+    assert snapshot['content'].endswith('x')
+    assert entry.content_length == SessionEntry.MAX_CONTENT_CHARS
+    assert entry.content.endswith('y')

@@ -6,9 +6,17 @@
 _current_language = "zh"
 
 TRANSLATIONS = {
+    "remote.sync_merge_cancel": {"zh": "取消", "en": "Cancel"},
+    "remote.sync_compare": {"zh": "比较与合并", "en": "Compare and merge"},
+    "remote.sync_merge_hint": {"zh": "右侧是当前远端内容。请在左侧合并修改，再保存；取消会保留本地修改。", "en": "The right side shows the current remote file. Merge your edits on the left, then save. Cancel retains your local edits."},
+    "remote.sync_local": {"zh": "本地修改（可编辑）", "en": "Local edits (editable)"},
+    "remote.sync_remote": {"zh": "当前远端内容（只读）", "en": "Current remote file (read only)"},
+    "remote.sync_merge_save": {"zh": "保存合并结果", "en": "Save merged result"},
+    "remote.sync_conflict": {"zh": "远端文件已修改，本地修改已保留。请比较并合并后保存。", "en": "The remote file changed. Local edits are retained. Compare and merge before saving."},
     "terminal.recording_truncated": {"zh": "[界面繁忙，较早的录制输出已截断]", "en": "[Earlier recorded output truncated while the interface was busy]"},
     "remote.sync_recovered": {"zh": "已恢复未上传的修改，请重试同步。", "en": "Unsent changes recovered. Retry to upload."},
     "remote.sync_disconnected": {"zh": "SSH 连接已断开，请重新连接后重试。", "en": "SSH session disconnected; reconnect and retry."},
+    "remote.sync_conflict_status": {"zh": "远端冲突（本地已保存）", "en": "Remote conflict (saved locally)"},
     "remote.sync_pending": {"zh": "等待同步", "en": "Sync pending"},
     "remote.sync_uploading": {"zh": "正在同步…", "en": "Syncing…"},
     "remote.sync_failed": {"zh": "同步失败（本地已保存）", "en": "Sync failed (saved locally)"},

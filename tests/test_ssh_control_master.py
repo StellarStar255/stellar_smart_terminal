@@ -407,9 +407,11 @@ class TestTransfers(unittest.TestCase):
         self.assertEqual(proc.stdin.written, payload)
         # 落 .part 再改名，但只起**一条** ssh —— 批量上传时进程启动是真开销
         self.assertEqual(len(cmds), 1)
-        self.assertIn('set -C; exec 3> /d/.stellar-upload-', cmds[0])
+        self.assertIn('set -C; exec 3> \"$temporary\"', cmds[0])
+        self.assertIn('/d/.stellar-upload-', cmds[0])
         self.assertIn('trap ', cmds[0])
-        self.assertIn('cat >&3 && mv -- ', cmds[0])
+        self.assertIn('cat >&3 || exit 1;', cmds[0])
+        self.assertIn('mv -- \"$temporary\" \"$target\"', cmds[0])
         self.assertEqual(extra, [], '成功路径不该再多一条 ssh')
         self.assertEqual(seen[-1], (len(payload), len(payload)))
 

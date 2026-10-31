@@ -36,7 +36,8 @@ from concurrent.futures import Future, ThreadPoolExecutor
 from types import SimpleNamespace
 from typing import Callable, Optional
 
-from file_persistence import atomic_writer
+from file_persistence import atomic_writer, file_sha256
+from remote_edit import atomic_upload_command, RemoteFileConflictError
 from PyQt6.QtCore import QObject, pyqtSignal
 
 from app_logging import get_logger
@@ -1237,19 +1238,23 @@ class ControlMasterSession(QObject):
     def upload(self, local_path: str, remote_path: str):
         self.upload_with_progress(local_path, remote_path, None)
 
+    def upload_for_edit(self, local_path, remote_path, expected_hash):
+        return self.upload_with_progress(local_path, remote_path,
+                                         expected_hash=expected_hash)
+
     def upload_with_progress(self, local_path: str, remote_path: str,
-                             progress_cb=None):
+                             progress_cb=None, *, expected_hash=None):
         total = os.path.getsize(local_path)
         tmp_remote = posixpath.join(posixpath.dirname(remote_path) or '.',
                                     f".stellar-upload-{uuid.uuid4().hex}.part")
-        cleanup = shlex.quote(f"rm -f -- {_qpath(tmp_remote)}")
+        desired = file_sha256(local_path) if expected_hash is not None else None
+        command = atomic_upload_command(_qpath(remote_path), _qpath(tmp_remote),
+                                        expected_hash, desired)
         with self._lock:
             # 先落 .part 再改名（半成品不会被别人看见），但两步放进**同一条**
             # 远端命令：每多一条 ssh 就多一次进程启动，批量上传时这笔开销很实在
             proc = self._spawn(
-                f"set -C; exec 3> {_qpath(tmp_remote)} || exit 1; "
-                f"trap {cleanup} 0; cat >&3 && mv -- {_qpath(tmp_remote)} "
-                f"{_qpath(remote_path)}",
+                command,
                 stdin=subprocess.PIPE, stdout=subprocess.DEVNULL)
             done = 0
             try:
@@ -1271,6 +1276,8 @@ class ControlMasterSession(QObject):
             finally:
                 self._reap(proc)
         if proc.returncode != 0:
+            if 'STELLAR_EDIT_CONFLICT' in err:
+                raise RemoteFileConflictError()
             # 远端 trap 只清理成功独占创建的文件，碰撞失败不能删别人的文件。
             raise RuntimeError(self._explain(err, proc.returncode) or f"上传失败 (exit {proc.returncode})")
         self.invalidate_cache(self._parent(remote_path))

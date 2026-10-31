@@ -54,6 +54,9 @@ class _FakeSftp:
         attr.st_mode = self.existing[path]
         return attr
 
+    def lstat(self, path):
+        return self.stat(path)
+
     def mkdir(self, path):
         self.calls.append(('mkdir', path))
         if path in self.existing:
@@ -88,6 +91,7 @@ class UploadIsAtomic(_Base):
         open(local, 'wb').close()
         self._sess(sftp).upload(local, '/data/.images/a.png')
         self.assertEqual(sftp.calls, [
+            ('stat', '/data/.images/a.png'),
             ('open', '/data/.images/.stellar-upload-test.part', 'wx'),
             ('put', local, '/data/.images/.stellar-upload-test.part'),
             ('posix_rename', '/data/.images/.stellar-upload-test.part', '/data/.images/a.png'),
@@ -141,7 +145,7 @@ class TestUploadFailureSafety(_Base):
         sftp.open = Mock(side_effect=FileExistsError('exists'))
         with self.assertRaises(FileExistsError):
             self._sess(sftp).upload('unused', '/data/a')
-        self.assertEqual(sftp.calls, [])
+        self.assertEqual(sftp.calls, [('stat', '/data/a')])
 
     def test_unsupported_extension_can_create_new_destination(self):
         sftp = _FakeSftp()

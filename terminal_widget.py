@@ -13,6 +13,7 @@ import itertools
 import threading
 from contextlib import contextmanager
 from collections import OrderedDict, deque
+from terminal_sequences import TerminalSequenceBuffer
 from typing import Optional, List
 from pathlib import Path
 import unicodedata
@@ -674,6 +675,7 @@ class TerminalWidget(TerminalInputMixin, TerminalMouseMixin,
 
         # UTF-8 增量解码器 - 正确处理跨数据块的多字节字符
         self._utf8_decoder = codecs.getincrementaldecoder('utf-8')('replace')
+        self._sequence_buffer = TerminalSequenceBuffer()
 
         # 输入缓冲
         self.input_buffer = ""
@@ -1284,6 +1286,8 @@ class TerminalWidget(TerminalInputMixin, TerminalMouseMixin,
             # "退出 → 再启动"都泄漏一个 fd（旧实例从未被清理）
             self.stop_process()
 
+        self._utf8_decoder.reset()
+        self._sequence_buffer = TerminalSequenceBuffer()
         # 更新终端大小
         self._update_terminal_size()
 
@@ -1373,6 +1377,8 @@ class TerminalWidget(TerminalInputMixin, TerminalMouseMixin,
             self._debug_capture_file.write(f"\n{'='*60}\n")
             self._debug_capture_file.write(f"[{ts}] RAW ({len(text)} chars):\n")
             self._debug_capture_file.write(repr(text) + '\n')
+
+        text = self._sequence_buffer.feed(text)
 
         # 没有 ESC 的纯文本块（大多数输出）直接跳过下面十几趟正则全扫
         if '\x1b' in text:

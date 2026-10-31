@@ -10,6 +10,7 @@ from abc import ABC, abstractmethod
 from typing import Optional, List, Callable
 
 from app_logging import get_logger
+from terminal_writer import TerminalWriter
 
 
 def scrub_packaging_env(env: dict) -> dict:
@@ -116,6 +117,8 @@ class TerminalBackend(ABC):
         self.on_output: Optional[Callable[[bytes], None]] = None
         self.on_exit: Optional[Callable[[int], None]] = None
         self._running = False
+        self._input_writer = None
+        self._input_closed = False
 
     def _pump_reads(self, read_first, wait_more, read_more,
                     clock=time.monotonic) -> bool:
@@ -527,6 +530,7 @@ if IS_WINDOWS:
                 self._pipe_out_write = None
 
                 self._running = True
+                self._input_closed = False
 
                 # 启动读取线程
                 self._reader_thread = threading.Thread(
@@ -614,35 +618,16 @@ if IS_WINDOWS:
             return code.value
 
         def write(self, data: bytes) -> bool:
-            if self._pipe_in_write is None:
-                return False
-            try:
-                # WriteFile 也可能只写入一部分（写入 ConPTY 输入管道，缓冲区有限），
-                # 实际写入字节数在 written 里。循环写到写完，避免大段粘贴被截断。
-                mv = memoryview(data)
-                total = len(mv)
-                sent = 0
-                with self._write_lock:
-                    while sent < total:
-                        chunk = bytes(mv[sent:])
-                        written = wintypes.DWORD(0)
-                        success = kernel32.WriteFile(
-                            wintypes.HANDLE(self._pipe_in_write),
-                            chunk,
-                            len(chunk),
-                            ctypes.byref(written),
-                            None,
-                        )
-                        if not success:
-                            return False
-                        n = written.value
-                        if n <= 0:
-                            break
-                        sent += n
-                return sent == total
-            except Exception as e:
-                logger.warning(f"[WindowsBackend] Write error: {e}")
-                return False
+            with self._write_lock:
+                if self._pipe_in_write is None or self._input_closed:
+                    return False
+                try:
+                    if self._input_writer is None:
+                        self._input_writer = TerminalWriter.for_windows_pipe(self._pipe_in_write)
+                    return self._input_writer.write(data)
+                except OSError:
+                    logger.warning('Could not queue terminal input', exc_info=True)
+                    return False
 
         def resize(self, cols: int, rows: int) -> bool:
             if self._hpc is None:
@@ -668,6 +653,11 @@ if IS_WINDOWS:
 
         def _cleanup(self):
             """清理所有资源"""
+            with self._write_lock:
+                self._input_closed = True
+                if self._input_writer is not None:
+                    self._input_writer.close()
+                    self._input_writer = None
             # 关闭 PseudoConsole（这会导致子进程收到关闭信号）
             if self._hpc is not None:
                 try:
@@ -797,6 +787,7 @@ else:
                     # 父进程
                     os.close(slave_fd)
                     self._running = True
+                    self._input_closed = False
 
                     # 启动读取线程
                     self._reader_thread = threading.Thread(
@@ -1005,34 +996,16 @@ else:
                     exit_callback(-1)
 
         def write(self, data: bytes) -> bool:
-            if self._master_fd is None:
-                return False
-            try:
-                # os.write 在阻塞 fd 上仍可能只写入一部分（PTY 内核缓冲区有限，
-                # 几十 KB），返回实际写入字节数。必须循环写到写完，否则大段粘贴
-                # 会被静默截断。EINTR 重试；万一 fd 被设为非阻塞，EAGAIN 时让出
-                # 片刻再试，避免忙等。
-                # 整个多段循环持锁：否则两个线程的循环交错会把各自的字节段
-                # 穿插进 PTY（读取线程回应答 vs GUI 键入）。
-                mv = memoryview(data)
-                total = len(mv)
-                sent = 0
-                with self._write_lock:
-                    while sent < total:
-                        try:
-                            n = os.write(self._master_fd, mv[sent:])
-                        except InterruptedError:
-                            continue
-                        except BlockingIOError:
-                            time.sleep(0.001)
-                            continue
-                        if n <= 0:
-                            break
-                        sent += n
-                return sent == total
-            except Exception as e:
-                logger.warning(f"[UnixBackend] Write error: {e}")
-                return False
+            with self._write_lock:
+                if self._master_fd is None or self._input_closed:
+                    return False
+                try:
+                    if self._input_writer is None:
+                        self._input_writer = TerminalWriter.for_fd(self._master_fd)
+                    return self._input_writer.write(data)
+                except OSError:
+                    logger.warning('Could not queue terminal input', exc_info=True)
+                    return False
 
         def resize(self, cols: int, rows: int) -> bool:
             if self._master_fd is None:
@@ -1073,7 +1046,8 @@ else:
 
             # 叫醒卡在 select 里的读取线程
             try:
-                os.write(self._wake_w, b'x')
+                if self._wake_w is not None:
+                    os.write(self._wake_w, b'x')
             except OSError:
                 pass  # 管道已在上一次 _cleanup 里关掉（重复 stop）
 
@@ -1081,6 +1055,11 @@ else:
 
         def _cleanup(self):
             """清理资源"""
+            with self._write_lock:
+                self._input_closed = True
+                if self._input_writer is not None:
+                    self._input_writer.close()
+                    self._input_writer = None
             # 先等待线程退出（已被唤醒管道叫醒，通常瞬间返回）
             if self._reader_thread is not None:
                 self._reader_thread.join(timeout=2.0)

@@ -29,6 +29,8 @@ from typing import Any, Callable, Optional
 import paramiko
 import paramiko.sftp_file  # noqa: F401 — 用于全局调高 SFTP prefetch 块大小
 from paramiko.config import SSHConfig
+from file_persistence import file_sha256
+from remote_edit import sftp_target, sftp_digest, check_remote_digest
 
 # paramiko 默认每个 SFTP 读请求只要 32KB。这是 SFTP 协议层的客户端参数，
 # 不影响 SSH 握手 / channel 协商；只在 prefetch() 把文件切成多少个 read
@@ -1775,9 +1777,13 @@ class SSHSession(QObject):
         不会被别人看见。直接委托 upload_with_progress（它自带 _auto_reconnect）。"""
         self.upload_with_progress(local_path, remote_path, None)
 
+    def upload_for_edit(self, local_path, remote_path, expected_hash):
+        return self.upload_with_progress(local_path, remote_path,
+                                         expected_hash=expected_hash)
+
     @_auto_reconnect
     def upload_with_progress(self, local_path: str, remote_path: str,
-                             progress_cb=None):
+                             progress_cb=None, *, expected_hash=None):
         """流式上传到远端，带字节级进度（与 download_with_progress 对称）。
 
         progress_cb(bytes_done, bytes_total) 由 paramiko 从 worker 线程里
@@ -1791,6 +1797,10 @@ class SSHSession(QObject):
         progress_cb 的 bytes_done 会从 0 重新涨（可接受）。
         """
         sftp = self._require()
+        remote_path, mode = sftp_target(sftp, remote_path)
+        desired = file_sha256(local_path) if expected_hash is not None else None
+        if expected_hash is not None:
+            check_remote_digest(sftp_digest(sftp, remote_path), expected_hash, desired)
         tmp_path = posixpath.join(posixpath.dirname(remote_path) or '.',
                                   f".stellar-upload-{uuid.uuid4().hex}.part")
         owned = False
@@ -1798,6 +1808,11 @@ class SSHSession(QObject):
             with sftp.open(tmp_path, 'wx'):
                 owned = True
             sftp.put(local_path, tmp_path, callback=progress_cb)
+            if mode is not None:
+                sftp.chmod(tmp_path, mode)
+            if expected_hash is not None:
+                # Recheck after the potentially long transfer as well.
+                check_remote_digest(sftp_digest(sftp, remote_path), expected_hash, desired)
             try:
                 sftp.posix_rename(tmp_path, remote_path)
             except OSError:

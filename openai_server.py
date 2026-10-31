@@ -420,7 +420,9 @@ class TerminalBridge(QObject):
             if self._rate_limit_count >= self.config.rate_limit_queries:
                 pause_time = self.config.rate_limit_pause
                 logger.debug(f"[TerminalBridge] Rate limit reached ({self._rate_limit_count} requests), pausing for {pause_time}s...")
-                time.sleep(pause_time)
+                if self.shutdown_event.wait(pause_time):
+                    self.end_request()
+                    return False
                 self._rate_limit_count = 0  # 重置计数器
                 logger.debug("[TerminalBridge] Rate limit pause completed, resuming")
 
@@ -1110,6 +1112,31 @@ class OpenAIRequestHandler(BaseHTTPRequestHandler):
             logger.error(f"[OpenAI Server] Error saving image: {e}")
             return None
 
+    def _submit_input(self, text: str) -> bool:
+        """Submit ordinary input promptly; only large pastes need detection.
+
+        The short settle period lets TUI paste handlers finish before Enter.
+        Every wait is interruptible when the server stops.
+        """
+        stopped = self.bridge.shutdown_event
+        if stopped.is_set():
+            return False
+        large_paste = '\n' in text or len(text) > 256
+        before = self.bridge.get_screen_content() if large_paste else ''
+        self.bridge.send_input(text)
+        if large_paste:
+            deadline = time.monotonic() + 1.0
+            while time.monotonic() < deadline:
+                if stopped.wait(0.05):
+                    return False
+                screen = self.bridge.get_screen_content()
+                if screen != before and 'Pasted text' in screen:
+                    break
+        if stopped.wait(0.1):
+            return False
+        self.bridge.send_input('\r')
+        return True
+
     def _handle_blocking_response(self, input_text: str, request: dict):
         """处理阻塞式响应"""
         logger.debug(f"[OpenAI Server] Blocking request, input: {len(input_text)} chars")
@@ -1137,27 +1164,8 @@ class OpenAIRequestHandler(BaseHTTPRequestHandler):
             if self.config.clear_after_query:
                 self._send_clear_command_sync()
 
-            # 发送输入文本（不带回车）——经 bridge 信号排队到 GUI 线程写入
-            logger.debug(f"[OpenAI Server] Sending input to terminal: {len(input_text)} chars")
-            self.bridge.send_input(input_text)
-            logger.debug(f"[OpenAI Server] Text sent: {len(input_text)} chars, waiting for paste detection...")
-
-            # 等待检测到 [Pasted text 出现，然后发送回车
-            paste_detected = False
-            for _ in range(50):  # 最多等待 5 秒
-                time.sleep(0.1)
-                screen = self.bridge.get_screen_content()
-                if '[Pasted text' in screen or 'Pasted text' in screen:
-                    paste_detected = True
-                    logger.debug("[OpenAI Server] Paste detected, sending Enter...")
-                    time.sleep(0.1)
-                    self.bridge.send_input('\r')
-                    break
-
-            if not paste_detected:
-                # 如果没检测到粘贴提示（可能是单行输入），直接发送回车
-                logger.debug("[OpenAI Server] No paste prompt, sending Enter directly...")
-                self.bridge.send_input('\r')
+            if not self._submit_input(input_text):
+                return
 
             # 收集响应
             response_content = self._collect_response(input_text)
@@ -1419,27 +1427,8 @@ class OpenAIRequestHandler(BaseHTTPRequestHandler):
             if self.config.clear_after_query:
                 self._send_clear_command_sync()
 
-            # 发送输入文本（不带回车）——经 bridge 信号排队到 GUI 线程写入
-            logger.debug(f"[OpenAI Server] Stream: Sending input to terminal: {len(input_text)} chars")
-            self.bridge.send_input(input_text)
-            logger.debug(f"[OpenAI Server] Stream: Text sent: {len(input_text)} chars, waiting for paste detection...")
-
-            # 等待检测到 [Pasted text 出现，然后发送回车
-            paste_detected = False
-            for _ in range(50):  # 最多等待 5 秒
-                time.sleep(0.1)
-                screen = self.bridge.get_screen_content()
-                if '[Pasted text' in screen or 'Pasted text' in screen:
-                    paste_detected = True
-                    logger.debug("[OpenAI Server] Stream: Paste detected, sending Enter...")
-                    time.sleep(0.1)
-                    self.bridge.send_input('\r')
-                    break
-
-            if not paste_detected:
-                # 如果没检测到粘贴提示（可能是单行输入），直接发送回车
-                logger.debug("[OpenAI Server] Stream: No paste prompt, sending Enter directly...")
-                self.bridge.send_input('\r')
+            if not self._submit_input(input_text):
+                return
 
             # 流式收集：等待响应完成，然后从屏幕读取
             last_activity_time = time.time()

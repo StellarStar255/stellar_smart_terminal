@@ -1424,6 +1424,8 @@ class FileEditorWidget(QWidget):
 
     # 信号
     remote_sync_retry = pyqtSignal(str)
+    remote_sync_compare = pyqtSignal(str)
+    remote_sync_resolved = pyqtSignal(str, str)
     remote_save_requested = pyqtSignal(str, object)
     file_saved = pyqtSignal(str)  # 文件保存信号
     editor_closed = pyqtSignal()  # 编辑器关闭信号
@@ -3800,18 +3802,34 @@ class FileEditorWidget(QWidget):
     def _update_remote_sync_ui(self):
         status = self._remote_sync_states.get(self._current_file)
         self.sync_label.setVisible(status is not None)
-        self.sync_retry_btn.setVisible(status is not None and status[0] == 'failed')
+        self.sync_retry_btn.setVisible(status is not None and status[0] in ('failed', 'conflict'))
+        self.sync_retry_btn.setText(t('remote.sync_compare' if status and status[0] == 'conflict' else 'remote.sync_retry'))
         if status:
             state, error = status
-            self.sync_label.setText(t('remote.sync_' + state))
+            self.sync_label.setText(t('remote.sync_conflict_status' if state == 'conflict' else 'remote.sync_' + state))
             self.sync_label.setToolTip(error)
 
     def _retry_remote_sync(self):
         if self._current_file:
+            status = self._remote_sync_states.get(self._current_file)
+            if status and status[0] == 'conflict':
+                self.remote_sync_compare.emit(self._current_file)
+                return
             if self.is_modified():
                 self.save_file()  # Saving also queues the newest version for upload.
             else:
                 self.remote_sync_retry.emit(self._current_file)
+
+    def show_remote_comparison(self, path, remote_data):
+        if path != self._current_file:
+            return
+        from remote_conflict_dialog import merge_remote_contents
+        remote_text, _ = _decode_with_fallback(remote_data)
+        merged = merge_remote_contents(self, self.editor.toPlainText(), remote_text)
+        if merged is not None and path == self._current_file:
+            self.editor.setPlainText(merged)
+            self.remote_sync_resolved.emit(path, hashlib.sha256(remote_data).hexdigest())
+            self.save_file()
 
     def _mark_baseline(self, dirty: bool = False):
         """装载/保存后把当前 document revision 记为"干净"基准。

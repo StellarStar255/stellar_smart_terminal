@@ -5,6 +5,7 @@
 import json
 import os
 import re
+from collections import deque
 from concurrent.futures import Future, ThreadPoolExecutor
 from pathlib import Path
 from typing import List, Optional, Dict, Any
@@ -25,7 +26,7 @@ logger = get_logger(__name__)
 class SessionEntry:
     """会话条目
 
-    content 内部按分段列表存储：追加只做 list.append，读取时才 join。
+    content 内部按有界分块队列存储，读取时 join 并缓存。
     连续输出合并到同一条目时，`+=` 会把整串复制一遍（总代价 O(n²)），
     长会话大输出下会拖死 GUI 线程，故必须走 append_content。
     """
@@ -33,23 +34,24 @@ class SessionEntry:
     # 单条目内容上限（字符数），超过后从最旧内容开始滚动截断
     MAX_CONTENT_CHARS = 10 * 1024 * 1024
     TRUNCATION_MARK = '[...内容过长，较早输出已截断...]\n'
+    _PART_CHARS = 4096
 
-    __slots__ = ('type', 'timestamp', 'files', '_parts', '_length', '_truncated')
+    __slots__ = ('type', 'timestamp', 'files', '_parts', '_length', '_truncated', '_content_cache')
 
     def __init__(self, type: str, content: str = '', timestamp: str = '',
                  files: Optional[List[str]] = None):
         self.type = type  # 'input' 或 'output'
         self.timestamp = timestamp
         self.files: List[str] = files if files is not None else []
-        self._parts: List[str] = []
         self.content = content
 
     @property
     def content(self) -> str:
-        if len(self._parts) > 1:
-            # join 后合并为单段，缓存结果避免重复 join
-            self._parts = [''.join(self._parts)]
-        body = self._parts[0] if self._parts else ''
+        if self._content_cache is None:
+            # Cache reads without collapsing the deque: later eviction should
+            # copy at most one small head chunk, never the entire session.
+            self._content_cache = ''.join(self._parts)
+        body = self._content_cache
         if self._truncated:
             return self.TRUNCATION_MARK + body
         return body
@@ -58,7 +60,9 @@ class SessionEntry:
     def content(self, value: str):
         self._truncated = len(value) > self.MAX_CONTENT_CHARS
         value = value[-self.MAX_CONTENT_CHARS:] if self._truncated else value
-        self._parts = [value] if value else []
+        self._parts = deque(value[i:i + self._PART_CHARS]
+                            for i in range(0, len(value), self._PART_CHARS))
+        self._content_cache = value
         self._length = len(value)
 
     @property
@@ -68,18 +72,22 @@ class SessionEntry:
 
     def append_content(self, text: str):
         """追加内容，超过上限时滚动丢弃最旧的分段"""
-        self._parts.append(text)
+        if not text:
+            return
+        self._content_cache = None
+        self._parts.extend(text[i:i + self._PART_CHARS]
+                           for i in range(0, len(text), self._PART_CHARS))
         self._length += len(text)
-        if self._length > self.MAX_CONTENT_CHARS:
-            while self._length > self.MAX_CONTENT_CHARS and len(self._parts) > 1:
-                removed = self._parts.pop(0)
-                self._length -= len(removed)
-                self._truncated = True
-            if self._length > self.MAX_CONTENT_CHARS:
-                kept = self._parts[0][-self.MAX_CONTENT_CHARS:]
-                self._parts = [kept]
-                self._length = len(kept)
-                self._truncated = True
+        excess = self._length - self.MAX_CONTENT_CHARS
+        if excess > 0:
+            self._truncated = True
+            while excess > 0:
+                first = self._parts.popleft()
+                removed = min(excess, len(first))
+                excess -= removed
+                self._length -= removed
+                if removed < len(first):
+                    self._parts.appendleft(first[removed:])
 
     def to_dict(self) -> dict:
         return {
@@ -109,6 +117,11 @@ class Session:
     revision: int = field(default=0, compare=False)
     # 是否发生过总量滚动截断（最旧条目被丢弃）
     truncated: bool = False
+
+    _total_chars: int = field(default=0, init=False, repr=False, compare=False)
+
+    def __post_init__(self):
+        self._total_chars = sum(e.content_length for e in self.entries)
 
     def to_dict(self) -> dict:
         return {
@@ -202,6 +215,7 @@ class SessionManager:
             files=files
         )
         self.current_session.entries.append(entry)
+        self.current_session._total_chars += entry.content_length
         self.current_session.revision += 1
         self._enforce_total_cap()
         return entry
@@ -216,13 +230,17 @@ class SessionManager:
         if session is None:
             return
         entries = session.entries
-        total = sum(e.content_length for e in entries)
+        total = session._total_chars
         if total <= self.MAX_SESSION_CHARS:
             return
-        while len(entries) > 1 and total > self.MAX_SESSION_CHARS:
-            removed = entries.pop(0)
-            total -= removed.content_length
+        drop = 0
+        while len(entries) - drop > 1 and total > self.MAX_SESSION_CHARS:
+            total -= entries[drop].content_length
+            drop += 1
+        if drop:
+            del entries[:drop]
             session.truncated = True
+        session._total_chars = total
 
     def add_output(self, content: str) -> SessionEntry:
         """添加输出记录 - 合并连续的输出（优化：延迟文件路径提取）"""
@@ -236,7 +254,9 @@ class SessionManager:
         if (self.current_session.entries and
             self.current_session.entries[-1].type == 'output'):
             last_entry = self.current_session.entries[-1]
+            before = last_entry.content_length
             last_entry.append_content(content)
+            self.current_session._total_chars += last_entry.content_length - before
             self.current_session.revision += 1
             # 性能优化：合并时不更新时间戳，减少函数调用
             self._enforce_total_cap()
@@ -250,6 +270,7 @@ class SessionManager:
             files=[]  # 延迟提取
         )
         self.current_session.entries.append(entry)
+        self.current_session._total_chars += entry.content_length
         self.current_session.revision += 1
         self._enforce_total_cap()
         return entry
