@@ -5785,6 +5785,14 @@ class MainWindow(ThemeMixin, ToolbarMixin, ConfigMixin, ExplorerPanelMixin,
         except Exception as e:
             logger.warning(f"[Close] terminal cleanup loop failed: {e}")
 
+        # Terminal cleanup has drained its recording buffers. Persist that final
+        # tail even when a previous autosave is still in progress, then retire
+        # the per-window executor without waiting for disk I/O on the GUI thread.
+        try:
+            self.session_manager.shutdown()
+        except Exception as exc:
+            logger.warning(f"[Close] session shutdown failed: {exc}")
+
         # 保存配置（包括最后选中的预设）
         try:
             self._save_config()

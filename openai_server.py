@@ -3,6 +3,7 @@ OpenAI API 兼容的 HTTP 服务器
 将终端中运行的 AI CLI 暴露为标准 OpenAI API
 """
 
+from functools import partial
 import hmac
 import json
 import uuid
@@ -1813,46 +1814,39 @@ class OpenAICompatServer(QThread):
 
     def run(self):
         try:
-            bridge = self.bridge
-            parser = self.parser
-            config = self.config
+            if self.bridge.shutdown_event.is_set():
+                return
+            bridge, parser, config = self.bridge, self.parser, self.config
 
             class HandlerFactory(OpenAIRequestHandler):
                 def __init__(self, *args, **kwargs):
                     super().__init__(*args, bridge=bridge, parser=parser, config=config, **kwargs)
 
             self.server = _FastBindHTTPServer(
-                (self.config.host, self.config.port), HandlerFactory)
+                (config.host, config.port), HandlerFactory)
             self.server.daemon_threads = True
-            self.listening.emit(self.config.port)
-
-            # serve_forever 由 stop() 里的 server.shutdown() 结束
-            self.server.serve_forever(poll_interval=0.5)
-            self.server.server_close()
-
-            # 给在途请求一点时间退出（shutdown_event 已置位，收集循环会
-            # 尽快返回），再清理 bridge —— 清理与在途请求并发会竞态
+            self.server.timeout = 0.1
+            if not self.bridge.shutdown_event.is_set():
+                self.listening.emit(self.server.server_address[1])
+            # handle_request has a bounded accept wait. Unlike shutdown() plus
+            # serve_forever(), stop-before-start cannot leave a waiter stranded.
+            while not self.bridge.shutdown_event.is_set():
+                self.server.handle_request()
+        except Exception as exc:
+            self.error.emit(str(exc))
+        finally:
+            self.bridge.shutdown_event.set()
+            if self.server is not None:
+                self.server.server_close()
             deadline = time.monotonic() + 2.0
             while self.bridge._request_active and time.monotonic() < deadline:
                 time.sleep(0.05)
             self.bridge.cleanup()
             self.stopped.emit()
 
-        except Exception as e:
-            self.error.emit(str(e))
-
     def stop(self):
-        """非阻塞停止：置停止标志并结束 accept 循环，清理在 run() 尾部完成。
-
-        旧实现的两个问题：在 GUI 线程 wait(3000) 卡界面；bridge.cleanup()
-        在此处执行会与仍在跑的请求处理竞态。
-        """
+        """Cancel startup or the bounded accept loop without blocking the GUI."""
         self.bridge.shutdown_event.set()
-        srv = self.server
-        if srv is not None:
-            # shutdown() 会阻塞到 serve_forever 退出（最多一个 poll_interval），
-            # 放到一次性线程里执行，GUI 线程完全不等
-            threading.Thread(target=srv.shutdown, daemon=True).start()
 
 
 class PortAllocator:
@@ -1903,6 +1897,15 @@ class PortAllocator:
         self.allocated = new_allocated
 
 
+# Keep QThreads alive even if their tab or manager disappears during shutdown.
+_LIVE_OPENAI_SERVERS = set()
+
+
+def _release_finished_server(server):
+    _LIVE_OPENAI_SERVERS.discard(server)
+    server.deleteLater()
+
+
 class OpenAIServerManager(QObject):
     """服务器管理器"""
 
@@ -1914,6 +1917,7 @@ class OpenAIServerManager(QObject):
         super().__init__()
         self.servers: Dict[int, OpenAICompatServer] = {}
         self.port_allocator = PortAllocator()
+        self._retiring = set()
 
     def start_server(self, tab_index: int, terminal_widget, port: int = None) -> int:
         if tab_index in self.servers:
@@ -1930,9 +1934,11 @@ class OpenAIServerManager(QObject):
         # 信号回调动态读取 server.tab_index，配合 remap_indices() 重新映射，避免指向错误 tab。
         server.tab_index = tab_index
         server.listening.connect(lambda p, s=server: self.server_started.emit(s.tab_index, p))
-        server.stopped.connect(lambda s=server: self._on_server_stopped(s.tab_index))
+        server.finished.connect(self._on_server_finished)
+        server.finished.connect(partial(_release_finished_server, server))
         server.error.connect(lambda e, s=server: self.server_error.emit(s.tab_index, e))
         self.servers[tab_index] = server
+        _LIVE_OPENAI_SERVERS.add(server)
         server.start()
         return actual_port
 
@@ -1940,15 +1946,15 @@ class OpenAIServerManager(QObject):
         if tab_index in self.servers:
             self.servers[tab_index].stop()
 
-    def _on_server_stopped(self, tab_index: int):
-        server = self.servers.get(tab_index)
-        if server is not None:
-            # stopped 信号在 run() 末尾发出，此刻线程即将退出；等它真正结束
-            # 再丢弃引用（QThread 对象必须活得比线程久），通常瞬时完成
-            server.wait(1000)
-            del self.servers[tab_index]
-        self.port_allocator.release(tab_index)
-        self.server_stopped.emit(tab_index)
+    def _on_server_finished(self):
+        server = self.sender()
+        self._retiring.discard(server)
+        index = server.tab_index
+        # Completion belongs to the server object, never just a reused index.
+        if self.servers.get(index) is server:
+            self.servers.pop(index)
+            self.port_allocator.release(index)
+            self.server_stopped.emit(index)
 
     def is_running(self, tab_index: int) -> bool:
         return tab_index in self.servers
@@ -1962,12 +1968,14 @@ class OpenAIServerManager(QObject):
         单个 stop() 是非阻塞的；这里统一等待可避免进程退出时 QThread
         仍在运行（"Destroyed while thread is still running"）。
         """
-        servers = list(self.servers.values())
-        for tab_index in list(self.servers.keys()):
-            self.stop_server(tab_index)
+        servers = set(self.servers.values()) | self._retiring
+        for server in servers:
+            server.stop()
         deadline = time.monotonic() + 3.0
         for server in servers:
-            remaining = max(0.05, deadline - time.monotonic())
+            remaining = deadline - time.monotonic()
+            if remaining <= 0:
+                break
             server.wait(int(remaining * 1000))
 
     def remap_indices(self, old_to_new: Dict[int, int]):
@@ -1982,6 +1990,8 @@ class OpenAIServerManager(QObject):
             new_idx = old_to_new.get(old_idx)
             if new_idx is None:
                 server.tab_index = -1
+                self._retiring.add(server)
+                server.stop()
                 continue
             server.tab_index = new_idx
             new_servers[new_idx] = server

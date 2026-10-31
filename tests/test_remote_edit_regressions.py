@@ -272,3 +272,119 @@ def test_conflict_merge_sets_remote_baseline_before_saving(sync_setup):
         assert local.read_bytes() == b'merged'
     finally:
         pane.deleteLater()
+
+
+def test_comparison_requests_coalesce_until_worker_completes(sync_setup):
+    from concurrent.futures import Future
+    sync, local, _, session = sync_setup
+    path = str(local)
+    sync._conflicts.add(path)
+    future = Future()
+    original_submit = session.submit
+    session.submit = lambda *args, **kwargs: future
+    try:
+        ready = []
+        sync.comparison_ready.connect(lambda *args: ready.append(args))
+        for _ in range(25):
+            sync.compare(path)
+        assert len(sync._comparison_jobs) == 1
+        future.set_result(b'current remote')
+        assert ready == [(path, b'current remote')]
+        assert not sync._comparison_jobs
+    finally:
+        session.submit = original_submit
+
+
+def test_comparison_completion_is_ignored_after_shutdown(sync_setup):
+    from concurrent.futures import Future
+    sync, local, _, session = sync_setup
+    path = str(local)
+    sync._conflicts.add(path)
+    future = Future()
+    original_submit = session.submit
+    session.submit = lambda *args, **kwargs: future
+    try:
+        ready = []
+        sync.comparison_ready.connect(lambda *args: ready.append(args))
+        sync.compare(path)
+        sync.shutdown()
+        future.set_result(b'late remote response')
+        assert not ready
+        assert not sync._comparison_jobs
+    finally:
+        session.submit = original_submit
+
+
+def test_comparison_failure_is_reported_on_gui_and_can_retry(sync_setup):
+    from concurrent.futures import Future
+    sync, local, _, session = sync_setup
+    path = str(local)
+    sync._conflicts.add(path)
+    future = Future()
+    original_submit = session.submit
+    session.submit = lambda *args, **kwargs: future
+    try:
+        sync.compare(path)
+        future.set_exception(RuntimeError('connection lost'))
+        assert sync.state(path) == ('conflict', 'connection lost')
+        assert not sync._comparison_jobs
+    finally:
+        session.submit = original_submit
+
+
+def test_recovery_is_loaded_before_remote_editor_reads_cache(sync_setup):
+    from file_editor import EditorArea
+    from main_window_remote import RemotePanelMixin
+    sync, local, _, session = sync_setup
+    # Simulate a fresh UI and a stale on-disk cache with an unsent durable edit.
+    RemoteFileSync._write_snapshot(sync._pending_dir, str(local), 'host', '/remote.txt',
+                                   b'unsent recovered edits', time.time(), file_sha256(local))
+    area = EditorArea(theme={})
+    class Host(RemotePanelMixin):
+        editor_area = area
+        _remote_split_horizontal = False
+        remote_splitter = object()
+        def _ensure_remote_panel(self):
+            return SimpleNamespace(file_sync=sync)
+        def _editor_placed_and_visible(self, target):
+            return True
+        def _spring_applicable(self):
+            return False
+    try:
+        Host()._open_remote_file_in_editor('host', '/remote.txt', str(local), session)
+        assert area.active_pane.editor.toPlainText() == 'unsent recovered edits'
+        assert local.read_bytes() == b'unsent recovered edits'
+        assert sync.pending(str(local))
+    finally:
+        area.deleteLater()
+
+
+def test_remote_save_connections_are_per_pane_and_rebind_cleanly(sync_setup):
+    from file_editor import FileEditorWidget
+    from main_window_remote import RemotePanelMixin
+    from unittest.mock import Mock
+    sync, local, _, _ = sync_setup
+    with patch('remote_file_sync.get_data_dir', return_value=local.parent):
+        other_sync = RemoteFileSync(lambda *_: None)
+    first, second = FileEditorWidget(), FileEditorWidget()
+    host = RemotePanelMixin()
+    sync.save = Mock()
+    other_sync.save = Mock()
+    panel, other_panel = SimpleNamespace(file_sync=sync), SimpleNamespace(file_sync=other_sync)
+    try:
+        for _ in range(10):
+            host._connect_remote_editor(first, panel)
+            host._connect_remote_editor(second, panel)
+        first.remote_save_requested.emit(str(local), b'first pane')
+        second.remote_save_requested.emit(str(local), b'second pane')
+        assert sync.save.call_count == 2
+        host._connect_remote_editor(first, other_panel)
+        first.remote_save_requested.emit(str(local), b'new panel')
+        assert sync.save.call_count == 2
+        other_sync.save.assert_called_once_with(str(local), b'new panel')
+    finally:
+        other_sync.shutdown()
+        other_sync._capture_executor.shutdown(wait=True)
+        first.deleteLater()
+        second.deleteLater()
+        other_sync.deleteLater()

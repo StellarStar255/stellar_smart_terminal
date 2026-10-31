@@ -166,6 +166,7 @@ class SessionManager:
     def __init__(self):
         self.sessions_dir = get_sessions_dir()
         self.current_session: Optional[Session] = None
+        self._closed = False
         # auto_save 的序列化和磁盘写入放到后台线程，避免长会话时
         # 每 30 秒在 GUI 线程 json.dump 整个会话造成周期性卡顿
         self._save_executor = ThreadPoolExecutor(
@@ -184,6 +185,8 @@ class SessionManager:
 
     def create_session(self, command: str = "claude") -> Session:
         """创建新会话"""
+        if self._closed:
+            raise RuntimeError("Session manager is closed")
         session = Session(
             session_id=generate_session_id(),
             start_time=format_timestamp(),
@@ -311,6 +314,20 @@ class SessionManager:
         except Exception as e:
             logger.warning(f"session finalize failed: {e}")
             raise
+
+    def shutdown(self, *, wait=False):
+        """Queue the final snapshot and retire the executor without freezing GUI."""
+        if not self._closed:
+            try:
+                self.end_session()
+            finally:
+                self._closed = True
+                self._save_executor.shutdown(wait=wait)
+        elif wait:
+            self._save_executor.shutdown(wait=True)
+        if wait:
+            self.flush()
+        return self._pending_save
 
     def flush(self, timeout: float = 30.0):
         """等待后台保存完成；超时/写入失败向调用方报告，不伪装成功。"""
@@ -476,7 +493,7 @@ class SessionManager:
         序列化与写盘在后台线程执行；内容无变化或上一次写入未完成时跳过。
         """
         session = self.current_session
-        if not session:
+        if self._closed or not session:
             return
         if self._pending_save is not None and not self._pending_save.done():
             return

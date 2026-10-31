@@ -45,13 +45,14 @@ class RemoteFileSync(QObject):
     state_changed = pyqtSignal(str, str, str)
     _completed = pyqtSignal(str, str, str, bool)
     comparison_ready = pyqtSignal(str, bytes)
-    _comparison_failed = pyqtSignal(str, str)
+    _comparison_completed = pyqtSignal(str, object, object, str)
     _captured = pyqtSignal(str, int, str, str)
 
     def __init__(self, session_for, parent=None):
         super().__init__(parent)
         self._session_for = session_for
         self._conflicts = set()
+        self._comparison_jobs = {}
         self._targets = {}
         self._baselines = {}
         self._snapshot_hashes = {}
@@ -59,7 +60,7 @@ class RemoteFileSync(QObject):
         self._active = {}
         self._states = {}
         self._completed.connect(self._finish)
-        self._comparison_failed.connect(lambda path, error: self._set_state(path, 'conflict', error))
+        self._comparison_completed.connect(self._finish_comparison)
         self._captured.connect(self._capture_done)
         self._capture_failed = set()
         self._pending_dir = os.path.join(get_data_dir(), 'remote_pending')
@@ -169,6 +170,7 @@ class RemoteFileSync(QObject):
             raise
 
     def shutdown(self):
+        self._comparison_jobs.clear()
         self._lifecycle.close()
 
     def save(self, path, data=None):
@@ -266,34 +268,46 @@ class RemoteFileSync(QObject):
         future.add_done_callback(done)
 
     def compare(self, path):
-        if path not in self._conflicts or self._closing[0]:
+        if (path not in self._conflicts or self._closing[0]
+                or path in self._comparison_jobs):
             return
         host, remote, original = self._targets[path]
+        token = object()
+        self._comparison_jobs[path] = token
         try:
             session = self._session_for(host, original)
             if session is None or not session.is_connected():
                 raise RuntimeError(t('remote.sync_disconnected'))
             future = session.submit(session.read_file, remote, max_bytes=20 * 1024 * 1024)
         except Exception as exc:
+            self._comparison_jobs.pop(path, None)
             self._set_state(path, 'conflict', str(exc))
             return
         def done(f):
             try:
-                data = f.result()
+                data, error = f.result(), ''
             except Exception as exc:
-                try:
-                    self._comparison_failed.emit(path, str(exc))
-                except RuntimeError:
-                    pass  # Window closed while fetching comparison.
-                return
+                data, error = None, str(exc)
             try:
-                self.comparison_ready.emit(path, data)
+                self._comparison_completed.emit(path, token, data, error)
             except RuntimeError:
                 logger.debug('Remote comparison finished after window closed')
         future.add_done_callback(done)
 
+    def _finish_comparison(self, path, token, data, error):
+        if self._comparison_jobs.get(path) is not token:
+            return
+        self._comparison_jobs.pop(path)
+        if self._closing[0] or path not in self._conflicts:
+            return
+        if error:
+            self._set_state(path, 'conflict', error)
+        else:
+            self.comparison_ready.emit(path, data)
+
     def resolve(self, path, baseline_hash):
         if path in self._conflicts:
+            self._comparison_jobs.pop(path, None)
             self._baselines[path] = baseline_hash
             self._conflicts.discard(path)
 

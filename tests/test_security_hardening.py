@@ -78,8 +78,7 @@ class TestOptionalAuth(unittest.TestCase):
 
     def test_env_var_wires_into_server(self):
         from openai_server import OpenAIServerManager
-        mgr = OpenAIServerManager.__new__(OpenAIServerManager)
-        mgr.servers = {}
+        mgr = OpenAIServerManager()
 
         class _FakePort:
             def allocate(self, *a):
@@ -94,6 +93,7 @@ class TestOptionalAuth(unittest.TestCase):
             tab_index = 0
             listening = mock.MagicMock()
             stopped = mock.MagicMock()
+            finished = mock.MagicMock()
             error = mock.MagicMock()
 
             def start(self):
@@ -103,6 +103,8 @@ class TestOptionalAuth(unittest.TestCase):
             with mock.patch('openai_server.OpenAICompatServer', _FakeServer):
                 mgr.start_server(0, terminal_widget=object(), port=8199)
         self.assertEqual(captured['api_key'], 'envkey')
+        from openai_server import _LIVE_OPENAI_SERVERS
+        _LIVE_OPENAI_SERVERS.discard(mgr.servers.pop(0))
 
 
 class TestKnownHostsDegradation(unittest.TestCase):

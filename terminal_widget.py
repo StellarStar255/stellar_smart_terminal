@@ -2048,12 +2048,10 @@ class TerminalWidget(TerminalInputMixin, TerminalMouseMixin,
         # 在途的搜索 worker 结果作废
         self._search_seq += 1
 
-        # 刷新并清空输出缓冲区
+        # Stop the producer before draining the final recording chunks.
+        self.stop_process()
         if hasattr(self, '_output_buffer') and self._output_buffer:
             self._flush_output_buffer()
-
-        # 停止进程
-        self.stop_process()
 
         # 清理搜索栏
         if hasattr(self, '_search_bar') and self._search_bar:

@@ -36,7 +36,6 @@ class RemotePanelMixin:
         """RemotePanelMixin 的实例状态（唯一默认值）"""
         self._remote_split_horizontal = False   # 默认上下分屏（可被配置覆盖）
         self._skip_auto_ssh_tab_once = False    # 连上后跳过一次"自动开 SSH tab"
-        self._remote_save_connections = {}      # {本地临时文件: 保存→上传 的槽}
 
     def _setup_remote_panel(self):
         """设置 Remote Explorer 面板（SSH/SFTP）"""
@@ -813,51 +812,51 @@ class RemotePanelMixin:
         # 收敛、窗口稳定下来后再连接，避免密码框弹出时还在被反复挪动/压窄。
         QTimer.singleShot(280, _connect_after_init)
 
+    @staticmethod
+    def _remote_editor_connections(pane, panel):
+        sync = panel.file_sync
+        return (
+            (pane.remote_save_requested, sync.save),
+            (sync.state_changed, pane.set_remote_sync_state),
+            (pane.remote_sync_retry, sync.retry),
+            (pane.remote_sync_compare, sync.compare),
+            (pane.remote_sync_resolved, sync.resolve),
+            (sync.comparison_ready, pane.show_remote_comparison),
+        )
+
+    def _connect_remote_editor(self, pane, panel):
+        """One save subscription per pane, independent of file switches."""
+        previous = getattr(pane, '_remote_sync_panel', None)
+        if previous is panel:
+            return
+        if previous is not None:
+            try:
+                for signal, slot in self._remote_editor_connections(pane, previous):
+                    try:
+                        signal.disconnect(slot)
+                    except (TypeError, RuntimeError):
+                        pass  # Connection or previous panel already gone.
+            except RuntimeError:
+                pass  # Previous panel's C++ object has been destroyed.
+        for signal, slot in self._remote_editor_connections(pane, panel):
+            signal.connect(slot)
+        pane._remote_sync_panel = panel
+
     def _open_remote_file_in_editor(self, host_alias: str, remote_path: str,
                                       local_temp_path: str, session):
         """远程 Explorer 双击文件后由本方法打开编辑器，并把保存事件转换成上传"""
         if not hasattr(self, 'editor_area'):
             return
-        ok = self.editor_area.open_file_in_active(local_temp_path)
-        if not ok:
-            return
-        # 在打开该远程文件的那个窗格上挂保存->上传逻辑（精确到窗格，避免活动窗格切换后错挂）
-        pane = self.editor_area.active_pane
-        # 把编辑器的「已保存」信号转成上传调用（only this file）
-        # 用一个一次性的连接，文件切换时自动清理
-        # 断开旧的连接（如果有）
-        old = self._remote_save_connections.pop(local_temp_path, None)
-        if old:
-            try:
-                pane.remote_save_requested.disconnect(old)
-            except Exception:
-                logger.debug("_open_remote_file_in_editor: suppressed exception", exc_info=True)
-        def on_saved(saved_path: str, data: bytes):
-            if saved_path != local_temp_path:
-                return
-            # 把本地临时文件 push 回远端
-            self._ensure_remote_panel().upload_after_save(local_temp_path, data)
-        pane.remote_save_requested.connect(on_saved)
-        self._remote_save_connections[local_temp_path] = on_saved
-
         panel = self._ensure_remote_panel()
+        # Recovery may replace the cached file: finish it before the editor reads.
+        panel.file_sync.register(local_temp_path, host_alias, remote_path, session)
+        if not self.editor_area.open_file_in_active(local_temp_path):
+            return
+        pane = self.editor_area.active_pane
         panel.file_sync.register(local_temp_path, host_alias, remote_path, session,
                                  baseline_hash=pane._disk_content_hash)
+        self._connect_remote_editor(pane, panel)
         pane.set_remote_sync_state(local_temp_path, *panel.file_sync.state(local_temp_path))
-        if getattr(pane, '_remote_sync_panel', None) is not panel:
-            previous = getattr(pane, '_remote_sync_panel', None)
-            if previous is not None:
-                previous.file_sync.state_changed.disconnect(pane.set_remote_sync_state)
-                pane.remote_sync_retry.disconnect(previous.file_sync.retry)
-                pane.remote_sync_compare.disconnect(previous.file_sync.compare)
-                pane.remote_sync_resolved.disconnect(previous.file_sync.resolve)
-                previous.file_sync.comparison_ready.disconnect(pane.show_remote_comparison)
-            panel.file_sync.state_changed.connect(pane.set_remote_sync_state)
-            pane.remote_sync_retry.connect(panel.file_sync.retry)
-            pane.remote_sync_compare.connect(panel.file_sync.compare)
-            pane.remote_sync_resolved.connect(panel.file_sync.resolve)
-            panel.file_sync.comparison_ready.connect(pane.show_remote_comparison)
-            pane._remote_sync_panel = panel
 
         # 让编辑器标题显示远程身份（在 file_label 后追加）
         try:
