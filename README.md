@@ -1,70 +1,60 @@
 # Stellar Smart Terminal
 
-基于 PyQt6 的智能终端，集成文件管理、Git GUI、LLM 代理和 VS Code 扩展浏览。
+English | [简体中文](README.zh-CN.md)
 
 A PyQt6-based smart terminal with file explorer, Git GUI, LLM proxy, and VS Code extension browser.
 
 <img src="assets/smart_terminal.png" width="300" />
 
-## Screenshot / 界面预览
+## Screenshot
 
-![Stellar Smart Terminal 界面预览](assets/smart_terminal_example1.png)
+![Stellar Smart Terminal screenshot](assets/smart_terminal_example1.png)
 
-> 多面板布局：文件管理 / Git、代码编辑器与多标签终端集成在一个窗口中。
 > Multi-pane layout: file explorer / Git, code editor, and multi-tab terminal in one window.
 
-## Tutorial / 新手教程
-
-首次启动会弹出互动教程，手把手带你认识 ⚡ 快速切目录、分屏、侧栏、命令面板等功能；之后可从「帮助 › 新手教程」随时重看。
+## Tutorial
 
 An interactive tour pops up on first launch, walking you through Quick Launch (⚡), split panes, side panels, the command palette and more. Replay it anytime from Help › Tutorial.
 
-![新手教程演示](assets/onboarding-zh.gif)
-
-<details><summary>English version</summary>
-
 ![Onboarding tour](assets/onboarding-en.gif)
+
+<details><summary>Chinese version</summary>
+
+![Onboarding tour in Chinese](assets/onboarding-zh.gif)
 
 </details>
 
-### 终端右键菜单 / Terminal right-click menu
-
-很多好用的功能藏在终端右键里：快速命令一键执行预设、跟着项目目录走的本地快速命令、搜索回滚历史、复制当前路径、分屏、调滚动灵敏度……
+### Terminal right-click menu
 
 Plenty of handy tools live in the terminal's right-click menu: run presets in one click, per-project local quick commands, scrollback search, copy the current path, split panes, scroll speed and more.
 
-![终端右键菜单演示](assets/context-menu-zh.gif)
-
-<details><summary>English version</summary>
-
 ![Terminal right-click menu](assets/context-menu-en.gif)
+
+<details><summary>Chinese version</summary>
+
+![Terminal right-click menu in Chinese](assets/context-menu-zh.gif)
 
 </details>
 
-## Features / 功能
+## Features
 
-- **Multi-tab Terminal / 多标签终端** — session management / 会话管理
-- **File Explorer & Editor / 文件管理与编辑器**
+- **Multi-tab Terminal** — session management
+- **File Explorer & Editor**
 - **Git GUI** — stage, commit, push, pull, diff, branch
-- **LLM Proxy / LLM 代理** — OpenAI-compatible / 兼容 OpenAI 接口
-- **VS Code Extensions / VS Code 扩展浏览**
-- **i18n** — English / 中文
+- **LLM Proxy** — OpenAI-compatible
+- **VS Code Extensions**
+- **i18n** — English / Chinese
 
-## Download / 下载安装
+## Download
 
-无需安装 Python，从 [**Releases**](https://github.com/StellarStar255/stellar_smart_terminal/releases/latest) 下载即可使用。
 No Python required — grab a build from the [**Releases**](https://github.com/StellarStar255/stellar_smart_terminal/releases/latest) page.
 
-1. 下载 `Stellar-Smart-Terminal-vX.Y.Z-macOS-arm64.dmg`（推荐；也提供 zip）
-   Download the `.dmg` (recommended; a zip is also available)
-2. 打开 DMG，把 `Stellar Smart Terminal.app` 拖进 `Applications` 文件夹
-   Open the DMG and drag the app into the `Applications` folder
-3. 双击打开即可——自 v1.16.4 起，macOS 版本已使用 Developer ID 签名并通过 Apple 公证，不会再被 Gatekeeper 拦截。
-   Double-click to open — since v1.16.4 the macOS builds are Developer ID signed and notarized by Apple, so Gatekeeper opens them without any prompt.
+1. Download `Stellar-Smart-Terminal-vX.Y.Z-macOS-arm64.dmg` (recommended; a zip is also available).
+2. Open the DMG and drag `Stellar Smart Terminal.app` into the `Applications` folder.
+3. Double-click to open. Since v1.16.4, macOS builds are Developer ID signed and notarized by Apple.
 
-   <details><summary>仅旧版本（≤ v1.16.3）需要 / Only for old versions (≤ v1.16.3)</summary>
+   <details><summary>Only for old versions (≤ v1.16.3)</summary>
 
-   旧版未签名，首次启动若提示 **"Not Opened"**：到 **系统设置 → 隐私与安全性** 底部点 **仍要打开 (Open Anyway)**，或在终端执行：
    Older unsigned builds may be blocked on first launch — go to **System Settings → Privacy & Security** and click **Open Anyway**, or run:
 
    ```bash
@@ -73,57 +63,56 @@ No Python required — grab a build from the [**Releases**](https://github.com/S
 
    </details>
 
-> 目前仅提供 Apple Silicon (arm64) 构建。
 > Currently Apple Silicon (arm64) only.
 
-## Quick Start (from source) / 源码运行
+## Quick Start (from source)
 
 ```bash
 pip install -r requirements.txt
 python app.py
 ```
 
-## Requirements / 依赖
+## Requirements
 
 - Python 3.10+
 - PyQt6 >= 6.5.0
 - pyte >= 0.8.0
 
-## Troubleshooting / 故障排除
+## Troubleshooting
+
 ```shell
 pip uninstall PyQt6 PyQt6-Qt6 PyQt6-sip -y
 pip install PyQt6==6.7.1 PyQt6-Qt6==6.7.1 --no-cache-dir
 ```
 
-## Guides / 指南
+## Guides
 
-- [Claude Code 通知点击跳转 / Click-to-focus notifications (macOS)](docs/claude-code-notifications.md) — Stop hook 配置，点击通知直接跳回对应 Smart Terminal 窗口
-- [打包与发布 / Packaging & Release](docs/PACKAGING.md) — 从 `./build.sh` 打包到 GitHub Release 发版的完整流程
-- [macOS 权限与责任进程 / macOS permissions & responsible process](docs/macos-permissions.md) — 为何终端里的程序用麦克风/摄像头会闪退，Info.plist 用途声明与四类需手动授权的权限
-- [排障：PowerShell + 代理下 claude login 失败 / PowerShell + proxy claude login](docs/troubleshooting-powershell-proxy-claude-login.md) — Windows 下代理要用 `$env:http_proxy = "..."` 而非 `set`，否则子进程 claude 拿不到代理导致 login 失败
+The following guides are written in Chinese.
 
-## Build / 打包
+- [Claude Code click-to-focus notifications (macOS)](docs/claude-code-notifications.md) — Configure a Stop hook so clicking a notification focuses the corresponding Smart Terminal window.
+- [Packaging & Release](docs/PACKAGING.md) — The full workflow from packaging with `./build.sh` to publishing a GitHub Release.
+- [macOS permissions & responsible process](docs/macos-permissions.md) — Troubleshoot microphone/camera crashes, configure Info.plist usage descriptions, and grant permissions that require manual approval.
+- [Troubleshooting: PowerShell + proxy claude login](docs/troubleshooting-powershell-proxy-claude-login.md) — Set proxies on Windows with `$env:http_proxy = "..."` so the claude child process receives them.
 
-打包为独立应用（onedir 模式，无需安装 Python）。
+## Build
+
 Package as a standalone app (onedir mode, no Python required).
 
 ```bash
-# macOS — 产出 dist/Stellar Smart Terminal.app 和拖拽安装的 .dmg
+# macOS — creates dist/Stellar Smart Terminal.app and a drag-to-install .dmg
 ./build.sh
 open "dist/Stellar Smart Terminal.app"
 ```
 
 ```bat
-:: Windows — 产出 dist\StellarSmartTerminal\StellarSmartTerminal.exe
+:: Windows — creates dist\StellarSmartTerminal\StellarSmartTerminal.exe
 build.bat
 ```
 
-> 脚本会自动创建独立虚拟环境 `.venv-build`、安装依赖与 PyInstaller，macOS 下还会从 `assets/smart_terminal.png` 生成 `.icns` 图标并打出 DMG。配置见 `smart_terminal.spec`。
-> The script creates an isolated `.venv-build` venv, installs dependencies + PyInstaller, and (on macOS) generates the `.icns` icon from `assets/smart_terminal.png` and a drag-to-install DMG. See `smart_terminal.spec` for configuration.
+> The script creates an isolated `.venv-build` venv, installs dependencies and PyInstaller, and (on macOS) generates the `.icns` icon from `assets/smart_terminal.png` and a drag-to-install DMG. See `smart_terminal.spec` for configuration.
 >
-> 完整的版本发布流程（版本号、tag、GitHub Release）见 [docs/PACKAGING.md](docs/PACKAGING.md)。
 > For the full release workflow (version bump, tag, GitHub Release), see [docs/PACKAGING.md](docs/PACKAGING.md).
 
-## License / 许可
+## License
 
 [MIT](LICENSE)
