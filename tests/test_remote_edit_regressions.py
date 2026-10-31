@@ -64,7 +64,7 @@ def uploader(request, tmp_path):
         session = SimpleNamespace(_require=lambda: fs, _parent=lambda p: str(Path(p).parent),
                                   invalidate_cache=lambda _: None)
         def upload(source, target, expected=None):
-            SSHSession.upload_with_progress.__wrapped__(session, str(source), str(target),
+            SSHSession.upload_with_progress.__wrapped__(session, Path(source).as_posix(), Path(target).as_posix(),
                                                         expected_hash=expected)
     else:
         fs = None
@@ -164,7 +164,7 @@ def sync_setup(tmp_path):
     backing = SimpleNamespace(_require=lambda: fs, _parent=lambda p: str(Path(p).parent),
                               invalidate_cache=lambda _: None)
     def upload(source, target, expected):
-        return SSHSession.upload_with_progress.__wrapped__(backing, source, target,
+        return SSHSession.upload_with_progress.__wrapped__(backing, Path(source).as_posix(), Path(target).as_posix(),
                                                            expected_hash=expected)
     session = SimpleNamespace(is_connected=lambda: True, submit=executor.submit,
                               upload_for_edit=upload,

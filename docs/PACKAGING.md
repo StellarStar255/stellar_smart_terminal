@@ -8,8 +8,9 @@
 macOS runner 跑 `build.sh` 产出 DMG + zip,Windows runner 跑 `build.bat` 产出 onedir zip,
 并用 **Inno Setup**(`installer.iss`)额外打出 `*-windows-x64-setup.exe` 安装包,
 Linux runner(Ubuntu)跑 `build.sh` 把 onedir 打成 `*-linux-amd64.deb`(含 `.desktop`
-桌面入口与图标),三个平台都跑离屏测试套件,产物自动挂到对应 Release(已存在的 release
-只补传产物,notes 不会被覆盖;新建的 release 用自动生成的 notes,之后可用 `gh release edit` 替换)。
+桌面入口与图标),三个平台都跑离屏测试套件,产物先上传到对应 Release 草稿。三平台构建和测试全部通过、五个安装包齐全后，
+由统一发布任务正式发布，避免用户下载到不完整版本。已存在的 release 只补传产物，
+notes 不会被覆盖；新建的 release 用自动生成的 notes，之后可用 `gh release edit` 替换。
 
 Ubuntu/Debian 用户:下载 `*-linux-amd64.deb`,`sudo apt install ./Stellar-Smart-Terminal-*.deb`
 (自动拉取 `libxcb-cursor0` 等依赖),装好后在应用菜单搜 “Stellar Smart Terminal” 或命令行
@@ -66,8 +67,8 @@ gh run view <run-id> --log-failed              # 只看失败步骤的日志
 gh release view v1.8.0 --json assets --jq '.assets[].name'  # 确认产物是否齐全
 ```
 
-一次成功的发版,`gh release view` 应能看到四个产物:`*-windows-x64-setup.exe`、
-`*-windows-x64.zip`、`*-macOS-arm64.dmg`、`*-macOS-arm64.zip`。
+一次成功的发版,`gh release view` 应能看到五个产物:`*-windows-x64-setup.exe`、
+`*-windows-x64.zip`、`*-macOS-arm64.dmg`、`*-macOS-arm64.zip`、`*-linux-amd64.deb`。
 
 ## CI 失败后重新发版 / Re-running a failed release
 

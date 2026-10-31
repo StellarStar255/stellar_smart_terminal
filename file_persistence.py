@@ -6,11 +6,31 @@ is deliberately no fallback that truncates the existing destination.
 import hashlib
 import os
 import tempfile
+import time
 from contextlib import contextmanager
 
 from app_logging import get_logger
 
 logger = get_logger(__name__)
+_IS_WINDOWS = os.name == 'nt'
+
+
+def _replace_file(source, target):
+    """Allow brief Windows sharing violations without truncating the old file.
+
+    Readers and antivirus scanners can momentarily deny replacement. Retry only
+    Windows access/sharing/lock errors; disk-full and other failures propagate.
+    """
+    for attempt in range(6):
+        try:
+            os.replace(source, target)
+            return
+        except PermissionError as exc:
+            if (not _IS_WINDOWS or getattr(exc, 'winerror', None) not in (5, 32, 33)
+                    or attempt == 5):
+                raise
+            time.sleep(0.01 * (2 ** attempt))
+
 
 
 @contextmanager
@@ -40,7 +60,7 @@ def atomic_writer(path, *, binary=False, preserve_mode=False,
                 os.chmod(temporary, os.stat(target).st_mode & 0o777)
             except FileNotFoundError:
                 pass  # new destination
-        os.replace(temporary, target)
+        _replace_file(temporary, target)
     finally:
         if fd is not None:
             os.close(fd)

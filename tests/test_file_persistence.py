@@ -99,3 +99,49 @@ def test_hash_spans_multiple_chunks(tmp_path):
     target = tmp_path / 'data'
     target.write_bytes(data)
     assert persistence.file_sha256(target) == hashlib.sha256(data).hexdigest()
+
+
+@pytest.mark.parametrize('winerror', [5, 32, 33])
+def test_windows_transient_replace_error_retries_complete_file(tmp_path, monkeypatch, winerror):
+    target = tmp_path / 'data'
+    target.write_bytes(b'original')
+    replace = persistence.os.replace
+    calls, delays = [], []
+    def interrupted(source, dest):
+        calls.append((source, dest))
+        assert target.read_bytes() == b'original'
+        if len(calls) < 3:
+            exc = PermissionError('transient Windows sharing violation')
+            exc.winerror = winerror
+            raise exc
+        replace(source, dest)
+    monkeypatch.setattr(persistence, '_IS_WINDOWS', True)
+    monkeypatch.setattr(persistence.os, 'replace', interrupted)
+    monkeypatch.setattr(persistence.time, 'sleep', delays.append)
+    with persistence.atomic_writer(target, binary=True) as stream:
+        stream.write(b'complete replacement')
+    assert target.read_bytes() == b'complete replacement'
+    assert len(calls) == 3
+    assert delays == [.01, .02]
+    assert list(tmp_path.iterdir()) == [target]
+
+
+@pytest.mark.parametrize('windows,code,attempts', [(True, 5, 6), (True, 112, 1), (False, 5, 1)])
+def test_replace_retry_is_bounded_and_failure_preserves_original(tmp_path, monkeypatch, windows, code, attempts):
+    target = tmp_path / 'data'
+    target.write_bytes(b'original')
+    calls = []
+    def denied(*args):
+        calls.append(args)
+        exc = PermissionError('replacement denied')
+        exc.winerror = code
+        raise exc
+    monkeypatch.setattr(persistence, '_IS_WINDOWS', windows)
+    monkeypatch.setattr(persistence.os, 'replace', denied)
+    monkeypatch.setattr(persistence.time, 'sleep', lambda _: None)
+    with pytest.raises(PermissionError):
+        with persistence.atomic_writer(target, binary=True) as stream:
+            stream.write(b'new')
+    assert len(calls) == attempts
+    assert target.read_bytes() == b'original'
+    assert list(tmp_path.iterdir()) == [target]
