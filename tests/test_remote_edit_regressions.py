@@ -388,3 +388,107 @@ def test_remote_save_connections_are_per_pane_and_rebind_cleanly(sync_setup):
         first.deleteLater()
         second.deleteLater()
         other_sync.deleteLater()
+
+
+def test_remote_deletion_is_a_conflict_until_explicit_restore(uploader, tmp_path):
+    from remote_edit import REMOTE_MISSING
+    upload, _ = uploader
+    source, remote = tmp_path/'source', tmp_path/'deleted'
+    source.write_bytes(b'local changes')
+    with pytest.raises(RemoteFileConflictError):
+        upload(source, remote, hashlib.sha256(b'original').hexdigest())
+    assert not remote.exists()
+    upload(source, remote, REMOTE_MISSING)
+    assert remote.read_bytes() == b'local changes'
+
+
+def test_restore_cannot_overwrite_newly_recreated_empty_file(uploader, tmp_path):
+    from remote_edit import REMOTE_MISSING
+    upload, _ = uploader
+    source, remote = tmp_path/'source', tmp_path/'recreated'
+    source.write_bytes(b'local changes')
+    remote.write_bytes(b'')
+    with pytest.raises(RemoteFileConflictError):
+        upload(source, remote, REMOTE_MISSING)
+    assert remote.read_bytes() == b''
+    assert not list(tmp_path.glob('.stellar-upload-*'))
+
+
+def test_restore_retry_accepts_previously_restored_content(uploader, tmp_path):
+    from remote_edit import REMOTE_MISSING
+    upload, _ = uploader
+    source, remote = tmp_path/'source', tmp_path/'restored'
+    source.write_bytes(b'restored')
+    remote.write_bytes(b'restored')
+    upload(source, remote, REMOTE_MISSING)
+    assert remote.read_bytes() == b'restored'
+
+
+def test_sync_delete_compare_and_explicit_restore(sync_setup):
+    from remote_edit import REMOTE_MISSING
+    sync, local, remote, _ = sync_setup
+    remote.unlink()
+    local.write_bytes(b'local work')
+    sync.save(str(local), b'local work')
+    wait_for(lambda: sync.state(str(local))[0] == 'conflict')
+    assert not remote.exists()
+    comparisons = []
+    sync.comparison_ready.connect(lambda *args: comparisons.append(args))
+    sync.compare(str(local))
+    wait_for(lambda: comparisons)
+    assert comparisons == [(str(local), None)]
+    sync.resolve(str(local), REMOTE_MISSING)
+    sync.save(str(local), b'local work')
+    wait_for(lambda: sync.state(str(local))[0] == 'synced')
+    assert remote.read_bytes() == b'local work'
+    assert not sync.pending(str(local))
+
+
+@pytest.mark.parametrize('accepted', [False, True])
+def test_deleted_remote_dialog_requires_explicit_restore(sync_setup, accepted):
+    from file_editor import FileEditorWidget
+    from remote_edit import REMOTE_MISSING
+    _, local, _, _ = sync_setup
+    pane = FileEditorWidget()
+    try:
+        assert pane.open_file(str(local))
+        resolved, saves = [], []
+        pane.remote_sync_resolved.connect(lambda *args: resolved.append(args))
+        pane.remote_save_requested.connect(lambda *args: saves.append(args))
+        with patch('remote_conflict_dialog.merge_remote_contents', return_value='original' if accepted else None) as dialog:
+            pane.show_remote_comparison(str(local), None)
+        assert dialog.call_args.kwargs['remote_missing'] is True
+        if accepted:
+            assert resolved == [(str(local), REMOTE_MISSING)]
+            assert saves == [(str(local), b'original')]
+        else:
+            assert not resolved and not saves
+        assert local.read_bytes() == b'original'
+    finally:
+        pane.deleteLater()
+
+
+def test_snapshot_damaged_after_capture_is_never_uploaded(sync_setup):
+    import threading
+    sync, local, remote, session = sync_setup
+    release, entered = threading.Event(), threading.Event()
+    def block_executor():
+        entered.set()
+        assert release.wait(3)
+    gate = session.submit(block_executor)
+    try:
+        assert entered.wait(1)
+        sync.save(str(local), b'local saved edit')
+        wait_for(lambda: sync.state(str(local))[0] == 'uploading')
+        snapshot = sync._latest[str(local)]
+        Path(snapshot).write_bytes(b'damaged after snapshot capture')
+        release.set()
+        gate.result()
+        wait_for(lambda: sync.state(str(local))[0] == 'failed')
+        assert remote.read_bytes() == b'original'
+        assert Path(snapshot).exists()
+        sync.save(str(local), b'reviewed local content')
+        wait_for(lambda: sync.state(str(local))[0] == 'synced')
+        assert remote.read_bytes() == b'reviewed local content'
+    finally:
+        release.set()

@@ -1719,6 +1719,8 @@ class SSHSession(QObject):
     @_auto_reconnect
     def read_file(self, path: str, max_bytes: int = 5 * 1024 * 1024) -> bytes:
         """读取远程文件。max_bytes 防止误开超大文件"""
+        if not isinstance(max_bytes, int) or max_bytes < 0:
+            raise ValueError('max_bytes must be a nonnegative integer')
         sftp = self._require()
         try:
             st = sftp.stat(path)
@@ -1727,7 +1729,10 @@ class SSHSession(QObject):
         if st is not None and st.st_size and st.st_size > max_bytes:
             raise ValueError(f"file too large ({st.st_size} bytes, limit {max_bytes})")
         with sftp.open(path, "rb") as fh:
-            return fh.read()
+            data = fh.read(max_bytes + 1)
+        if len(data) > max_bytes:
+            raise ValueError(f"file too large (limit {max_bytes} bytes)")
+        return data
 
     @_auto_reconnect
     def write_file(self, path: str, content: bytes):

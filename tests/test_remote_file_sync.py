@@ -339,3 +339,98 @@ def test_parent_destruction_stops_snapshot_executor_without_crashing(setup_sync)
         sip.delete(parent)
         assert executor._shutdown
         app.processEvents()
+
+
+def test_corrupt_newest_snapshot_recovers_earlier_intact_version(setup_sync):
+    import hashlib
+    from i18n import t
+    _, sync, session, local = setup_sync
+    baseline = hashlib.sha256(b'first').hexdigest()
+    snapshots = [Path(sync._write_snapshot(sync._pending_dir, str(local), 'host', '/remote.txt',
+                                           data, timestamp, baseline))
+                 for timestamp, data in [(1, b'oldest'), (2, b'intact recent edit'), (3, b'latest edit')]]
+    snapshots[-1].write_bytes(b'damaged contents')
+    sync.register(str(local), 'host', '/remote.txt', session)
+    assert local.read_bytes() == b'intact recent edit'
+    assert sync._latest[str(local)] == str(snapshots[1])
+    assert snapshots[2].read_bytes() == b'damaged contents'
+    assert not snapshots[0].exists()
+    assert sync.state(str(local)) == ('failed', t('remote.sync_recovered_older'))
+    assert not session.jobs
+
+
+def test_all_corrupt_snapshots_leave_cache_and_recovery_files_intact(setup_sync):
+    from i18n import t
+    _, sync, session, local = setup_sync
+    snapshot = Path(sync._write_snapshot(sync._pending_dir, str(local), 'host', '/remote.txt',
+                                        b'unsent', 1))
+    snapshot.write_bytes(b'corrupt')
+    sync.register(str(local), 'host', '/remote.txt', session)
+    assert local.read_bytes() == b'first'
+    assert snapshot.read_bytes() == b'corrupt'
+    assert Path(str(snapshot) + '.json').exists()
+    assert sync.state(str(local)) == ('failed', t('remote.sync_snapshot_corrupt'))
+    assert not session.jobs
+
+
+def test_snapshot_integrity_checked_before_any_upload(setup_sync):
+    import hashlib
+    from unittest.mock import Mock
+    from remote_file_sync import SnapshotIntegrityError
+    _, sync, session, local = setup_sync
+    baseline = hashlib.sha256(b'first').hexdigest()
+    snapshot = sync._write_snapshot(sync._pending_dir, str(local), 'host', '/remote.txt', b'new', 1, baseline)
+    Path(snapshot).write_bytes(b'corrupted after capture')
+    session.upload_for_edit = Mock()
+    with pytest.raises(SnapshotIntegrityError):
+        sync._upload_checked(session, baseline, snapshot, '/remote.txt')
+    session.upload_for_edit.assert_not_called()
+    assert local.read_bytes() == b'first'
+
+
+@pytest.mark.parametrize('data', [b'immutable saved bytes', None])
+def test_snapshot_hash_is_computed_while_writing_without_rereading(setup_sync, data):
+    import json
+    import hashlib
+    _, sync, _, local = setup_sync
+    with patch('remote_file_sync.file_sha256', side_effect=AssertionError('unnecessary second disk read')):
+        snapshot = sync._write_snapshot(sync._pending_dir, str(local), 'host', '/remote.txt', data, 1)
+    record = json.loads(Path(snapshot + '.json').read_text())
+    content = b'first' if data is None else data
+    assert Path(snapshot).read_bytes() == content
+    assert record['digest'] == hashlib.sha256(content).hexdigest()
+
+
+def test_legacy_snapshot_is_recovered_but_requires_explicit_merge(setup_sync):
+    import json
+    from remote_edit import RemoteFileConflictError
+    _, sync, session, local = setup_sync
+    snapshot = Path(sync._write_snapshot(sync._pending_dir, str(local), 'host', '/remote.txt', b'legacy', 1))
+    metadata = Path(str(snapshot) + '.json')
+    record = json.loads(metadata.read_text())
+    record.pop('digest')
+    record.pop('baseline')
+    metadata.write_text(json.dumps(record))
+    sync.register(str(local), 'host', '/remote.txt', session)
+    assert local.read_bytes() == b'legacy'
+    assert not session.jobs
+    with pytest.raises(RemoteFileConflictError):
+        sync._upload_checked(session, sync._baselines[str(local)], str(snapshot), '/remote.txt')
+
+
+@pytest.mark.parametrize('damage', ['missing', 'null', 'invalid'])
+def test_modern_snapshot_cannot_downgrade_to_unchecked_legacy(setup_sync, damage):
+    import json
+    _, sync, session, local = setup_sync
+    snapshot = sync._write_snapshot(sync._pending_dir, str(local), 'host', '/remote.txt', b'unverified', 1)
+    metadata = Path(snapshot + '.json')
+    record = json.loads(metadata.read_text())
+    if damage == 'missing':
+        record.pop('digest')
+    else:
+        record['digest'] = None if damage == 'null' else 'not-a-checksum'
+    metadata.write_text(json.dumps(record))
+    sync.register(str(local), 'host', '/remote.txt', session)
+    assert local.read_bytes() == b'first'
+    assert Path(snapshot).exists()
+    assert sync.state(str(local))[0] == 'failed'

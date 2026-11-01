@@ -6,6 +6,8 @@ import stat
 
 from i18n import t
 
+REMOTE_MISSING = "missing"
+
 
 class RemoteFileConflictError(RuntimeError):
     def __init__(self):
@@ -30,9 +32,14 @@ def sftp_target(sftp, path):
 
 def sftp_digest(sftp, path):
     digest = hashlib.sha256()
-    with sftp.open(path, 'rb') as stream:
-        for chunk in iter(lambda: stream.read(256 * 1024), b''):
-            digest.update(chunk)
+    try:
+        with sftp.open(path, 'rb') as stream:
+            for chunk in iter(lambda: stream.read(256 * 1024), b''):
+                digest.update(chunk)
+    except OSError as exc:
+        if exc.errno == errno.ENOENT:
+            return REMOTE_MISSING
+        raise
     return digest.hexdigest()
 
 
@@ -48,10 +55,11 @@ def atomic_upload_command(quoted_path, quoted_temporary, expected=None, desired=
     Resolve file symlinks before publishing. stat supports GNU and BSD hosts.
     Optional digest checks happen after transfer, immediately before rename.
     """
-    if expected is not None and not all(
-            isinstance(value, str) and re.fullmatch(r'[0-9a-f]{64}', value)
-            for value in (expected, desired)):
-        raise ValueError('Invalid remote edit digest')
+    if expected is not None:
+        expected_valid = expected == REMOTE_MISSING or (
+            isinstance(expected, str) and re.fullmatch(r'[0-9a-f]{64}', expected))
+        if not expected_valid or not isinstance(desired, str) or not re.fullmatch(r'[0-9a-f]{64}', desired):
+            raise ValueError('Invalid remote edit digest')
     command = (
         f'target={quoted_path}; n=0; '
         'while [ -L "$target" ]; do '
@@ -74,7 +82,9 @@ def atomic_upload_command(quoted_path, quoted_temporary, expected=None, desired=
             'if command -v sha256sum >/dev/null 2>&1; then sha256sum < "$1"; '
             'elif command -v shasum >/dev/null 2>&1; then shasum -a 256 < "$1"; '
             'else openssl dgst -sha256 < "$1"; fi; }; '
+            'if [ -e "$target" ]; then '
             'actual=$(hash_file "$target") || { echo STELLAR_EDIT_CONFLICT >&2; exit 1; }; '
+            'else actual=missing; fi; '
             # GNU/shasum output starts with hash; OpenSSL output ends with hash.
             f'case " $actual " in *" {expected} "*|*" {desired} "*) ;; '
             '*) echo STELLAR_EDIT_CONFLICT >&2; exit 1;; esac; '

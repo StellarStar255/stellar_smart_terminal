@@ -1,9 +1,10 @@
 """Serialize editor uploads and publish worker results on the Qt thread."""
 import os
+import errno
+import hashlib
 import json
 import math
 import time
-import shutil
 from functools import partial
 import tempfile
 from concurrent.futures import ThreadPoolExecutor
@@ -17,6 +18,19 @@ from i18n import t
 logger = get_logger(__name__)
 
 from PyQt6.QtCore import QObject, QCoreApplication, pyqtSignal
+
+
+class SnapshotIntegrityError(RuntimeError):
+    def __init__(self):
+        super().__init__(t('remote.sync_snapshot_corrupt'))
+
+
+def _copy_and_hash(source, destination):
+    digest = hashlib.sha256()
+    for chunk in iter(lambda: source.read(256 * 1024), b''):
+        destination.write(chunk)
+        digest.update(chunk)
+    return digest.hexdigest()
 
 
 class _SnapshotLifecycle(QObject):
@@ -44,7 +58,7 @@ class _SnapshotLifecycle(QObject):
 class RemoteFileSync(QObject):
     state_changed = pyqtSignal(str, str, str)
     _completed = pyqtSignal(str, str, str, bool)
-    comparison_ready = pyqtSignal(str, bytes)
+    comparison_ready = pyqtSignal(str, object)
     _comparison_completed = pyqtSignal(str, object, object, str)
     _captured = pyqtSignal(str, int, str, str)
 
@@ -117,23 +131,40 @@ class RemoteFileSync(QObject):
                         candidates.append((timestamp, snapshot, record))
             except (OSError, ValueError, TypeError, KeyError, AttributeError):
                 continue
-        if candidates:
-            timestamp, snapshot, record = max(candidates, key=lambda item: item[:2])
-            self._snapshot_timestamp = max(self._snapshot_timestamp, timestamp)
-            self._latest[path] = snapshot
-            # Recovery must retain the version against which editing started.
-            self._baselines[path] = record.get('baseline')
-            self._snapshot_hashes[snapshot] = record.get('digest')
+        candidates.sort(key=lambda item: item[:2], reverse=True)
+        corrupt = False
+        for index, (timestamp, snapshot, record) in enumerate(candidates):
             try:
                 with atomic_writer(path, binary=True) as dst, open(snapshot, 'rb') as src:
-                    shutil.copyfileobj(src, dst)
+                    digest = _copy_and_hash(src, dst)
+                    expected = record.get('digest')
+                    # Legacy records have neither a checksum nor a baseline.
+                    # A missing/invalid checksum in a modern record is damage,
+                    # not a reason to silently downgrade its integrity checks.
+                    legacy = 'digest' not in record and 'baseline' not in record
+                    if not legacy and expected != digest:
+                        raise SnapshotIntegrityError()
+            except SnapshotIntegrityError:
+                corrupt = True
+                logger.warning('Skipping damaged pending snapshot: %s', snapshot)
+                continue
             except OSError as exc:
+                self._latest[path] = snapshot
+                self._baselines[path] = record.get('baseline')
+                self._snapshot_hashes[snapshot] = record.get('digest')
                 self._set_state(path, 'failed', str(exc))
                 return
-            for _, older, _ in candidates:
-                if older != snapshot:
-                    self._discard_snapshot(older)
-            self._set_state(path, 'failed', t('remote.sync_recovered'))
+            self._snapshot_timestamp = max(self._snapshot_timestamp, timestamp)
+            self._latest[path] = snapshot
+            self._baselines[path] = record.get('baseline')
+            self._snapshot_hashes[snapshot] = digest
+            for _, older, _ in candidates[index + 1:]:
+                self._discard_snapshot(older)
+            self._set_state(path, 'failed', t('remote.sync_recovered_older' if corrupt else 'remote.sync_recovered'))
+            return
+        if corrupt:
+            # Keep damaged snapshots for inspection, and leave the cache intact.
+            self._set_state(path, 'failed', t('remote.sync_snapshot_corrupt'))
 
     def state(self, path):
         return self._states.get(path, ('synced', ''))
@@ -155,14 +186,15 @@ class RemoteFileSync(QObject):
             with os.fdopen(fd, 'wb') as dst:
                 if data is not None:
                     dst.write(data)
+                    digest = hashlib.sha256(data).hexdigest()
                 else:
                     with open(path, 'rb') as src:
-                        shutil.copyfileobj(src, dst)
+                        digest = _copy_and_hash(src, dst)
                 dst.flush()
                 os.fsync(dst.fileno())
             with atomic_writer(snapshot + '.json') as metadata:
                 json.dump({'host': host, 'remote': remote, 'timestamp': timestamp,
-                           'baseline': baseline, 'digest': file_sha256(snapshot)}, metadata)
+                           'baseline': baseline, 'digest': digest}, metadata)
             return snapshot
         except Exception:
             if snapshot:
@@ -278,7 +310,7 @@ class RemoteFileSync(QObject):
             session = self._session_for(host, original)
             if session is None or not session.is_connected():
                 raise RuntimeError(t('remote.sync_disconnected'))
-            future = session.submit(session.read_file, remote, max_bytes=20 * 1024 * 1024)
+            future = session.submit(self._read_for_comparison, session, remote)
         except Exception as exc:
             self._comparison_jobs.pop(path, None)
             self._set_state(path, 'conflict', str(exc))
@@ -293,6 +325,15 @@ class RemoteFileSync(QObject):
             except RuntimeError:
                 logger.debug('Remote comparison finished after window closed')
         future.add_done_callback(done)
+
+    @staticmethod
+    def _read_for_comparison(session, remote):
+        try:
+            return session.read_file(remote, max_bytes=20 * 1024 * 1024)
+        except OSError as exc:
+            if exc.errno == errno.ENOENT:
+                return None  # Distinct from an existing empty file.
+            raise
 
     def _finish_comparison(self, path, token, data, error):
         if self._comparison_jobs.get(path) is not token:
@@ -318,6 +359,8 @@ class RemoteFileSync(QObject):
             raise RemoteFileConflictError()
         with open(snapshot + '.json', encoding='utf-8') as stream:
             record = json.load(stream)
+        if record.get('digest') != file_sha256(snapshot):
+            raise SnapshotIntegrityError()
         record['baseline'] = baseline
         with atomic_writer(snapshot + '.json') as stream:
             json.dump(record, stream)

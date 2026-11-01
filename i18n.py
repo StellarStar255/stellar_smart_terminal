@@ -6,6 +6,13 @@
 _current_language = "zh"
 
 TRANSLATIONS = {
+    "remote.sync_snapshot_corrupt": {"zh": "未上传的快照校验失败，已保留原文件和快照。请检查本地内容后重新保存。", "en": "A pending snapshot failed its integrity check. The original file and snapshot are retained. Review your local contents and save again."},
+    "remote.sync_recovered_older": {"zh": "最新快照校验失败，已恢复较早的完整版本；损坏快照仍保留，请检查后再同步。", "en": "The latest snapshot failed its integrity check. An earlier intact version was recovered; the damaged snapshot is retained. Review before syncing."},
+
+    "remote.sync_deleted": {"zh": "远端文件已删除", "en": "Remote file deleted"},
+    "remote.sync_deleted_hint": {"zh": "远端文件已被删除。本地修改仍保留；点击“恢复远端文件”可使用左侧内容重新创建，取消则不改变远端。", "en": "The remote file was deleted. Your local edits are retained. Choose Restore remote file to recreate it with the contents on the left, or Cancel to leave it deleted."},
+    "remote.sync_restore": {"zh": "恢复远端文件", "en": "Restore remote file"},
+
     "remote.sync_merge_cancel": {"zh": "取消", "en": "Cancel"},
     "remote.sync_compare": {"zh": "比较与合并", "en": "Compare and merge"},
     "remote.sync_merge_hint": {"zh": "右侧是当前远端内容。请在左侧合并修改，再保存；取消会保留本地修改。", "en": "The right side shows the current remote file. Merge your edits on the left, then save. Cancel retains your local edits."},

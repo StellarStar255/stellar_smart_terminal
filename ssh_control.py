@@ -1140,11 +1140,13 @@ class ControlMasterSession(QObject):
                            is_link=is_link, size=size, mtime=mtime)
 
     def read_file(self, path: str, max_bytes: int = 5 * 1024 * 1024) -> bytes:
+        if not isinstance(max_bytes, int) or max_bytes < 0:
+            raise ValueError('max_bytes must be a nonnegative integer')
         st = self.stat(path)
         if st.size and st.size > max_bytes:
             raise ValueError(f"file too large ({st.size} bytes, limit {max_bytes})")
         with self._lock:
-            proc = self._spawn(f"cat -- {_qpath(path)}")
+            proc = self._spawn(f"head -c {max_bytes + 1} -- {_qpath(path)}")
             try:
                 out, err = proc.communicate(timeout=CMD_TIMEOUT)
             except subprocess.TimeoutExpired:
@@ -1155,6 +1157,8 @@ class ControlMasterSession(QObject):
                 self._reap(proc)
         if proc.returncode != 0:
             raise RuntimeError(self._explain((err or b"").decode("utf-8", "replace"), proc.returncode))
+        if out is not None and len(out) > max_bytes:
+            raise ValueError(f"file too large (limit {max_bytes} bytes)")
         return out or b""
 
     def write_file(self, path: str, content: bytes):

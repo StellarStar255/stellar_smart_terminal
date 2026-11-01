@@ -11,6 +11,7 @@ import time
 from pathlib import Path
 
 from file_persistence import atomic_writer, file_sha256
+from remote_edit import REMOTE_MISSING
 from editor_highlighting import (
     MarkdownHighlighter, GenericHighlighter, _MdCodeHighlighter,
     _shell_rules, _json_rules, _yaml_rules, _js_ts_rules,
@@ -3824,11 +3825,14 @@ class FileEditorWidget(QWidget):
         if path != self._current_file:
             return
         from remote_conflict_dialog import merge_remote_contents
-        remote_text, _ = _decode_with_fallback(remote_data)
-        merged = merge_remote_contents(self, self.editor.toPlainText(), remote_text)
+        remote_missing = remote_data is None
+        remote_text, _ = _decode_with_fallback(remote_data or b'')
+        merged = merge_remote_contents(self, self.editor.toPlainText(), remote_text,
+                                       remote_missing=remote_missing)
         if merged is not None and path == self._current_file:
             self.editor.setPlainText(merged)
-            self.remote_sync_resolved.emit(path, hashlib.sha256(remote_data).hexdigest())
+            self.remote_sync_resolved.emit(
+                path, REMOTE_MISSING if remote_missing else hashlib.sha256(remote_data).hexdigest())
             self.save_file()
 
     def _mark_baseline(self, dirty: bool = False):
