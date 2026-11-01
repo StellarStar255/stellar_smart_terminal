@@ -4,7 +4,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "stellar-smart-terminal"
-version = "1.35.17"
+version = "1.35.18"
 description = "A PyQt6-based smart terminal with file explorer, Git GUI, LLM proxy, and VS Code extension browser"
 readme = "README.md"
 license = { text = "MIT" }
@@ -89,6 +89,7 @@ py-modules = [
     "settings_transfer",
     "shell_integration",
     "ssh_control",
+    "ssh_process_io",
     "ssh_session",
     "terminal_backend",
     "terminal_render",

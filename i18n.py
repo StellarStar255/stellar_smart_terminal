@@ -6,6 +6,9 @@
 _current_language = "zh"
 
 TRANSLATIONS = {
+    "remote.transfer_cancelled": {"zh": "远程传输已取消。", "en": "Remote transfer cancelled."},
+    "remote.transfer_timeout": {"zh": "远程传输连续 {seconds} 秒没有数据进展，已停止。", "en": "Remote transfer stopped after {seconds} seconds without data progress."},
+
     "remote.sync_snapshot_corrupt": {"zh": "未上传的快照校验失败，已保留原文件和快照。请检查本地内容后重新保存。", "en": "A pending snapshot failed its integrity check. The original file and snapshot are retained. Review your local contents and save again."},
     "remote.sync_recovered_older": {"zh": "最新快照校验失败，已恢复较早的完整版本；损坏快照仍保留，请检查后再同步。", "en": "The latest snapshot failed its integrity check. An earlier intact version was recovered; the damaged snapshot is retained. Review before syncing."},
 

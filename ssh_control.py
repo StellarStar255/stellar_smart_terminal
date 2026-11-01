@@ -38,6 +38,7 @@ from typing import Callable, Optional
 
 from file_persistence import atomic_writer, file_sha256
 from remote_edit import atomic_upload_command, RemoteFileConflictError
+from ssh_process_io import ProcessPipeIO, TransferCancelledError
 from PyQt6.QtCore import QObject, pyqtSignal
 
 from app_logging import get_logger
@@ -924,6 +925,9 @@ class ControlMasterSession(QObject):
         self._procs: set = set()
         self._procs_lock = threading.Lock()
         self._aborted = False
+        self._abort_generation = 0
+        self._closed = False
+        self._operation = threading.local()
 
     # ---------- 生命周期 ----------
 
@@ -977,6 +981,7 @@ class ControlMasterSession(QObject):
         管它的寿命；面板的空闲看门狗需要真正关掉时调 shutdown_master()。
         """
         self._alive = False
+        self._closed = True
         self.abort()
         self._executor.shutdown(wait=False)
         self.disconnected.emit()
@@ -989,6 +994,7 @@ class ControlMasterSession(QObject):
         """杀掉在跑的子进程，让卡住的传输立刻失败（取消按钮走这里）。"""
         self._aborted = True
         with self._procs_lock:
+            self._abort_generation += 1
             procs = list(self._procs)
         for p in procs:
             try:
@@ -1030,9 +1036,13 @@ class ControlMasterSession(QObject):
             # 文案含 "connection lost"，面板据此走「重连」提示。
             raise MasterNotRunning(self._MASTER_GONE_MSG)
         args = self._base_args() + [ssh_target(self.host_config), remote_cmd]
-        proc = subprocess.Popen(args, stdin=stdin, stdout=stdout,
-                                stderr=subprocess.PIPE)
         with self._procs_lock:
+            generation = getattr(self._operation, 'generation', self._abort_generation)
+            if self._closed or generation != self._abort_generation:
+                raise TransferCancelledError()
+            proc = subprocess.Popen(args, stdin=stdin, stdout=stdout,
+                                    stderr=subprocess.PIPE)
+            proc._stellar_generation = generation
             self._procs.add(proc)
         return proc
 
@@ -1076,7 +1086,24 @@ class ControlMasterSession(QObject):
         return (out or b"").decode("utf-8", "replace")
 
     def submit(self, fn: Callable, *args, **kwargs) -> Future:
-        return self._executor.submit(fn, *args, **kwargs)
+        generation = self._abort_generation
+        def run():
+            if self._closed or generation != self._abort_generation:
+                raise TransferCancelledError()
+            previous = getattr(self._operation, 'generation', None)
+            self._operation.generation = generation
+            try:
+                return fn(*args, **kwargs)
+            finally:
+                if previous is None:
+                    del self._operation.generation
+                else:
+                    self._operation.generation = previous
+        return self._executor.submit(run)
+
+    def _cancel_check(self, proc):
+        generation = getattr(proc, '_stellar_generation', self._abort_generation)
+        return lambda: self._closed or generation != self._abort_generation
 
     # ---------- 缓存 ----------
 
@@ -1219,22 +1246,20 @@ class ControlMasterSession(QObject):
                 proc = self._spawn(f"cat -- {_qpath(remote_path)}")
                 done = 0
                 try:
-                    while True:
-                        chunk = proc.stdout.read(_CHUNK)
-                        if not chunk:
-                            break
-                        fh.write(chunk)
-                        done += len(chunk)
-                        if progress_cb is not None:
-                            progress_cb(done, total)
-                    err = (proc.stderr.read() or b"").decode("utf-8", "replace")
-                    proc.wait(timeout=CMD_TIMEOUT)
-                    if proc.returncode != 0:
-                        raise RuntimeError(self._explain(err, proc.returncode)
-                                           or f"下载失败 (exit {proc.returncode})")
-                except Exception:
-                    proc.kill()
-                    raise
+                    with ProcessPipeIO(proc, timeout=CMD_TIMEOUT,
+                                       cancelled=self._cancel_check(proc)) as pipes:
+                        while True:
+                            chunk = pipes.read(_CHUNK)
+                            if not chunk:
+                                break
+                            fh.write(chunk)
+                            done += len(chunk)
+                            if progress_cb is not None:
+                                progress_cb(done, total)
+                        err = pipes.finish()
+                        if proc.returncode != 0:
+                            raise RuntimeError(self._explain(err, proc.returncode)
+                                               or f"下载失败 (exit {proc.returncode})")
                 finally:
                     self._reap(proc)
         return SimpleNamespace(st_size=st.size, st_mtime=st.mtime)
@@ -1262,21 +1287,18 @@ class ControlMasterSession(QObject):
                 stdin=subprocess.PIPE, stdout=subprocess.DEVNULL)
             done = 0
             try:
-                with open(local_path, "rb") as fh:
-                    while True:
-                        chunk = fh.read(_CHUNK)
-                        if not chunk:
-                            break
-                        proc.stdin.write(chunk)
-                        done += len(chunk)
-                        if progress_cb is not None:
-                            progress_cb(done, total)
-                proc.stdin.close()
-                err = (proc.stderr.read() or b"").decode("utf-8", "replace")
-                proc.wait(timeout=CMD_TIMEOUT)
-            except Exception:
-                proc.kill()
-                raise
+                with ProcessPipeIO(proc, timeout=CMD_TIMEOUT,
+                                   cancelled=self._cancel_check(proc)) as pipes:
+                    with open(local_path, "rb") as fh:
+                        while True:
+                            chunk = fh.read(_CHUNK)
+                            if not chunk:
+                                break
+                            pipes.write(chunk)
+                            done += len(chunk)
+                            if progress_cb is not None:
+                                progress_cb(done, total)
+                    err = pipes.finish()
             finally:
                 self._reap(proc)
         if proc.returncode != 0:
@@ -1394,7 +1416,7 @@ class ControlMasterSession(QObject):
                 """tarfile 的写出 → ssh stdin，顺带计数/回调。"""
 
                 def write(self, data):
-                    proc.stdin.write(data)
+                    pipes.write(data)
                     sent["n"] += len(data)
                     if progress_cb is not None and not raw["used"]:
                         done = sent["n"]
@@ -1407,20 +1429,17 @@ class ControlMasterSession(QObject):
                     pass
 
             try:
-                # bufsize 调大：攒到 256KB 再写一次，减少系统调用
-                tf = tarfile.open(mode="w|gz" if compress else "w|",
-                                  fileobj=_StdinWriter(), bufsize=_CHUNK,
-                                  **({"compresslevel": 1} if compress else {}))
-                try:
-                    add_entries(tf, note_raw)
-                finally:
-                    tf.close()
-                proc.stdin.close()
-                err = (proc.stderr.read() or b"").decode("utf-8", "replace")
-                proc.wait(timeout=600)
-            except Exception:
-                proc.kill()
-                raise
+                with ProcessPipeIO(proc, timeout=600,
+                                   cancelled=self._cancel_check(proc)) as pipes:
+                    # bufsize 调大：攒到 256KB 再写一次，减少系统调用
+                    tf = tarfile.open(mode="w|gz" if compress else "w|",
+                                      fileobj=_StdinWriter(), bufsize=_CHUNK,
+                                      **({"compresslevel": 1} if compress else {}))
+                    try:
+                        add_entries(tf, note_raw)
+                    finally:
+                        tf.close()
+                    err = pipes.finish()
             finally:
                 self._reap(proc)
         if proc.returncode != 0:

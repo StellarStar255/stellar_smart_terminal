@@ -36,12 +36,15 @@ def _lock_file_path() -> Path:
     return get_config_path().with_name('.smart_terminal_config.lock')
 
 
+class ConfigLockError(RuntimeError):
+    """The configuration transaction cannot safely start without its lock."""
+
+
 @contextmanager
 def _inter_process_lock():
     """跨进程文件锁（POSIX 用 flock；Windows 用 msvcrt.locking）。
 
-    平台不支持或加锁失败时退化为仅进程内锁——不比旧行为差，
-    原子写仍保证不会出现半截文件。
+    平台不支持或加锁失败时拒绝事务，避免多进程读-改-写丢失更新。
     """
     handle = None
     locked = False
@@ -59,8 +62,8 @@ def _inter_process_lock():
                 handle.seek(0)
                 msvcrt.locking(handle.fileno(), msvcrt.LK_LOCK, 1)
                 locked = True
-        except Exception as e:
-            logger.debug(f"config lock unavailable, in-process lock only: {e}")
+        except Exception as exc:
+            raise ConfigLockError(f"Cannot acquire configuration lock: {exc}") from exc
         yield
     finally:
         if handle is not None:
@@ -102,20 +105,24 @@ def update_config_with(mutator, *, description: str = '') -> bool:
     - description 用于日志定位是哪个组件的写入失败。
     """
     path = get_config_path()
-    with _process_lock, _inter_process_lock():
-        cfg, ok = read_config_json(path)
-        if not ok:
-            logger.warning(f"config unreadable, skipped save ({description or 'unknown'})")
+    try:
+        with _process_lock, _inter_process_lock():
+            cfg, ok = read_config_json(path)
+            if not ok:
+                logger.warning(f"config unreadable, skipped save ({description or 'unknown'})")
+                return False
+            try:
+                if mutator(cfg) is False:
+                    return True  # 调用方判定无变化，跳过写入
+            except Exception as e:
+                logger.warning(f"config mutator failed ({description or 'unknown'}): {e}")
+                return False
+            if atomic_write_json(path, cfg):
+                return True
+            logger.warning(f"config write failed ({description or 'unknown'}) — disk full or permission?")
             return False
-        try:
-            if mutator(cfg) is False:
-                return True  # 调用方判定无变化，跳过写入
-        except Exception as e:
-            logger.warning(f"config mutator failed ({description or 'unknown'}): {e}")
-            return False
-        if atomic_write_json(path, cfg):
-            return True
-        logger.warning(f"config write failed ({description or 'unknown'}) — disk full or permission?")
+    except ConfigLockError as exc:
+        logger.warning('Config save skipped (%s): %s', description or 'unknown', exc)
         return False
 
 

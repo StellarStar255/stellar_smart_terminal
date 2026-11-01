@@ -317,6 +317,31 @@ class _FakeProc:
         self.killed = True
 
 
+class _MemoryPipeIO:
+    """Adapter for command-generation fixtures; real pipe tests live separately."""
+    def __init__(self, proc, **kwargs):
+        self.proc = proc
+
+    def __enter__(self):
+        return self
+
+    def read(self, size):
+        return self.proc.stdout.read(size)
+
+    def write(self, data):
+        return self.proc.stdin.write(data)
+
+    def finish(self):
+        self.proc.stdin.close()
+        error = self.proc.stderr.read().decode('utf-8', 'replace')
+        self.proc.wait()
+        return error
+
+    def __exit__(self, exc_type, exc, tb):
+        if exc is not None:
+            self.proc.kill()
+
+
 @_POSIX_ONLY
 class TestTransfers(unittest.TestCase):
     """传输走 `ssh + cat`（不是 scp：OpenSSH 9 的 scp 改走 SFTP，引号会进文件名）。"""
@@ -341,6 +366,9 @@ class TestTransfers(unittest.TestCase):
             return proc
         self.sess._spawn = _spawn
         self.sess._reap = lambda p: None
+        adapter = mock.patch('ssh_control.ProcessPipeIO', _MemoryPipeIO)
+        adapter.start()
+        self.addCleanup(adapter.stop)
 
     def test_download_streams_to_a_part_file_then_renames(self):
         from ssh_session import RemoteEntry

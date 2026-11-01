@@ -114,3 +114,36 @@ for _ in range(25):
             self_ok = proc.wait(timeout=60)
             assert self_ok == 0
         assert _read(p)['counter'] == 100
+
+
+def test_lock_file_open_failure_never_runs_mutator_or_writes(cfg_path, tmp_path, monkeypatch, caplog):
+    from unittest.mock import Mock
+    cfg_path.write_bytes(b'{"original":true}')
+    lock_directory = tmp_path/'invalid-lock-directory'
+    lock_directory.mkdir()
+    monkeypatch.setattr(app_config, '_lock_file_path', lambda: lock_directory)
+    mutator = Mock()
+    assert app_config.update_config_with(mutator, description='test lock failure') is False
+    mutator.assert_not_called()
+    assert cfg_path.read_bytes() == b'{"original":true}'
+    assert 'Config save skipped' in caplog.text
+
+
+def test_lock_failure_preserves_missing_config_and_read_access(cfg_path, tmp_path, monkeypatch):
+    lock_directory = tmp_path/'invalid-lock-directory'
+    lock_directory.mkdir()
+    monkeypatch.setattr(app_config, '_lock_file_path', lambda: lock_directory)
+    assert app_config.update_config({'counter': 1}) is False
+    assert not cfg_path.exists()
+    assert app_config.read_config() == {}
+
+
+@pytest.mark.skipif(sys.platform == 'win32', reason='POSIX flock failure injection')
+def test_os_lock_failure_closes_handle_and_allows_later_retry(cfg_path, monkeypatch):
+    from unittest.mock import patch
+    cfg_path.write_text('{"original":true}', encoding='utf-8')
+    with patch('fcntl.flock', side_effect=OSError('lock denied')):
+        assert app_config.update_config({'new': 1}) is False
+    assert _read(cfg_path) == {'original': True}
+    assert app_config.update_config({'new': 1}) is True
+    assert _read(cfg_path) == {'original': True, 'new': 1}
