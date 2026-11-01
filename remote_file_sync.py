@@ -5,6 +5,7 @@ import hashlib
 import json
 import math
 import time
+import weakref
 from functools import partial
 import tempfile
 from concurrent.futures import ThreadPoolExecutor
@@ -33,12 +34,43 @@ def _copy_and_hash(source, destination):
     return digest.hexdigest()
 
 
+class _RemoteEditorReference:
+    """A pane's signals own this object; it never keeps the pane or sync alive."""
+    def __init__(self):
+        self.sync = None
+        self.paths = set()
+
+    def bind(self, sync, path):
+        if self.sync is not None and self.sync() is not sync:
+            self.release_all()
+        self.sync = weakref.ref(sync)
+        if path not in self.paths:
+            self.paths.add(path)
+            sync._references[path] = sync._references.get(path, 0) + 1
+            sync._released.discard(path)
+
+    def file_closed(self, path):
+        if path not in self.paths:
+            return
+        self.paths.remove(path)
+        sync = self.sync() if self.sync is not None else None
+        if sync is not None:
+            sync._release_reference(path)
+
+    def release_all(self, *args):
+        for path in list(self.paths):
+            self.file_closed(path)
+        self.sync = None
+
+
 class _SnapshotLifecycle(QObject):
     """A separate Qt receiver stays alive while its owner emits destroyed."""
-    def __init__(self, executor, sources, closing, pending_dir):
+    def __init__(self, executor, sources, closing, pending_dir, preparations, recovery_executor):
         super().__init__(QCoreApplication.instance())
         self.executor, self.sources, self.closing = executor, sources, closing
         self.pending_dir = pending_dir
+        self.preparations = preparations
+        self.recovery_executor = recovery_executor
 
     def close(self):
         if self.closing[0]:
@@ -48,6 +80,8 @@ class _SnapshotLifecycle(QObject):
             self.executor.submit(RemoteFileSync._write_snapshot,
                                  self.pending_dir, path, host, remote, data, timestamp, baseline)
         self.sources.clear()
+        self.preparations.clear()
+        self.recovery_executor.shutdown(wait=False, cancel_futures=True)
         self.executor.shutdown(wait=False)
 
     def owner_destroyed(self):
@@ -57,10 +91,14 @@ class _SnapshotLifecycle(QObject):
 
 class RemoteFileSync(QObject):
     state_changed = pyqtSignal(str, str, str)
+    released = pyqtSignal(str)
+    release_requested = pyqtSignal(str)
+    preparation_failed = pyqtSignal(str, str)
     _completed = pyqtSignal(str, str, str, bool)
     comparison_ready = pyqtSignal(str, object)
     _comparison_completed = pyqtSignal(str, object, object, str)
     _captured = pyqtSignal(str, int, str, str)
+    _prepared_completed = pyqtSignal(str, object, object)
 
     def __init__(self, session_for, parent=None):
         super().__init__(parent)
@@ -68,14 +106,20 @@ class RemoteFileSync(QObject):
         self._conflicts = set()
         self._comparison_jobs = {}
         self._targets = {}
+        self._preparations = {}
+        self._prepared = {}
+        self._references = {}
+        self._released = set()
         self._baselines = {}
         self._snapshot_hashes = {}
         self._latest = {}
         self._active = {}
         self._states = {}
+        self.release_requested.connect(self.unregister)
         self._completed.connect(self._finish)
         self._comparison_completed.connect(self._finish_comparison)
         self._captured.connect(self._capture_done)
+        self._prepared_completed.connect(self._finish_preparation)
         self._capture_failed = set()
         self._pending_dir = os.path.join(get_data_dir(), 'remote_pending')
         self._generation = {}
@@ -83,10 +127,11 @@ class RemoteFileSync(QObject):
         self._capture_sources = {}
         self._capture_jobs = {}
         self._capture_executor = ThreadPoolExecutor(max_workers=1, thread_name_prefix='remote-snapshot')
+        self._recovery_executor = ThreadPoolExecutor(max_workers=1, thread_name_prefix='remote-recovery')
         self._closing = [False]
         # The cleanup receiver has an independent QObject lifetime.
         self._lifecycle = _SnapshotLifecycle(self._capture_executor, self._capture_sources,
-                                            self._closing, self._pending_dir)
+                                            self._closing, self._pending_dir, self._preparations, self._recovery_executor)
         self.destroyed.connect(self._lifecycle.owner_destroyed)
 
     @staticmethod
@@ -103,23 +148,28 @@ class RemoteFileSync(QObject):
         self._snapshot_hashes.pop(path, None)
         self._unlink(path)
 
-    def register(self, path, host, remote, session, baseline_hash=None):
+    def register(self, path, host, remote, session, baseline_hash=None, *, recover=True):
         self._targets[path] = (host, remote, session)
         self._states.setdefault(path, ('synced', ''))
         if self.pending(path):
             return
         if baseline_hash is not None:
             self._baselines[path] = baseline_hash
+        if recover:
+            self._apply_recovery(path, self._recover_file(self._pending_dir, path, host, remote))
+
+    @staticmethod
+    def _recover_file(pending_dir, path, host, remote):
         # Recover the newest unsent snapshot after a restart. Never auto-upload it.
         candidates = []
         try:
-            names = os.listdir(self._pending_dir)
-        except OSError:
-            return
+            names = os.listdir(pending_dir)
+        except FileNotFoundError:
+            return {}
         for name in names:
             if not name.endswith('.json'):
                 continue
-            metadata = os.path.join(self._pending_dir, name)
+            metadata = os.path.join(pending_dir, name)
             try:
                 with open(metadata, encoding='utf-8') as stream:
                     record = json.load(stream)
@@ -149,22 +199,118 @@ class RemoteFileSync(QObject):
                 logger.warning('Skipping damaged pending snapshot: %s', snapshot)
                 continue
             except OSError as exc:
-                self._latest[path] = snapshot
-                self._baselines[path] = record.get('baseline')
-                self._snapshot_hashes[snapshot] = record.get('digest')
-                self._set_state(path, 'failed', str(exc))
-                return
-            self._snapshot_timestamp = max(self._snapshot_timestamp, timestamp)
-            self._latest[path] = snapshot
-            self._baselines[path] = record.get('baseline')
-            self._snapshot_hashes[snapshot] = digest
+                return dict(snapshot=snapshot, baseline=record.get('baseline'),
+                            digest=record.get('digest'), state='failed', error=str(exc))
             for _, older, _ in candidates[index + 1:]:
-                self._discard_snapshot(older)
-            self._set_state(path, 'failed', t('remote.sync_recovered_older' if corrupt else 'remote.sync_recovered'))
-            return
+                RemoteFileSync._unlink(older)
+            return dict(snapshot=snapshot, baseline=record.get('baseline'),
+                        digest=digest, timestamp=timestamp, state='failed',
+                        error=t('remote.sync_recovered_older' if corrupt else 'remote.sync_recovered'))
         if corrupt:
             # Keep damaged snapshots for inspection, and leave the cache intact.
-            self._set_state(path, 'failed', t('remote.sync_snapshot_corrupt'))
+            return dict(state='failed', error=t('remote.sync_snapshot_corrupt'))
+        return {}
+
+    def _apply_recovery(self, path, result):
+        snapshot = result.get('snapshot')
+        if snapshot:
+            self._latest[path] = snapshot
+            self._baselines[path] = result.get('baseline')
+            self._snapshot_hashes[snapshot] = result.get('digest')
+        self._snapshot_timestamp = max(self._snapshot_timestamp, result.get('timestamp', 0.0))
+        if result.get('state'):
+            self._set_state(path, result['state'], result.get('error', ''))
+
+    def prepare_async(self, path, host, remote, session, callback, *, request_key=None):
+        """Recover before opening, coalescing repeated requests for the same file."""
+        if self._closing[0]:
+            return
+        self._released.discard(path)
+        self.register(path, host, remote, session, recover=False)
+        key = (host, remote)
+        if self._prepared.get(path) == key or self.pending(path) or self._references.get(path):
+            self._prepared[path] = key
+            callback()
+            return
+        callback_key = object() if request_key is None else request_key
+        existing = self._preparations.get(path)
+        if existing and existing[1] == key:
+            existing[2][callback_key] = callback
+            return
+        token = object()
+        self._preparations[path] = (token, key, {callback_key: callback})
+        future = self._recovery_executor.submit(self._recover_file, self._pending_dir, path, host, remote)
+        def done(f):
+            if self._closing[0] or f.cancelled():
+                return
+            try:
+                result = f.result()
+            except Exception as exc:
+                logger.warning('Remote recovery failed: %s', path, exc_info=True)
+                result = dict(state='failed', error=str(exc), blocked=True)
+            try:
+                self._prepared_completed.emit(path, token, result)
+            except RuntimeError:
+                logger.debug('Recovery completed after window closed')
+        future.add_done_callback(done)
+
+    def _finish_preparation(self, path, token, result):
+        entry = self._preparations.get(path)
+        if not entry or entry[0] is not token or self._closing[0]:
+            return
+        _, key, callbacks = self._preparations.pop(path)
+        self._apply_recovery(path, result)
+        if result.get('blocked'):
+            self.preparation_failed.emit(path, result.get('error', ''))
+            self.unregister(path)
+            return
+        self._prepared[path] = key
+        if path in self._released and not self._references.get(path):
+            self._forget_if_idle(path)
+            return
+        for callback in callbacks.values():
+            try:
+                callback()
+            except (RuntimeError, ReferenceError):
+                logger.debug('Remote open callback no longer available', exc_info=True)
+                self.unregister(path)
+            except Exception as exc:
+                logger.warning('Remote open callback failed', exc_info=True)
+                self.preparation_failed.emit(path, str(exc))
+                self.unregister(path)
+
+    def track_editor(self, pane, path):
+        reference = getattr(pane, '_remote_file_reference', None)
+        if reference is None:
+            reference = _RemoteEditorReference()
+            pane.remote_file_closed.connect(reference.file_closed)
+            pane.destroyed.connect(reference.release_all)
+            pane._remote_file_reference = reference
+        reference.bind(self, path)
+
+    def _release_reference(self, path):
+        remaining = self._references.get(path, 0) - 1
+        if remaining > 0:
+            self._references[path] = remaining
+        else:
+            self._references.pop(path, None)
+            self.unregister(path)
+
+    def unregister(self, path):
+        """Release synced state; defer removal while any edit or job is pending."""
+        self._released.add(path)
+        self._forget_if_idle(path)
+
+    def _forget_if_idle(self, path):
+        if (self._closing[0] or path not in self._released or self._references.get(path)
+                or self.pending(path) or path in self._active or path in self._preparations
+                or path in self._comparison_jobs):
+            return
+        for mapping in (self._targets, self._states, self._baselines, self._generation, self._prepared):
+            mapping.pop(path, None)
+        self._conflicts.discard(path)
+        self._released.discard(path)
+        self.released.emit(path)
 
     def state(self, path):
         return self._states.get(path, ('synced', ''))
@@ -345,6 +491,7 @@ class RemoteFileSync(QObject):
             self._set_state(path, 'conflict', error)
         else:
             self.comparison_ready.emit(path, data)
+        self._forget_if_idle(path)
 
     def resolve(self, path, baseline_hash):
         if path in self._conflicts:
@@ -390,3 +537,4 @@ class RemoteFileSync(QObject):
             self._set_state(path, 'conflict', error)
         retained = set(self._latest.values()) | set(self._active.values())
         self._snapshot_hashes = {p: h for p, h in self._snapshot_hashes.items() if p in retained}
+        self._forget_if_idle(path)

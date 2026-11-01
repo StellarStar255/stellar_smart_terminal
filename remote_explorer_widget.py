@@ -1293,6 +1293,8 @@ class RemoteExplorerPanel(QWidget, explorer_common.TransferJobHost):
         # 便于编辑器保存时调度上传
         self._open_temp_map: dict[str, tuple[str, str]] = {}
         self.file_sync = RemoteFileSync(self._editor_session_for, self)
+        self.file_sync.released.connect(self._forget_remote_mapping)
+        self.file_sync.preparation_failed.connect(self._on_preparation_failed)
         # local_path -> 发起下载时所用的 session（回调时 self._session 可能已切换/断开）
         self._open_session_map: dict[str, "SSHSession"] = {}
         # 新建文件/文件夹后，等刷新把它装进树里再原地重命名（不弹窗）
@@ -4481,7 +4483,13 @@ class RemoteExplorerPanel(QWidget, explorer_common.TransferJobHost):
             host_alias, *entry.path.strip("/").split("/")[:-1])
         local_path = os.path.join(local_dir, entry.name)
 
-        self.file_sync.register(local_path, host_alias, entry.path, sess)
+        self.file_sync.prepare_async(
+            local_path, host_alias, entry.path, sess,
+            lambda: RemoteExplorerPanel._open_prepared_remote_file(
+                self, entry, local_path, sess, host_alias),
+            request_key=(id(self), 'open'))
+
+    def _open_prepared_remote_file(self, entry, local_path, sess, host_alias):
         if self.file_sync.pending(local_path) and os.path.isfile(local_path):
             self._open_session_map[local_path] = sess
             self._file_ready.emit(host_alias, entry.path, local_path)
@@ -4517,6 +4525,7 @@ class RemoteExplorerPanel(QWidget, explorer_common.TransferJobHost):
             try:
                 attr = f.result()
             except Exception as e:
+                self.file_sync.release_requested.emit(local_path)
                 self._error_signal.emit(str(e))
                 # 还原 subtitle
                 self._download_progress.emit(remote_path, -1, -1)
@@ -4597,6 +4606,7 @@ class RemoteExplorerPanel(QWidget, explorer_common.TransferJobHost):
             # 编辑器展示不了的格式（xlsx 等二进制）→ 系统默认应用打开临时
             # 文件。只读查看语义：系统程序里的改动不会回传远端。
             QDesktopServices.openUrl(QUrl.fromLocalFile(local_path))
+            self.file_sync.unregister(local_path)
             return
         self.file_open_requested.emit(host_alias, remote_path, local_path, sess_for_open)
 
@@ -4613,8 +4623,16 @@ class RemoteExplorerPanel(QWidget, explorer_common.TransferJobHost):
         sess_for_open = self._open_session_map.pop(local_path, self._session)
         if not explorer_common.editor_can_display(local_path):
             QDesktopServices.openUrl(QUrl.fromLocalFile(local_path))
+            self.file_sync.unregister(local_path)
             return
         self.file_open_requested.emit(host_alias, remote_path, local_path, sess_for_open)
+
+    def _forget_remote_mapping(self, path):
+        self._open_temp_map.pop(path, None)
+        self._open_session_map.pop(path, None)
+
+    def _on_preparation_failed(self, path, error):
+        self._toast_error(error)
 
     def remote_mapping_for(self, local_path: str) -> Optional[tuple[str, str]]:
         """主窗口的编辑器保存时调，查 local_path 对应哪个 (host_alias, remote_path)"""

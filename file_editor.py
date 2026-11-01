@@ -1428,6 +1428,7 @@ class FileEditorWidget(QWidget):
     remote_sync_compare = pyqtSignal(str)
     remote_sync_resolved = pyqtSignal(str, str)
     remote_save_requested = pyqtSignal(str, object)
+    remote_file_closed = pyqtSignal(str)
     file_saved = pyqtSignal(str)  # 文件保存信号
     editor_closed = pyqtSignal()  # 编辑器关闭信号
     split_h_requested = pyqtSignal()  # 请求左右分屏（并排）
@@ -2445,6 +2446,11 @@ class FileEditorWidget(QWidget):
             finally:
                 self._tab_guard = False
             self._refresh_tab_strip_visibility()
+            self._release_remote_tab(path)
+
+    def _release_remote_tab(self, path):
+        self._remote_sync_states.pop(path, None)
+        self.remote_file_closed.emit(path)
 
     def _on_file_tab_changed(self, idx: int):
         """用户点了另一个文件标签 → 经 open_file 装载（含脏缓冲提示等全套机制）。"""
@@ -3755,6 +3761,8 @@ class FileEditorWidget(QWidget):
                 self.tab_bar.setTabToolTip(idx, file_path)
             else:
                 self._sync_tab_for_current_file()
+            if old_path and old_path != file_path:
+                self._release_remote_tab(old_path)
         return ok
 
     def _on_text_changed(self):
@@ -3797,6 +3805,8 @@ class FileEditorWidget(QWidget):
         self._update_remote_sync_ui()
 
     def set_remote_sync_state(self, path, state, error=''):
+        if path != self._current_file and path not in self._tab_paths():
+            return
         self._remote_sync_states[path] = (state, error)
         self._update_remote_sync_ui()
 
@@ -4260,7 +4270,9 @@ class FileEditorWidget(QWidget):
         self._tab_guard = True
         try:
             while self.tab_bar.count():
+                closed_path = self.tab_bar.tabData(0)
                 self.tab_bar.removeTab(0)
+                self._release_remote_tab(closed_path)
         finally:
             self._tab_guard = False
         self._refresh_tab_strip_visibility()
@@ -4298,12 +4310,15 @@ class FileEditorWidget(QWidget):
         self._tab_guard = True
         try:
             for i in range(self.tab_bar.count()):
-                mapped = self._map_renamed(self.tab_bar.tabData(i), old, new)
+                previous_path = self.tab_bar.tabData(i)
+                mapped = self._map_renamed(previous_path, old, new)
                 if mapped is None:
                     continue
                 self.tab_bar.setTabData(i, mapped)
                 self.tab_bar.setTabText(i, os.path.basename(mapped))
                 self.tab_bar.setTabToolTip(i, mapped)
+                if previous_path != mapped:
+                    self._release_remote_tab(previous_path)
         finally:
             self._tab_guard = False
         # 2) 当前文件

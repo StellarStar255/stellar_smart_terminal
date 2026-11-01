@@ -352,7 +352,7 @@ def test_recovery_is_loaded_before_remote_editor_reads_cache(sync_setup):
             return False
     try:
         Host()._open_remote_file_in_editor('host', '/remote.txt', str(local), session)
-        assert area.active_pane.editor.toPlainText() == 'unsent recovered edits'
+        wait_for(lambda: area.active_pane.editor.toPlainText() == 'unsent recovered edits')
         assert local.read_bytes() == b'unsent recovered edits'
         assert sync.pending(str(local))
     finally:

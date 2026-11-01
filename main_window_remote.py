@@ -848,14 +848,20 @@ class RemotePanelMixin:
         if not hasattr(self, 'editor_area'):
             return
         panel = self._ensure_remote_panel()
-        # Recovery may replace the cached file: finish it before the editor reads.
-        panel.file_sync.register(local_temp_path, host_alias, remote_path, session)
+        panel.file_sync.prepare_async(
+            local_temp_path, host_alias, remote_path, session,
+            lambda: self._open_prepared_remote_editor(host_alias, remote_path, local_temp_path, session, panel),
+            request_key=(id(self), 'editor'))
+
+    def _open_prepared_remote_editor(self, host_alias, remote_path, local_temp_path, session, panel):
         if not self.editor_area.open_file_in_active(local_temp_path):
+            panel.file_sync.unregister(local_temp_path)
             return
         pane = self.editor_area.active_pane
         panel.file_sync.register(local_temp_path, host_alias, remote_path, session,
-                                 baseline_hash=pane._disk_content_hash)
+                                 baseline_hash=pane._disk_content_hash, recover=False)
         self._connect_remote_editor(pane, panel)
+        panel.file_sync.track_editor(pane, local_temp_path)
         pane.set_remote_sync_state(local_temp_path, *panel.file_sync.state(local_temp_path))
 
         # 让编辑器标题显示远程身份（在 file_label 后追加）
