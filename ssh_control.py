@@ -880,12 +880,21 @@ def forward_apply(cfg: HostConfig, spec: dict, cancel: bool = False) -> str:
             raise LocalPortBusy(port, port_holders(port))
     proc = subprocess.run(
         ["ssh", "-O", ("cancel" if cancel else "forward"),
-         "-o", f"ControlPath={ctl}", *args, ssh_target(cfg)],
+         "-o", f"ControlPath={ctl}", "-o", "LogLevel=ERROR",
+         *args, ssh_target(cfg)],
         stdin=subprocess.DEVNULL, stdout=subprocess.PIPE,
         stderr=subprocess.PIPE, timeout=15)
     out = (proc.stdout or b"").decode("utf-8", "replace").strip()
-    if proc.returncode != 0:
-        err = (proc.stderr or b"").decode("utf-8", "replace").strip() or out
+    err = (proc.stderr or b"").decode("utf-8", "replace").strip()
+    # OpenSSH 的 SSHMUX_COMMAND_CANCEL_FWD 在撤销失败时 error() 后仍
+    # exit(0)，不能只信退出码，否则 UI 会把还活着的转发标成已停用。
+    # 上面固定 ERROR 级别，避免 ssh_config 的 LogLevel=QUIET 吞掉错误。
+    cancel_failed = cancel and any(message in err.lower() for message in (
+        "forwarding request failed", "master refused forwarding request",
+        "master cancel forward request failed",
+    ))
+    if proc.returncode != 0 or cancel_failed:
+        err = err or out
         tail = " · ".join([l for l in err.split("\n") if l.strip()][-2:])
         if "control socket connect" in err.lower() or "no such file" in err.lower():
             raise MasterNotRunning("主连接不在了 —— 先做一次 MFA 登录再加转发")

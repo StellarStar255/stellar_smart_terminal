@@ -787,6 +787,30 @@ class TestPortForwarding(unittest.TestCase):
             ssh_control.forward_apply(_host(), {'type': 'D', 'bind_port': 1080},
                                       cancel=True)
         self.assertEqual(seen['args'][:3], ['ssh', '-O', 'cancel'])
+        self.assertIn('LogLevel=ERROR', seen['args'])
+
+    def test_cancel_failure_with_zero_exit_status_is_not_success(self):
+        # OpenSSH 的 SSHMUX_COMMAND_CANCEL_FWD 分支报错后仍 exit(0)。
+        # 老版本可能只有第一行，新版本还会附上第二行。
+        errors = (
+            b'mux_client_forward: forwarding request failed: port not forwarded\r\n',
+            b'master cancel forward request failed\r\n',
+            b'Master refused forwarding request: Permission denied\r\n',
+        )
+        for error in errors:
+            with self.subTest(error=error), mock.patch.object(
+                    ssh_control.subprocess, 'run', return_value=
+                    subprocess.CompletedProcess([], 0, b'', error)):
+                with self.assertRaisesRegex(RuntimeError, 'forwarding|forward'):
+                    ssh_control.forward_apply(
+                        _host(), {'type': 'D', 'bind_port': 1080}, cancel=True)
+
+    def test_cancel_does_not_treat_unrelated_stderr_as_failure(self):
+        with mock.patch.object(ssh_control.subprocess, 'run', return_value=
+                subprocess.CompletedProcess([], 0, b'',
+                    b'Warning: Permanently added host to the list of known hosts.\n')):
+            ssh_control.forward_apply(
+                _host(), {'type': 'D', 'bind_port': 1080}, cancel=True)
 
     def test_busy_local_port_is_caught_before_ssh_runs(self):
         """ssh 只会说 "Port forwarding failed"；我们要说清是谁占了。"""
@@ -1001,17 +1025,42 @@ class TestForwardsDialog(unittest.TestCase):
         d.deleteLater()
 
     def test_starting_a_rule_keeps_row_layout(self):
-        # 状态点曾是 ●/○ 字符：启用会改该行文字、触发重排，两个字符还回退到
-        # 不同字体，列表在点「启用」的瞬间跳动。现在状态走图标，文字不变
-        d = self._dlg([{'type': 'L', 'bind_port': '8888', 'dest_port': '80'},
-                       {'type': 'L', 'bind_port': '9999', 'dest_port': '90'}])
-        d._list.setCurrentRow(0)
-        before = d._list.item(0).text()
-        d._apply_selected(False)
-        self.assertEqual(d._list.item(0).text(), before)
-        self.assertTrue(d._list.uniformItemSizes())
-        self.assertEqual(d._list.sizeHintForRow(0), d._list.sizeHintForRow(1))
-        d.deleteLater()
+        # 必须比较显示后每行的实际位置和高度；只比较两行等高无法发现
+        # 启用后整张列表一起变高（截图中的问题）。规则多到出现滚动条。
+        from PyQt6.QtTest import QTest
+        from PyQt6.QtWidgets import QPushButton
+        from PyQt6.QtCore import Qt
+        from i18n import t
+        d = self._dlg([{'type': 'L', 'bind_port': str(6000 + i), 'dest_port': '80'}
+                       for i in range(14)])
+        self.addCleanup(d.deleteLater)
+        self.addCleanup(d.close)
+        d.show()
+        self.app.processEvents()
+        d._list.setCurrentRow(2)
+        self.app.processEvents()
+
+        def layout():
+            return [(d._list.visualItemRect(d._list.item(i)).y(),
+                     d._list.visualItemRect(d._list.item(i)).height())
+                    for i in range(d._list.count())]
+
+        before = layout()
+        text = d._list.item(2).text()
+        scroll_max = d._list.verticalScrollBar().maximum()
+        self.assertGreater(scroll_max, 0)
+        for action in ('remote.fwd_start', 'remote.fwd_stop', 'remote.fwd_start'):
+            button = next(b for b in d.findChildren(QPushButton) if b.text() == t(action))
+            QTest.mouseClick(button, Qt.MouseButton.LeftButton)
+            self.app.processEvents()
+            self.assertEqual(layout(), before)
+            self.assertEqual(d._list.verticalScrollBar().maximum(), scroll_max)
+            self.assertEqual(d._list.item(2).text(), text)
+            self.assertEqual(d._is_item_active(d._list.item(2)), action == 'remote.fwd_start')
+        d._auto_check.setChecked(True)
+        self.app.processEvents()
+        self.assertEqual(layout(), before)
+        self.assertEqual(d._list.verticalScrollBar().maximum(), scroll_max)
 
     def test_failed_start_does_not_mark_it_active(self):
         from remote_explorer_widget import _ForwardsDialog, QMessageBox

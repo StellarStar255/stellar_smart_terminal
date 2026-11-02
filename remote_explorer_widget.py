@@ -434,6 +434,16 @@ class _MfaLoginDialog(QDialog):
 _ACTIVE_FORWARDS: dict[str, set] = {}
 
 
+class _ForwardRuleDelegate(QStyledItemDelegate):
+    """状态刷新时保持紧凑行高，不依赖样式重新计算后的 item padding。"""
+
+    def sizeHint(self, option, index):
+        size = super().sizeHint(option, index)
+        size.setHeight(max(option.fontMetrics.height(),
+                           self.parent().iconSize().height()) + 4)
+        return size
+
+
 class _ForwardsDialog(QDialog):
     """端口转发管理（一台主机多条规则）。
 
@@ -465,7 +475,7 @@ class _ForwardsDialog(QDialog):
                 background-color: #2d2d44; color: #eaeaea;
                 border: 1px solid #3d3d5c; border-radius: 6px; padding: 2px;
             }
-            QListWidget::item { padding: 5px 6px; border-radius: 4px; }
+            QListWidget::item { padding: 2px 6px; border-radius: 4px; }
             QListWidget::item:selected { background-color: #667eea; }
             QLineEdit, QComboBox {
                 background-color: #2d2d44; color: #eaeaea;
@@ -505,7 +515,9 @@ class _ForwardsDialog(QDialog):
         self._list = QListWidget()
         self._list.setMinimumHeight(150)
         self._list.setIconSize(QSize(10, 10))
-        # 启用/停用只换图标不改文字；再锁定统一行高，任何一行都不会单独变高
+        # uniformItemSizes 只保证行之间等高；缓存失效后整表仍可能一起变高。
+        # delegate 明确行高，避免 Start/Stop 触发样式重算时行间距跳动。
+        self._list.setItemDelegate(_ForwardRuleDelegate(self._list))
         self._list.setUniformItemSizes(True)
         layout.addWidget(self._list, 1)
         for r in rules or []:

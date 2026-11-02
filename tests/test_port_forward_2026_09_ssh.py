@@ -132,6 +132,21 @@ class DialogDeleteKeepsRuleWhenCancelFails(unittest.TestCase):
         self.assertEqual(dlg._list.count(), 0)
         self.assertNotIn(dlg.rule_key(_SPEC), dlg.active_keys())
 
+    def test_ssh_zero_exit_cancel_failure_keeps_rule_and_active_state(self):
+        host = HostConfig(alias='rd-13', hostname='10.10.64.13', user='root', port=2222)
+        dlg = self._dialog(lambda spec: ssh_control.forward_apply(host, spec, cancel=True))
+        with mock.patch.object(ssh_control, 'is_supported', return_value=True), \
+             mock.patch.object(ssh_control, 'control_path_for', return_value='/tmp/fwd-test'), \
+             mock.patch.object(ssh_control.subprocess, 'run', return_value=_proc(
+                 0, err=b'mux_client_forward: forwarding request failed: port not forwarded\n'
+                        b'master cancel forward request failed\n')), \
+             mock.patch.object(QMessageBox, 'warning') as warn:
+            self.assertFalse(dlg._apply_selected(True))
+            dlg._on_delete()
+        self.assertEqual(warn.call_count, 2)
+        self.assertEqual(dlg._list.count(), 1)
+        self.assertIn(dlg.rule_key(_SPEC), dlg.active_keys())
+
 
 class EnsureMasterAuth(unittest.TestCase):
 
