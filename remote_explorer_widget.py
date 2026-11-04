@@ -3866,16 +3866,28 @@ class RemoteExplorerPanel(QWidget, explorer_common.TransferJobHost):
             act_term = QAction(t("remote.open_terminal_here"), self)
             act_term.triggered.connect(lambda: self._open_terminal_here(entry))
             menu.addAction(act_term)
-            act_new_file = QAction(t("remote.new_file"), self)
-            act_new_file.triggered.connect(lambda: self._new_file_under(entry, item))
-            menu.addAction(act_new_file)
-            act_new_dir = QAction(t("remote.new_folder"), self)
-            act_new_dir.triggered.connect(lambda: self._new_folder_under(entry, item))
-            menu.addAction(act_new_dir)
+
+        # 与本地 Explorer 一致：目录内新建，文件旁新建。
+        # 文件的 parent() 为 None 表示顶层；嵌套文件则刷新对应父节点，
+        # 保证名称去重和创建后的原地重命名都作用在正确的同级条目上。
+        target_dir = entry.path if entry.is_dir else (
+            posixpath.dirname(entry.path.rstrip("/")) or "/"
+        )
+        target_item = item if entry.is_dir else item.parent()
+        act_new_file = QAction(t("remote.new_file"), self)
+        act_new_file.triggered.connect(
+            lambda: self._new_file_at(target_dir, target_item))
+        menu.addAction(act_new_file)
+        act_new_dir = QAction(t("remote.new_folder"), self)
+        act_new_dir.triggered.connect(
+            lambda: self._new_folder_at(target_dir, target_item))
+        menu.addAction(act_new_dir)
+
+        if entry.is_dir:
             act_upload = QAction(t("remote.upload"), self)
             act_upload.triggered.connect(lambda: self._upload_into(entry, item))
             menu.addAction(act_upload)
-            menu.addSeparator()
+        menu.addSeparator()
 
         # 跨面板复制 / 粘贴
         act_copy = QAction(t("remote.copy"), self)

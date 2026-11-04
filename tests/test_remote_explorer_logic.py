@@ -242,6 +242,78 @@ class TestUniqueNewName(_Base):
                          "fresh.txt")
 
 
+class TestCreateFromContextMenu(_Base):
+    def test_creation_actions_use_clicked_directory_or_file_parent(self):
+        from PyQt6.QtCore import QPoint
+        from PyQt6.QtWidgets import QMenu
+        from i18n import t
+        from ssh_session import RemoteEntry
+
+        for location in ("blank", "root_file", "nested_file", "directory"):
+            for kind in ("file", "folder"):
+                with self.subTest(location=location, kind=kind):
+                    p = self._panel()
+                    p._session = mock.Mock()
+                    p._current_path = "/work"
+                    parent = p._make_item(RemoteEntry(
+                        name="sub", path="/work/sub", is_dir=True))
+                    p._tree.addTopLevelItem(parent)
+                    child = p._make_item(RemoteEntry(
+                        name="test.py", path="/work/sub/test.py", is_dir=False))
+                    parent.addChild(child)
+                    root_file = p._make_item(RemoteEntry(
+                        name="test.py", path="/work/test.py", is_dir=False))
+                    p._tree.addTopLevelItem(root_file)
+                    item, target, target_item = {
+                        "blank": (None, "/work", None),
+                        "root_file": (root_file, "/work", None),
+                        "nested_file": (child, "/work/sub", parent),
+                        "directory": (parent, "/work/sub", parent),
+                    }[location]
+                    method = "_new_file_at" if kind == "file" else "_new_folder_at"
+                    label = t("remote.new_file" if kind == "file" else "remote.new_folder")
+
+                    def trigger(menu, *_args):
+                        actions = [a for a in menu.actions() if a.text() == label]
+                        self.assertEqual(len(actions), 1)
+                        actions[0].trigger()
+
+                    with mock.patch.object(p._tree, "itemAt", return_value=item), \
+                            mock.patch.object(QMenu, "exec", trigger), \
+                            mock.patch.object(p, method) as create:
+                        p._on_context_menu(QPoint())
+                    create.assert_called_once_with(target, target_item)
+
+    def test_new_file_uses_siblings_and_refreshes_its_parent(self):
+        p = self._panel()
+        parent = p._make_item(_make_entry("sub", is_dir=True))
+        p._tree.addTopLevelItem(parent)
+        parent.addChild(p._make_item(_make_entry("untitled")))
+        parent.addChild(p._make_item(_make_entry("untitled2")))
+        p._session = mock.Mock()
+        fut = Future()
+        p._session.submit.return_value = fut
+        with mock.patch.object(p, "_refresh_after") as refresh:
+            p._new_file_at("/x/sub", parent)
+        p._session.submit.assert_called_once_with(
+            p._session.write_file, "/x/sub/untitled3", b"")
+        refresh.assert_called_once_with(fut, parent, "/x/sub")
+        self.assertEqual(p._pending_edit_path, "/x/sub/untitled3")
+        fut.set_exception(PermissionError("Permission denied"))
+        self.assertIsNone(p._pending_edit_path)
+
+    def test_created_item_is_selected_for_inline_rename_after_refresh(self):
+        p = self._panel()
+        p._pending_edit_path = "/x/untitled"
+        with mock.patch.object(p._tree, "editItem") as edit:
+            p._apply_top_level([_make_entry("untitled")])
+            self.app.processEvents()
+        item = p._tree.topLevelItem(0)
+        edit.assert_called_once_with(item, 0)
+        self.assertIs(p._tree.currentItem(), item)
+        self.assertIsNone(p._pending_edit_path)
+
+
 class TestTempLocalPath(_Base):
     def test_alias_sanitized_and_remote_dirs_mirrored(self):
         import remote_explorer_widget as rew
