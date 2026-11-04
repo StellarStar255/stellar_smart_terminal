@@ -229,9 +229,6 @@ class MainWindow(ThemeMixin, ToolbarMixin, ConfigMixin, ExplorerPanelMixin,
     _sidebar_height_sync = False
     _nav_height_by_screen = {}
 
-    # QApplication 全局 stylesheet 原值快照（进程级共享，仅初始化一次）
-    _original_app_stylesheet = None
-
     def _screen_key(self):
         """联动分桶用的屏幕标识（QScreen.name()）；拿不到屏幕时归入 None
         （与磁盘播种值同桶）。跨窗口联动只发生在同一 key 的窗口之间。"""
@@ -451,7 +448,7 @@ class MainWindow(ThemeMixin, ToolbarMixin, ConfigMixin, ExplorerPanelMixin,
             self.pin_row2_checkbox.blockSignals(False)
 
         # 恢复全局缩放（无偏移也要跑一次：显式 GUI 字号需要在启动时应用；
-        # Auto 且无偏移时等价于清掉 app 级 font-size，跟随系统默认字号）
+        # Auto 且无偏移时保留系统默认字号）
         self._apply_global_zoom()
 
         # 恢复左右分屏偏好
@@ -1770,6 +1767,8 @@ class MainWindow(ThemeMixin, ToolbarMixin, ConfigMixin, ExplorerPanelMixin,
         value = self.gui_font_spin.currentData()
         if value is None:
             return
+        if self._gui_font_size == int(value):
+            return
         self._gui_font_size = int(value)
         self._apply_gui_font_to_all_windows()
         self._save_config_debounced()
@@ -1780,12 +1779,12 @@ class MainWindow(ThemeMixin, ToolbarMixin, ConfigMixin, ExplorerPanelMixin,
         仅在导航栏「内嵌」模式下跨窗口联动：此时各窗口共用同一套侧栏布局，
         字号也随之全局同步，并静默对齐其他窗口的下拉框，避免信号回环。
         浮动模式下字号是 per-window 设置，只应用到当前窗口。
-        每个窗口各自调用 _apply_global_zoom()——该方法用 self.findChildren 只能
+        每个窗口各自调用 _apply_gui_font()——该方法用 self.findChildren 只能
         缩放本窗口的控件，所以必须逐窗口分别应用，不能只在当前窗口跑一次。
         """
         app = QApplication.instance()
         if not app or MainWindow._navigator_dock_mode != 'embed':
-            self._apply_global_zoom()
+            self._apply_gui_font()
             return
         for widget in app.topLevelWidgets():
             if not isinstance(widget, MainWindow):
@@ -1794,7 +1793,7 @@ class MainWindow(ThemeMixin, ToolbarMixin, ConfigMixin, ExplorerPanelMixin,
                 widget._gui_font_size = self._gui_font_size
                 if hasattr(widget, 'gui_font_spin'):
                     self._select_combo_value(widget.gui_font_spin, self._gui_font_size)
-            widget._apply_global_zoom()
+            widget._apply_gui_font()
 
     def _on_opacity_changed(self, _index: int = -1):
         """窗口透明度调整 — 同步到所有窗口"""
@@ -1915,9 +1914,6 @@ class MainWindow(ThemeMixin, ToolbarMixin, ConfigMixin, ExplorerPanelMixin,
         界面（工具栏/标签/按钮/Git 面板）字体只由 GUI Font 下拉框控制——
         二者解耦，互不影响（用户明确要求分开）。"""
         delta = self._global_zoom_delta
-        # GUI 字体大小：0 = Auto（跟随系统默认字号），>0 = 固定大小
-        gui_font_size = self._gui_font_size
-
         # 1. 所有终端 (默认12pt, 范围8-32) — 始终跟随全局缩放。
         #    apply_font_size：字号立即生效，O(历史) 的网格 reflow 走 150ms
         #    防抖——连按 Cmd+± 时每个终端只在停手后 reflow 一次，不再每按
@@ -1927,38 +1923,41 @@ class MainWindow(ThemeMixin, ToolbarMixin, ConfigMixin, ExplorerPanelMixin,
                 target_size = max(8, min(32, 12 + delta))
                 term.apply_font_size(target_size)
 
-        # 2. 全局 GUI 字体（工具栏、标签栏、状态栏等）——只由 GUI Font 控制，
-        #    与 Cmd+± 的缩放偏移无关：
-        #    - 显式选了字号：缩放样式表里写死 font-size 的控件 + 下发 app 级
-        #      font-size（覆盖 Start/Stop/Switch 等未显式设字号的控件）
-        #    - Auto（=0）：恢复原始样式、不下发 app 级 font-size，跟随系统
-        #      默认字号（mac 上强制 12px 反而比系统字号显大、挤出省略号）
-        effective_px = gui_font_size if gui_font_size > 0 else None
-        self._scale_gui_font_sizes(gui_font_size)
-        self._apply_application_font(effective_px)
-
-        # 3. 文件编辑器 — 与终端字号完全联动（同一字号、同一范围 8-32），不受 GUI 字号影响
+        # 2. 文件编辑器 — 与终端字号完全联动（同一字号、同一范围 8-32），不受 GUI 字号影响
         if hasattr(self, 'editor_area') and self.editor_area is not None:
             target_size = max(8, min(32, 12 + delta))
             self.editor_area.set_editor_font_size(target_size)
 
-        # 4. 资源管理器文件树 (默认13pt, 范围8-28) — 跟随终端缩放，不受 GUI 字号影响
+        # 3. 资源管理器文件树 (默认13pt, 范围8-28) — 跟随终端缩放，不受 GUI 字号影响
         self._apply_zoom_to_explorer_tree()
 
-        # 5. Git 面板（diff 查看器 + 提交 graph，默认12pt, 范围6-32）
-        self._apply_gui_font_to_git_panel()
+        self._apply_gui_font()
+        # 持久化由各用户动作入口按防抖触发。
 
-        # 6. 导航面板（全局单例 + 各窗口内嵌）——不在 findChildren 缩放遍历内，
+    def _apply_gui_font(self):
+        """只更新界面字号，避免重设编辑器主题、Markdown 预览及终端字体。
+
+        通用字号并入窗口样式一次提交，避免 QApplication.setStyleSheet
+        对所有窗口和弹层重新 polish。内嵌模式的跨窗口同步由调用方负责。
+        """
+        updates_enabled = self.updatesEnabled()
+        if updates_enabled:
+            self.setUpdatesEnabled(False)
+        try:
+            self._scale_gui_font_sizes(self._gui_font_size)
+            self._apply_gui_font_to_git_panel()
+        finally:
+            if updates_enabled:
+                self.setUpdatesEnabled(True)
+
+        # 导航面板（全局单例 + 各窗口内嵌）——不在 findChildren 缩放遍历内，
         #    必须显式下发 GUI Font 比例，否则列表字号与控制栏对不上（偏小）。
         nav_scale = self._current_gui_font_scale()
         for nav in MainWindow._iter_navigators():
             try:
                 nav.apply_gui_font_scale(nav_scale)
             except Exception:
-                logger.debug("_apply_global_zoom: nav font scale failed", exc_info=True)
-        # 不在这里落盘：__init__ 也会走到此处（那时几何/面板状态尚未恢复），
-        # 且 Cmd+± 连按会逐次写盘。持久化由各用户动作入口按防抖触发。
-
+                logger.debug("_apply_gui_font: nav font scale failed", exc_info=True)
 
     def _current_gui_font_scale(self) -> float:
         """当前 GUI 字体缩放比例（以 12px 为基准）。
@@ -1999,7 +1998,7 @@ class MainWindow(ThemeMixin, ToolbarMixin, ConfigMixin, ExplorerPanelMixin,
                 continue
             wid = id(widget)
             ss = widget.styleSheet()
-            if not ss or 'font-size' not in ss:
+            if widget is not self and (not ss or 'font-size' not in ss):
                 continue
 
             # 首次遇到：记录原始样式表
@@ -2013,6 +2012,9 @@ class MainWindow(ThemeMixin, ToolbarMixin, ConfigMixin, ExplorerPanelMixin,
                 lambda m: f'font-size: {max(7, round(int(m.group(1)) * scale))}px',
                 ss
             )
+            if widget is self:
+                # 放在具体规则之前：工具栏/输入框原有字号优先，其他控件继承。
+                new_ss = f'QWidget {{ font-size: {max(7, gui_font_size)}px; }}\n' + new_ss
             if new_ss != widget.styleSheet():
                 widget.setStyleSheet(new_ss)
 
@@ -2037,36 +2039,6 @@ class MainWindow(ThemeMixin, ToolbarMixin, ConfigMixin, ExplorerPanelMixin,
                 dead_ids.append(wid)
         for wid in dead_ids:
             del self._original_widget_styles[wid]
-
-    def _apply_application_font(self, effective_px):
-        """让 QApplication 层面的 stylesheet 承担通用字号缩放。
-
-        原因：Qt6 下 QApplication.setFont(...) 对已存在的 widget 并不会可靠地
-        重新解析字体；而 app 级 stylesheet 通过 Qt 的层叠（cascade）机制，能把
-        通配的 ``QWidget { font-size: Npx; }`` 应用到所有没有自己显式设 font-size
-        的控件，同时被控件局部 stylesheet 的更具体规则覆盖。
-
-        作用范围：工具栏里 Start/Stop/Switch/Manage 等未显式设字号的按钮。
-        _scale_gui_font_sizes() 不会触到它们，这里补齐。
-
-        effective_px 为 None 时恢复 app 级 stylesheet 的原值（通常为空）。
-        """
-        app = QApplication.instance()
-        if app is None:
-            return
-
-        if MainWindow._original_app_stylesheet is None:
-            MainWindow._original_app_stylesheet = app.styleSheet() or ''
-
-        base = MainWindow._original_app_stylesheet
-        if effective_px is None:
-            new_ss = base
-        else:
-            px = max(7, int(effective_px))
-            new_ss = (base + '\nQWidget { font-size: %dpx; }' % px).strip()
-
-        if app.styleSheet() != new_ss:
-            app.setStyleSheet(new_ss)
 
     @property
     def terminal(self):
