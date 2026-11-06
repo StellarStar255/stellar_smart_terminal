@@ -179,8 +179,9 @@ def test_window_close_persists_last_unflushed_recording(app, tmp_path):
     window = MainWindow()
     manager = window.session_manager
     manager.sessions_dir = tmp_path
-    session = manager.create_session('close-test')
-    window.current_session = session
+    with patch.object(window.terminal, 'is_running', return_value=True):
+        window._toggle_terminal_recording()
+    session = manager.current_session
     try:
         window.active_terminal._buffer_output('last output before closing')
         QApplication.sendEvent(window, QCloseEvent())

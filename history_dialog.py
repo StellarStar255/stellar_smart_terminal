@@ -106,6 +106,7 @@ class _SessionListWorker(QThread):
 
     def run(self):
         try:
+            self._manager.flush()  # 在后台等待刚停止的录制落盘
             sessions = self._manager.list_sessions()
         except Exception:
             sessions = []
@@ -160,6 +161,16 @@ class _SessionSearchWorker(QThread):
 
 class HistoryDialog(QDialog):
     """历史记录对话框"""
+
+    recording_toggle_requested = pyqtSignal()
+
+    def set_recording(self, recording):
+        stopped = getattr(self, '_recording', False) and not recording
+        self._recording = recording
+        self.recording_btn.setText(t("history.stop_recording" if recording else "history.start_recording"))
+        self.recording_status.setText(t("history.recording_active" if recording else "history.recording_off"))
+        if stopped:
+            self._load_sessions()
 
     def __init__(self, session_manager: SessionManager, parent=None):
         super().__init__(parent)
@@ -249,6 +260,17 @@ class HistoryDialog(QDialog):
         title.setStyleSheet("color: #667eea; margin-bottom: 10px;")
         title.setSizePolicy(QSizePolicy.Policy.Preferred, QSizePolicy.Policy.Fixed)
         layout.addWidget(title)
+        hint = QLabel(t("history.recording_hint"))
+        hint.setWordWrap(True)
+        layout.addWidget(hint)
+        row = QHBoxLayout()
+        self.recording_status = QLabel()
+        row.addWidget(self.recording_status, 1)
+        self.recording_btn = QPushButton()
+        self.recording_btn.clicked.connect(self.recording_toggle_requested.emit)
+        row.addWidget(self.recording_btn)
+        layout.addLayout(row)
+        self.set_recording(False)
 
         # 分割器
         splitter = QSplitter(Qt.Orientation.Horizontal)

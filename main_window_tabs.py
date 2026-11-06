@@ -518,6 +518,8 @@ class TabSplitMixin:
 
         # 完整清理终端资源
         terminal_to_close.cleanup()
+        if self._recording_terminal is terminal_to_close:
+            self._stop_terminal_recording()
 
         # 从列表中移除
         terminals.remove(terminal_to_close)
@@ -637,12 +639,14 @@ class TabSplitMixin:
 
         terminals = self.tab_terminals.get(index, [])
         for terminal in terminals:
-            # 完整清理终端资源
+            # cleanup 会排空进程停止期间的输出，之后再结束录制。
             terminal.cleanup()
+            if self._recording_terminal is terminal:
+                self._stop_terminal_recording()
 
         # 结束会话
         session = self.tab_sessions.get(index)
-        if session:
+        if session is not None and session is self.session_manager.current_session:
             self.session_manager.end_session()
 
         # 移除标签页。removeTab 会同步发出 currentChanged，而此时 tab_cwds 等映射

@@ -98,6 +98,9 @@ class MenusMixin:
         recent.aboutToShow.connect(lambda m=recent: self._fill_recent_dirs_menu(m))
         menu.addSeparator()
         self._own_action(menu, "menu.export_session", self._show_export_dialog)
+        self._recording_action = self._own_action(
+            menu, "history.start_recording", self._toggle_terminal_recording)
+        menu.aboutToShow.connect(self._update_recording_ui)
         self._shortcut_menu_action(menu, "history", "shortcuts.act.history")
         menu.addSeparator()
         self._shortcut_menu_action(menu, "close_tab", "shortcuts.act.close_tab")

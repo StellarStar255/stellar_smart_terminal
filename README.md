@@ -45,6 +45,12 @@ Plenty of handy tools live in the terminal's right-click menu: run presets in on
 - **VS Code Extensions**
 - **i18n** — English / Chinese
 
+### Terminal recordings and export
+
+Automatic recording is off. To capture output from now on, use **History → Start Recording Current Terminal** (also in File). Only that terminal is recorded; switching tabs does not change the target. Stop and save from History or File. Recording does not resume after restart and ends when the target exits, closes, or moves to another window. Older recordings remain available in History.
+
+**Export** saves the current terminal’s retained screen and scrollback text, without starting a recording. It does not recover cleared or discarded text. For Codex and other dynamic interfaces, use the tool’s own session history for complete conversations; raw terminal recordings can contain repeated or misplaced text.
+
 ## Download
 
 No Python required — grab a build from the [**Releases**](https://github.com/StellarStar255/stellar_smart_terminal/releases/latest) page.

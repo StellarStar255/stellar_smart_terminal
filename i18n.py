@@ -6,6 +6,15 @@
 _current_language = "zh"
 
 TRANSLATIONS = {
+    "history.start_recording": {"zh": "开始录制当前终端", "en": "Start Recording Current Terminal"},
+    "history.stop_recording": {"zh": "停止并保存录制", "en": "Stop and Save Recording"},
+    "history.recording_off": {"zh": "自动录制已关闭。当前未录制。", "en": "Automatic recording is off. Not recording."},
+    "history.recording_active": {"zh": "正在录制选定的终端，切换标签不会改变录制目标。", "en": "Recording the selected terminal. Switching tabs does not change the target."},
+    "history.recording_hint": {"zh": "这里保留手动录制和旧版自动保存的记录。录制从手动开启时开始，每次仅记录选定的终端，不随重启自动开启。动态界面（如 Codex）的原始录制可能重复或错位；对话历史请使用工具自身的会话功能。Export 导出当前终端已保留的屏幕及回滚文本，不等于完整对话。", "en": "This list contains manual recordings and older automatically saved records. Recording starts only when requested, captures one selected terminal, and does not resume after restart. Raw recordings of dynamic interfaces such as Codex may contain repeated or misplaced text; use the tool’s own session history for conversations. Export saves the current terminal’s retained screen and scrollback text, not a complete conversation."},
+    "history.no_terminal_text": {"zh": "当前终端没有可导出的文本。旧录制请在 History 中选择导出。", "en": "The current terminal has no text to export. To export an older recording, select it in History."},
+    "history.start_terminal_first": {"zh": "请先启动要录制的终端，再手动开始录制。", "en": "Start the terminal you want to record, then start recording manually."},
+    "history.recording_started": {"zh": "已开始录制选定终端（仅从现在起）。", "en": "Recording the selected terminal from now on."},
+    "history.recording_saved": {"zh": "录制已停止并保存到 History。", "en": "Recording stopped and saved to History."},
     "remote.transfer_cancelled": {"zh": "远程传输已取消。", "en": "Remote transfer cancelled."},
     "remote.transfer_timeout": {"zh": "远程传输连续 {seconds} 秒没有数据进展，已停止。", "en": "Remote transfer stopped after {seconds} seconds without data progress."},
 
@@ -242,7 +251,7 @@ TRANSLATIONS = {
     "menu.open_file_title": {"zh": "在编辑器中打开文件", "en": "Open File in Editor"},
     "menu.recent_dirs": {"zh": "最近的文件夹", "en": "Recent Folders"},
     "menu.recent_dirs_empty": {"zh": "（暂无）", "en": "(none yet)"},
-    "menu.export_session": {"zh": "导出会话…", "en": "Export Session…"},
+    "menu.export_session": {"zh": "导出当前终端文本…", "en": "Export Current Terminal Text…"},
     "menu.show_log": {"zh": "日志面板", "en": "Log Panel"},
     "menu.stop_session": {"zh": "停止会话", "en": "Stop Session"},
     "menu.clear_terminal": {"zh": "清屏", "en": "Clear Terminal"},

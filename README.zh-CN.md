@@ -52,6 +52,14 @@ Plenty of handy tools live in the terminal's right-click menu: run presets in on
 - **VS Code Extensions / VS Code 扩展浏览**
 - **i18n** — English / 中文
 
+### 终端录制与导出 / Terminal recordings and export
+
+自动录制默认关闭。需要记录时，在 **History → 开始录制当前终端**（也可从「文件」菜单进入）手动开启，仅记录此刻起选定终端的输入输出；切换标签不改变目标。可随时停止并保存；目标终端退出、关闭或移到其他窗口时结束录制，重启应用不会自动开启。旧记录仍可在 History 查看和导出。
+
+**Export** 直接导出当前终端已保留的屏幕和回滚文本，无需开启录制，无法找回已清除或丢弃的内容。Codex 等动态界面的完整对话请使用工具自身的会话历史；原始终端录制可能出现重复或错位。
+
+Automatic recording is off. Start it manually from History or File to capture one selected terminal from that point onward. Export saves the current terminal’s retained screen and scrollback text. Use the tool’s own session history for complete Codex conversations; raw recordings may contain repeated or misplaced text.
+
 ## Download / 下载安装
 
 无需安装 Python，从 [**Releases**](https://github.com/StellarStar255/stellar_smart_terminal/releases/latest) 下载即可使用。

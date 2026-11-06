@@ -57,7 +57,7 @@ from PyQt6.QtCore import (Qt, QTimer, QEvent, QPoint, QRect, QObject,
 from PyQt6.QtGui import QAction, QIcon, QColor, QPixmap, QPainter, QKeySequence
 
 from terminal_widget import TerminalWidget
-from session_manager import SessionManager
+from session_manager import SessionManager, Session, SessionEntry
 from exporter import export_session
 from history_dialog import HistoryDialog
 # openai_server（OpenAIServerManager）在 __init__ 里惰性导入：只有建窗口才用到
@@ -288,6 +288,7 @@ class MainWindow(ThemeMixin, ToolbarMixin, ConfigMixin, ExplorerPanelMixin,
         self._init_update_state()
 
         self.session_manager = SessionManager()
+        self._recording_terminal = None  # 每次手动开启，仅录制选定的终端
         self.auto_save_timer = QTimer()
         self.command_history = []
         self.presets = []  # 预设命令列表
@@ -2475,8 +2476,8 @@ class MainWindow(ThemeMixin, ToolbarMixin, ConfigMixin, ExplorerPanelMixin,
     def _terminal_signal_slots(self, terminal):
         """返回 {信号名: 槽} —— 唯一的接线真相源。"""
         return {
-            'input_recorded': self._on_input,
-            'output_recorded': self._on_output,
+            'input_recorded': lambda text, term=terminal: self._on_input(text, term),
+            'output_recorded': lambda text, term=terminal: self._on_output(text, term),
             'session_ended': lambda t=terminal: self._on_terminal_ended(t),
             'image_pasted': self._on_image_pasted,
             'close_tab_requested': self._close_tab_or_window,
@@ -2516,6 +2517,9 @@ class MainWindow(ThemeMixin, ToolbarMixin, ConfigMixin, ExplorerPanelMixin,
         逐个信号各自 try：某个信号恰好没有连接时 disconnect() 抛 TypeError，
         不能让它把后面的信号全部跳过。
         """
+        owner = getattr(terminal, '_owner_window', None)
+        if owner is not None and getattr(owner, '_recording_terminal', None) is terminal:
+            owner._stop_terminal_recording()
         for name in self._TERMINAL_SIGNAL_NAMES:
             try:
                 getattr(terminal, name).disconnect()
@@ -2576,6 +2580,8 @@ class MainWindow(ThemeMixin, ToolbarMixin, ConfigMixin, ExplorerPanelMixin,
         """
         old = getattr(terminal, '_owner_window', None)
         if old is not None and old is not self:
+            if getattr(old, '_recording_terminal', None) is terminal:
+                old._stop_terminal_recording()
             try:
                 terminal.removeEventFilter(old)
             except RuntimeError:
@@ -2649,6 +2655,8 @@ class MainWindow(ThemeMixin, ToolbarMixin, ConfigMixin, ExplorerPanelMixin,
 
     def _on_terminal_ended(self, terminal):
         """单个终端进程结束"""
+        if self._recording_terminal is terminal:
+            self._stop_terminal_recording()
         # 找到对应的标签页
         for idx, terminals in self.tab_terminals.items():
             if terminal in terminals:
@@ -2821,8 +2829,9 @@ class MainWindow(ThemeMixin, ToolbarMixin, ConfigMixin, ExplorerPanelMixin,
         # 后续命令需要在 shell 启动后发送
         self.pending_commands = commands[1:] if len(commands) > 1 else []
 
-        # 创建新会话
-        self.current_session = self.session_manager.create_session(preset.get('name', shell_cmd))
+        # 启动进程不再自动录制；重启正在录制的终端时先保存旧录制。
+        if self._recording_terminal is self.terminal:
+            self._stop_terminal_recording()
 
         # 清空终端
         self.terminal.clear_screen()
@@ -2854,8 +2863,7 @@ class MainWindow(ThemeMixin, ToolbarMixin, ConfigMixin, ExplorerPanelMixin,
         self._update_running_state(True)
         self.statusbar.showMessage(t("status.session_started", name=preset_name))
 
-        # 启动自动保存
-        self.auto_save_timer.start(30000)
+        # 仅手动开始录制时启动历史自动保存。
 
         # 延迟发送后续命令（等待 shell 初始化）
         # 重要：使用闭包绑定当前终端和命令列表，避免快速启动多个 tab 时命令发送到错误的终端
@@ -2894,13 +2902,14 @@ class MainWindow(ThemeMixin, ToolbarMixin, ConfigMixin, ExplorerPanelMixin,
 
         session_id = self.current_session.session_id if self.current_session else None
 
-        self.terminal.stop_process()
+        terminal = self.terminal
+        terminal.stop_process()
+        if self._recording_terminal is terminal:
+            self._stop_terminal_recording()
 
-        if self.current_session:
-            self.session_manager.end_session()
-
-        self._update_running_state(False)
-        self.auto_save_timer.stop()
+        self._update_running_state(self._any_terminal_running())
+        if self.session_manager.current_session is None:
+            self.auto_save_timer.stop()
 
         if session_id:
             self.statusbar.showMessage(t("status.session_stopped_saved", session_id=session_id), 3000)
@@ -2924,11 +2933,8 @@ class MainWindow(ThemeMixin, ToolbarMixin, ConfigMixin, ExplorerPanelMixin,
     def _on_session_ended(self):
         """会话结束回调。
 
-        录制会话是**窗口级共享**的（所有标签页/分屏的输出都进同一个
-        session）。因此只有当窗口里再没有终端在跑时才真正结束它——否则
-        一个标签的 SSH 掉线就会把整窗停录：其它标签仍在正常工作，输出却
-        不再进历史/导出（add_output 抛 "No active session"），状态栏还
-        误报「已停止」，自动保存也被关掉。
+        手动录制由 _on_terminal_ended 按目标终端结束。其它标签页进程退出
+        时不应改变仍在运行的终端状态或停止它的录制保存定时器。
         """
         session_id = self.current_session.session_id if self.current_session else None
 
@@ -3023,10 +3029,12 @@ class MainWindow(ThemeMixin, ToolbarMixin, ConfigMixin, ExplorerPanelMixin,
             self.statusbar.showMessage(t("status.session_stopped"))
             self.current_session = None
 
-    def _on_input(self, text: str):
+    def _on_input(self, text: str, terminal=None):
         """输入回调"""
-        # 使用 session_manager 的状态来判断，避免竞态条件
-        if self.session_manager.current_session:
+        # 只接受手动选定终端的数据，防止标签和分屏之间混录。
+        if (self._recording_terminal is not None
+                and terminal is self._recording_terminal
+                and self.session_manager.current_session):
             try:
                 self.session_manager.add_input(text)
                 self._update_stats()
@@ -3034,10 +3042,12 @@ class MainWindow(ThemeMixin, ToolbarMixin, ConfigMixin, ExplorerPanelMixin,
                 # 会话可能在输入过程中结束，忽略此错误
                 pass
 
-    def _on_output(self, text: str):
+    def _on_output(self, text: str, terminal=None):
         """输出回调"""
-        # 使用 session_manager 的状态来判断，避免竞态条件
-        if self.session_manager.current_session:
+        # 只接受手动选定终端的数据，防止标签和分屏之间混录。
+        if (self._recording_terminal is not None
+                and terminal is self._recording_terminal
+                and self.session_manager.current_session):
             try:
                 self.session_manager.add_output(text)
                 self._stats_dirty = True  # 标记需要更新统计
@@ -3114,8 +3124,8 @@ class MainWindow(ThemeMixin, ToolbarMixin, ConfigMixin, ExplorerPanelMixin,
             self.files_label.setText(t("status.files", n=file_count))
 
     def _auto_save(self):
-        """自动保存"""
-        if self.current_session:
+        """保存手动开启的录制，不随当前标签切换。"""
+        if self.session_manager.current_session:
             self.session_manager.auto_save()
 
     def _clear_terminal(self):
@@ -4855,7 +4865,7 @@ class MainWindow(ThemeMixin, ToolbarMixin, ConfigMixin, ExplorerPanelMixin,
         if hasattr(self, 'export_btn'):
             self.export_btn.setText(t("toolbar.export"))
         if hasattr(self, 'history_btn'):
-            self.history_btn.setText(t("toolbar.history"))
+            self._update_recording_ui()
         if hasattr(self, 'images_btn'):
             self.images_btn.setText(t("toolbar.images"))
             self.images_btn.setToolTip(t("toolbar.images_tooltip"))
@@ -5025,18 +5035,30 @@ class MainWindow(ThemeMixin, ToolbarMixin, ConfigMixin, ExplorerPanelMixin,
             debug_info = self.terminal.debug_special_chars()
             QMessageBox.information(self, t("msg.debug_special_chars"), debug_info)
 
-    def _quick_export(self):
-        """快速导出（HTML）"""
-        session = self.current_session
-        if session:
-            self.session_manager.auto_save()
-        else:
-            sessions = self.session_manager.list_sessions()
-            if sessions:
-                session = self.session_manager.load_session(sessions[0]['session_id'])
+    def _session_for_export(self):
+        """导出当前终端解析后的文本快照，不落入 History，也不回退到旧记录。"""
+        terminal = self.terminal
+        if terminal is None:
+            return None
+        content = terminal._get_all_content().rstrip()
+        if not content.strip():
+            return None
+        idx = self.tab_widget.currentIndex()
+        now = datetime.now()
+        return Session(
+            session_id=now.strftime('snapshot_%Y%m%d_%H%M%S_%f'),
+            start_time=now.strftime('%Y-%m-%d %H:%M:%S'),
+            command=self.tab_widget.tabText(idx),
+            working_directory=self.tab_cwds.get(idx, self._window_cwd),
+            entries=[SessionEntry(type='output', content=content,
+                                  timestamp=now.strftime('%Y-%m-%d %H:%M:%S'))],
+        )
 
+    def _quick_export(self):
+        """快速导出当前终端文本（HTML）。"""
+        session = self._session_for_export()
         if not session:
-            QMessageBox.information(self, t("msg.hint"), t("msg.no_session_to_export"))
+            QMessageBox.information(self, t("msg.hint"), t("history.no_terminal_text"))
             return
 
         try:
@@ -5046,18 +5068,10 @@ class MainWindow(ThemeMixin, ToolbarMixin, ConfigMixin, ExplorerPanelMixin,
             QMessageBox.critical(self, t("msg.export_failed"), str(e))
 
     def _show_export_dialog(self):
-        """显示导出对话框"""
-        session = self.current_session
-        if session:
-            self.session_manager.auto_save()
-        else:
-            sessions = self.session_manager.list_sessions()
-            if not sessions:
-                QMessageBox.information(self, t("msg.hint"), t("msg.no_session_to_export"))
-                return
-            session = self.session_manager.load_session(sessions[0]['session_id'])
-
+        """选择格式并导出当前终端文本快照。"""
+        session = self._session_for_export()
         if not session:
+            QMessageBox.information(self, t("msg.hint"), t("history.no_terminal_text"))
             return
 
         from PyQt6.QtWidgets import QInputDialog
@@ -5083,10 +5097,64 @@ class MainWindow(ThemeMixin, ToolbarMixin, ConfigMixin, ExplorerPanelMixin,
                 except Exception as e:
                     QMessageBox.critical(self, t("msg.export_failed"), f"{fmt}: {e}")
 
+    def _toggle_terminal_recording(self):
+        if self._recording_terminal is not None:
+            self._stop_terminal_recording()
+            return
+        terminal = self.terminal
+        if terminal is None or not terminal.is_running():
+            self._styled_message_box(QMessageBox.Icon.Information, t("msg.hint"),
+                                     t("history.start_terminal_first"))
+            return
+        # 清掉开始按钮之前的输出，录制只从此刻起生效。
+        terminal._flush_output_buffer()
+        idx = self.tab_widget.currentIndex()
+        session = self.session_manager.create_session(self.tab_widget.tabText(idx))
+        session.working_directory = self.tab_cwds.get(idx, self._window_cwd)
+        self.current_session = session
+        self._recording_terminal = terminal
+        self.auto_save_timer.start(30000)
+        self._update_recording_ui()
+        self.statusbar.showMessage(t("history.recording_started"))
+
+    def _stop_terminal_recording(self):
+        terminal = self._recording_terminal
+        if terminal is None:
+            return
+        # 在解绑信号/关闭前排空尾部，然后结束历史录制。
+        if not sip.isdeleted(terminal):
+            terminal._flush_output_buffer()
+        self._recording_terminal = None
+        session = self.session_manager.end_session()
+        for idx, recorded in self.tab_sessions.items():
+            if recorded is session:
+                self.tab_sessions[idx] = None
+        self.auto_save_timer.stop()
+        self._update_recording_ui()
+        self.statusbar.showMessage(t("history.recording_saved"))
+
+    def _update_recording_ui(self):
+        recording = self._recording_terminal is not None
+        if hasattr(self, 'history_btn'):
+            self.history_btn.setText(t("toolbar.history") + (" ●" if recording else ""))
+        action = getattr(self, '_recording_action', None)
+        if action is not None:
+            action.setText(t("history.stop_recording" if recording else "history.start_recording"))
+        dialog = getattr(self, '_history_dialog', None)
+        if dialog is not None and not sip.isdeleted(dialog):
+            dialog.set_recording(recording)
+
     def _show_history(self):
-        """显示历史对话框"""
+        """查看旧录制；仅显式点击开始才产生新录制。"""
         dialog = HistoryDialog(self.session_manager, self)
-        dialog.exec()
+        self._history_dialog = dialog
+        dialog.recording_toggle_requested.connect(self._toggle_terminal_recording)
+        self._update_recording_ui()
+        try:
+            dialog.exec()
+        finally:
+            self._history_dialog = None
+            dialog.deleteLater()
 
     def _make_styled_message_box(self, icon, title, text, buttons=QMessageBox.StandardButton.Ok):
         """构造带明确样式的消息框（不 exec），供需要附加勾选框等定制的调用方使用"""
@@ -5761,6 +5829,7 @@ class MainWindow(ThemeMixin, ToolbarMixin, ConfigMixin, ExplorerPanelMixin,
         # tail even when a previous autosave is still in progress, then retire
         # the per-window executor without waiting for disk I/O on the GUI thread.
         try:
+            self._stop_terminal_recording()
             self.session_manager.shutdown()
         except Exception as exc:
             logger.warning(f"[Close] session shutdown failed: {exc}")
