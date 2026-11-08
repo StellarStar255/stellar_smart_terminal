@@ -6,6 +6,23 @@
 _current_language = "zh"
 
 TRANSLATIONS = {
+    "remote.fwd_group": {"zh": "端口组合", "en": "Port Group"},
+    "remote.fwd_group_custom": {"zh": "自定义勾选", "en": "Custom selection"},
+    "remote.fwd_group_save_as": {"zh": "另存组合…", "en": "Save Group As…"},
+    "remote.fwd_group_update": {"zh": "保存修改", "en": "Save Changes"},
+    "remote.fwd_group_delete": {"zh": "删除组合", "en": "Delete Group"},
+    "remote.fwd_group_name": {"zh": "组合名称：", "en": "Group name:"},
+    "remote.fwd_group_duplicate": {"zh": "组合名称已存在，请选择该组合并保存修改，或使用其他名称。", "en": "This name already exists. Select that group and save changes, or use another name."},
+    "remote.fwd_group_empty": {"zh": "请先勾选要操作的端口规则。", "en": "Check at least one forwarding rule first."},
+    "remote.fwd_group_save_failed": {"zh": "组合保存失败，请重试。", "en": "Could not save the port group. Please retry."},
+    "remote.fwd_group_selection": {"zh": "已勾选 {n} 条规则。可拖拽调整顺序；切换组合不会启停端口。", "en": "{n} rules checked. Drag to reorder; selecting a group does not start or stop ports."},
+    "remote.fwd_group_unsaved": {"zh": " 勾选已修改，点击“保存修改”更新组合。", "en": " Selection changed; click Save Changes to update the group."},
+    "remote.fwd_group_result": {"zh": "成功 {done} 条，跳过 {skipped} 条，失败 {failed} 条。", "en": "Succeeded: {done}; skipped: {skipped}; failed: {failed}."},
+    "remote.fwd_check_all": {"zh": "全选", "en": "Check All"},
+    "remote.fwd_check_none": {"zh": "全不选", "en": "Uncheck All"},
+    "remote.fwd_group_start": {"zh": "启动勾选端口", "en": "Start Checked Ports"},
+    "remote.fwd_group_stop": {"zh": "停止勾选端口", "en": "Stop Checked Ports"},
+    "remote.fwd_reorder_hint": {"zh": "拖拽规则调整顺序，顺序按主机保存。勾选框用于组合，圆点显示启停状态。", "en": "Drag rules to reorder; order is saved per host. Checkboxes select group members; dots show running status."},
     "history.start_recording": {"zh": "开始录制当前终端", "en": "Start Recording Current Terminal"},
     "history.stop_recording": {"zh": "停止并保存录制", "en": "Stop and Save Recording"},
     "history.recording_off": {"zh": "自动录制已关闭。当前未录制。", "en": "Automatic recording is off. Not recording."},

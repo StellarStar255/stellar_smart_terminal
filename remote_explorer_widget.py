@@ -456,21 +456,29 @@ class _ForwardsDialog(QDialog):
 
     def __init__(self, parent=None, *, alias: str, rules: list,
                  apply_cb=None, cancel_cb=None, active: Optional[set] = None,
-                 force_cb=None):
+                 force_cb=None, groups=None, selected_group="", save_cb=None):
         super().__init__(parent)
         self._alias = alias
         self._apply_cb = apply_cb          # (spec) -> None，抛异常表示失败
         self._cancel_cb = cancel_cb
         self._force_cb = force_cb          # (spec) -> None：端口被 ssh 占着时强制释放再挂
         self._active = set(active or ())   # 已生效规则的 key
+        groups = groups if isinstance(groups, dict) else {}
+        self._groups = {name: list(dict.fromkeys(keys))
+                        for name, keys in groups.items()
+                        if isinstance(name, str) and name.strip() and isinstance(keys, list)
+                        and all(isinstance(key, str) for key in keys)}
+        self._save_cb = save_cb
+        self._batch_running = False
         self.setWindowTitle(t("remote.fwd_title", host=alias))
         self.setModal(True)
-        self.setMinimumWidth(560)
+        self.setMinimumWidth(720)
         self.setStyleSheet("""
             QDialog { background-color: #1e1e2e; }
             QLabel#title { color: #eaeaea; font-size: 15px; font-weight: 600; }
             QLabel#hint { color: #8a8aa0; font-size: 12px; }
             QLabel#field { color: #b8b8cc; font-size: 12px; }
+            QCheckBox { color: #b8b8cc; }
             QListWidget {
                 background-color: #2d2d44; color: #eaeaea;
                 border: 1px solid #3d3d5c; border-radius: 6px; padding: 2px;
@@ -512,8 +520,31 @@ class _ForwardsDialog(QDialog):
         hint.setWordWrap(True)
         layout.addWidget(hint)
 
+        group_row = QHBoxLayout()
+        group_label = QLabel(t("remote.fwd_group"))
+        group_label.setObjectName("field")
+        group_row.addWidget(group_label)
+        self._group_combo = QComboBox()
+        suppress_popup_flash(self._group_combo)
+        group_row.addWidget(self._group_combo, 1)
+        save_as = QPushButton(t("remote.fwd_group_save_as"))
+        save_as.clicked.connect(self._save_group_as)
+        group_row.addWidget(save_as)
+        self._group_update = QPushButton(t("remote.fwd_group_update"))
+        self._group_update.clicked.connect(self._update_group)
+        group_row.addWidget(self._group_update)
+        self._group_delete = QPushButton(t("remote.fwd_group_delete"))
+        self._group_delete.clicked.connect(self._delete_group)
+        group_row.addWidget(self._group_delete)
+        layout.addLayout(group_row)
+
         self._list = QListWidget()
-        self._list.setMinimumHeight(150)
+        self._list.setMinimumHeight(190)
+        self._list.setDragDropMode(QAbstractItemView.DragDropMode.InternalMove)
+        self._list.setDefaultDropAction(Qt.DropAction.MoveAction)
+        self._list.setDropIndicatorShown(True)
+        self._list.setDragDropOverwriteMode(False)
+        self._list.setToolTip(t("remote.fwd_reorder_hint"))
         self._list.setIconSize(QSize(10, 10))
         # uniformItemSizes 只保证行之间等高；缓存失效后整表仍可能一起变高。
         # delegate 明确行高，避免 Start/Stop 触发样式重算时行间距跳动。
@@ -522,6 +553,24 @@ class _ForwardsDialog(QDialog):
         layout.addWidget(self._list, 1)
         for r in rules or []:
             self._add_item(dict(r))
+
+        self._group_status = QLabel()
+        self._group_status.setObjectName("hint")
+        self._group_status.setWordWrap(True)
+        layout.addWidget(self._group_status)
+        batch_row = QHBoxLayout()
+        for label, slot in (("remote.fwd_check_all", lambda: self._check_all(True)),
+                            ("remote.fwd_check_none", lambda: self._check_all(False)),
+                            ("remote.fwd_group_start", lambda: self._apply_checked(False)),
+                            ("remote.fwd_group_stop", lambda: self._apply_checked(True))):
+            button = QPushButton(t(label))
+            button.clicked.connect(slot)
+            batch_row.addWidget(button)
+        layout.addLayout(batch_row)
+        self._list.itemChanged.connect(self._sync_group_status)
+        self._list.model().rowsMoved.connect(self._on_rules_reordered)
+        self._group_combo.currentIndexChanged.connect(self._select_group)
+        self._reload_groups(selected_group)
 
         # —— 新增一条 ——
         form = QHBoxLayout()
@@ -595,6 +644,8 @@ class _ForwardsDialog(QDialog):
     def _add_item(self, spec: dict) -> QListWidgetItem:
         item = QListWidgetItem()
         item.setData(_ROLE_ENTRY, spec)
+        item.setFlags(item.flags() | Qt.ItemFlag.ItemIsUserCheckable)
+        item.setCheckState(Qt.CheckState.Unchecked)
         self._list.addItem(item)
         self._refresh_item(item)
         return item
@@ -694,18 +745,27 @@ class _ForwardsDialog(QDialog):
             # 还挂在主连接上的监听就再也没人管了）
             if not self._apply_selected(True):
                 return
+        key = self.rule_key(spec)
         self._list.takeItem(self._list.row(item))
+        for name in self._groups:
+            self._groups[name] = [member for member in self._groups[name] if member != key]
+        self._sync_group_status()
 
     def _apply_selected(self, cancel: bool) -> bool:
         """挂/撤当前选中的规则。返回是否成功（失败已经弹过提示）。"""
-        item = self._list.currentItem()
-        if item is None or self._apply_cb is None:
+        return self._apply_item(self._list.currentItem(), cancel)
+
+    def _apply_item(self, item, cancel, errors=None):
+        if item is None or (self._cancel_cb if cancel else self._apply_cb) is None:
             return False
         spec = item.data(_ROLE_ENTRY)
         key = self.rule_key(spec)
         try:
             (self._cancel_cb if cancel else self._apply_cb)(spec)
         except ssh_control.LocalPortBusy as e:
+            if errors is not None:
+                errors.append(f"{ssh_control.forward_label(spec)}: {e}")
+                return False
             # 端口被 ssh 进程占着：十有八九是残留的同一条转发（应用重启后
             # 登记丢了、主连接还活着）→ 给「强制释放并启用」
             if cancel or self._force_cb is None or not e.held_by_ssh_only():
@@ -728,12 +788,161 @@ class _ForwardsDialog(QDialog):
                 QMessageBox.warning(self, t("remote.fwd_title", host=self._alias), str(e2))
                 return False
         except Exception as e:      # noqa: BLE001 — 原样告诉用户
-            QMessageBox.warning(self, t("remote.fwd_title", host=self._alias),
-                                str(e))
+            if errors is not None:
+                errors.append(f"{ssh_control.forward_label(spec)}: {e}")
+            else:
+                QMessageBox.warning(self, t("remote.fwd_title", host=self._alias), str(e))
             return False
         self._active.discard(key) if cancel else self._active.add(key)
         self._refresh_item(item)
         return True
+
+    def accept(self):
+        if not self._batch_running:
+            super().accept()
+
+    def reject(self):
+        if not self._batch_running:
+            super().reject()
+
+    def _checked_keys(self):
+        return [self.rule_key(self._list.item(i).data(_ROLE_ENTRY))
+                for i in range(self._list.count())
+                if self._list.item(i).checkState() == Qt.CheckState.Checked]
+
+    def groups(self):
+        return {name: list(keys) for name, keys in self._groups.items()}
+
+    def selected_group(self):
+        return self._group_combo.currentData() or ""
+
+    def _reload_groups(self, selected=""):
+        self._group_combo.blockSignals(True)
+        self._group_combo.clear()
+        self._group_combo.addItem(t("remote.fwd_group_custom"), "")
+        for name in self._groups:
+            self._group_combo.addItem(name, name)
+        idx = self._group_combo.findData(selected)
+        self._group_combo.setCurrentIndex(max(0, idx))
+        self._group_combo.blockSignals(False)
+        self._select_group()
+
+    def _select_group(self, _index=-1):
+        name = self.selected_group()
+        if name:
+            members = set(self._groups[name])
+            self._list.blockSignals(True)
+            try:
+                for i in range(self._list.count()):
+                    item = self._list.item(i)
+                    item.setCheckState(Qt.CheckState.Checked if self.rule_key(
+                        item.data(_ROLE_ENTRY)) in members else Qt.CheckState.Unchecked)
+            finally:
+                self._list.blockSignals(False)
+        self._group_update.setEnabled(bool(name))
+        self._group_delete.setEnabled(bool(name))
+        self._sync_group_status()
+
+    def _sync_group_status(self, *_args):
+        keys = self._checked_keys()
+        name = self.selected_group()
+        changed = name and set(keys) != set(self._groups.get(name, []))
+        self._group_status.setText(t("remote.fwd_group_selection", n=len(keys))
+                                   + (t("remote.fwd_group_unsaved") if changed else ""))
+
+    def _check_all(self, checked):
+        self._list.blockSignals(True)
+        try:
+            for i in range(self._list.count()):
+                self._list.item(i).setCheckState(
+                    Qt.CheckState.Checked if checked else Qt.CheckState.Unchecked)
+        finally:
+            self._list.blockSignals(False)
+        self._sync_group_status()
+
+    def _persist_state(self):
+        try:
+            if self._save_cb is not None and self._save_cb(
+                    self.rules(), self.groups(), self.selected_group()) is False:
+                raise RuntimeError(t("remote.fwd_group_save_failed"))
+        except Exception as exc:
+            QMessageBox.warning(self, t("remote.fwd_title", host=self._alias), str(exc))
+            return False
+        return True
+
+    def _save_group_as(self):
+        if not self._checked_keys():
+            QMessageBox.information(self, t("remote.fwd_group"), t("remote.fwd_group_empty"))
+            return
+        name, ok = QInputDialog.getText(self, t("remote.fwd_group_save_as"),
+                                       t("remote.fwd_group_name"))
+        name = name.strip()
+        if not ok or not name:
+            return
+        if name in self._groups:
+            QMessageBox.warning(self, t("remote.fwd_group"), t("remote.fwd_group_duplicate"))
+            return
+        old = self.selected_group()
+        self._groups[name] = self._checked_keys()
+        self._reload_groups(name)
+        if not self._persist_state():
+            del self._groups[name]
+            self._reload_groups(old)
+
+    def _update_group(self):
+        name = self.selected_group()
+        if not name:
+            return
+        if not self._checked_keys():
+            QMessageBox.information(self, t("remote.fwd_group"), t("remote.fwd_group_empty"))
+            return
+        previous = self._groups[name]
+        self._groups[name] = self._checked_keys()
+        if not self._persist_state():
+            self._groups[name] = previous
+        self._sync_group_status()
+
+    def _delete_group(self):
+        name = self.selected_group()
+        if not name:
+            return
+        old = self.groups()
+        del self._groups[name]
+        self._reload_groups()
+        if not self._persist_state():
+            self._groups = old
+            self._reload_groups(name)
+
+    def _on_rules_reordered(self, *_args):
+        # InternalMove preserves item metadata, check states, and active identities.
+        self._persist_state()
+
+    def _apply_checked(self, cancel):
+        if self._batch_running:
+            return
+        items = [self._list.item(i) for i in range(self._list.count())
+                 if self._list.item(i).checkState() == Qt.CheckState.Checked]
+        if not items:
+            QMessageBox.information(self, t("remote.fwd_group"), t("remote.fwd_group_empty"))
+            return
+        errors = []
+        done = skipped = 0
+        self._batch_running = True
+        self.setEnabled(False)
+        try:
+            for item in items:
+                if self._is_item_active(item) != cancel:
+                    skipped += 1
+                    continue
+                if self._apply_item(item, cancel, errors):
+                    done += 1
+        finally:
+            self.setEnabled(True)
+            self._batch_running = False
+        summary = t("remote.fwd_group_result", done=done, skipped=skipped, failed=len(errors))
+        self._group_status.setText(summary)
+        if errors:
+            QMessageBox.warning(self, t("remote.fwd_group"), summary + "\n\n" + "\n".join(errors))
 
     def rules(self) -> list:
         return [self._list.item(i).data(_ROLE_ENTRY)
@@ -2262,13 +2471,25 @@ class RemoteExplorerPanel(QWidget, explorer_common.TransferJobHost):
     # ---- 端口转发（挂在 ssh 主连接上，按主机持久化） ----
 
     CONFIG_KEY_FORWARDS = 'remote_explorer_forwards'
+    CONFIG_KEY_FORWARD_GROUPS = 'remote_explorer_forward_groups'
 
     def _load_forwards(self, alias: str) -> list:
         data = app_config.read_config().get(self.CONFIG_KEY_FORWARDS)
         rules = data.get(alias) if isinstance(data, dict) else None
         return [dict(r) for r in rules if isinstance(r, dict)] if isinstance(rules, list) else []
 
-    def _save_forwards(self, alias: str, rules: list):
+    def _load_forward_groups(self, alias: str):
+        data = app_config.read_config().get(self.CONFIG_KEY_FORWARD_GROUPS, {})
+        state = data.get(alias, {}) if isinstance(data, dict) else {}
+        if not isinstance(state, dict):
+            return {}, ""
+        groups = state.get("groups", {})
+        if not isinstance(groups, dict):
+            groups = {}
+        selected = state.get("selected", "")
+        return groups, selected if isinstance(selected, str) else ""
+
+    def _save_forwards(self, alias: str, rules: list, groups=None, selected_group=""):
         if not alias:
             return
 
@@ -2281,8 +2502,13 @@ class RemoteExplorerPanel(QWidget, explorer_common.TransferJobHost):
             else:
                 data.pop(alias, None)
             cfg[self.CONFIG_KEY_FORWARDS] = data
+            if groups is not None:
+                states = cfg.get(self.CONFIG_KEY_FORWARD_GROUPS)
+                states = dict(states) if isinstance(states, dict) else {}
+                states[alias] = {"groups": groups, "selected": selected_group}
+                cfg[self.CONFIG_KEY_FORWARD_GROUPS] = states
 
-        app_config.update_config_with(_apply, description='remote-forwards')
+        return app_config.update_config_with(_apply, description='remote-forwards')
 
     def _run_blocking(self, fn, label: str):
         """在后台线程跑 fn，同时转一个不可取消的小进度框保持界面响应；
@@ -2422,8 +2648,12 @@ class RemoteExplorerPanel(QWidget, explorer_common.TransferJobHost):
             return lambda spec: self._run_blocking(
                 lambda: fn(spec), t("remote.fwd_applying"))
 
+        groups, selected_group = self._load_forward_groups(host.alias)
         dlg = _ForwardsDialog(
             self, alias=host.alias, rules=self._load_forwards(host.alias),
+            groups=groups, selected_group=selected_group,
+            save_cb=lambda rules, groups, selected: self._save_forwards(
+                host.alias, rules, groups, selected),
             apply_cb=_bg(lambda spec: ssh_control.forward_apply(host, spec, cancel=False)),
             cancel_cb=_bg(lambda spec: ssh_control.forward_apply(host, spec, cancel=True)),
             force_cb=_bg(lambda spec: ssh_control.forward_force_apply(
@@ -2432,7 +2662,7 @@ class RemoteExplorerPanel(QWidget, explorer_common.TransferJobHost):
             active=active,
         )
         dlg.exec()
-        self._save_forwards(host.alias, dlg.rules())
+        self._save_forwards(host.alias, dlg.rules(), dlg.groups(), dlg.selected_group())
         self._active_forwards[host.alias] = dlg.active_keys()
         self._populate_hosts_list()   # 🔀 标记立刻反映到列表上
 

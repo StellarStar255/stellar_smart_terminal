@@ -60,6 +60,12 @@ Plenty of handy tools live in the terminal's right-click menu: run presets in on
 
 Automatic recording is off. Start it manually from History or File to capture one selected terminal from that point onward. Export saves the current terminal’s retained screen and scrollback text. Use the tool’s own session history for complete Codex conversations; raw recordings may contain repeated or misplaced text.
 
+### SSH 端口转发组合 / SSH port-forwarding groups
+
+在主机的「端口转发」窗口勾选多条规则，点击「另存组合…」命名保存。之后选择组合，点击「启动勾选端口」或「停止勾选端口」即可批量操作，不影响未勾选的端口；切换组合本身不会启停端口。可拖拽规则调整顺序，组合和顺序分别按主机保存。绿色圆点表示运行状态，复选框表示组合成员。
+
+Check rules in a host’s Port Forwarding dialog and save a named group. Select it to start or stop checked ports together; selecting a group does not change running ports. Drag rules to reorder. Groups and order are saved per host.
+
 ## Download / 下载安装
 
 无需安装 Python，从 [**Releases**](https://github.com/StellarStar255/stellar_smart_terminal/releases/latest) 下载即可使用。

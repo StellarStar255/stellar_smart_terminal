@@ -51,6 +51,10 @@ Automatic recording is off. To capture output from now on, use **History → Sta
 
 **Export** saves the current terminal’s retained screen and scrollback text, without starting a recording. It does not recover cleared or discarded text. For Codex and other dynamic interfaces, use the tool’s own session history for complete conversations; raw terminal recordings can contain repeated or misplaced text.
 
+### SSH port-forwarding groups
+
+In a host’s **Port Forwarding** dialog, check the rules you want and choose **Save Group As…**. Select a saved group, then use **Start Checked Ports** or **Stop Checked Ports** to operate on its members. Other ports are left alone; choosing a group does not change running ports. Drag rules to reorder them. Groups and order are saved separately for each host; green dots show running status, while checkboxes select group members.
+
 ## Download
 
 No Python required — grab a build from the [**Releases**](https://github.com/StellarStar255/stellar_smart_terminal/releases/latest) page.
