@@ -7,6 +7,7 @@
 """
 import os
 import re
+import weakref
 
 from PyQt6 import sip
 from PyQt6.QtCore import Qt, QEvent, QModelIndex, QPoint, QSize, QTimer, pyqtSignal
@@ -1274,23 +1275,48 @@ class WindowNavigatorPanel(QWidget):
         # deferred deletion 后再启动关窗。0ms 在 macOS 上仍可能与菜单清理重叠。
         QTimer.singleShot(80, do_close)
 
+    @staticmethod
+    def _focus_window_terminal(window):
+        """导航是明确的输入目标切换：优先恢复目标窗口当前页的活跃终端。"""
+        if sip.isdeleted(window) or not window.isEnabled():
+            return
+        if QApplication.activeModalWidget() is not None:
+            return
+        terminal = getattr(window, 'terminal', None)
+        if terminal is not None and not sip.isdeleted(terminal) and terminal.isVisible():
+            terminal.setFocus(Qt.FocusReason.OtherFocusReason)
+
     def _switch_to_window(self, window):
-        """切换到指定窗口"""
-        if window and not sip.isdeleted(window):
+        """切换窗口并交还终端输入焦点，覆盖鼠标事件末尾的列表焦点恢复。"""
+        self._focus_switch_generation = getattr(self, '_focus_switch_generation', 0) + 1
+        generation = self._focus_switch_generation
+        if window is not None and not sip.isdeleted(window):
             try:
-                window.raise_()
-                window.activateWindow()
-                # 如果窗口最小化，恢复它
+                # 先恢复最小化窗口，再激活和设置其输入目标。
                 if window.isMinimized():
                     window.showNormal()
+                window.raise_()
+                window.activateWindow()
                 self.window_switch_requested.emit(window)
+                self._focus_window_terminal(window)
+                nav_ref, window_ref = weakref.ref(self), weakref.ref(window)
+
+                def finish_focus_switch():
+                    nav, target = nav_ref(), window_ref()
+                    if (nav is None or sip.isdeleted(nav)
+                            or generation != nav._focus_switch_generation
+                            or target is None or sip.isdeleted(target)):
+                        return
+                    # 不重新激活窗口：用户若已切到别处，过期回调不能抢走焦点。
+                    if target.isActiveWindow():
+                        nav._focus_window_terminal(target)
+
+                QTimer.singleShot(0, finish_focus_switch)
             except RuntimeError:
-                # 窗口已被删除，刷新列表
                 self._refresh_window_list()
-        # 钉死模式：点击/双击切走后把高亮吸回宿主窗口自己
-        # （点击本身会把 QListWidget 的 currentRow 挪到被点的行）
+        # 钉死模式的列表高亮仍指向宿主，但键盘焦点交给被点击的终端。
         if self._pinned_window() is not None:
-            self.select_window(None)  # select_window 会重定向到钉死窗口
+            self.select_window(None)
 
     def showEvent(self, event):
         """显示时刷新列表"""
