@@ -250,14 +250,27 @@ class PresetDialog(QDialog):
 
         main_layout.addLayout(content_layout)
 
+        self.transfer_status = QLabel()
+        self.transfer_status.setWordWrap(True)
+        main_layout.addWidget(self.transfer_status)
+
         # 底部按钮
+        footer = QHBoxLayout()
+        self.copy_json_btn = QPushButton(t("preset.copy_json"))
+        self.copy_json_btn.clicked.connect(self._copy_json)
+        self.import_json_btn = QPushButton(t("preset.import_json"))
+        self.import_json_btn.clicked.connect(self._import_json)
+        footer.addWidget(self.copy_json_btn)
+        footer.addWidget(self.import_json_btn)
+        footer.addStretch()
         button_box = QDialogButtonBox(
             QDialogButtonBox.StandardButton.Ok |
             QDialogButtonBox.StandardButton.Cancel
         )
         button_box.accepted.connect(self.accept)
         button_box.rejected.connect(self.reject)
-        main_layout.addWidget(button_box)
+        footer.addWidget(button_box)
+        main_layout.addLayout(footer)
 
         # 填充列表
         self._populate_list()
@@ -414,6 +427,72 @@ class PresetDialog(QDialog):
             if preset:
                 new_presets.append(preset)
         self.presets = new_presets
+
+    def _copy_json(self):
+        """复制当前列表（包括尚未关闭管理框的编辑），不携带内部 ID。"""
+        QApplication.clipboard().setText(json.dumps(
+            {"presets": self.get_presets()}, ensure_ascii=False, indent=2))
+        self.transfer_status.setText(t("preset.json_copied", n=len(self.presets)))
+
+    @staticmethod
+    def _parse_presets_json(text):
+        data = json.loads(text)
+        presets = data.get('presets') if isinstance(data, dict) else data
+        if not isinstance(presets, list):
+            raise ValueError(t("preset.json_structure_error"))
+        result = []
+        for index, preset in enumerate(presets, 1):
+            if (not isinstance(preset, dict)
+                    or not isinstance(preset.get('name'), str)
+                    or not isinstance(preset.get('commands'), list)
+                    or not all(isinstance(command, str) for command in preset['commands'])):
+                raise ValueError(t("preset.json_entry_error", n=index))
+            result.append({key: value for key, value in preset.items() if key != '_id'})
+        return result
+
+    def _import_json(self):
+        dialog = QDialog(self)
+        dialog.setWindowTitle(t("preset.import_json"))
+        dialog.resize(560, 380)
+        layout = QVBoxLayout(dialog)
+        hint = QLabel(t("preset.json_import_hint"))
+        hint.setWordWrap(True)
+        layout.addWidget(hint)
+        editor = QPlainTextEdit()
+        editor.setPlaceholderText('{"presets": [{"name": "ssh", "commands": ["ssh server"]}]}')
+        editor.setPlainText(QApplication.clipboard().text())
+        layout.addWidget(editor)
+        buttons = QDialogButtonBox(
+            QDialogButtonBox.StandardButton.Ok | QDialogButtonBox.StandardButton.Cancel)
+        buttons.accepted.connect(lambda: self._apply_json_import(editor.toPlainText(), dialog))
+        buttons.rejected.connect(dialog.reject)
+        layout.addWidget(buttons)
+        dialog.exec()
+
+    def _apply_json_import(self, text, dialog):
+        # 先验证全部条目；错误时保留输入和现有列表，让用户直接修正。
+        try:
+            imported = self._parse_presets_json(text)
+        except (ValueError, RecursionError) as exc:
+            QMessageBox.warning(dialog, t("preset.json_import_error"), str(exc))
+            return
+        existing = self.get_presets()
+        added = 0
+        for preset in imported:
+            if preset in existing:
+                continue
+            existing.append(preset.copy())
+            pid = self._next_preset_id()
+            preset['_id'] = pid
+            self.presets.append(preset)
+            self._preset_map[pid] = preset
+            added += 1
+        if added:
+            self._populate_list()
+            self.preset_list.setCurrentRow(len(self.presets) - added)
+        self.transfer_status.setText(t(
+            "preset.json_imported", n=added, skipped=len(imported) - added))
+        dialog.accept()
 
     def accept(self):
         """重写 accept 方法，确保当前编辑在关闭前被保存"""

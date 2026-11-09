@@ -337,6 +337,14 @@ TRANSLATIONS = {
     "preset.unnamed": {"zh": "未命名", "en": "Unnamed"},
     "preset.cannot_save": {"zh": "无法保存", "en": "Cannot Save"},
     "preset.select_first": {"zh": "请先选择一个预设", "en": "Please select a preset first"},
+    "preset.copy_json": {"zh": "复制全部为 JSON", "en": "Copy All as JSON"},
+    "preset.import_json": {"zh": "从 JSON 快速导入", "en": "Quick Import from JSON"},
+    "preset.json_copied": {"zh": "已复制全部 {n} 条快捷命令到剪贴板。", "en": "Copied all {n} presets to the clipboard."},
+    "preset.json_import_hint": {"zh": "粘贴另一台电脑复制的 JSON。导入将追加命令，跳过完全相同的条目；同名但内容不同的命令会保留。完成后请在管理窗口点 OK 保存。", "en": "Paste JSON copied from another computer. Import appends presets and skips exact duplicates; presets with the same name but different commands are kept. Click OK in the manager afterward to save."},
+    "preset.json_structure_error": {"zh": "JSON 必须是包含 presets 数组的对象，或快捷命令数组。", "en": "JSON must be an object containing a presets array, or an array of presets."},
+    "preset.json_entry_error": {"zh": "第 {n} 条快捷命令格式错误：name 必须是字符串，commands 必须是字符串数组。", "en": "Invalid preset #{n}: name must be a string and commands must be an array of strings."},
+    "preset.json_import_error": {"zh": "无法导入 JSON", "en": "Cannot Import JSON"},
+    "preset.json_imported": {"zh": "已导入 {n} 条，跳过 {skipped} 条重复项。点 OK 保存。", "en": "Imported {n} presets; skipped {skipped} duplicates. Click OK to save."},
 
     # ===== LLM 配置对话框 =====
     "llm.config_title": {"zh": "LLM API 配置", "en": "LLM API Configuration"},
