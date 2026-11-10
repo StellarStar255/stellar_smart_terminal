@@ -851,6 +851,66 @@ class TestPortForwarding(unittest.TestCase):
         finally:
             srv.close()
 
+    @_POSIX_ONLY
+    def test_restart_after_traffic_does_not_mistake_time_wait_for_listener(self):
+        """真实 TCP 流量后主动关闭，普通 bind 失败但 SSH 可以立即重新监听。"""
+        import errno
+        import socket
+
+        for kind in ('L', 'D'):
+            with self.subTest(kind=kind):
+                with socket.socket() as listener:
+                    listener.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
+                    listener.bind(('127.0.0.1', 0))
+                    listener.listen(1)
+                    listener.settimeout(2)
+                    port = listener.getsockname()[1]
+                    with socket.create_connection(('127.0.0.1', port), timeout=2) as client:
+                        conn, _ = listener.accept()
+                        with conn:
+                            conn.settimeout(2)
+                            conn.sendall(b'forwarded data')
+                            self.assertEqual(client.recv(14), b'forwarded data')
+                            conn.shutdown(socket.SHUT_WR)
+                            self.assertEqual(client.recv(1), b'')
+                        # 客户端后关闭，保证 TIME_WAIT 留在本机转发端口。
+                with socket.socket() as old_probe:
+                    with self.assertRaises(OSError) as cm:
+                        old_probe.bind(('127.0.0.1', port))
+                    self.assertEqual(cm.exception.errno, errno.EADDRINUSE)
+                self.assertFalse(ssh_control.local_port_busy('127.0.0.1', port))
+                spec = {'type': kind, 'bind_port': port, 'dest_port': 80}
+                with mock.patch.object(ssh_control.subprocess, 'run', return_value=
+                        subprocess.CompletedProcess([], 0, b'', b'')) as run:
+                    ssh_control.forward_apply(_host(), spec)
+                self.assertEqual(run.call_args.args[0][:3], ['ssh', '-O', 'forward'])
+                # 探测结束必须关闭自己的 socket，且仍能发现真正的 SSH 式监听。
+                with socket.socket() as restarted:
+                    restarted.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
+                    restarted.bind(('127.0.0.1', port))
+                    restarted.listen(1)
+                    self.assertTrue(ssh_control.local_port_busy('127.0.0.1', port))
+
+    @_POSIX_ONLY
+    def test_stopped_listener_with_existing_connection_can_restart(self):
+        """取消转发关闭监听，已建立的转发连接可以继续存活。"""
+        import socket
+
+        with socket.socket() as listener:
+            listener.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
+            listener.bind(('127.0.0.1', 0))
+            listener.listen(1)
+            listener.settimeout(2)
+            port = listener.getsockname()[1]
+            with socket.create_connection(('127.0.0.1', port), timeout=2) as client:
+                conn, _ = listener.accept()
+                with conn:
+                    conn.settimeout(2)
+                    listener.close()
+                    self.assertFalse(ssh_control.local_port_busy('127.0.0.1', port))
+                    client.sendall(b'x')
+                    self.assertEqual(conn.recv(1), b'x')
+
     def test_dead_master_says_to_log_in_again(self):
         def _fail(args, **kwargs):
             return subprocess.CompletedProcess(

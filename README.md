@@ -4,7 +4,7 @@ English | [简体中文](README.zh-CN.md)
 
 A PyQt6-based smart terminal with file explorer, Git GUI, LLM proxy, and VS Code extension browser.
 
-Latest release: [v1.35.30](docs/releases/v1.35.30.md) restores the original window’s previous directory after opening a path in a new window, and aligns the directory toolbar buttons.
+Latest release: [v1.35.31](docs/releases/v1.35.31.md) fixes false port-in-use errors when restarting SSH port forwarding after stopping it.
 
 <img src="assets/smart_terminal.png" width="300" />
 

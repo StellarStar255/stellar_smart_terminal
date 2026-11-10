@@ -746,7 +746,13 @@ def local_port_busy(host: str, port) -> bool:
         return False
     s = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
     try:
+        # 和 OpenSSH 的转发监听一致：允许复用已关闭连接留下的 TIME_WAIT。
+        # 普通 bind 会把刚停止的转发误判为占用，即使 lsof 没有任何监听进程。
+        s.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
         s.bind((host or "127.0.0.1", p))
+        # 某些系统允许 REUSEADDR socket 绑定同一地址，但不允许同时监听。
+        # 必须检查 listen，避免把仍在工作的监听器当成空闲端口。
+        s.listen(1)
         return False
     except OSError:
         return True
