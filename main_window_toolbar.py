@@ -933,7 +933,7 @@ class ToolbarMixin:
             }
         """)
         # 历史记录下拉按钮：简洁的向下箭头（下拉指示），与工具栏矢量图标风格一致。
-        # 高度与 Browse 对齐（见下方 setFixedHeight）。
+        # 与目录操作按钮共用主题尺寸，随 GUI 字号自然增高。
         self.dir_dropdown_btn = QPushButton()
         self.dir_dropdown_btn.setIcon(_make_git_tool_icon('caret_down', 'white'))
         self.dir_dropdown_btn.setIconSize(QSize(16, 16))
@@ -1015,8 +1015,6 @@ class ToolbarMixin:
         """)
         self.browse_btn.clicked.connect(self._browse_working_dir)
         self.dir_toolbar.addWidget(self.browse_btn)
-        # 历史按钮高度与 Browse 对齐（Browse 高度由内容+padding 决定，取其 sizeHint）
-        self.dir_dropdown_btn.setFixedHeight(self.browse_btn.sizeHint().height())
 
         self.open_dir_window_btn = QPushButton(t("dir.open_new_window"))
         self.open_dir_window_btn.setToolTip(t("dir.open_new_window_tooltip"))

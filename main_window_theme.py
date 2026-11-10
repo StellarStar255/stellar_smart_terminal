@@ -591,24 +591,34 @@ class ThemeMixin:
             }}
         """)
 
-        # 浏览按钮样式
-        self.browse_btn.setStyleSheet(f"""
+        # 目录操作使用同一套尺寸；避免返回按钮继承主工具栏的大号 padding。
+        directory_button_metrics = "font-size: 12px; min-height: 20px;"
+        directory_secondary_qss = f"""
             QPushButton {{
                 background-color: {t['bg_lighter']};
                 color: {t['text']};
                 padding: 4px 12px;
-                font-size: 12px;
+                {directory_button_metrics}
                 border: none;
                 border-radius: 4px;
             }}
             QPushButton:hover {{
                 background-color: {t['bg_hover']};
             }}
-        """)
+            QPushButton:pressed {{
+                background-color: {t['bg_light']};
+            }}
+            QPushButton:disabled {{
+                color: {t['text_dim']};
+                background-color: {t['bg_lighter']};
+            }}
+        """
+        for button in (self.dir_back_btn, self.browse_btn):
+            button.setStyleSheet(directory_secondary_qss)
 
         self.open_dir_window_btn.setStyleSheet(brand_button_qss(
             t, t['accent'], t['accent_hover'],
-            padding="4px 12px", radius="4px", extra="font-size: 12px;"))
+            padding="4px 12px", radius="4px", extra=directory_button_metrics))
 
         # 当前目录标签样式
         self.current_dir_label.setStyleSheet(f"color: {t['accent']}; font-size: 11px;")
@@ -616,7 +626,7 @@ class ThemeMixin:
         # 历史目录按钮样式（浅色主题走中性按钮）
         self.dir_dropdown_btn.setStyleSheet(brand_button_qss(
             t, t['accent'], t['accent_hover'],
-            padding="2px", radius="6px", extra="font-size: 14px;"))
+            padding="4px 2px", radius="4px", extra=directory_button_metrics))
 
         # 预设切换按钮样式 - 浅色主题使用浅灰色
         if t.get('is_light_theme'):
