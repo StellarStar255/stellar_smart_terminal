@@ -2085,6 +2085,7 @@ class TabSplitMixin:
             #   故重载是安全的，不会丢失编辑。）
             if cwd_changed:
                 self._load_local_commands()
+        self._update_dir_back_button()
         # 工作区快照：当前标签变化（恢复时要记住停在哪个 tab）
         self._checkpoint_workspace()
 

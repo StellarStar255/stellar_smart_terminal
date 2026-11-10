@@ -125,8 +125,61 @@ class DirectoryNewWindowTest(unittest.TestCase):
                 i18n.set_language(value)
                 self.win._apply_language()
                 self.assertEqual(self.win.open_dir_window_btn.text(), expected)
+                self.assertEqual(self.win.dir_back_btn.text(),
+                                 '← Back' if value == 'en' else '← 返回')
         finally:
             i18n.set_language(language)
+
+    def test_back_walks_directories_and_updates_explorer_and_terminal(self):
+        original = self.win._window_cwd
+        self.assertFalse(self.win.dir_back_btn.isEnabled())
+        self.win._toggle_explorer_panel()
+        first = Path(self.tmp.name) / 'first project'
+        second = Path(self.tmp.name) / 'second'
+        first.mkdir()
+        second.mkdir()
+        for target in (first, second, second):
+            self.win.working_dir_combo.setCurrentText(str(target))
+            self.win._apply_working_dir()
+        with patch.object(self.win.active_terminal, 'set_working_dir') as change:
+            self.win.dir_back_btn.click()
+            change.assert_called_once_with(str(first))
+        self.assertEqual(self.win._window_cwd, str(first))
+        self.assertEqual(self.win.working_dir_combo.currentText(), str(first))
+        self.assertEqual(self.win.tab_cwds[0], str(first))
+        self.assertEqual(self.win.explorer_panel._current_path, str(first))
+        self.win.dir_back_btn.click()
+        self.assertEqual(self.win._window_cwd, original)
+        self.assertFalse(self.win.dir_back_btn.isEnabled())
+
+    def test_back_skips_removed_directories_and_invalid_input(self):
+        original = self.win._window_cwd
+        target = Path(self.tmp.name) / 'removed'
+        target.mkdir()
+        self.win.working_dir_combo.setCurrentText(str(target))
+        self.win._apply_working_dir()
+        self.win.working_dir_combo.setCurrentText(self.tmp.name)
+        self.win._apply_working_dir()
+        target.rmdir()
+        self.win.working_dir_combo.setCurrentText(str(target))
+        with patch.object(self.win, '_styled_message_box') as warning:
+            self.win._apply_working_dir()
+            self.win.dir_back_btn.click()
+        warning.assert_called_once()
+        self.assertEqual(self.win._window_cwd, original)
+        self.assertFalse(self.win.dir_back_btn.isEnabled())
+
+    def test_back_history_is_independent_for_each_tab(self):
+        original = self.win._window_cwd
+        self.win.working_dir_combo.setCurrentText(self.tmp.name)
+        self.win._apply_working_dir()
+        self.win._add_new_tab(tab_cwd=self.tmp.name)
+        self.assertFalse(self.win.dir_back_btn.isEnabled())
+        self.win.tab_widget.setCurrentIndex(0)
+        self.assertTrue(self.win.dir_back_btn.isEnabled())
+        self.win.dir_back_btn.click()
+        self.assertEqual(self.win._window_cwd, original)
+        self.assertEqual(self.win.tab_cwds[1], self.tmp.name)
 
     def test_enter_on_selected_history_completion_switches_directory(self):
         target = Path(self.tmp.name) / 'recent-project'

@@ -1387,6 +1387,8 @@ TRANSLATIONS = {
     # ===== main_window.py - 目录工具栏 =====
     "dir.label": {"zh": " 工作目录: ", "en": " Directory: "},
     "dir.browse": {"zh": "浏览...", "en": "Browse..."},
+    "dir.back": {"zh": "← 返回", "en": "← Back"},
+    "dir.back_tooltip": {"zh": "返回当前标签页之前所在的目录", "en": "Go back to the previous directory in this tab"},
     "dir.input_hint": {"zh": "输入目录路径后按回车切换", "en": "Enter a directory path and press Enter to switch"},
     "dir.open_new_window": {"zh": "在新窗口打开", "en": "Open as New Window"},
     "dir.open_new_window_tooltip": {"zh": "在上方输入已有文件夹路径，点击后在新窗口打开并自动运行当前预设。路径会自动记入最近目录，可从目录历史或 ⚡ 再次打开。", "en": "Enter an existing folder path and open it in a new window with the selected preset. The path is saved automatically in recent directories; reopen it from directory history or ⚡."},

@@ -995,6 +995,12 @@ class ToolbarMixin:
         self.dir_toolbar.addWidget(self.working_dir_combo)
         self.dir_toolbar.addWidget(self.dir_dropdown_btn)
 
+        self.dir_back_btn = QPushButton(t("dir.back"))
+        self.dir_back_btn.setEnabled(False)
+        self.dir_back_btn.setToolTip(t("dir.back_tooltip"))
+        self.dir_back_btn.clicked.connect(self._go_back_working_dir)
+        self.dir_toolbar.addWidget(self.dir_back_btn)
+
         # 浏览按钮
         self.browse_btn = QPushButton(t("dir.browse"))
         self.browse_btn.setStyleSheet("""

@@ -1395,7 +1395,30 @@ class MainWindow(ThemeMixin, ToolbarMixin, ConfigMixin, ExplorerPanelMixin,
         self.working_dir_combo.setCurrentText(path)
         self._apply_working_dir()
 
-    def _apply_working_dir(self):
+    def _update_dir_back_button(self):
+        if not hasattr(self, 'dir_back_btn'):
+            return
+        page = self.tab_widget.currentWidget()
+        history = getattr(page, '_directory_back_history', [])
+        self.dir_back_btn.setEnabled(bool(history))
+        self.dir_back_btn.setToolTip(
+            t("dir.back_tooltip") + ("\n" + history[-1] if history else ""))
+
+    def _go_back_working_dir(self):
+        # 每个标签页独立保存历史，切换或重排时不会串到其他标签页。
+        page = self.tab_widget.currentWidget()
+        history = getattr(page, '_directory_back_history', [])
+        while history:
+            previous = history.pop()
+            if (os.path.isdir(previous)
+                    and os.path.normcase(os.path.abspath(previous))
+                    != os.path.normcase(os.path.abspath(self._window_cwd))):
+                self.working_dir_combo.setCurrentText(previous)
+                self._apply_working_dir(record_history=False)
+                break
+        self._update_dir_back_button()
+
+    def _apply_working_dir(self, *, record_history=True):
         """应用选中的工作目录（窗口级别，不影响其他窗口）"""
         dir_path = self.working_dir_combo.currentText().strip()
         if not dir_path:
@@ -1408,8 +1431,17 @@ class MainWindow(ThemeMixin, ToolbarMixin, ConfigMixin, ExplorerPanelMixin,
             self._styled_message_box(QMessageBox.Icon.Warning, t("msg.error"), t("msg.dir_not_found", path=dir_path))
             return
 
+        page = self.tab_widget.currentWidget()
+        if (record_history and page is not None
+                and os.path.normcase(os.path.abspath(dir_path))
+                != os.path.normcase(os.path.abspath(self._window_cwd))):
+            history = getattr(page, '_directory_back_history', [])
+            history.append(self._window_cwd)
+            page._directory_back_history = history[-100:]
+
         # 使用窗口级别的工作目录，不调用 os.chdir()
         self._window_cwd = dir_path
+        self._update_dir_back_button()
         self._add_to_dir_history(dir_path)
         self.current_dir_label.setText(t("dir.current", cwd=dir_path))
         self.current_dir_label.setToolTip(dir_path)
@@ -4976,6 +5008,9 @@ class MainWindow(ThemeMixin, ToolbarMixin, ConfigMixin, ExplorerPanelMixin,
             self.dir_label.setText(t("dir.label"))
         if hasattr(self, 'browse_btn'):
             self.browse_btn.setText(t("dir.browse"))
+        if hasattr(self, 'dir_back_btn'):
+            self.dir_back_btn.setText(t("dir.back"))
+            self._update_dir_back_button()
         if hasattr(self, 'working_dir_combo'):
             self.working_dir_combo.lineEdit().setPlaceholderText(t("dir.input_hint"))
             self.working_dir_combo.setToolTip(t("dir.input_hint"))
