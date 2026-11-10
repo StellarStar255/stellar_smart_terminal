@@ -977,6 +977,7 @@ class ToolbarMixin:
             QListView::item:selected { background-color: #667eea; color: white; }
         """)
         self.working_dir_combo.setCompleter(self._dir_completer)
+        self._dir_completer.submitted.connect(self._on_directory_completion_submitted)
         # 🕘 按钮与输入框空白点击共用同一套精确的开/关逻辑，避免无条件 showPopup()
         # 在弹窗已开/刚被抓取关闭时反弹重开造成闪烁。按下时补记按下时刻（与原生抓取
         # 关闭弹窗同刻），松开后推迟到事件循环空闲再据此做恰好一次开/关切换。

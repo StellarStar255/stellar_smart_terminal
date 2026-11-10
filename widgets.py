@@ -2,6 +2,7 @@
 通用小控件
 从 main_window.py 拆分出来的不依赖 MainWindow 的控件类
 """
+import os
 import time
 
 from PyQt6.QtWidgets import (
@@ -180,8 +181,11 @@ class MultiKeywordCompleter(QCompleter):
     弹窗即显示过滤后的全部匹配（Qt 自身不再做前缀过滤）。
     """
 
+    submitted = pyqtSignal(str)
+
     def __init__(self, items=None, parent=None):
         super().__init__(parent)
+        self._navigation_used = False
         self._all = list(items or [])
         self._model = QStringListModel(self._all, self)
         self.setModel(self._model)
@@ -191,7 +195,41 @@ class MultiKeywordCompleter(QCompleter):
     def set_items(self, items):
         self._all = list(items or [])
 
+    def eventFilter(self, obj, event):
+        if obj is self.popup() and event.type() == QEvent.Type.Show:
+            self._navigation_used = False
+        if (event.type() == QEvent.Type.KeyPress and self.popup().isVisible()
+                and event.key() in (Qt.Key.Key_Up, Qt.Key.Key_Down,
+                                    Qt.Key.Key_PageUp, Qt.Key.Key_PageDown)):
+            self._navigation_used = True
+        if (obj is self.popup() and event.type() == QEvent.Type.KeyPress
+                and event.key() in (Qt.Key.Key_Return, Qt.Key.Key_Enter)):
+            # QCompleter 的默认回车处理会先向编辑框转发 Return，再填入候选；
+            # QComboBox 的 returnPressed 槽因此可能拿到旧文本。先解析用户确认的
+            # 值，再关闭弹窗、一次性提交，避免重建历史时打断 Qt 的补全过程。
+            widget = self.widget()
+            if isinstance(widget, QComboBox):
+                text = widget.currentText()
+            elif isinstance(widget, QLineEdit):
+                text = widget.text()
+            else:
+                return super().eventFilter(obj, event)
+            index = self.popup().currentIndex()
+            # Qt 会默认把第一条候选设为 currentIndex；输入完整目录时不能因此
+            # 被替换成它的某个历史子目录。只有主动导航候选才优先采用选中项。
+            typed = text.strip()
+            is_path = ('/' in typed or '\\' in typed or typed.startswith('~')
+                       or os.path.isdir(os.path.expanduser(typed)))
+            if index.isValid() and (self._navigation_used or not is_path):
+                text = index.data(Qt.ItemDataRole.EditRole)
+            self.popup().hide()
+            self.submitted.emit(text)
+            event.accept()
+            return True
+        return super().eventFilter(obj, event)
+
     def splitPath(self, path):
+        self._navigation_used = False
         tokens = parse_search_tokens(path or "")
         if tokens:
             filtered = [s for s in self._all if name_matches_tokens(s, tokens)]

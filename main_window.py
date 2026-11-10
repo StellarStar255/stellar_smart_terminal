@@ -1391,6 +1391,10 @@ class MainWindow(ThemeMixin, ToolbarMixin, ConfigMixin, ExplorerPanelMixin,
         if dir_path:
             self._quick_launch_with_dir(dir_path, detach=True)
 
+    def _on_directory_completion_submitted(self, path):
+        self.working_dir_combo.setCurrentText(path)
+        self._apply_working_dir()
+
     def _apply_working_dir(self):
         """应用选中的工作目录（窗口级别，不影响其他窗口）"""
         dir_path = self.working_dir_combo.currentText().strip()

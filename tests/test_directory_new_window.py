@@ -7,7 +7,7 @@ from unittest.mock import patch
 
 os.environ.setdefault('QT_QPA_PLATFORM', 'offscreen')
 
-from PyQt6.QtCore import QEvent
+from PyQt6.QtCore import QEvent, Qt
 from PyQt6.QtGui import QCloseEvent
 from PyQt6.QtTest import QTest
 from PyQt6.QtWidgets import QApplication
@@ -95,6 +95,28 @@ class DirectoryNewWindowTest(unittest.TestCase):
         self.assertEqual(self.started, [])
         self.assertEqual(self.win.detached_windows, [])
 
+    def test_enter_with_history_suggestions_switches_to_typed_parent_directory(self):
+        target = Path(self.tmp.name) / 'projects'
+        child = target / 'recent-project'
+        child.mkdir(parents=True)
+        self.win._add_to_dir_history(str(child))
+        self.win._toggle_explorer_panel()
+        edit = self.win.working_dir_combo.lineEdit()
+        edit.setFocus()
+        edit.selectAll()
+        QTest.keyClicks(edit, str(target) + os.sep)
+        self.app.processEvents()
+        edit.setText(str(target) + os.sep)
+        self.win._dir_completer.setCompletionPrefix(edit.text())
+        self.win._dir_completer.complete()
+        self.app.processEvents()
+        self.assertTrue(self.win._dir_completer.popup().isVisible())
+        QTest.keyClick(self.win._dir_completer.popup(), Qt.Key.Key_Return)
+        self.app.processEvents()
+        self.assertEqual(os.path.normpath(self.win._window_cwd), str(target))
+        self.assertEqual(os.path.normpath(self.win.explorer_panel._current_path), str(target))
+        self.assertFalse(self.win._dir_completer.popup().isVisible())
+
     def test_button_retranslates_at_runtime(self):
         import i18n
         language = i18n.get_language()
@@ -105,6 +127,63 @@ class DirectoryNewWindowTest(unittest.TestCase):
                 self.assertEqual(self.win.open_dir_window_btn.text(), expected)
         finally:
             i18n.set_language(language)
+
+    def test_enter_on_selected_history_completion_switches_directory(self):
+        target = Path(self.tmp.name) / 'recent-project'
+        target.mkdir()
+        edit = self.win.working_dir_combo.lineEdit()
+        edit.setText('recent')
+        completer = self.win._dir_completer
+        completer.set_items([str(target)])
+        completer.setCompletionPrefix(edit.text())
+        completer.complete()
+        popup = completer.popup()
+        popup.setCurrentIndex(completer.completionModel().index(0, 0))
+        with patch.object(self.win, '_styled_message_box'):
+            QTest.keyClick(popup, Qt.Key.Key_Return)
+        self.app.processEvents()
+        self.assertEqual(self.win._window_cwd, str(target))
+
+    def test_down_then_enter_chooses_history_instead_of_typed_parent(self):
+        parent = Path(self.tmp.name) / 'projects'
+        child = parent / 'recent-project'
+        child.mkdir(parents=True)
+        edit = self.win.working_dir_combo.lineEdit()
+        edit.setText(str(parent) + os.sep)
+        completer = self.win._dir_completer
+        completer.set_items([str(child)])
+        completer.setCompletionPrefix(edit.text())
+        completer.complete()
+        popup = completer.popup()
+        QTest.keyClick(popup, Qt.Key.Key_Down)
+        QTest.keyClick(popup, Qt.Key.Key_Return)
+        self.app.processEvents()
+        self.assertEqual(self.win._window_cwd, str(child))
+        self.assertEqual(self.win._working_dir_freq[str(child)], 1)
+
+    def test_invalid_typed_path_is_not_replaced_by_history_suggestion(self):
+        original_cwd = self.win._window_cwd
+        target = str(Path(self.tmp.name) / 'missing')
+        edit = self.win.working_dir_combo.lineEdit()
+        edit.setText(target)
+        completer = self.win._dir_completer
+        completer.set_items([target + '-old-project'])
+        completer.setCompletionPrefix(edit.text())
+        completer.complete()
+        with patch.object(self.win, '_styled_message_box') as warning:
+            QTest.keyClick(completer.popup(), Qt.Key.Key_Enter)
+        warning.assert_called_once()
+        self.assertEqual(self.win._window_cwd, original_cwd)
+        self.assertNotIn(target, self.win.working_dir_history)
+        self.assertFalse(completer.popup().isVisible())
+
+    def test_keypad_enter_without_suggestions_switches_directory(self):
+        target = Path(self.tmp.name) / 'new-directory'
+        target.mkdir()
+        self.win.working_dir_combo.setCurrentText(str(target))
+        QTest.keyClick(self.win.working_dir_combo.lineEdit(), Qt.Key.Key_Enter)
+        self.app.processEvents()
+        self.assertEqual(self.win._window_cwd, str(target))
 
 
 if __name__ == '__main__':
