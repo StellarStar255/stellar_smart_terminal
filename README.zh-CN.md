@@ -15,6 +15,22 @@ A PyQt6-based smart terminal with file explorer, Git GUI, LLM proxy, and VS Code
 > 多面板布局：文件管理 / Git、代码编辑器与多标签终端集成在一个窗口中。
 > Multi-pane layout: file explorer / Git, code editor, and multi-tab terminal in one window.
 
+## 粘贴路径，快速打开项目 / Open a project by path
+
+先选好命令预设，点击标签栏右端的 **⚡**，粘贴一个**已存在的文件夹路径**，按 **Enter**：立即在该目录新建终端标签，并自动运行当前预设，比如你配置好的 Codex、Claude Code 启动命令。路径会记入最近目录，下次直接点选；其他标签保留各自的工作目录。
+
+例如 `/path/to/project`、`~/projects/my-app`，Windows 可用 `C:\projects\my-app`。按住 **Shift 点击**最近目录可在新窗口打开。这是把已有文件夹作为项目终端打开，不会新建文件夹或初始化仓库。
+
+Choose a preset, click **⚡**, paste an existing folder path, and press **Enter** to open a new tab there and run the preset automatically. The path is saved in recent directories; Shift-click an entry to open it in a new window. Existing tabs keep their working directories.
+
+![粘贴路径快速打开项目终端](assets/quick-launch-zh.gif)
+
+<details><summary>English version</summary>
+
+![Paste a path to open a project terminal](assets/quick-launch-en.gif)
+
+</details>
+
 ## Tutorial / 新手教程
 
 首次启动会弹出互动教程，手把手带你认识 ⚡ 快速切目录、分屏、侧栏、命令面板等功能；之后可从「帮助 › 新手教程」随时重看。
@@ -46,6 +62,7 @@ Plenty of handy tools live in the terminal's right-click menu: run presets in on
 ## Features / 功能
 
 - **Multi-tab Terminal / 多标签终端** — session management / 会话管理
+- **Project Quick Launch (⚡) / 项目快速启动** — 粘贴文件夹路径，自动新建标签并运行预设；最近目录一键复用
 - **File Explorer & Editor / 文件管理与编辑器**
 - **Git GUI** — stage, commit, push, pull, diff, branch
 - **LLM Proxy / LLM 代理** — OpenAI-compatible / 兼容 OpenAI 接口

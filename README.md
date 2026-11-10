@@ -12,6 +12,14 @@ A PyQt6-based smart terminal with file explorer, Git GUI, LLM proxy, and VS Code
 
 > Multi-pane layout: file explorer / Git, code editor, and multi-tab terminal in one window.
 
+## Open a project by pasting its path
+
+Choose a command preset, click **⚡** at the right end of the tab bar, paste an **existing folder path**, and press **Enter**. A new tab opens in that folder and automatically runs the selected preset—for example, your configured Codex or Claude Code command. The path is added to recent directories for next time. The other tabs keep their own working directories.
+
+You can enter paths such as `/path/to/project`, `~/projects/my-app`, or `C:\projects\my-app` on Windows. To open a recent directory in a separate window, **Shift-click** its entry. This opens an existing project folder; it does not create a folder or initialize a repository.
+
+![Paste a path to open a project terminal](assets/quick-launch-en.gif)
+
 ## Tutorial
 
 An interactive tour pops up on first launch, walking you through Quick Launch (⚡), split panes, side panels, the command palette and more. Replay it anytime from Help › Tutorial.
@@ -39,6 +47,7 @@ Plenty of handy tools live in the terminal's right-click menu: run presets in on
 ## Features
 
 - **Multi-tab Terminal** — session management
+- **Project Quick Launch (⚡)** — paste a folder path to open a tab and run your preset; reuse recent directories
 - **File Explorer & Editor**
 - **Git GUI** — stage, commit, push, pull, diff, branch
 - **LLM Proxy** — OpenAI-compatible

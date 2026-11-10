@@ -9,6 +9,8 @@
     python scripts/make_onboarding_gif.py en assets/onboarding-en.gif
     python scripts/make_onboarding_gif.py zh assets/context-menu-zh.gif menu   # 右键菜单
     python scripts/make_onboarding_gif.py en assets/context-menu-en.gif menu
+    python scripts/make_onboarding_gif.py zh assets/quick-launch-zh.gif path  # 粘贴项目路径
+    python scripts/make_onboarding_gif.py en assets/quick-launch-en.gif path
 
 剧本是生成器，由一个 5ms 的 QTimer 推进（yield 毫秒数 = 等多久）。这样右键菜单
 menu.exec() 的嵌套事件循环里剧本照样往下走，可以在菜单里悬停、点子菜单。
@@ -344,6 +346,48 @@ def T(zh: str, en: str) -> str:
     return zh if ZH else en
 
 
+def path_script():
+    """展示真实路径输入与启动结果，不只停留在打开菜单。"""
+    global caption
+    target = os.path.join(PROJECTS, 'new-project')
+    os.makedirs(target, exist_ok=True)
+    win.presets = [{'name': 'zsh + pwd', 'commands': ['zsh', 'pwd']}]
+    win._populate_presets()
+    win._start_session(cwd=PROJ)
+    yield 1500
+    caption = T('① 点击 ⚡，粘贴已有项目路径',
+                '1. Click ⚡ and paste an existing project path')
+    yield from hold(1500)
+    yield from move_to(center_of(win.quick_launch_btn))
+    yield from click(win.quick_launch_btn.click)
+    yield 300
+    yield from move_to(center_of(win._ql_search))
+    yield from click(win._ql_search.setFocus)
+    QApplication.clipboard().setText(target)
+    win._ql_search.paste()
+    yield from hold(2200)
+    caption = T('② 按 Enter，新建项目标签并自动运行预设',
+                '2. Press Enter: new project tab, preset runs automatically')
+    before = win.tab_widget.count()
+    QTest.keyClick(win._ql_search, Qt.Key.Key_Return)
+    yield 1800
+    assert win.tab_widget.count() == before + 1, 'Path did not open a new tab'
+    assert target in win.working_dir_history, 'Path was not added to history'
+    yield from hold(2800)
+    caption = T('③ 路径已记入最近目录，下次直接点选',
+                '3. The path is saved in recent directories for next time')
+    yield from move_to(center_of(win.quick_launch_btn))
+    yield from click(win.quick_launch_btn.click)
+    yield 300
+    win._ql_search.setText('new-project')
+    assert win._ql_list.count() > 0, 'Recent project is missing'
+    yield from hold(2400)
+    win._ql_hide()
+    caption = T('已有文件夹 → 项目终端；支持当前选中的命令预设',
+                'Existing folder → project terminal with your selected preset')
+    yield from hold(2000)
+
+
 # ---- 剧本：新手教程 ----
 
 def tour_script():
@@ -559,7 +603,7 @@ def drive(gen):
 
 
 _clip_backup = QApplication.clipboard().text()   # 演示会用「复制当前路径」，结束后还原
-_driver = drive(tour_script() if MODE == 'tour' else menu_script())
+_driver = drive({'tour': tour_script, 'menu': menu_script, 'path': path_script}[MODE]())
 rc = qa.exec()
 QApplication.clipboard().setText(_clip_backup)
 QApplication.processEvents()
@@ -588,7 +632,7 @@ q = [im.quantize(palette=pal_img, dither=Image.Dither.NONE) for im in imgs]
 q[0].save(OUT, save_all=True, append_images=q[1:], duration=durs, loop=0,
           optimize=True, disposal=1)
 print(f"{OUT}: {len(q)} frames, {sum(durs)/1000:.1f}s, "
-      f"{os.path.getsize(OUT)/1e6:.2f} MB")
+      f"{os.path.getsize(OUT)/1e6:.2f} MB", flush=True)
 shutil.rmtree(DEMO, ignore_errors=True)
 shutil.rmtree(PROJECTS, ignore_errors=True)
 os._exit(0)
