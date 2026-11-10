@@ -4976,9 +4976,9 @@ class MainWindow(ThemeMixin, ToolbarMixin, ConfigMixin, ExplorerPanelMixin,
             self.dir_label.setText(t("dir.label"))
         if hasattr(self, 'browse_btn'):
             self.browse_btn.setText(t("dir.browse"))
-        if hasattr(self, 'apply_dir_btn'):
-            self.apply_dir_btn.setText(t("dir.switch"))
-            self.apply_dir_btn.setToolTip(t("status.apply_dir_tooltip"))
+        if hasattr(self, 'working_dir_combo'):
+            self.working_dir_combo.lineEdit().setPlaceholderText(t("dir.input_hint"))
+            self.working_dir_combo.setToolTip(t("dir.input_hint"))
         if hasattr(self, 'open_dir_window_btn'):
             self.open_dir_window_btn.setText(t("dir.open_new_window"))
             self.open_dir_window_btn.setToolTip(t("dir.open_new_window_tooltip"))

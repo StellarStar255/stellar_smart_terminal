@@ -961,6 +961,8 @@ class ToolbarMixin:
         select_all_edit = SelectAllLineEdit(popup_owner=self.working_dir_combo)
         select_all_edit.setAlignment(Qt.AlignmentFlag.AlignLeft | Qt.AlignmentFlag.AlignVCenter)
         self.working_dir_combo.setLineEdit(select_all_edit)
+        select_all_edit.setPlaceholderText(t("dir.input_hint"))
+        self.working_dir_combo.setToolTip(t("dir.input_hint"))
         # 目录历史多关键词补全：输入 "llm train" 即过滤出同时含两词的历史目录
         # （与文件 quick-open 一致），不必记住完整前缀。候选在 _populate_working_dirs
         # 里随历史更新；用整条 history（不止下拉里显示的前 N 条）做候选。
@@ -1009,22 +1011,6 @@ class ToolbarMixin:
         self.dir_toolbar.addWidget(self.browse_btn)
         # 历史按钮高度与 Browse 对齐（Browse 高度由内容+padding 决定，取其 sizeHint）
         self.dir_dropdown_btn.setFixedHeight(self.browse_btn.sizeHint().height())
-
-        # 应用目录按钮
-        self.apply_dir_btn = QPushButton(t("dir.switch"))
-        self.apply_dir_btn.setToolTip(t("status.apply_dir_tooltip"))
-        self.apply_dir_btn.setStyleSheet("""
-            QPushButton {
-                background-color: #2d5a27;
-                padding: 4px 12px;
-                font-size: 12px;
-            }
-            QPushButton:hover {
-                background-color: #3d6a37;
-            }
-        """)
-        self.apply_dir_btn.clicked.connect(self._apply_working_dir)
-        self.dir_toolbar.addWidget(self.apply_dir_btn)
 
         self.open_dir_window_btn = QPushButton(t("dir.open_new_window"))
         self.open_dir_window_btn.setToolTip(t("dir.open_new_window_tooltip"))

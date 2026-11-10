@@ -1263,7 +1263,6 @@ TRANSLATIONS = {
 
     # ===== 状态栏/通用 =====
     "status.dir_history_tooltip": {"zh": "历史目录", "en": "Directory History"},
-    "status.apply_dir_tooltip": {"zh": "切换到选中的工作目录", "en": "Switch to selected working directory"},
     "common.error": {"zh": "错误", "en": "Error"},
     "common.close": {"zh": "关闭", "en": "Close"},
 
@@ -1388,7 +1387,7 @@ TRANSLATIONS = {
     # ===== main_window.py - 目录工具栏 =====
     "dir.label": {"zh": " 工作目录: ", "en": " Directory: "},
     "dir.browse": {"zh": "浏览...", "en": "Browse..."},
-    "dir.switch": {"zh": "切换", "en": "Switch"},
+    "dir.input_hint": {"zh": "输入目录路径后按回车切换", "en": "Enter a directory path and press Enter to switch"},
     "dir.open_new_window": {"zh": "在新窗口打开", "en": "Open as New Window"},
     "dir.open_new_window_tooltip": {"zh": "在上方输入已有文件夹路径，点击后在新窗口打开并自动运行当前预设。路径会自动记入最近目录，可从目录历史或 ⚡ 再次打开。", "en": "Enter an existing folder path and open it in a new window with the selected preset. The path is saved automatically in recent directories; reopen it from directory history or ⚡."},
     "dir.current": {"zh": "当前: {cwd}", "en": "Current: {cwd}"},

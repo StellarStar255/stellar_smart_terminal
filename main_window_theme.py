@@ -606,23 +606,6 @@ class ThemeMixin:
             }}
         """)
 
-        # 切换按钮样式（浅色主题：唯一的主操作用强调蓝，而不是又一块绿）
-        _sw_bg, _sw_hover = ((t['accent'], t['accent_hover']) if light
-                             else (t['success'], t['success_hover']))
-        self.apply_dir_btn.setStyleSheet(f"""
-            QPushButton {{
-                background-color: {_sw_bg};
-                color: white;
-                padding: 4px 12px;
-                font-size: 12px;
-                border: none;
-                border-radius: 4px;
-            }}
-            QPushButton:hover {{
-                background-color: {_sw_hover};
-            }}
-        """)
-
         self.open_dir_window_btn.setStyleSheet(brand_button_qss(
             t, t['accent'], t['accent_hover'],
             padding="4px 12px", radius="4px", extra="font-size: 12px;"))
