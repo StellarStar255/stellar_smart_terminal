@@ -1025,6 +1025,11 @@ class ToolbarMixin:
         self.apply_dir_btn.clicked.connect(self._apply_working_dir)
         self.dir_toolbar.addWidget(self.apply_dir_btn)
 
+        self.open_dir_window_btn = QPushButton(t("dir.open_new_window"))
+        self.open_dir_window_btn.setToolTip(t("dir.open_new_window_tooltip"))
+        self.open_dir_window_btn.clicked.connect(self._open_directory_in_new_window)
+        self.dir_toolbar.addWidget(self.open_dir_window_btn)
+
         # 当前目录显示
         self.dir_toolbar.addSeparator()
         self.current_dir_label = QLabel(t("dir.current", cwd=self._window_cwd))

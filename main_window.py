@@ -1385,6 +1385,12 @@ class MainWindow(ThemeMixin, ToolbarMixin, ConfigMixin, ExplorerPanelMixin,
             if cur_idx >= 0:
                 self.tab_cwds[cur_idx] = self.last_working_dir
 
+    def _open_directory_in_new_window(self):
+        """显式目录入口：沿用快速启动的预设、目录记忆和窗口分离流程。"""
+        dir_path = self.working_dir_combo.currentText().strip()
+        if dir_path:
+            self._quick_launch_with_dir(dir_path, detach=True)
+
     def _apply_working_dir(self):
         """应用选中的工作目录（窗口级别，不影响其他窗口）"""
         dir_path = self.working_dir_combo.currentText().strip()
@@ -4969,6 +4975,9 @@ class MainWindow(ThemeMixin, ToolbarMixin, ConfigMixin, ExplorerPanelMixin,
         if hasattr(self, 'apply_dir_btn'):
             self.apply_dir_btn.setText(t("dir.switch"))
             self.apply_dir_btn.setToolTip(t("status.apply_dir_tooltip"))
+        if hasattr(self, 'open_dir_window_btn'):
+            self.open_dir_window_btn.setText(t("dir.open_new_window"))
+            self.open_dir_window_btn.setToolTip(t("dir.open_new_window_tooltip"))
         if hasattr(self, 'current_dir_label'):
             self.current_dir_label.setText(t("dir.current", cwd=self._window_cwd))
 

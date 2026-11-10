@@ -623,6 +623,10 @@ class ThemeMixin:
             }}
         """)
 
+        self.open_dir_window_btn.setStyleSheet(brand_button_qss(
+            t, t['accent'], t['accent_hover'],
+            padding="4px 12px", radius="4px", extra="font-size: 12px;"))
+
         # 当前目录标签样式
         self.current_dir_label.setStyleSheet(f"color: {t['accent']}; font-size: 11px;")
 

@@ -1389,6 +1389,8 @@ TRANSLATIONS = {
     "dir.label": {"zh": " 工作目录: ", "en": " Directory: "},
     "dir.browse": {"zh": "浏览...", "en": "Browse..."},
     "dir.switch": {"zh": "切换", "en": "Switch"},
+    "dir.open_new_window": {"zh": "在新窗口打开", "en": "Open as New Window"},
+    "dir.open_new_window_tooltip": {"zh": "在上方输入已有文件夹路径，点击后在新窗口打开并自动运行当前预设。路径会自动记入最近目录，可从目录历史或 ⚡ 再次打开。", "en": "Enter an existing folder path and open it in a new window with the selected preset. The path is saved automatically in recent directories; reopen it from directory history or ⚡."},
     "dir.current": {"zh": "当前: {cwd}", "en": "Current: {cwd}"},
 
     # ===== main_window.py - Tab & 终端 =====
@@ -1444,7 +1446,7 @@ TRANSLATIONS = {
     "onboarding.welcome.title": {"zh": "欢迎使用 Stellar Smart Terminal", "en": "Welcome to Stellar Smart Terminal"},
     "onboarding.welcome.body": {"zh": "花两分钟手把手认识一遍主要功能。每一步都可以直接上手试，也可以随时退出；以后从「帮助 › 新手教程」能再看一遍。", "en": "Take two minutes for a hands-on walk through the main features. Try each step for real, or exit any time; you can reopen this later from Help › Tutorial."},
     "onboarding.dir.title": {"zh": "工作目录", "en": "Working directory"},
-    "onboarding.dir.body": {"zh": "这里决定新终端在哪个文件夹里打开。输入或粘贴路径后点 Switch 切换；下拉箭头列出最近用过的目录；Browse… 打开文件夹选择框。右侧显示当前生效的目录。", "en": "This decides which folder a new terminal opens in. Type or paste a path and click Switch; the caret lists recently used directories; Browse… opens a folder picker. The current directory is shown on the right."},
+    "onboarding.dir.body": {"zh": "输入或粘贴已有文件夹路径，点“在新窗口打开”即可打开独立项目窗口并自动运行当前预设，路径会自动记入最近目录。Switch 切换当前目录；下拉箭头列出最近目录；Browse… 选择文件夹。右侧显示当前生效的目录。", "en": "Paste an existing folder path and click Open as New Window to launch a separate project window with your selected preset. The path is remembered in recent directories. Switch changes the current directory; the caret lists recent paths; Browse… opens a folder picker. The current directory is shown on the right."},
     "onboarding.quick_launch.title": {"zh": "⚡ 快速切目录（很多人没发现它）", "en": "⚡ Quick Launch (easy to miss)"},
     "onboarding.quick_launch.body": {"zh": "标签栏右端这个闪电按钮，点开是最近目录列表：选一个就在那个目录新建标签页并自动执行预设；也可以直接粘贴路径按回车。按住 Shift 点选会在新窗口打开。", "en": "The lightning button at the right end of the tab bar opens your recent directories: pick one to open a new tab there and auto-run the preset, or paste a path and press Enter. Shift-click an entry to open it in a new window."},
     "onboarding.quick_launch.hint": {"zh": "👉 现在点一下闪电按钮试试", "en": "👉 Click the lightning button now"},

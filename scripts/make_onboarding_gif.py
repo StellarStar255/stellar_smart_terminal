@@ -348,30 +348,39 @@ def T(zh: str, en: str) -> str:
 
 def path_script():
     """展示真实路径输入与启动结果，不只停留在打开菜单。"""
-    global caption
+    global caption, win
     target = os.path.join(PROJECTS, 'new-project')
     os.makedirs(target, exist_ok=True)
     win.presets = [{'name': 'zsh + pwd', 'commands': ['zsh', 'pwd']}]
     win._populate_presets()
+    win._presets_modified = True
+    win._save_config()
+    win.working_dir_combo.setCurrentText(PROJ)
+    win._apply_working_dir()
     win._start_session(cwd=PROJ)
     yield 1500
-    caption = T('① 点击 ⚡，粘贴已有项目路径',
-                '1. Click ⚡ and paste an existing project path')
+    caption = T('① 在顶部目录框粘贴已有项目路径',
+                '1. Paste an existing project path into Directory')
     yield from hold(1500)
-    yield from move_to(center_of(win.quick_launch_btn))
-    yield from click(win.quick_launch_btn.click)
-    yield 300
-    yield from move_to(center_of(win._ql_search))
-    yield from click(win._ql_search.setFocus)
+    edit = win.working_dir_combo.lineEdit()
+    yield from move_to(center_of(edit))
+    yield from click(edit.selectAll)
     QApplication.clipboard().setText(target)
-    win._ql_search.paste()
+    edit.paste()
     yield from hold(2200)
-    caption = T('② 按 Enter，新建项目标签并自动运行预设',
-                '2. Press Enter: new project tab, preset runs automatically')
+    caption = T('② 点击“在新窗口打开”，自动运行当前预设',
+                '2. Click Open as New Window to run your preset')
+    source = win
+    original_cwd = source._window_cwd
     before = win.tab_widget.count()
-    QTest.keyClick(win._ql_search, Qt.Key.Key_Return)
+    yield from move_to(center_of(win.open_dir_window_btn))
+    yield from click(win.open_dir_window_btn.click)
     yield 1800
-    assert win.tab_widget.count() == before + 1, 'Path did not open a new tab'
+    assert len(source.detached_windows) == 1, 'Path did not open a new window'
+    assert source.tab_widget.count() == before, 'Original tabs changed'
+    assert source._window_cwd == original_cwd, 'Original directory changed'
+    win = source.detached_windows[0]
+    assert win._window_cwd == target, 'New window opened in the wrong directory'
     assert target in win.working_dir_history, 'Path was not added to history'
     yield from hold(2800)
     caption = T('③ 路径已记入最近目录，下次直接点选',
