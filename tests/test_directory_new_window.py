@@ -71,10 +71,35 @@ class DirectoryNewWindowTest(unittest.TestCase):
         self.assertEqual(child.tab_cwds[0], str(target))
         self.assertEqual(self.started, [(str(target), preset)])
         self.assertEqual(self.win._window_cwd, original_cwd)
+        self.assertEqual(self.win.working_dir_combo.currentText(), original_cwd)
         self.assertEqual(self.win.tab_widget.count(), original_tabs)
         self.assertIn(str(target), app_config.read_config()['working_dir_history'])
         child._reload_dir_history_from_config()
         self.assertIn(str(target), child.working_dir_history)
+
+    def test_browsed_directory_moves_to_new_window_and_source_returns(self):
+        from PyQt6.QtWidgets import QFileDialog
+        original = self.win._window_cwd
+        source_page = self.win.tab_widget.currentWidget()
+        target = Path(self.tmp.name) / 'browsed project'
+        target.mkdir()
+        self.win._toggle_explorer_panel()
+        with patch.object(QFileDialog, 'getExistingDirectory', return_value=str(target)):
+            self.win.browse_btn.click()
+        self.assertEqual(self.win._window_cwd, str(target))
+        with patch.object(self.win.active_terminal, 'set_working_dir') as change:
+            self.win.open_dir_window_btn.click()
+            QTest.qWait(450)
+            change.assert_called_once_with(original)
+        child = self.win.detached_windows[0]
+        self.assertEqual(child._window_cwd, str(target))
+        self.assertEqual(self.started[0][0], str(target))
+        self.assertIs(self.win.tab_widget.currentWidget(), source_page)
+        self.assertEqual(self.win._window_cwd, original)
+        self.assertEqual(self.win.working_dir_combo.currentText(), original)
+        self.assertEqual(self.win.tab_cwds[self.win.tab_widget.currentIndex()], original)
+        self.assertEqual(self.win.explorer_panel._current_path, original)
+        self.assertFalse(self.win.dir_back_btn.isEnabled())
 
     def test_invalid_path_does_not_open_or_remember_a_window(self):
         import app_config

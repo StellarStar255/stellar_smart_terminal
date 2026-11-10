@@ -4,7 +4,7 @@ English | [简体中文](README.zh-CN.md)
 
 A PyQt6-based smart terminal with file explorer, Git GUI, LLM proxy, and VS Code extension browser.
 
-Latest release: [v1.35.29](docs/releases/v1.35.29.md) adds **← Back** beside Browse in the directory toolbar. Click to return through this tab's previous directories; missing folders are skipped automatically.
+Latest release: [v1.35.30](docs/releases/v1.35.30.md) restores the original window’s previous directory after opening a path in a new window, and aligns the directory toolbar buttons.
 
 <img src="assets/smart_terminal.png" width="300" />
 

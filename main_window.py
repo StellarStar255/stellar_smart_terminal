@@ -1389,7 +1389,25 @@ class MainWindow(ThemeMixin, ToolbarMixin, ConfigMixin, ExplorerPanelMixin,
         """显式目录入口：沿用快速启动的预设、目录记忆和窗口分离流程。"""
         dir_path = self.working_dir_combo.currentText().strip()
         if dir_path:
-            self._quick_launch_with_dir(dir_path, detach=True)
+            source_page = self.tab_widget.currentWidget()
+            source_cwd = self._window_cwd
+            # Browse / 历史选择已经应用了目标目录；手动输入则还没有。
+            target_is_current = (
+                os.path.normcase(os.path.abspath(os.path.expanduser(dir_path)))
+                == os.path.normcase(os.path.abspath(source_cwd)))
+
+            def restore_source_directory():
+                if source_page is None or self.tab_widget.indexOf(source_page) < 0:
+                    return
+                self.tab_widget.setCurrentWidget(source_page)
+                if self._window_cwd != source_cwd:
+                    return
+                if target_is_current:
+                    self._go_back_working_dir()
+                self.working_dir_combo.setCurrentText(self._window_cwd)
+
+            self._quick_launch_with_dir(
+                dir_path, detach=True, on_detached=restore_source_directory)
 
     def _on_directory_completion_submitted(self, path):
         self.working_dir_combo.setCurrentText(path)
@@ -2396,7 +2414,8 @@ class MainWindow(ThemeMixin, ToolbarMixin, ConfigMixin, ExplorerPanelMixin,
         QTimer.singleShot(100, lambda: setattr(self, '_ql_ready', True))
 
 
-    def _quick_launch_with_dir(self, dir_path: str, detach: bool = False):
+    def _quick_launch_with_dir(self, dir_path: str, detach: bool = False,
+                               on_detached=None):
         """以指定目录快速启动新终端标签页并自动启动预设
 
         注意：不改变当前窗口的工作目录，新tab使用指定目录
@@ -2439,6 +2458,9 @@ class MainWindow(ThemeMixin, ToolbarMixin, ConfigMixin, ExplorerPanelMixin,
                     i = self.tab_widget.indexOf(detach_page)
                     if i >= 0:
                         self._detach_tab(i, None, follow_drag=False)
+                        if (on_detached is not None
+                                and self.tab_widget.indexOf(detach_page) < 0):
+                            on_detached()
             QTimer.singleShot(100, start_session_delayed)
 
         except Exception as e:
