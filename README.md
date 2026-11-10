@@ -16,13 +16,15 @@ A PyQt6-based smart terminal with file explorer, Git GUI, LLM proxy, and VS Code
 
 Paste an **existing folder path** into the **Directory** field and click **Open as New Window**. A separate project window opens and automatically runs your selected command preset. The path is remembered across restarts: select it from directory history and click the button to open it again. This also works with your configured Codex or Claude Code preset.
 
-![Open a project in a new window and remember its path](assets/quick-launch-en.gif)
+You can also click **⚡**, paste a long folder path directly into its search field, then press **Shift+Enter** to open a new window. **Enter** opens a new tab. The demo enlarges the path field and shows both windows so you can see that the original project stays open.
+
+![Paste a long path into Quick Launch and press Shift+Enter to open a new window](assets/quick-launch-en.gif)
 
 ### Quick Launch in a tab
 
 Choose a command preset, click **⚡** at the right end of the tab bar, paste an **existing folder path**, and press **Enter**. A new tab opens in that folder and automatically runs the selected preset—for example, your configured Codex or Claude Code command. The path is added to recent directories for next time. The other tabs keep their own working directories.
 
-You can enter paths such as `/path/to/project`, `~/projects/my-app`, or `C:\projects\my-app` on Windows. To open a recent directory in a separate window, **Shift-click** its entry. This opens an existing project folder; it does not create a folder or initialize a repository.
+You can enter paths such as `/path/to/project`, `~/projects/my-app`, or `C:\projects\my-app` on Windows. Use **Shift+Enter** for a typed path or **Shift-click** a recent-directory entry to open a separate window. This opens an existing project folder; it does not create a folder or initialize a repository.
 
 ## Tutorial
 

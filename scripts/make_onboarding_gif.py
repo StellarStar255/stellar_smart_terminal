@@ -156,6 +156,8 @@ frames: list[tuple[QPixmap, int]] = []   # (画面, 停留毫秒)
 cursor = QPointF(WIN_W * 0.55, WIN_H * 0.6)
 click_ring = 0.0     # >0 时画点击波纹
 caption = ''         # 底部字幕（右键菜单演示用）
+path_zoom = False
+comparison_source = None
 
 
 def _extra_popups() -> list[QWidget]:
@@ -211,9 +213,41 @@ def snap(hold_ms: int = MOVE_MS):
     pm = win.grab()
     painter = QPainter(pm)
     painter.setRenderHint(QPainter.RenderHint.Antialiasing)
+    painter.setRenderHint(QPainter.RenderHint.SmoothPixmapTransform)
     origin = win.mapToGlobal(QPoint(0, 0))
     for pop in _extra_popups():
         painter.drawPixmap(pop.mapToGlobal(QPoint(0, 0)) - origin, pop.grab())
+    if comparison_source is not None:
+        # 两个真实窗口错位叠放，明确展示“新增窗口”，而非原窗口切换目录。
+        current = pm.copy()
+        painter.drawPixmap(0, 0, comparison_source.grab())
+        target = QRectF(190, 90, WIN_W - 210, WIN_H - 170)
+        painter.setPen(QPen(QColor('#a78bfa'), 4))
+        painter.setBrush(QColor('#1a1a2e'))
+        painter.drawRect(target.adjusted(-3, -28, 3, 3))
+        painter.fillRect(QRectF(0, 0, 500, 38), QColor('#1a1a2e'))
+        painter.setFont(QFont('.AppleSystemUIFont', 17, QFont.Weight.DemiBold))
+        painter.setPen(QColor('white'))
+        painter.drawText(16, 26, T('原窗口 · my-project（保留）', 'Original window · my-project (kept)'))
+        painter.drawText(202, 82, T('新窗口 · new-project', 'New window · new-project'))
+        painter.drawPixmap(target, current, QRectF(current.rect()))
+    elif path_zoom and getattr(win, '_ql_popup', None) is not None:
+        # 放大真正输入框的画面，长路径在 README 的缩小尺寸下也能读清。
+        edit = win._ql_search
+        pos = win.mapFromGlobal(edit.mapToGlobal(QPoint(0, 0)))
+        painter.setPen(QPen(QColor('#fbbf24'), 3))
+        painter.setBrush(Qt.BrushStyle.NoBrush)
+        painter.drawRoundedRect(QRectF(pos.x() - 3, pos.y() - 3,
+                                      edit.width() + 6, edit.height() + 6), 5, 5)
+        field = edit.grab()
+        zoom_width = WIN_W - 72
+        zoom_height = zoom_width * field.height() / field.width()
+        rect = QRectF(36, WIN_H - 255, zoom_width, zoom_height)
+        painter.setBrush(QColor('#1a1a2e'))
+        painter.drawRoundedRect(rect.adjusted(-8, -38, 8, 8), 8, 8)
+        painter.setFont(QFont('.AppleSystemUIFont', 17, QFont.Weight.DemiBold))
+        painter.drawText(40, WIN_H - 270, T('⚡ 路径输入框（放大）', '⚡ Path input (enlarged)'))
+        painter.drawPixmap(rect, field, QRectF(field.rect()))
     if caption:
         _draw_caption(painter, caption)
     _draw_cursor(painter, cursor)
@@ -348,8 +382,8 @@ def T(zh: str, en: str) -> str:
 
 def path_script():
     """展示真实路径输入与启动结果，不只停留在打开菜单。"""
-    global caption, win
-    target = os.path.join(PROJECTS, 'new-project')
+    global caption, win, path_zoom, comparison_source
+    target = os.path.join(PROJECTS, 'projects/research/experiments/2026/customer-insights/new-project')
     os.makedirs(target, exist_ok=True)
     win.presets = [{'name': 'zsh + pwd', 'commands': ['zsh', 'pwd']}]
     win._populate_presets()
@@ -359,22 +393,33 @@ def path_script():
     win._apply_working_dir()
     win._start_session(cwd=PROJ)
     yield 1500
-    caption = T('① 在顶部目录框粘贴已有项目路径',
-                '1. Paste an existing project path into Directory')
+    caption = T('① 点击 ⚡：这里也能直接输入完整路径',
+                '1. Click ⚡: enter a full folder path here')
     yield from hold(1500)
-    edit = win.working_dir_combo.lineEdit()
+    win._ensure_quick_launch_popup()
+    win._ql_search.setMinimumWidth(780)
+    yield from move_to(center_of(win.quick_launch_btn))
+    yield from click(win.quick_launch_btn.click)
+    yield 300
+    edit = win._ql_search
     yield from move_to(center_of(edit))
-    yield from click(edit.selectAll)
+    yield from click(edit.setFocus)
+    path_zoom = True
+    yield from hold(1800)
+    caption = T('② 粘贴长路径；不必先加入最近目录',
+                '2. Paste a long path; no saved entry needed')
     QApplication.clipboard().setText(target)
     edit.paste()
-    yield from hold(2200)
-    caption = T('② 点击“在新窗口打开”，自动运行当前预设',
-                '2. Click Open as New Window to run your preset')
+    edit.setCursorPosition(0)
+    yield from hold(3200)
+    caption = T('③ Shift + Enter：在新窗口打开并运行预设',
+                '3. Shift + Enter: new window + your preset')
+    yield from hold(2400)
     source = win
     original_cwd = source._window_cwd
     before = win.tab_widget.count()
-    yield from move_to(center_of(win.open_dir_window_btn))
-    yield from click(win.open_dir_window_btn.click)
+    path_zoom = False
+    QTest.keyClick(edit, Qt.Key.Key_Return, Qt.KeyboardModifier.ShiftModifier)
     yield 1800
     assert len(source.detached_windows) == 1, 'Path did not open a new window'
     assert source.tab_widget.count() == before, 'Original tabs changed'
@@ -382,9 +427,13 @@ def path_script():
     win = source.detached_windows[0]
     assert win._window_cwd == target, 'New window opened in the wrong directory'
     assert target in win.working_dir_history, 'Path was not added to history'
-    yield from hold(2800)
-    caption = T('③ 路径已记入最近目录，下次直接点选',
-                '3. The path is saved in recent directories for next time')
+    comparison_source = source
+    caption = T('新窗口已打开；原窗口和原项目仍保留',
+                'New window opened; the original project stays open')
+    yield from hold(3600)
+    comparison_source = None
+    caption = T('④ 路径自动记忆，下次从 ⚡ 最近目录打开',
+                '4. Path remembered: find it in ⚡ next time')
     yield from move_to(center_of(win.quick_launch_btn))
     yield from click(win.quick_launch_btn.click)
     yield 300

@@ -21,11 +21,15 @@ A PyQt6-based smart terminal with file explorer, Git GUI, LLM proxy, and VS Code
 
 Paste an existing folder path into Directory and click **Open as New Window** to launch a separate project window with your selected preset. The path is saved in recent directories across restarts for quick reopening.
 
-![在新窗口打开项目并记住路径](assets/quick-launch-zh.gif)
+也可以点击 **⚡**，在弹窗搜索框里**直接粘贴长路径**，按 **Shift+Enter** 在新窗口打开；只按 **Enter** 则新建标签。下面的演示放大了路径输入框，并同时展示原窗口和新窗口，方便看清完整操作和结果。
+
+You can also paste a long path directly into **⚡** and press **Shift+Enter** for a new window, or **Enter** for a new tab. The demo enlarges the input and shows both windows.
+
+![在闪电弹窗输入长路径，按 Shift+Enter 打开新窗口](assets/quick-launch-zh.gif)
 
 <details><summary>English version</summary>
 
-![Open a project in a new window and remember its path](assets/quick-launch-en.gif)
+![Paste a long path into Quick Launch and press Shift+Enter to open a new window](assets/quick-launch-en.gif)
 
 </details>
 
@@ -33,7 +37,7 @@ Paste an existing folder path into Directory and click **Open as New Window** to
 
 先选好命令预设，点击标签栏右端的 **⚡**，粘贴一个**已存在的文件夹路径**，按 **Enter**：立即在该目录新建终端标签，并自动运行当前预设，比如你配置好的 Codex、Claude Code 启动命令。路径会记入最近目录，下次直接点选；其他标签保留各自的工作目录。
 
-例如 `/path/to/project`、`~/projects/my-app`，Windows 可用 `C:\projects\my-app`。按住 **Shift 点击**最近目录可在新窗口打开。这是把已有文件夹作为项目终端打开，不会新建文件夹或初始化仓库。
+例如 `/path/to/project`、`~/projects/my-app`，Windows 可用 `C:\projects\my-app`。输入路径后按 **Shift+Enter**，或按住 **Shift 点击**最近目录，即可在新窗口打开。这是把已有文件夹作为项目终端打开，不会新建文件夹或初始化仓库。
 
 Choose a preset, click **⚡**, paste an existing folder path, and press **Enter** to open a new tab there and run the preset automatically. The path is saved in recent directories; Shift-click an entry to open it in a new window. Existing tabs keep their working directories.
 
