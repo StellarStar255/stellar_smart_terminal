@@ -4587,7 +4587,9 @@ class MainWindow(ThemeMixin, ToolbarMixin, ConfigMixin, ExplorerPanelMixin,
         cwd = entry.get('cwd') or ''
         if cwd and os.path.isdir(cwd) and cwd != self._window_cwd:
             self.working_dir_combo.setCurrentText(cwd)
-            self._apply_working_dir()
+            # 启动恢复只设置初始目录；默认目录不是用户访问过的目录，
+            # 不应进入 Back 历史（工作区恢复和升级恢复共用此入口）。
+            self._apply_working_dir(record_history=False)
         color = entry.get('color')
         if color:
             try:

@@ -4,7 +4,7 @@ English | [简体中文](README.zh-CN.md)
 
 A PyQt6-based smart terminal with file explorer, Git GUI, LLM proxy, and VS Code extension browser.
 
-Latest release: [v1.35.32](docs/releases/v1.35.32.md) improves SSH forwarding state recovery, adds safe restart and background status checks, and provides manual connectivity diagnostics.
+Latest release: [v1.35.33](docs/releases/v1.35.33.md) fixes the Back button becoming available immediately after restoring a window at startup.
 
 <img src="assets/smart_terminal.png" width="300" />
 

@@ -69,6 +69,7 @@ class DirectoryNewWindowTest(unittest.TestCase):
         child = self.win.detached_windows[0]
         self.assertEqual(child._window_cwd, str(target))
         self.assertEqual(child.tab_cwds[0], str(target))
+        self.assertFalse(child.dir_back_btn.isEnabled())
         self.assertEqual(self.started, [(str(target), preset)])
         self.assertEqual(self.win._window_cwd, original_cwd)
         self.assertEqual(self.win.working_dir_combo.currentText(), original_cwd)
@@ -176,6 +177,37 @@ class DirectoryNewWindowTest(unittest.TestCase):
         self.win.dir_back_btn.click()
         self.assertEqual(self.win._window_cwd, original)
         self.assertFalse(self.win.dir_back_btn.isEnabled())
+
+    def _check_startup_restore_has_no_back_history(self, *, after_update):
+        import app_config
+        import time
+        target = Path(self.tmp.name) / 'restored project'
+        target.mkdir()
+        snapshot = {'ts': time.time(), 'windows': [{'cwd': str(target)}]}
+        key = 'update_restore_windows' if after_update else 'workspace_snapshot'
+        app_config.update_config({key: snapshot, 'workspace_restore_enabled': True})
+        if after_update:
+            self.assertTrue(self.MW.restore_windows_after_update(self.win))
+        else:
+            self.MW.restore_workspace_on_start(self.win)
+        self.assertEqual(self.win._window_cwd, str(target))
+        self.assertEqual(self.win.tab_cwds[0], str(target))
+        self.assertFalse(self.win.dir_back_btn.isEnabled())
+        self.assertEqual(getattr(self.win.tab_widget.currentWidget(),
+                                 '_directory_back_history', []), [])
+        # 恢复后的首次用户切换仍应能返回恢复目录，不能回到启动用的默认目录。
+        self.win.working_dir_combo.setCurrentText(self.tmp.name)
+        self.win._apply_working_dir()
+        self.assertTrue(self.win.dir_back_btn.isEnabled())
+        self.win.dir_back_btn.click()
+        self.assertEqual(self.win._window_cwd, str(target))
+        self.assertFalse(self.win.dir_back_btn.isEnabled())
+
+    def test_workspace_restore_does_not_create_back_history(self):
+        self._check_startup_restore_has_no_back_history(after_update=False)
+
+    def test_update_restore_does_not_create_back_history(self):
+        self._check_startup_restore_has_no_back_history(after_update=True)
 
     def test_back_skips_removed_directories_and_invalid_input(self):
         original = self.win._window_cwd
