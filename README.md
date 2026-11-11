@@ -72,6 +72,8 @@ Automatic recording is off. To capture output from now on, use **History → Sta
 
 In a host’s **Port Forwarding** dialog, check the rules you want and choose **Save Group As…**. Select a saved group, then use **Start Checked Ports** or **Stop Checked Ports** to operate on its members. Other ports are left alone; choosing a group does not change running ports. Drag rules to reorder them. Groups and order are saved separately for each host; green dots show running status, while checkboxes select group members.
 
+Opening the dialog or choosing **Refresh** checks forwarding status against the current master connection and local listeners. Successful operations are recorded for that master so status can survive an app restart. Unverified rules show **Unknown status**; remote forwards rely on this record because SSH does not expose a portable list of remote listeners. **Restart** stops the selected rule before starting it, and stops if cancellation fails. Controls are disabled during operations, with progress and failure details shown on the rule. Recovery only cancels this app’s recorded rule on its current master; it never terminates another SSH process or rebuilds the master connection.
+
 ## Download
 
 No Python required — grab a build from the [**Releases**](https://github.com/StellarStar255/stellar_smart_terminal/releases/latest) page.

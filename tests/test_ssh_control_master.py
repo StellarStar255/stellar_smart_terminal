@@ -1027,6 +1027,21 @@ class TestForwardRulesInPanel(unittest.TestCase):
             panel._auto_apply_forwards(_host())     # 第二次连接/重连
         self.assertEqual(len(calls), 1)
 
+    def test_recovered_running_auto_rule_is_not_started_again(self):
+        panel = self._panel()
+        self.addCleanup(panel.deleteLater)
+        spec = {'type': 'L', 'bind_port': 8888, 'dest_port': 80, 'auto': True}
+        panel._save_forwards('bastion', [spec])
+        with mock.patch('ssh_control.is_supported', return_value=True), \
+                mock.patch('ssh_control.master_socket_exists', return_value=True), \
+                mock.patch.object(panel, '_refresh_pre_qos_master'), \
+                mock.patch('ssh_control.forward_statuses', return_value=['running']), \
+                mock.patch('ssh_control.forward_apply') as apply:
+            panel._auto_apply_forwards(_host())
+        apply.assert_not_called()
+        from remote_explorer_widget import _ForwardsDialog
+        self.assertIn(_ForwardsDialog.rule_key(spec), panel._active_forwards['bastion'])
+
 
 @_POSIX_ONLY
 class TestForwardsDialog(unittest.TestCase):
@@ -1115,7 +1130,11 @@ class TestForwardsDialog(unittest.TestCase):
             self.app.processEvents()
             self.assertEqual(layout(), before)
             self.assertEqual(d._list.verticalScrollBar().maximum(), scroll_max)
-            self.assertEqual(d._list.item(2).text(), text)
+            self.assertEqual(d._list.item(2).text().rsplit(' · ', 1)[0],
+                             text.rsplit(' · ', 1)[0])
+            self.assertTrue(d._list.item(2).text().endswith(t(
+                'remote.fwd_state_stopped' if action == 'remote.fwd_stop'
+                else 'remote.fwd_state_running')))
             self.assertEqual(d._is_item_active(d._list.item(2)), action == 'remote.fwd_start')
         d._auto_check.setChecked(True)
         self.app.processEvents()

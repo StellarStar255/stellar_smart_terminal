@@ -12,6 +12,7 @@ UI 有两个状态：
 import atexit
 import bisect
 import os
+import subprocess
 import posixpath
 import shutil
 import tempfile
@@ -456,13 +457,19 @@ class _ForwardsDialog(QDialog):
 
     def __init__(self, parent=None, *, alias: str, rules: list,
                  apply_cb=None, cancel_cb=None, active: Optional[set] = None,
-                 force_cb=None, groups=None, selected_group="", save_cb=None):
+                 force_cb=None, groups=None, selected_group="", save_cb=None,
+                 status_cb=None):
         super().__init__(parent)
         self._alias = alias
         self._apply_cb = apply_cb          # (spec) -> None，抛异常表示失败
         self._cancel_cb = cancel_cb
         self._force_cb = force_cb          # (spec) -> None：端口被 ssh 占着时强制释放再挂
         self._active = set(active or ())   # 已生效规则的 key
+        self._status_cb = status_cb
+        self._states = {}
+        self._operation_running = False
+        self._uncertain = set()
+        self._errors = {}
         groups = groups if isinstance(groups, dict) else {}
         self._groups = {name: list(dict.fromkeys(keys))
                         for name, keys in groups.items()
@@ -612,12 +619,19 @@ class _ForwardsDialog(QDialog):
         self._auto_check.stateChanged.connect(self._on_auto_toggled)
         row.addWidget(self._auto_check)
         row.addStretch(1)
-        start_btn = QPushButton(t("remote.fwd_start"))
+        refresh_btn = QPushButton(t("remote.fwd_refresh"))
+        refresh_btn.clicked.connect(self._refresh_statuses)
+        refresh_btn.setVisible(status_cb is not None)
+        row.addWidget(refresh_btn)
+        start_btn = self._start_btn = QPushButton(t("remote.fwd_start"))
         start_btn.clicked.connect(lambda: self._apply_selected(False))
         row.addWidget(start_btn)
-        stop_btn = QPushButton(t("remote.fwd_stop"))
+        stop_btn = self._stop_btn = QPushButton(t("remote.fwd_stop"))
         stop_btn.clicked.connect(lambda: self._apply_selected(True))
         row.addWidget(stop_btn)
+        self._restart_btn = QPushButton(t("remote.fwd_restart"))
+        self._restart_btn.clicked.connect(self._restart_selected)
+        row.addWidget(self._restart_btn)
         del_btn = QPushButton(t("remote.fwd_delete"))
         del_btn.clicked.connect(self._on_delete)
         row.addWidget(del_btn)
@@ -632,6 +646,9 @@ class _ForwardsDialog(QDialog):
         self._sync_dest_enabled()
         if self._list.count():
             self._list.setCurrentRow(0)
+        if self._status_cb is not None:
+            self._refresh_statuses()
+        self._sync_action_buttons()
 
     # ---- 规则 <-> 列表项 ----
 
@@ -686,8 +703,53 @@ class _ForwardsDialog(QDialog):
         return self.rule_key(item.data(_ROLE_ENTRY) or {}) in self._active
 
     def _refresh_item(self, item: QListWidgetItem):
-        item.setText(self._item_text(item.data(_ROLE_ENTRY)))
+        key = self.rule_key(item.data(_ROLE_ENTRY))
+        state = self._states.get(key, 'running' if key in self._active else 'stopped')
+        item.setText(self._item_text(item.data(_ROLE_ENTRY)) + ' · '
+                     + t('remote.fwd_state_' + state))
         item.setIcon(self._status_icon(self._is_item_active(item)))
+        item.setToolTip(self._errors.get(key, '') or (
+            t('remote.fwd_unknown_hint') if state == 'unknown' else ''))
+
+    def _refresh_statuses(self):
+        if self._batch_running or self._operation_running or self._status_cb is None:
+            return
+        self._operation_running = True
+        self.setEnabled(False)
+        try:
+            states = self._status_cb(self.rules())
+            if len(states) != self._list.count():
+                raise RuntimeError(t('remote.fwd_status_invalid'))
+            for i, state in enumerate(states):
+                item = self._list.item(i)
+                key = self.rule_key(item.data(_ROLE_ENTRY))
+                self._states[key] = state
+                self._errors.pop(key, None)
+                self._uncertain.add(key) if state == 'unknown' else self._uncertain.discard(key)
+                self._active.add(key) if state == 'running' else self._active.discard(key)
+                self._refresh_item(item)
+        except Exception as exc:
+            for i in range(self._list.count()):
+                item = self._list.item(i)
+                key = self.rule_key(item.data(_ROLE_ENTRY))
+                self._states[key] = 'unknown'
+                self._uncertain.add(key)
+                self._active.discard(key)
+                self._errors[key] = str(exc)
+                self._refresh_item(item)
+            QMessageBox.warning(self, t('remote.fwd_title', host=self._alias), str(exc))
+        finally:
+            self._operation_running = False
+            self.setEnabled(True)
+            self._sync_action_buttons()
+
+    def _sync_action_buttons(self):
+        item = self._list.currentItem()
+        key = self.rule_key(item.data(_ROLE_ENTRY)) if item else None
+        enabled = item is not None and not self._operation_running and not self._batch_running
+        self._start_btn.setEnabled(enabled and key not in self._active)
+        self._stop_btn.setEnabled(enabled and (key in self._active or key in self._uncertain))
+        self._restart_btn.setEnabled(enabled)
 
     def _sync_dest_enabled(self):
         is_socks = self._type.currentData() == "D"
@@ -701,6 +763,7 @@ class _ForwardsDialog(QDialog):
             bool(item and (item.data(_ROLE_ENTRY) or {}).get("auto")))
         self._auto_check.setEnabled(item is not None)
         self._auto_check.blockSignals(False)
+        self._sync_action_buttons()
 
     def _on_auto_toggled(self, state):
         item = self._list.currentItem()
@@ -736,11 +799,13 @@ class _ForwardsDialog(QDialog):
         self._dest_port.clear()
 
     def _on_delete(self):
+        if self._batch_running or self._operation_running:
+            return
         item = self._list.currentItem()
         if item is None:
             return
         spec = item.data(_ROLE_ENTRY)
-        if self.rule_key(spec) in self._active:
+        if self.rule_key(spec) in self._active or self.rule_key(spec) in self._uncertain:
             # 删之前先撤掉，别留个孤儿监听；撤不掉就把规则留着（否则那个
             # 还挂在主连接上的监听就再也没人管了）
             if not self._apply_selected(True):
@@ -749,26 +814,66 @@ class _ForwardsDialog(QDialog):
         self._list.takeItem(self._list.row(item))
         for name in self._groups:
             self._groups[name] = [member for member in self._groups[name] if member != key]
+        self._states.pop(key, None)
+        self._errors.pop(key, None)
+        self._uncertain.discard(key)
         self._sync_group_status()
+        self._sync_action_buttons()
 
     def _apply_selected(self, cancel: bool) -> bool:
         """挂/撤当前选中的规则。返回是否成功（失败已经弹过提示）。"""
+        if self._batch_running:
+            return False
         return self._apply_item(self._list.currentItem(), cancel)
 
-    def _apply_item(self, item, cancel, errors=None):
+    def _restart_selected(self):
+        if self._batch_running:
+            return False
+        return self._apply_item(self._list.currentItem(), False, restart=True)
+
+    def _apply_item(self, item, cancel, errors=None, restart=False):
+        if self._operation_running or item is None:
+            return False
+        self._operation_running = True
+        self.setEnabled(False)
+        try:
+            key = self.rule_key(item.data(_ROLE_ENTRY))
+            if restart and (key in self._active or key in self._uncertain):
+                if not self._apply_item_impl(item, True, errors):
+                    return False
+            return self._apply_item_impl(item, cancel, errors)
+        finally:
+            self._operation_running = False
+            self.setEnabled(not self._batch_running)
+            self._sync_action_buttons()
+
+    def _set_rule_state(self, item, state, error=''):
+        key = self.rule_key(item.data(_ROLE_ENTRY))
+        self._states[key] = state
+        if error:
+            self._errors[key] = error
+        else:
+            self._errors.pop(key, None)
+        self._refresh_item(item)
+
+    def _apply_item_impl(self, item, cancel, errors=None):
         if item is None or (self._cancel_cb if cancel else self._apply_cb) is None:
             return False
         spec = item.data(_ROLE_ENTRY)
         key = self.rule_key(spec)
+        if (cancel and key not in self._active and key not in self._uncertain
+                or not cancel and key in self._active):
+            return True
+        self._set_rule_state(item, 'stopping' if cancel else 'starting')
         try:
             (self._cancel_cb if cancel else self._apply_cb)(spec)
         except ssh_control.LocalPortBusy as e:
+            self._set_rule_state(item, 'failed', str(e))
             if errors is not None:
                 errors.append(f"{ssh_control.forward_label(spec)}: {e}")
                 return False
-            # 端口被 ssh 进程占着：十有八九是残留的同一条转发（应用重启后
-            # 登记丢了、主连接还活着）→ 给「强制释放并启用」
-            if cancel or self._force_cb is None or not e.held_by_ssh_only():
+            # 仅当前主连接上有本应用记录的同一条规则允许恢复。
+            if cancel or self._force_cb is None or not e.recoverable:
                 QMessageBox.warning(self, t("remote.fwd_title", host=self._alias), str(e))
                 return False
             box = QMessageBox(self)
@@ -785,24 +890,38 @@ class _ForwardsDialog(QDialog):
             try:
                 self._force_cb(spec)
             except Exception as e2:     # noqa: BLE001
+                # Recovery may have cancelled the old listener before failing.
+                self._active.discard(key)
+                self._uncertain.add(key)
+                self._set_rule_state(item, 'failed', str(e2))
                 QMessageBox.warning(self, t("remote.fwd_title", host=self._alias), str(e2))
                 return False
         except Exception as e:      # noqa: BLE001 — 原样告诉用户
+            if isinstance(e.__cause__, subprocess.TimeoutExpired):
+                self._uncertain.add(key)
+                self._active.discard(key)
+            if isinstance(e, ssh_control.MasterNotRunning):
+                self._active.clear()
+                for i in range(self._list.count()):
+                    self._set_rule_state(self._list.item(i), 'stopped')
+                self._uncertain.clear()
+            self._set_rule_state(item, 'failed', str(e))
             if errors is not None:
                 errors.append(f"{ssh_control.forward_label(spec)}: {e}")
             else:
                 QMessageBox.warning(self, t("remote.fwd_title", host=self._alias), str(e))
             return False
         self._active.discard(key) if cancel else self._active.add(key)
-        self._refresh_item(item)
+        self._uncertain.discard(key)
+        self._set_rule_state(item, 'stopped' if cancel else 'running')
         return True
 
     def accept(self):
-        if not self._batch_running:
+        if not self._batch_running and not self._operation_running:
             super().accept()
 
     def reject(self):
-        if not self._batch_running:
+        if not self._batch_running and not self._operation_running:
             super().reject()
 
     def _checked_keys(self):
@@ -918,7 +1037,7 @@ class _ForwardsDialog(QDialog):
         self._persist_state()
 
     def _apply_checked(self, cancel):
-        if self._batch_running:
+        if self._batch_running or self._operation_running:
             return
         items = [self._list.item(i) for i in range(self._list.count())
                  if self._list.item(i).checkState() == Qt.CheckState.Checked]
@@ -931,7 +1050,8 @@ class _ForwardsDialog(QDialog):
         self.setEnabled(False)
         try:
             for item in items:
-                if self._is_item_active(item) != cancel:
+                key = self.rule_key(item.data(_ROLE_ENTRY))
+                if key not in self._uncertain and self._is_item_active(item) != cancel:
                     skipped += 1
                     continue
                 if self._apply_item(item, cancel, errors):
@@ -939,6 +1059,7 @@ class _ForwardsDialog(QDialog):
         finally:
             self.setEnabled(True)
             self._batch_running = False
+            self._sync_action_buttons()
         summary = t("remote.fwd_group_result", done=done, skipped=skipped, failed=len(errors))
         self._group_status.setText(summary)
         if errors:
@@ -2660,6 +2781,8 @@ class RemoteExplorerPanel(QWidget, explorer_common.TransferJobHost):
                 host, spec, mfa=self._is_mfa_host(host.alias),
                 password=self.get_cached_password(host.alias) or "")),
             active=active,
+            status_cb=lambda specs: self._run_blocking(
+                lambda: ssh_control.forward_statuses(host, specs), t('remote.fwd_checking')),
         )
         dlg.exec()
         self._save_forwards(host.alias, dlg.rules(), dlg.groups(), dlg.selected_group())
@@ -2704,9 +2827,11 @@ class RemoteExplorerPanel(QWidget, explorer_common.TransferJobHost):
         def _apply_all():
             """工作线程里逐条挂；返回 (成功 key 列表, [(规则, 错误)])。"""
             ok, failed = [], []
-            for spec in pending:
+            states = ssh_control.forward_statuses(host, pending)
+            for spec, state in zip(pending, states):
                 try:
-                    ssh_control.forward_apply(host, spec, cancel=False)
+                    if state != 'running':
+                        ssh_control.forward_apply(host, spec, cancel=False)
                     ok.append(_ForwardsDialog.rule_key(spec))
                     logger.info("[RemoteExplorerPanel] port forward up: %s",
                                 ssh_control.forward_label(spec))

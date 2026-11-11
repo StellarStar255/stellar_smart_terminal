@@ -45,59 +45,30 @@ class ForceApplySparesOwnMaster(unittest.TestCase):
             self.addCleanup(p.stop)
         open(self.ctl, 'w').close()
 
-    def test_other_ssh_holders_are_killed_but_own_master_is_not(self):
-        """占端口的两条 ssh 里有一条是本主机主连接（-O check 报的 pid）→ 只杀另一条，
-        自己的主连接（非 MFA）走 refresh_master 重建。"""
-        busy = [True, True, False]
-        with mock.patch.object(ssh_control, 'local_port_busy', side_effect=lambda h, p: busy.pop(0)), \
-             mock.patch.object(ssh_control, 'port_holders', return_value=[('ssh', 100), ('ssh', 200)]), \
-             mock.patch.object(ssh_control, 'master_pid', return_value=100, create=True), \
-             mock.patch.object(ssh_control, 'refresh_master', return_value=self.ctl) as refresh, \
-             mock.patch.object(ssh_control.subprocess, 'run', return_value=_proc(0)), \
-             mock.patch.object(ssh_control, '_kill_wait') as kill:
-            ssh_control.forward_force_apply(self.host, _SPEC, mfa=False, password='pw')
-        self.assertEqual([c.args[0] for c in kill.call_args_list], [200])
-        refresh.assert_called_once()
-        self.assertEqual(refresh.call_args.kwargs.get('password'), 'pw')
-
-    def test_mfa_host_whose_master_holds_the_port_asks_for_relogin(self):
-        busy = [True, True]
-        with mock.patch.object(ssh_control, 'local_port_busy', side_effect=lambda h, p: busy.pop(0)), \
+    def test_owned_rule_still_busy_never_kills_or_rebuilds_master(self):
+        with mock.patch.object(ssh_control, 'local_port_busy', return_value=True), \
              mock.patch.object(ssh_control, 'port_holders', return_value=[('ssh', 100)]), \
-             mock.patch.object(ssh_control, 'master_pid', return_value=100, create=True), \
+             mock.patch.object(ssh_control, '_forward_owned', return_value=True), \
              mock.patch.object(ssh_control, 'refresh_master') as refresh, \
              mock.patch.object(ssh_control.subprocess, 'run', return_value=_proc(0)), \
              mock.patch.object(ssh_control, '_kill_wait') as kill:
-            with self.assertRaises(RuntimeError) as cm:
-                ssh_control.forward_force_apply(self.host, _SPEC, mfa=True)
+            with self.assertRaises(ssh_control.LocalPortBusy):
+                ssh_control.forward_force_apply(self.host, _SPEC)
         kill.assert_not_called()
         refresh.assert_not_called()
-        self.assertIn('登录', str(cm.exception))
-        self.assertNotIsInstance(cm.exception, ssh_control.MasterNotRunning)
 
-    def test_socket_gone_after_kill_is_a_plain_error_not_the_mfa_text(self):
-        """杀完占端口的 ssh 发现自己的 socket 没了 → 明确报错，而不是让 forward_apply
-        甩出「先做一次 MFA 登录」（普通主机根本没有 MFA）。"""
-        busy = [True, True, False]
-
-        def kill(pid):
-            os.unlink(self.ctl)
-
-        def run(argv, **kw):
-            if argv[:3] == ['ssh', '-O', 'forward']:
-                return _proc(255, b"", b"Control socket connect(/tmp/c-abc): No such file or directory\n")
-            return _proc(0)
-
-        with mock.patch.object(ssh_control, 'local_port_busy', side_effect=lambda h, p: busy.pop(0)), \
-             mock.patch.object(ssh_control, 'port_holders', return_value=[('ssh', 300)]), \
-             mock.patch.object(ssh_control, 'master_pid', return_value=0, create=True), \
-             mock.patch.object(ssh_control.subprocess, 'run', side_effect=run), \
-             mock.patch.object(ssh_control, '_kill_wait', side_effect=kill):
-            with self.assertRaises(RuntimeError) as cm:
-                ssh_control.forward_force_apply(self.host, _SPEC)
-        self.assertNotIsInstance(cm.exception, ssh_control.MasterNotRunning)
-        self.assertNotIn('MFA', str(cm.exception))
-        self.assertIn('6013', str(cm.exception))
+    def test_mfa_unknown_owner_never_reauthenticates_or_cancels(self):
+        with mock.patch.object(ssh_control, 'local_port_busy', return_value=True), \
+             mock.patch.object(ssh_control, 'port_holders', return_value=[('ssh', 100)]), \
+             mock.patch.object(ssh_control, '_forward_owned', return_value=False), \
+             mock.patch.object(ssh_control, 'forward_apply') as apply, \
+             mock.patch.object(ssh_control, 'refresh_master') as refresh, \
+             mock.patch.object(ssh_control, '_kill_wait') as kill:
+            with self.assertRaises(ssh_control.LocalPortBusy):
+                ssh_control.forward_force_apply(self.host, _SPEC, mfa=True)
+        apply.assert_not_called()
+        kill.assert_not_called()
+        refresh.assert_not_called()
 
 
 class DialogDeleteKeepsRuleWhenCancelFails(unittest.TestCase):

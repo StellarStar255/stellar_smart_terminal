@@ -20,12 +20,15 @@ Explorer 用到的那部分一致，面板可以直接换后端。
 平台：ControlMaster 是 POSIX unix socket 的能力，Windows 的 OpenSSH 不支持
 （is_supported() 会返回 False，调用方回落 paramiko）。
 """
+import errno
 import hashlib
+import json
 import os
 import posixpath
 import re
 import shlex
 import shutil
+import stat
 import subprocess
 import sys
 import tempfile
@@ -42,6 +45,7 @@ from ssh_process_io import ProcessPipeIO, TransferCancelledError
 from PyQt6.QtCore import QObject, pyqtSignal
 
 from app_logging import get_logger
+from i18n import t
 from ssh_session import (HostConfig, RemoteEntry,
                          _CountingReader, _worth_compressing)
 
@@ -691,6 +695,91 @@ def _reject_degraded_master(cfg: HostConfig, ctl: str, stderr: str) -> None:
 
 _FWD_HOST_RE = re.compile(r"^[A-Za-z0-9._-]+$")
 FORWARD_TYPES = ("L", "R", "D")
+_FORWARD_STATE_LOCK = threading.RLock()
+
+
+def _forward_socket_identity(ctl):
+    """A replacement master must never inherit its predecessor's forward state."""
+    try:
+        info = os.stat(ctl)
+        if stat.S_ISSOCK(info.st_mode):
+            return [info.st_dev, info.st_ino, info.st_ctime_ns]
+    except OSError:
+        # Missing/inaccessible sockets have no identity we can safely trust.
+        pass
+    return None
+
+
+def _forward_identity(spec):
+    return json.dumps(forward_args(spec), separators=(',', ':'))
+
+
+def _read_forward_state(ctl, identity):
+    try:
+        with open(ctl + '.forwards.json', encoding='utf-8') as stream:
+            state = json.load(stream)
+        if (isinstance(state, dict) and state.get('socket') == identity
+                and isinstance(state.get('rules'), dict)):
+            return state['rules']
+    except (OSError, ValueError):
+        # Missing or corrupt optional metadata means status is unverified.
+        pass
+    return {}
+
+
+def _record_forward_state(ctl, identity, spec, active):
+    # Metadata failure must not turn a successful SSH operation into a UI failure.
+    if identity is None:
+        return
+    try:
+        import fcntl
+        with _FORWARD_STATE_LOCK, open(ctl + '.forwards.lock', 'a') as lock:
+            fcntl.flock(lock.fileno(), fcntl.LOCK_EX)
+            if _forward_socket_identity(ctl) != identity:
+                return
+            rules = _read_forward_state(ctl, identity)
+            rules[_forward_identity(spec)] = active
+            with atomic_writer(ctl + '.forwards.json') as stream:
+                json.dump({'socket': identity, 'rules': rules}, stream)
+    except (OSError, ValueError, ImportError):
+        logger.warning('Could not save forwarding status', exc_info=True)
+
+
+def forward_statuses(cfg: HostConfig, specs: list) -> list:
+    """Read-only reconciliation. Never open/cancel a forward to discover its state.
+
+    Remote listeners cannot be enumerated through portable OpenSSH mux commands;
+    only successful operations recorded for this exact master are trusted.
+    """
+    ctl = control_path_for(cfg)
+    identity = _forward_socket_identity(ctl) if ctl else None
+    pid = master_pid(cfg)
+    if not pid:
+        return ['unknown' if identity else 'stopped'] * len(specs)
+    records = _read_forward_state(ctl, identity) if identity else {}
+    result = []
+    for spec in specs:
+        recorded = records.get(_forward_identity(spec))
+        if str(spec.get('type') or 'L').upper() == 'R':
+            result.append('running' if recorded is True else
+                          'stopped' if recorded is False else 'unknown')
+            continue
+        try:
+            busy = local_port_busy(spec.get('bind_host') or '127.0.0.1',
+                                   spec.get('bind_port'))
+        except OSError:
+            result.append('unknown')
+            continue
+        if not busy:
+            result.append('stopped')
+        else:
+            holders = port_holders(spec.get('bind_port'))
+            own_only = bool(holders) and all(owner == pid for _, owner in holders)
+            result.append('running' if recorded is True and own_only else 'unknown')
+    # The connection may have been replaced while lsof was running.
+    if identity != (_forward_socket_identity(ctl) if ctl else None):
+        return ['unknown'] * len(specs)
+    return result
 
 
 def _fwd_port(value) -> str:
@@ -740,24 +829,38 @@ def local_port_busy(host: str, port) -> bool:
     自己先 bind 一下，能提前给出准确得多的报错。
     """
     import socket
+    p = int(_fwd_port(port))
+    host = host or '127.0.0.1'
+    s = None
     try:
-        p = int(port)
-    except (TypeError, ValueError):
-        return False
-    s = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
-    try:
+        s = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
         # 和 OpenSSH 的转发监听一致：允许复用已关闭连接留下的 TIME_WAIT。
         # 普通 bind 会把刚停止的转发误判为占用，即使 lsof 没有任何监听进程。
         s.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
-        s.bind((host or "127.0.0.1", p))
+        s.bind((host, p))
         # 某些系统允许 REUSEADDR socket 绑定同一地址，但不允许同时监听。
         # 必须检查 listen，避免把仍在工作的监听器当成空闲端口。
         s.listen(1)
         return False
-    except OSError:
-        return True
+    except OSError as exc:
+        if exc.errno == errno.EADDRINUSE:
+            return True
+        raise LocalBindError(host, p, exc) from exc
     finally:
-        s.close()
+        if s is not None:
+            s.close()
+
+
+class LocalBindError(OSError):
+    """A failed bind is not necessarily a port conflict."""
+
+    def __init__(self, host, port, original):
+        import socket
+        self.kind = ('dns' if isinstance(original, socket.gaierror) else
+                     'permission' if original.errno in (errno.EACCES, errno.EPERM) else
+                     'address' if original.errno == errno.EADDRNOTAVAIL else 'other')
+        super().__init__(original.errno, t('remote.fwd_bind_' + self.kind,
+                                         host=host, port=port, error=str(original)))
 
 
 def port_holders(port) -> list:
@@ -786,8 +889,9 @@ def who_holds_port(port) -> str:
 class LocalPortBusy(RuntimeError):
     """-L/-D 要监听的本机端口已被占用。holders: [(进程名, pid)]。"""
 
-    def __init__(self, port, holders: list):
+    def __init__(self, port, holders: list, recoverable: bool = False):
         self.port = port
+        self.recoverable = recoverable
         self.holders = list(holders)
         who = "、".join(f"{n}(pid {p})" for n, p in self.holders)
         super().__init__(f"本机端口 {port} 已被占用" + (f"：{who}" if who else ""))
@@ -816,55 +920,35 @@ def _kill_wait(pid: int, timeout: float = 2.0) -> None:
             time.sleep(0.05)
 
 
+def _forward_owned(cfg: HostConfig, spec: dict, holders: list) -> bool:
+    ctl = control_path_for(cfg)
+    identity = _forward_socket_identity(ctl) if ctl else None
+    if identity is None or _read_forward_state(ctl, identity).get(_forward_identity(spec)) is not True:
+        return False
+    own = master_pid(cfg)
+    return bool(own and holders) and all(pid == own for _, pid in holders)
+
+
 def forward_force_apply(cfg: HostConfig, spec: dict, mfa: bool = False,
                         password: str = "") -> str:
-    """端口被 ssh 进程占着时的「强制释放并启用」。
+    """Recover only this application's recorded rule on its current master.
 
-    最常见的情形：这台主机的常驻主连接上早就挂着同一条转发（应用重启后
-    内存里的登记没了，主连接还活着），再 Start 一次就撞到自己。所以先在
-    主连接上 `-O cancel` 同一条规则再重试；还不行才结束占着端口的 ssh
-    进程。占端口的不是 ssh 进程时不动它——那可能是用户自己的服务。
-
-    本主机自己的主连接（`-O check` 报的 pid）绝不杀：`-O cancel` 撤不掉
-    多半是 ~/.ssh/config 里写死的 LocalForward，非 MFA 主机走 refresh_master
-    换一条新主连接，MFA 主机只能提示用户重登（重建要重输码）。
+    Never kill an SSH process or rebuild a master: either action can disconnect
+    unrelated terminal sessions and forwards. Credentials are retained in the
+    public signature for existing callers but no reauthentication is performed.
     """
     kind = str(spec.get("type") or "L").upper()
     host = spec.get("bind_host") or "127.0.0.1"
     port = spec.get("bind_port")
-    killed = False
+    forward_args(spec)
     if kind != "R" and local_port_busy(host, port):
-        try:
-            forward_apply(cfg, spec, cancel=True)
-        except (RuntimeError, subprocess.SubprocessError, OSError) as e:
-            # 主连接上本来就没这条（或主连接不在）→ 撤不掉很正常，走下一步
-            logger.debug("forward_force_apply: cancel on master failed: %s", e)
-        if local_port_busy(host, port):
-            holders = port_holders(port)
-            if not (holders and all(n == "ssh" for n, _ in holders)):
-                raise LocalPortBusy(port, holders)
-            own = master_pid(cfg)
-            own_holds = bool(own) and any(pid == own for _, pid in holders)
-            if own_holds and mfa:
-                raise RuntimeError(
-                    f"本机端口 {port} 被 {cfg.alias} 自己的主连接占着，"
-                    f"-O cancel 撤不掉；请「退出主连接」后重新 MFA 登录再启用")
-            for _, pid in holders:
-                if pid != own:
-                    _kill_wait(pid)
-                    killed = True
-            if own_holds:
-                refresh_master(cfg, password=password)
-    try:
-        return forward_apply(cfg, spec, cancel=False)
-    except MasterNotRunning:
-        if not killed:
-            raise
-        # 刚结束的那条 ssh 就是这台主机（已经死掉/陈旧）的主连接：说清楚
-        # 发生了什么，别甩「先做一次 MFA 登录」——普通主机根本没有 MFA
-        raise RuntimeError(
-            f"已结束占着本机端口 {port} 的 ssh 进程，但 {cfg.alias} "
-            f"的主连接不在了——请先建立主连接再启用转发") from None
+        holders = port_holders(port)
+        if not _forward_owned(cfg, spec, holders):
+            raise LocalPortBusy(port, holders)
+        forward_apply(cfg, spec, cancel=True)
+        # If cancellation did not release the listener, report the conflict.
+        # Do not escalate from cancelling one rule to terminating a connection.
+    return forward_apply(cfg, spec, cancel=False)
 
 
 def forward_apply(cfg: HostConfig, spec: dict, cancel: bool = False) -> str:
@@ -878,18 +962,24 @@ def forward_apply(cfg: HostConfig, spec: dict, cancel: bool = False) -> str:
     if not ctl:
         raise RuntimeError("ControlPath 建不出来（临时目录路径太长）")
     args = forward_args(spec)
+    identity = _forward_socket_identity(ctl)
     if not cancel and str(spec.get("type") or "L").upper() != "R":
         # -L/-D 在本机开监听：先自查端口占用，给出比 ssh 有用得多的报错
         host = spec.get("bind_host") or "127.0.0.1"
         port = spec.get("bind_port")
         if local_port_busy(host, port):
-            raise LocalPortBusy(port, port_holders(port))
-    proc = subprocess.run(
-        ["ssh", "-O", ("cancel" if cancel else "forward"),
-         "-o", f"ControlPath={ctl}", "-o", "LogLevel=ERROR",
-         *args, ssh_target(cfg)],
-        stdin=subprocess.DEVNULL, stdout=subprocess.PIPE,
-        stderr=subprocess.PIPE, timeout=15)
+            holders = port_holders(port)
+            raise LocalPortBusy(port, holders, _forward_owned(cfg, spec, holders))
+    try:
+        proc = subprocess.run(
+            ["ssh", "-O", ("cancel" if cancel else "forward"),
+             "-o", f"ControlPath={ctl}", "-o", "LogLevel=ERROR",
+             *args, ssh_target(cfg)],
+            stdin=subprocess.DEVNULL, stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE, timeout=15)
+    except subprocess.TimeoutExpired as exc:
+        _record_forward_state(ctl, identity, spec, None)
+        raise RuntimeError(t('remote.fwd_timeout')) from exc
     out = (proc.stdout or b"").decode("utf-8", "replace").strip()
     err = (proc.stderr or b"").decode("utf-8", "replace").strip()
     # OpenSSH 的 SSHMUX_COMMAND_CANCEL_FWD 在撤销失败时 error() 后仍
@@ -903,9 +993,10 @@ def forward_apply(cfg: HostConfig, spec: dict, cancel: bool = False) -> str:
         err = err or out
         tail = " · ".join([l for l in err.split("\n") if l.strip()][-2:])
         if "control socket connect" in err.lower() or "no such file" in err.lower():
-            raise MasterNotRunning("主连接不在了 —— 先做一次 MFA 登录再加转发")
+            raise MasterNotRunning(t('remote.fwd_master_gone'))
         raise RuntimeError(tail or f"ssh -O {'cancel' if cancel else 'forward'} "
                                    f"退出码 {proc.returncode}")
+    _record_forward_state(ctl, identity, spec, not cancel)
     return out
 
 

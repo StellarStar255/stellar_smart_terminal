@@ -2,8 +2,7 @@
 
 典型场景：这台主机的常驻主连接上早就挂着同一条转发（应用重启后内存
 登记丢了、主连接还活着），再 Start 一次就撞到自己。强制释放 = 先在主
-连接上 `-O cancel` 同一条再重试；还不行才结束占端口的 ssh 进程；占端口
-的不是 ssh 进程时绝不动它。
+连接上 `-O cancel` 同一条再重试；只有确认本应用拥有这条规则才允许撤销；绝不结束任何占用进程。
 
     QT_QPA_PLATFORM=offscreen python3 -m pytest tests/test_port_forward_force.py -v
 """
@@ -60,6 +59,7 @@ class ForceApplyLogicTest(unittest.TestCase):
             return _proc(0)
 
         with mock.patch.object(ssh_control, 'local_port_busy', side_effect=lambda h, p: busy.pop(0)), \
+             mock.patch.object(ssh_control, '_forward_owned', return_value=True), \
              mock.patch.object(ssh_control.subprocess, 'run', side_effect=run), \
              mock.patch.object(ssh_control, '_kill_wait') as kill:
             ssh_control.forward_force_apply(self.host, _SPEC)
@@ -67,14 +67,16 @@ class ForceApplyLogicTest(unittest.TestCase):
         ops = [a[2] for a in calls if a[0] == 'ssh' and a[1] == '-O']
         self.assertEqual(ops, ['cancel', 'forward'])
 
-    def test_force_kills_ssh_holder_when_cancel_does_not_free(self):
-        busy = [True, True, False]    # 初查占用；cancel 后仍占用；kill 后 forward 前的自查空闲
-        with mock.patch.object(ssh_control, 'local_port_busy', side_effect=lambda h, p: busy.pop(0)), \
+    def test_force_refuses_foreign_ssh_without_cancel_or_kill(self):
+        with mock.patch.object(ssh_control, 'local_port_busy', return_value=True), \
              mock.patch.object(ssh_control, 'port_holders', return_value=[('ssh', 14527)]), \
-             mock.patch.object(ssh_control.subprocess, 'run', return_value=_proc(0)), \
+             mock.patch.object(ssh_control, '_forward_owned', return_value=False), \
+             mock.patch.object(ssh_control, 'forward_apply') as apply, \
              mock.patch.object(ssh_control, '_kill_wait') as kill:
-            ssh_control.forward_force_apply(self.host, _SPEC)
-        kill.assert_called_once_with(14527)
+            with self.assertRaises(ssh_control.LocalPortBusy):
+                ssh_control.forward_force_apply(self.host, _SPEC)
+        apply.assert_not_called()
+        kill.assert_not_called()
 
     def test_force_refuses_to_kill_non_ssh_holder(self):
         busy = [True, True]
@@ -106,7 +108,7 @@ class ForceApplyDialogTest(unittest.TestCase):
         forced = []
 
         def apply_cb(spec):
-            raise ssh_control.LocalPortBusy(6013, [('ssh', 14527)])
+            raise ssh_control.LocalPortBusy(6013, [('ssh', 14527)], recoverable=True)
 
         dlg = self._dialog(apply_cb, lambda spec: forced.append(spec))
         # 用户点了「强制释放并启用」（第一个加进去的按钮）

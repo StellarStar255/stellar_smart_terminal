@@ -922,6 +922,23 @@ TRANSLATIONS = {
     "remote.fwd_auto": {"zh": "连上后自动启用这条", "en": "Start this one on connect"},
     "remote.fwd_auto_short": {"zh": "自动", "en": "auto"},
     "remote.fwd_start": {"zh": "启用", "en": "Start"},
+    "remote.fwd_refresh": {"zh": "刷新状态", "en": "Refresh"},
+    "remote.fwd_checking": {"zh": "正在核对端口转发状态…", "en": "Checking forwarding status…"},
+    "remote.fwd_state_running": {"zh": "运行中", "en": "Running"},
+    "remote.fwd_state_stopped": {"zh": "已停止", "en": "Stopped"},
+    "remote.fwd_state_unknown": {"zh": "状态待确认", "en": "Unknown status"},
+    "remote.fwd_state_starting": {"zh": "启动中…", "en": "Starting…"},
+    "remote.fwd_state_stopping": {"zh": "停止中…", "en": "Stopping…"},
+    "remote.fwd_state_failed": {"zh": "操作失败", "en": "Failed"},
+    "remote.fwd_restart": {"zh": "重启", "en": "Restart"},
+    "remote.fwd_unknown_hint": {"zh": "无法确认监听是否属于此规则。可刷新状态或查看启停时的详细错误；不会自动结束其他连接。", "en": "The listener cannot be confirmed as this rule. Refresh or inspect the operation error; other connections will not be terminated automatically."},
+    "remote.fwd_status_invalid": {"zh": "未能取得完整的转发状态，请重试。", "en": "Could not read all forwarding states. Please retry."},
+    "remote.fwd_bind_permission": {"zh": "没有权限监听 {host}:{port}，请检查端口权限或使用其他端口。{error}", "en": "Permission denied listening on {host}:{port}. Check permissions or choose another port. {error}"},
+    "remote.fwd_bind_address": {"zh": "本机没有可用的绑定地址 {host}，请检查本机网卡地址。{error}", "en": "Bind address {host} is unavailable on this computer. Check the local network address. {error}"},
+    "remote.fwd_bind_dns": {"zh": "无法解析绑定地址 {host}，请检查地址拼写。{error}", "en": "Could not resolve bind address {host}. Check the address spelling. {error}"},
+    "remote.fwd_bind_other": {"zh": "无法监听 {host}:{port}：{error}", "en": "Could not listen on {host}:{port}: {error}"},
+    "remote.fwd_timeout": {"zh": "主连接在 15 秒内未响应，转发结果待确认。请刷新状态后再操作。", "en": "The master did not respond within 15 seconds. The result is uncertain; refresh status before retrying."},
+    "remote.fwd_master_gone": {"zh": "主连接已断开，请先重新连接主机，再操作端口转发。", "en": "The master connection is gone. Reconnect to the host before managing forwards."},
     "remote.fwd_stop": {"zh": "停用", "en": "Stop"},
     "remote.fwd_delete": {"zh": "删除", "en": "Delete"},
     "remote.fwd_close": {"zh": "完成", "en": "Done"},
@@ -953,15 +970,10 @@ TRANSLATIONS = {
               "forwarding is unavailable.",
     },
     "remote.fwd_port_busy_force": {
-        "zh": "占着端口的是 ssh 进程，多半是上次残留的同一条转发。要强制释放吗？\n"
-              "会先在主连接上撤销这条转发再重试；还不行就结束那个 ssh 进程"
-              "（如果它是某台主机的主连接，那台主机的会话会断开）。",
-        "en": "The port is held by an ssh process, most likely a leftover of this same "
-              "forward. Force-release it?\nThe forward is first cancelled on the master "
-              "connection and retried; failing that, the ssh process is killed (if it is "
-              "another host's master connection, that host's session will drop).",
+        "zh": "已确认是本应用在当前主连接上创建的同一条转发。要撤销该规则并重新启用吗？其他 SSH 连接不会被结束。",
+        "en": "This exact rule was created by this app on the current master. Cancel and restart it? Other SSH connections will not be terminated.",
     },
-    "remote.fwd_force_btn": {"zh": "强制释放并启用", "en": "Force-release and start"},
+    "remote.fwd_force_btn": {"zh": "恢复并启用", "en": "Recover and start"},
     "remote.fwd_failed": {"zh": "端口转发失败（{rule}）：{error}",
                            "en": "Port forward failed ({rule}): {error}"},
     "remote.mfa_drop_master": {

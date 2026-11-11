@@ -95,6 +95,10 @@ Automatic recording is off. Start it manually from History or File to capture on
 
 Check rules in a host’s Port Forwarding dialog and save a named group. Select it to start or stop checked ports together; selecting a group does not change running ports. Drag rules to reorder. Groups and order are saved per host.
 
+打开窗口或点击“刷新状态”时，会核对当前主连接和本机监听。成功的启停记录与该主连接绑定，应用重开后可恢复状态；无法确认的规则显示“状态待确认”。远程转发依据上述记录判断，SSH 不提供通用的远程监听列表查询。“重启”会先停止所选规则，停止失败则不继续启动；操作期间禁用重复操作，列表显示进度，失败原因可在提示中查看。恢复转发只撤销本应用在当前主连接上记录的同一条规则，不结束其他 SSH 进程，也不重建主连接。
+
+Open the dialog or use Refresh to check the current master and local listeners. Records tied to that master restore status after reopening the app; unverifiable rules show Unknown status. Remote forwards rely on these records. Restart stops the selected rule before starting it and stops if cancellation fails. Controls are disabled during operations. Recovery never kills another SSH process or rebuilds the master.
+
 ## Download / 下载安装
 
 无需安装 Python，从 [**Releases**](https://github.com/StellarStar255/stellar_smart_terminal/releases/latest) 下载即可使用。
