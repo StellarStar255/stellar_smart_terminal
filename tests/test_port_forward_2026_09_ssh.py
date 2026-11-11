@@ -109,7 +109,7 @@ class DialogDeleteKeepsRuleWhenCancelFails(unittest.TestCase):
         with mock.patch.object(ssh_control, 'is_supported', return_value=True), \
              mock.patch.object(ssh_control, 'control_path_for', return_value='/tmp/fwd-test'), \
              mock.patch.object(ssh_control.subprocess, 'run', return_value=_proc(
-                 0, err=b'mux_client_forward: forwarding request failed: port not forwarded\n'
+                 0, err=b'mux_client_forward: forwarding request failed: permission denied\n'
                         b'master cancel forward request failed\n')), \
              mock.patch.object(QMessageBox, 'warning') as warn:
             self.assertFalse(dlg._apply_selected(True))

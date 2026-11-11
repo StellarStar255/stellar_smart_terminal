@@ -927,6 +927,8 @@ TRANSLATIONS = {
     "remote.fwd_state_running": {"zh": "运行中", "en": "Running"},
     "remote.fwd_state_stopped": {"zh": "已停止", "en": "Stopped"},
     "remote.fwd_state_unknown": {"zh": "状态待确认", "en": "Unknown status"},
+    "remote.fwd_state_invalid": {"zh": "规则无效", "en": "Invalid rule"},
+    "remote.fwd_rule_invalid": {"zh": "转发规则格式无效，请删除后重新添加。", "en": "Invalid forwarding rule format. Delete it and add a new rule."},
     "remote.fwd_state_starting": {"zh": "启动中…", "en": "Starting…"},
     "remote.fwd_state_stopping": {"zh": "停止中…", "en": "Stopping…"},
     "remote.fwd_state_failed": {"zh": "操作失败", "en": "Failed"},

@@ -751,41 +751,45 @@ def forward_statuses(cfg: HostConfig, specs: list) -> list:
     Remote listeners cannot be enumerated through portable OpenSSH mux commands;
     only successful operations recorded for this exact master are trusted.
     """
+    result = ['invalid' if forward_rule_error(spec) else None for spec in specs]
+    if all(state == 'invalid' for state in result):
+        return result
     ctl = control_path_for(cfg)
     identity = _forward_socket_identity(ctl) if ctl else None
     pid = master_pid(cfg)
     if not pid:
-        return ['unknown' if identity else 'stopped'] * len(specs)
+        return [state or ('unknown' if identity else 'stopped') for state in result]
     records = _read_forward_state(ctl, identity) if identity else {}
-    result = []
-    for spec in specs:
+    for i, spec in enumerate(specs):
+        if result[i] == 'invalid':
+            continue
         recorded = records.get(_forward_identity(spec))
         if str(spec.get('type') or 'L').upper() == 'R':
-            result.append('running' if recorded is True else
-                          'stopped' if recorded is False else 'unknown')
+            result[i] = ('running' if recorded is True else
+                         'stopped' if recorded is False else 'unknown')
             continue
         try:
             busy = local_port_busy(spec.get('bind_host') or '127.0.0.1',
                                    spec.get('bind_port'))
         except OSError:
-            result.append('unknown')
+            result[i] = 'unknown'
             continue
         if not busy:
-            result.append('stopped')
+            result[i] = 'stopped'
         else:
             holders = port_holders(spec.get('bind_port'))
             own_only = bool(holders) and all(owner == pid for _, owner in holders)
-            result.append('running' if recorded is True and own_only else 'unknown')
+            result[i] = 'running' if recorded is True and own_only else 'unknown'
     # The connection may have been replaced while lsof was running.
     if identity != (_forward_socket_identity(ctl) if ctl else None):
-        return ['unknown'] * len(specs)
+        return ['invalid' if state == 'invalid' else 'unknown' for state in result]
     return result
 
 
 def _fwd_port(value) -> str:
     try:
         n = int(value)
-    except (TypeError, ValueError):
+    except (TypeError, ValueError, OverflowError):
         raise ValueError(f"端口不合法: {value}")
     if not 1 <= n <= 65535:
         raise ValueError(f"端口要在 1-65535 之间: {value}")
@@ -801,6 +805,8 @@ def _fwd_host(value, default: str) -> str:
 
 def forward_args(spec: dict) -> list:
     """把一条转发规则转成 ssh 参数（-L/-R/-D）。规则不合法直接抛 ValueError。"""
+    if not isinstance(spec, dict):
+        raise ValueError(t('remote.fwd_rule_invalid'))
     kind = str(spec.get("type") or "L").upper()
     if kind not in FORWARD_TYPES:
         raise ValueError(f"未知的转发类型: {kind}")
@@ -809,6 +815,15 @@ def forward_args(spec: dict) -> list:
         return ["-D", bind]
     dest = f'{_fwd_host(spec.get("dest_host"), "127.0.0.1")}:{_fwd_port(spec.get("dest_port"))}'
     return [("-R" if kind == "R" else "-L"), f"{bind}:{dest}"]
+
+
+def forward_rule_error(spec) -> str:
+    """Validate one saved rule without preventing its neighbours from running."""
+    try:
+        forward_args(spec)
+    except ValueError as exc:
+        return str(exc)
+    return ''
 
 
 def forward_label(spec: dict) -> str:
@@ -982,6 +997,18 @@ def forward_apply(cfg: HostConfig, spec: dict, cancel: bool = False) -> str:
         raise RuntimeError(t('remote.fwd_timeout')) from exc
     out = (proc.stdout or b"").decode("utf-8", "replace").strip()
     err = (proc.stderr or b"").decode("utf-8", "replace").strip()
+    # OpenSSH explicitly confirms that this exact rule is absent. Cancellation
+    # is idempotent in this case, including the generic failure summary that
+    # newer clients append. Never hide other errors (e.g. a dead control socket).
+    missing_messages = {
+        'mux_client_forward: forwarding request failed: port not forwarded',
+        'forwarding request failed: port not forwarded',
+    }
+    error_lines = {line.strip().lower() for line in err.splitlines() if line.strip()}
+    if (cancel and error_lines & missing_messages
+            and error_lines <= missing_messages | {'master cancel forward request failed'}):
+        _record_forward_state(ctl, identity, spec, False)
+        return out
     # OpenSSH 的 SSHMUX_COMMAND_CANCEL_FWD 在撤销失败时 error() 后仍
     # exit(0)，不能只信退出码，否则 UI 会把还活着的转发标成已停用。
     # 上面固定 ERROR 级别，避免 ssh_config 的 LogLevel=QUIET 吞掉错误。

@@ -99,6 +99,10 @@ Check rules in a host’s Port Forwarding dialog and save a named group. Select 
 
 Open the dialog or use Refresh to check the current master and local listeners. Records tied to that master restore status after reopening the app; unverifiable rules show Unknown status. Remote forwards rely on these records. Restart stops the selected rule before starting it and stops if cancellation fails. Controls are disabled during operations. Recovery never kills another SSH process or rebuilds the master.
 
+窗口显示期间每 15 秒在后台检查状态，不自动重连或启停转发。后台检查不禁用界面，不重叠执行；用户操作后会丢弃过期结果。后台错误显示在规则状态和悬浮提示中，不反复弹窗。坏规则单独显示“规则无效”和错误原因，不影响其他规则的检查与启动。SSH 明确确认规则已不存在时，停止视为成功，重启或删除可继续；其他撤销错误仍会中止操作。
+
+While visible, the dialog checks status in the background every 15 seconds without reconnecting or changing forwards. Controls stay available, checks never overlap, and stale results are discarded. Background errors appear inline without repeated popups. Invalid rules do not block healthy ones. An explicit confirmation that a rule is already absent counts as a successful stop; other errors still abort the operation.
+
 ## Download / 下载安装
 
 无需安装 Python，从 [**Releases**](https://github.com/StellarStar255/stellar_smart_terminal/releases/latest) 下载即可使用。

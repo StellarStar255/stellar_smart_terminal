@@ -74,6 +74,8 @@ In a host’s **Port Forwarding** dialog, check the rules you want and choose **
 
 Opening the dialog or choosing **Refresh** checks forwarding status against the current master connection and local listeners. Successful operations are recorded for that master so status can survive an app restart. Unverified rules show **Unknown status**; remote forwards rely on this record because SSH does not expose a portable list of remote listeners. **Restart** stops the selected rule before starting it, and stops if cancellation fails. Controls are disabled during operations, with progress and failure details shown on the rule. Recovery only cancels this app’s recorded rule on its current master; it never terminates another SSH process or rebuilds the master connection.
 
+While the dialog is visible, status is checked in the background every 15 seconds without reconnecting or starting/stopping forwards. Background checks keep controls available, never overlap, and discard results made stale by your operations. Errors appear in the row’s status and tooltip without repeated popups. Invalid rules are reported individually so other rules can still be checked and started. If SSH explicitly confirms that a rule is already absent, stopping succeeds and restarting or deleting it can continue; other cancellation errors still stop the operation.
+
 ## Download
 
 No Python required — grab a build from the [**Releases**](https://github.com/StellarStar255/stellar_smart_terminal/releases/latest) page.

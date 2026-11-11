@@ -11,6 +11,7 @@ UI 有两个状态：
 """
 import atexit
 import bisect
+import copy
 import os
 import subprocess
 import posixpath
@@ -19,6 +20,7 @@ import tempfile
 import threading
 import time
 from collections import deque
+from concurrent.futures import ThreadPoolExecutor
 from typing import Optional
 
 from PyQt6.QtWidgets import (
@@ -458,7 +460,7 @@ class _ForwardsDialog(QDialog):
     def __init__(self, parent=None, *, alias: str, rules: list,
                  apply_cb=None, cancel_cb=None, active: Optional[set] = None,
                  force_cb=None, groups=None, selected_group="", save_cb=None,
-                 status_cb=None):
+                 status_cb=None, status_runner=None):
         super().__init__(parent)
         self._alias = alias
         self._apply_cb = apply_cb          # (spec) -> None，抛异常表示失败
@@ -466,6 +468,18 @@ class _ForwardsDialog(QDialog):
         self._force_cb = force_cb          # (spec) -> None：端口被 ssh 占着时强制释放再挂
         self._active = set(active or ())   # 已生效规则的 key
         self._status_cb = status_cb
+        self._status_runner = status_runner or (lambda fn: fn())
+        self._status_executor = None
+        self._status_pending = None
+        self._status_revision = 0
+        self._status_closed = False
+        self._status_timer = QTimer(self)
+        self._status_timer.setInterval(15000)
+        self._status_timer.timeout.connect(self._start_status_refresh)
+        self._status_poll_timer = QTimer(self)
+        self._status_poll_timer.setInterval(100)
+        self._status_poll_timer.timeout.connect(self._poll_status_refresh)
+        self.finished.connect(self._stop_status_refresh)
         self._states = {}
         self._operation_running = False
         self._uncertain = set()
@@ -664,6 +678,12 @@ class _ForwardsDialog(QDialog):
         item.setFlags(item.flags() | Qt.ItemFlag.ItemIsUserCheckable)
         item.setCheckState(Qt.CheckState.Unchecked)
         self._list.addItem(item)
+        error = ssh_control.forward_rule_error(spec)
+        if error:
+            key = self.rule_key(spec)
+            self._states[key] = 'invalid'
+            self._errors[key] = error
+            self._active.discard(key)
         self._refresh_item(item)
         return item
 
@@ -712,41 +732,119 @@ class _ForwardsDialog(QDialog):
             t('remote.fwd_unknown_hint') if state == 'unknown' else ''))
 
     def _refresh_statuses(self):
-        if self._batch_running or self._operation_running or self._status_cb is None:
+        if (self._batch_running or self._operation_running or self._status_cb is None
+                or self._status_pending is not None):
             return
+        self._status_revision += 1
         self._operation_running = True
         self.setEnabled(False)
         try:
-            states = self._status_cb(self.rules())
-            if len(states) != self._list.count():
-                raise RuntimeError(t('remote.fwd_status_invalid'))
-            for i, state in enumerate(states):
-                item = self._list.item(i)
-                key = self.rule_key(item.data(_ROLE_ENTRY))
-                self._states[key] = state
-                self._errors.pop(key, None)
-                self._uncertain.add(key) if state == 'unknown' else self._uncertain.discard(key)
-                self._active.add(key) if state == 'running' else self._active.discard(key)
-                self._refresh_item(item)
+            specs = self.rules()
+            states = self._status_runner(lambda: self._status_cb(specs))
+            self._apply_statuses(states)
         except Exception as exc:
-            for i in range(self._list.count()):
-                item = self._list.item(i)
-                key = self.rule_key(item.data(_ROLE_ENTRY))
-                self._states[key] = 'unknown'
-                self._uncertain.add(key)
-                self._active.discard(key)
-                self._errors[key] = str(exc)
-                self._refresh_item(item)
+            self._apply_status_error(exc)
             QMessageBox.warning(self, t('remote.fwd_title', host=self._alias), str(exc))
         finally:
             self._operation_running = False
             self.setEnabled(True)
             self._sync_action_buttons()
 
+    def _apply_statuses(self, states):
+        if (len(states) != self._list.count() or any(
+                state not in ('running', 'stopped', 'unknown', 'invalid') for state in states)):
+            raise RuntimeError(t('remote.fwd_status_invalid'))
+        for i, state in enumerate(states):
+            item = self._list.item(i)
+            spec = item.data(_ROLE_ENTRY)
+            key = self.rule_key(spec)
+            error = ssh_control.forward_rule_error(spec)
+            if error:
+                state = 'invalid'
+            self._states[key] = state
+            self._errors.pop(key, None)
+            if error:
+                self._errors[key] = error
+            self._uncertain.add(key) if state == 'unknown' else self._uncertain.discard(key)
+            self._active.add(key) if state == 'running' else self._active.discard(key)
+            self._refresh_item(item)
+        self._sync_action_buttons()
+
+    def _apply_status_error(self, error):
+        self._apply_statuses(['unknown'] * self._list.count())
+        for i in range(self._list.count()):
+            item = self._list.item(i)
+            key = self.rule_key(item.data(_ROLE_ENTRY))
+            if self._states.get(key) != 'invalid':
+                self._errors[key] = str(error)
+                self._refresh_item(item)
+
+    def showEvent(self, event):
+        super().showEvent(event)
+        self._status_closed = False
+        if self._status_cb is not None:
+            self._status_timer.start()
+            if self._status_pending is not None:
+                self._status_poll_timer.start()
+
+    def hideEvent(self, event):
+        self._status_revision += 1
+        self._status_timer.stop()
+        self._status_poll_timer.stop()
+        super().hideEvent(event)
+
+    def _start_status_refresh(self):
+        if (self._status_closed or not self.isVisible() or self._status_cb is None
+                or self._operation_running or self._batch_running or self._status_pending is not None):
+            return
+        if self._status_executor is None:
+            self._status_executor = ThreadPoolExecutor(max_workers=1, thread_name_prefix='forward-status')
+            # Parent destruction can bypass QDialog.finished. This cleanup uses
+            # only the executor, never an already-destroyed Qt object.
+            executor = self._status_executor
+            self.destroyed.connect(lambda _=None, pool=executor:
+                                   pool.shutdown(wait=False, cancel_futures=True))
+        specs = copy.deepcopy(self.rules())
+        future = self._status_executor.submit(self._status_cb, specs)
+        self._status_pending = (future, specs, self._status_revision)
+        self._status_poll_timer.start()
+
+    def _poll_status_refresh(self):
+        if self._status_pending is None:
+            self._status_poll_timer.stop()
+            return
+        future, specs, revision = self._status_pending
+        if not future.done():
+            return
+        self._status_pending = None
+        self._status_poll_timer.stop()
+        if (self._status_closed or not self.isVisible() or self._operation_running
+                or self._batch_running or revision != self._status_revision or specs != self.rules()):
+            return
+        try:
+            self._apply_statuses(future.result())
+        except Exception as exc:
+            # Background failures are visible as unknown state, not repeated
+            # modal popups. Explicit manual refresh still provides an error.
+            self._apply_status_error(exc)
+
+    def _stop_status_refresh(self, *_args):
+        self._status_closed = True
+        self._status_revision += 1
+        self._status_timer.stop()
+        self._status_poll_timer.stop()
+        if self._status_pending is not None:
+            self._status_pending[0].cancel()
+            self._status_pending = None
+        if self._status_executor is not None:
+            self._status_executor.shutdown(wait=False, cancel_futures=True)
+            self._status_executor = None
+
     def _sync_action_buttons(self):
         item = self._list.currentItem()
         key = self.rule_key(item.data(_ROLE_ENTRY)) if item else None
-        enabled = item is not None and not self._operation_running and not self._batch_running
+        enabled = (item is not None and not self._operation_running and not self._batch_running
+                   and self._states.get(key) != 'invalid')
         self._start_btn.setEnabled(enabled and key not in self._active)
         self._stop_btn.setEnabled(enabled and (key in self._active or key in self._uncertain))
         self._restart_btn.setEnabled(enabled)
@@ -769,6 +867,7 @@ class _ForwardsDialog(QDialog):
         item = self._list.currentItem()
         if item is None:
             return
+        self._status_revision += 1
         spec = dict(item.data(_ROLE_ENTRY) or {})
         spec["auto"] = bool(state)
         item.setData(_ROLE_ENTRY, spec)
@@ -794,6 +893,7 @@ class _ForwardsDialog(QDialog):
                 QMessageBox.warning(self, t("remote.fwd_title", host=self._alias),
                                     t("remote.fwd_duplicate"))
                 return
+        self._status_revision += 1
         self._list.setCurrentItem(self._add_item(spec))
         self._bind_port.clear()
         self._dest_port.clear()
@@ -811,6 +911,7 @@ class _ForwardsDialog(QDialog):
             if not self._apply_selected(True):
                 return
         key = self.rule_key(spec)
+        self._status_revision += 1
         self._list.takeItem(self._list.row(item))
         for name in self._groups:
             self._groups[name] = [member for member in self._groups[name] if member != key]
@@ -834,6 +935,7 @@ class _ForwardsDialog(QDialog):
     def _apply_item(self, item, cancel, errors=None, restart=False):
         if self._operation_running or item is None:
             return False
+        self._status_revision += 1
         self._operation_running = True
         self.setEnabled(False)
         try:
@@ -861,6 +963,14 @@ class _ForwardsDialog(QDialog):
             return False
         spec = item.data(_ROLE_ENTRY)
         key = self.rule_key(spec)
+        error = ssh_control.forward_rule_error(spec)
+        if error:
+            self._set_rule_state(item, 'invalid', error)
+            if errors is not None:
+                errors.append(f"{ssh_control.forward_label(spec)}: {error}")
+            else:
+                QMessageBox.warning(self, t('remote.fwd_title', host=self._alias), error)
+            return False
         if (cancel and key not in self._active and key not in self._uncertain
                 or not cancel and key in self._active):
             return True
@@ -1034,6 +1144,7 @@ class _ForwardsDialog(QDialog):
 
     def _on_rules_reordered(self, *_args):
         # InternalMove preserves item metadata, check states, and active identities.
+        self._status_revision += 1
         self._persist_state()
 
     def _apply_checked(self, cancel):
@@ -2781,8 +2892,8 @@ class RemoteExplorerPanel(QWidget, explorer_common.TransferJobHost):
                 host, spec, mfa=self._is_mfa_host(host.alias),
                 password=self.get_cached_password(host.alias) or "")),
             active=active,
-            status_cb=lambda specs: self._run_blocking(
-                lambda: ssh_control.forward_statuses(host, specs), t('remote.fwd_checking')),
+            status_cb=lambda specs: ssh_control.forward_statuses(host, specs),
+            status_runner=lambda fn: self._run_blocking(fn, t('remote.fwd_checking')),
         )
         dlg.exec()
         self._save_forwards(host.alias, dlg.rules(), dlg.groups(), dlg.selected_group())
@@ -2830,6 +2941,8 @@ class RemoteExplorerPanel(QWidget, explorer_common.TransferJobHost):
             states = ssh_control.forward_statuses(host, pending)
             for spec, state in zip(pending, states):
                 try:
+                    if state == 'invalid':
+                        raise ValueError(ssh_control.forward_rule_error(spec))
                     if state != 'running':
                         ssh_control.forward_apply(host, spec, cancel=False)
                     ok.append(_ForwardsDialog.rule_key(spec))

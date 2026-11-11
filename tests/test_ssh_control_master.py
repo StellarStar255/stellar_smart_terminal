@@ -793,7 +793,7 @@ class TestPortForwarding(unittest.TestCase):
         # OpenSSH 的 SSHMUX_COMMAND_CANCEL_FWD 分支报错后仍 exit(0)。
         # 老版本可能只有第一行，新版本还会附上第二行。
         errors = (
-            b'mux_client_forward: forwarding request failed: port not forwarded\r\n',
+            b'mux_client_forward: forwarding request failed: permission denied\r\n',
             b'master cancel forward request failed\r\n',
             b'Master refused forwarding request: Permission denied\r\n',
         )
