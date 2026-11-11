@@ -286,7 +286,8 @@ def test_start_timeout_is_uncertain_and_can_be_stopped(dialog):
 
 
 @pytest.mark.parametrize('rc', [0, 255])
-@pytest.mark.parametrize('summary', ['', '\nmaster cancel forward request failed'])
+@pytest.mark.parametrize('summary', ['', '\nmaster cancel forward request failed',
+                                     '\nmuxclient: master cancel forward request failed'])
 def test_cancel_absent_rule_is_success_and_records_stopped(master, rc, summary):
     import subprocess
     cfg, ctl = master

@@ -45,6 +45,7 @@ from explorer_common import _TransferRateTracker, _BYTE_BAR_SCALE  # 共享的�
 from explorer_common import _BreadcrumbBar  # 与本地 Explorer 同款面包屑
 import remote_bookmarks
 import ssh_control
+import forward_diagnostics
 from ssh_session import (
     HostConfig, RemoteEntry, SSHSession, parse_ssh_config, append_ssh_config_host,
     rename_ssh_config_host, remove_ssh_config_host, update_ssh_config_host,
@@ -460,12 +461,13 @@ class _ForwardsDialog(QDialog):
     def __init__(self, parent=None, *, alias: str, rules: list,
                  apply_cb=None, cancel_cb=None, active: Optional[set] = None,
                  force_cb=None, groups=None, selected_group="", save_cb=None,
-                 status_cb=None, status_runner=None):
+                 status_cb=None, status_runner=None, probe_cb=None):
         super().__init__(parent)
         self._alias = alias
         self._apply_cb = apply_cb          # (spec) -> None，抛异常表示失败
         self._cancel_cb = cancel_cb
         self._force_cb = force_cb          # (spec) -> None：端口被 ssh 占着时强制释放再挂
+        self._probe_cb = probe_cb
         self._active = set(active or ())   # 已生效规则的 key
         self._status_cb = status_cb
         self._status_runner = status_runner or (lambda fn: fn())
@@ -496,6 +498,7 @@ class _ForwardsDialog(QDialog):
         self.setMinimumWidth(720)
         self.setStyleSheet("""
             QDialog { background-color: #1e1e2e; }
+            QLabel { color: #eaeaea; }
             QLabel#title { color: #eaeaea; font-size: 15px; font-weight: 600; }
             QLabel#hint { color: #8a8aa0; font-size: 12px; }
             QLabel#field { color: #b8b8cc; font-size: 12px; }
@@ -637,6 +640,14 @@ class _ForwardsDialog(QDialog):
         refresh_btn.clicked.connect(self._refresh_statuses)
         refresh_btn.setVisible(status_cb is not None)
         row.addWidget(refresh_btn)
+        self._probe_btn = QPushButton(t('remote.fwd_probe'))
+        self._probe_btn.setVisible(probe_cb is not None)
+        self._probe_btn.clicked.connect(self._probe_selected)
+        row.addWidget(self._probe_btn)
+        layout.addLayout(row)
+        row = QHBoxLayout()
+        row.setSpacing(8)
+        row.addStretch(1)
         start_btn = self._start_btn = QPushButton(t("remote.fwd_start"))
         start_btn.clicked.connect(lambda: self._apply_selected(False))
         row.addWidget(start_btn)
@@ -848,6 +859,7 @@ class _ForwardsDialog(QDialog):
         self._start_btn.setEnabled(enabled and key not in self._active)
         self._stop_btn.setEnabled(enabled and (key in self._active or key in self._uncertain))
         self._restart_btn.setEnabled(enabled)
+        self._probe_btn.setEnabled(enabled and self._probe_cb is not None)
 
     def _sync_dest_enabled(self):
         is_socks = self._type.currentData() == "D"
@@ -931,6 +943,62 @@ class _ForwardsDialog(QDialog):
         if self._batch_running:
             return False
         return self._apply_item(self._list.currentItem(), False, restart=True)
+
+    def _probe_selected(self):
+        item = self._list.currentItem()
+        if (item is None or self._probe_cb is None or self._batch_running
+                or self._operation_running):
+            return False
+        spec = item.data(_ROLE_ENTRY)
+        error = ssh_control.forward_rule_error(spec)
+        if error:
+            QMessageBox.warning(self, t('remote.fwd_probe'), error)
+            return False
+        target = None
+        if str(spec.get('type') or 'L').upper() == 'D':
+            target, accepted = QInputDialog.getText(self, t('remote.fwd_probe'),
+                                                   t('remote.fwd_probe_target_prompt'))
+            if not accepted:
+                return False
+            try:
+                forward_diagnostics.parse_target(target)
+            except ValueError as exc:
+                QMessageBox.warning(self, t('remote.fwd_probe'), str(exc))
+                return False
+        self._status_revision += 1
+        self._operation_running = True
+        self.setEnabled(False)
+        try:
+            result = self._probe_cb(spec, target)
+            QMessageBox.information(self, t('remote.fwd_probe'), self._probe_text(spec, result))
+            return True
+        except Exception as exc:
+            QMessageBox.warning(self, t('remote.fwd_probe'), str(exc))
+            return False
+        finally:
+            self._operation_running = False
+            self.setEnabled(True)
+            self._sync_action_buttons()
+
+    @staticmethod
+    def _probe_text(spec, result):
+        def describe(check):
+            text = t('remote.fwd_probe_status_' + check.status)
+            return text + (' — ' + check.detail if check.detail else '')
+        type_key = {'L': 'remote.fwd_type_local', 'R': 'remote.fwd_type_remote',
+                    'D': 'remote.fwd_type_socks'}[result.kind]
+        heading = f'{t(type_key)} {result.listen_host}:{result.listen_port}'
+        if result.kind != 'D':
+            heading += f' → {result.target_host}:{result.target_port}'
+        return '\n\n'.join([
+            heading,
+            t('remote.fwd_probe_forward', state=t('remote.fwd_state_' + result.forward_state)),
+            t('remote.fwd_probe_listener_' + result.kind, host=result.listen_host,
+              port=result.listen_port, result=describe(result.listener)),
+            t('remote.fwd_probe_target_' + result.kind, host=result.target_host,
+              port=result.target_port, result=describe(result.target)),
+            t('remote.fwd_probe_note'),
+        ])
 
     def _apply_item(self, item, cancel, errors=None, restart=False):
         if self._operation_running or item is None:
@@ -2894,6 +2962,9 @@ class RemoteExplorerPanel(QWidget, explorer_common.TransferJobHost):
             active=active,
             status_cb=lambda specs: ssh_control.forward_statuses(host, specs),
             status_runner=lambda fn: self._run_blocking(fn, t('remote.fwd_checking')),
+            probe_cb=lambda spec, target: self._run_blocking(
+                lambda: forward_diagnostics.check_forward(host, spec, target),
+                t('remote.fwd_probe_checking')),
         )
         dlg.exec()
         self._save_forwards(host.alias, dlg.rules(), dlg.groups(), dlg.selected_group())

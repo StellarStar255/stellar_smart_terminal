@@ -129,6 +129,18 @@ open "dist/Stellar Smart Terminal.app"
 
 如需从头重新打包,删掉 `build/`、`dist/`(必要时连同 `.venv-build/`)再跑脚本。
 
+### 真实 SSH 回归 / Real SSH regression
+
+端口转发另有真实 OpenSSH 端到端测试，使用临时密钥、独立配置和仅监听本机回环地址的 sshd/测试服务，不修改用户的 SSH 配置或已有主连接。测试覆盖本地、远程、SOCKS5 流量、连续停启、应用进程重开、断线恢复、外部端口保护，以及目标服务正常/关闭时的手动检测结果。需要 POSIX 环境中的 `ssh`、`sshd`、`ssh-keygen`、`lsof`。
+
+```bash
+STELLAR_SSH_INTEGRATION=1 QT_QPA_PLATFORM=offscreen .venv-build/bin/python -m pytest tests/test_openssh_forward_integration.py -v
+```
+
+默认完整测试会跳过该套件；显式启用后，依赖缺失或 SSH 服务启动失败均视为失败，不会静默跳过。Linux CI 单独安装依赖并运行该套件。Windows 不支持 ControlMaster，因此跳过。手动检测只确认 TCP/SOCKS5 可连接性，不验证业务协议或登录；远端 TCP 检测需要可执行命令及 Python，否则结果为“无法确认”。
+
+These opt-in tests run real OpenSSH against isolated loopback services and temporary keys/configuration. They do not modify user SSH configuration or existing masters. Linux CI runs them separately; Windows skips them because it has no ControlMaster support. Explicitly enabled tests fail when required tools or the test SSH server are unavailable.
+
 ## 代码签名与公证 / Code signing & notarization (macOS)
 
 `build.sh` 自动探测钥匙串里的 **Developer ID Application** 证书:有则签名

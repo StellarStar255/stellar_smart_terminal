@@ -1006,7 +1006,8 @@ def forward_apply(cfg: HostConfig, spec: dict, cancel: bool = False) -> str:
     }
     error_lines = {line.strip().lower() for line in err.splitlines() if line.strip()}
     if (cancel and error_lines & missing_messages
-            and error_lines <= missing_messages | {'master cancel forward request failed'}):
+            and error_lines <= missing_messages | {'master cancel forward request failed',
+                                                    'muxclient: master cancel forward request failed'}):
         _record_forward_state(ctl, identity, spec, False)
         return out
     # OpenSSH 的 SSHMUX_COMMAND_CANCEL_FWD 在撤销失败时 error() 后仍

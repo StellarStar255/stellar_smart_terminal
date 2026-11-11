@@ -103,6 +103,10 @@ Open the dialog or use Refresh to check the current master and local listeners. 
 
 While visible, the dialog checks status in the background every 15 seconds without reconnecting or changing forwards. Controls stay available, checks never overlap, and stale results are discarded. Background errors appear inline without repeated popups. Invalid rules do not block healthy ones. An explicit confirmation that a rule is already absent counts as a successful stop; other errors still abort the operation.
 
+选中规则后点击“测试连通性”，分别查看转发状态、监听连接和目标 TCP 的检测结果。本地转发从 SSH 主机检测目标，远程转发从本机检测目标；SOCKS5 需输入明确的“主机:端口”，再测试 SOCKS5 CONNECT 路径。本地/远程转发的监听与目标分别检测，TCP 可连接不代表业务或登录正常。检测复用已有主连接，不启停转发、不重新认证；远端无法执行检测时显示“无法确认”。
+
+Select a rule and use Test Connection to check its state, listener, and destination TCP separately. Local forwards check the destination from the SSH host; remote forwards check it locally. SOCKS5 requires an explicit host:port and tests the CONNECT path. TCP reachability does not establish application health. The existing master is reused without starting/stopping forwards or authenticating again; unavailable remote probes are reported as unverified.
+
 ## Download / 下载安装
 
 无需安装 Python，从 [**Releases**](https://github.com/StellarStar255/stellar_smart_terminal/releases/latest) 下载即可使用。

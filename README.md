@@ -76,6 +76,8 @@ Opening the dialog or choosing **Refresh** checks forwarding status against the 
 
 While the dialog is visible, status is checked in the background every 15 seconds without reconnecting or starting/stopping forwards. Background checks keep controls available, never overlap, and discard results made stale by your operations. Errors appear in the row’s status and tooltip without repeated popups. Invalid rules are reported individually so other rules can still be checked and started. If SSH explicitly confirms that a rule is already absent, stopping succeeds and restarting or deleting it can continue; other cancellation errors still stop the operation.
 
+Select a rule and choose **Test Connection** for a manual diagnostic. It reports the forward state, listener connectivity, and destination TCP connectivity separately. Local forwarding checks the destination from the SSH host; remote forwarding checks it from this computer. SOCKS5 asks for an explicit `host:port` and tests the SOCKS5 CONNECT path. Local/remote listener and destination checks are independent, and TCP reachability does not verify application behavior or login. The check reuses the existing master without starting/stopping forwards or logging in again; if remote probing is unavailable, the destination is shown as unverified.
+
 ## Download
 
 No Python required — grab a build from the [**Releases**](https://github.com/StellarStar255/stellar_smart_terminal/releases/latest) page.
