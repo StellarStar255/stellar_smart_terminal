@@ -522,6 +522,7 @@ def test_real_background_worker_is_off_gui_thread_and_does_not_disable_controls(
 
 def test_timer_schedules_only_while_visible(dialog):
     from concurrent.futures import Future
+    import time
     from PyQt6.QtTest import QTest
     d = dialog(status_cb=lambda specs: ['stopped'])
     pool = Mock()
@@ -531,7 +532,12 @@ def test_timer_schedules_only_while_visible(dialog):
     d._start_status_refresh()
     pool.submit.assert_not_called()
     d.show()
-    QTest.qWait(50)
+    assert d._status_timer.isActive()
+    # 首次显示的布局可能耗尽一次 qWait 的时间预算，定时器要等下一轮
+    # 事件分发才能触发；等待行为本身，避免把 CI 调度速度作为通过条件。
+    deadline = time.monotonic() + 2
+    while not pool.submit.called and time.monotonic() < deadline:
+        QTest.qWait(10)
     pool.submit.assert_called_once()
     d.hide()
     assert not d._status_timer.isActive()
