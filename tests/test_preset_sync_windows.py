@@ -8,6 +8,7 @@
 import os
 import sys
 import unittest
+from unittest.mock import patch
 
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 os.environ.setdefault('QT_QPA_PLATFORM', 'offscreen')
@@ -73,6 +74,33 @@ class PresetSyncAcrossWindowsTest(unittest.TestCase):
         a._apply_edited_presets([_preset('zsh')])
         self.assertEqual(self._names(b), ['zsh'])
         self.assertEqual(b.preset_combo.currentIndex(), 0)
+
+    def test_selection_syncs_both_directions_without_restarting_sessions(self):
+        import app_config
+        a, b = self.windows
+        with patch.object(a, '_start_session') as start_a, \
+                patch.object(b, '_start_session') as start_b:
+            a.preset_combo.setCurrentIndex(0)
+            self.assertEqual(b.preset_combo.currentText(), 'zsh')
+            self.assertEqual(b.last_preset_index, 0)
+            b.preset_combo.setCurrentIndex(1)
+            self.assertEqual(a.preset_combo.currentText(), 'Claude')
+            self.assertEqual(a.last_preset_index, 1)
+            self.assertEqual(app_config.read_config()['last_preset_index'], 1)
+            start_a.assert_not_called()
+            start_b.assert_not_called()
+
+    def test_populating_combo_does_not_broadcast_intermediate_selection(self):
+        a, b = self.windows
+        a._populate_presets()
+        self.assertEqual(a.preset_combo.currentText(), 'Claude')
+        self.assertEqual(b.preset_combo.currentText(), 'Claude')
+
+    def test_old_workspace_selection_does_not_override_global_default(self):
+        a, b = self.windows
+        a._apply_restored_window_state({'preset_name': 'zsh'})
+        self.assertEqual(a.preset_combo.currentText(), 'Claude')
+        self.assertEqual(b.preset_combo.currentText(), 'Claude')
 
 
 if __name__ == '__main__':

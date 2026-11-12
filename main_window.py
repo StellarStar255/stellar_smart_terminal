@@ -4603,12 +4603,7 @@ class MainWindow(ThemeMixin, ToolbarMixin, ConfigMixin, ExplorerPanelMixin,
         window_id = entry.get('window_id')
         if isinstance(window_id, str) and window_id:
             self._workspace_id = window_id
-        preset_name = entry.get('preset_name')
-        if isinstance(preset_name, str):
-            index = self.preset_combo.findText(preset_name)
-            if index >= 0:
-                self.last_preset_index = index
-                self.preset_combo.setCurrentIndex(index)
+        # Preset 是全局默认值；旧快照中的窗口级选项不能覆盖当前全局选择。
         cwd = entry.get('cwd') or ''
         if cwd and os.path.isdir(cwd) and cwd != self._window_cwd:
             self.working_dir_combo.setCurrentText(cwd)
@@ -5640,15 +5635,43 @@ class MainWindow(ThemeMixin, ToolbarMixin, ConfigMixin, ExplorerPanelMixin,
         """填充预设到下拉框"""
         if not getattr(self, '_preset_checkpoint_connected', False):
             self.preset_combo.currentIndexChanged.connect(
-                lambda _index: self._checkpoint_workspace())
+                self._on_preset_selection_changed)
             self._preset_checkpoint_connected = True
-        self.preset_combo.clear()
-        for preset in self.presets:
-            self.preset_combo.addItem(preset.get('name', t('common.unnamed')))
-        # 恢复上次选中的预设
-        if self.presets:
-            index = min(self.last_preset_index, len(self.presets) - 1)
-            self.preset_combo.setCurrentIndex(max(0, index))
+        blocked = self.preset_combo.blockSignals(True)
+        try:
+            self.preset_combo.clear()
+            for preset in self.presets:
+                self.preset_combo.addItem(preset.get('name', t('common.unnamed')))
+            # 初始化和管理列表时的中间选项不能广播到其它窗口。
+            if self.presets:
+                index = min(self.last_preset_index, len(self.presets) - 1)
+                self.preset_combo.setCurrentIndex(max(0, index))
+        finally:
+            self.preset_combo.blockSignals(blocked)
+
+    def _on_preset_selection_changed(self, index):
+        """同步所有窗口的新会话默认预设；不触碰正在运行的终端。"""
+        if not 0 <= index < len(self.presets):
+            return
+        self.last_preset_index = index
+        name = self.preset_combo.currentText()
+        app = QApplication.instance()
+        for w in app.topLevelWidgets() if app else []:
+            if w is self or not isinstance(w, MainWindow) or sip.isdeleted(w):
+                continue
+            combo = getattr(w, 'preset_combo', None)
+            target = combo.findText(name) if combo is not None else -1
+            if target < 0:
+                continue
+            blocked = combo.blockSignals(True)
+            try:
+                w.last_preset_index = target
+                combo.setCurrentIndex(target)
+            finally:
+                combo.blockSignals(blocked)
+        app_config.update_config(
+            {'last_preset_index': index}, description='global preset selection')
+        self._checkpoint_workspace()
 
     def _manage_presets(self):
         """打开预设管理对话框"""
