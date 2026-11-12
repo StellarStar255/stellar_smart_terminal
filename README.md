@@ -4,7 +4,7 @@ English | [简体中文](README.zh-CN.md)
 
 A PyQt6-based smart terminal with file explorer, Git GUI, LLM proxy, and VS Code extension browser.
 
-Latest release: [v1.35.34](docs/releases/v1.35.34.md) fixes the Back button becoming available immediately after restoring a window at startup.
+Latest release: [v1.35.35](docs/releases/v1.35.35.md) adds New Terminal to the context menu, with ⌘N for a new terminal and ⌘⇧N for a new window on macOS.
 
 <img src="assets/smart_terminal.png" width="300" />
 

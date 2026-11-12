@@ -377,6 +377,7 @@ class TerminalWidget(TerminalInputMixin, TerminalMouseMixin,
     raw_output_received = pyqtSignal(str)  # 原始输出信号（用于 OpenAI API 服务器）
     close_tab_requested = pyqtSignal()  # 请求关闭当前标签页 (Cmd+W)
     new_tab_requested = pyqtSignal()  # 请求新建标签页 (Cmd+T)
+    new_terminal_requested = pyqtSignal()  # 请求新建并启动终端 (Cmd+N)
     manage_presets_requested = pyqtSignal()  # 请求打开预设管理对话框
     add_command_requested = pyqtSignal()  # 请求添加新命令
     manage_local_presets_requested = pyqtSignal()  # 请求打开本地预设管理对话框

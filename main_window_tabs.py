@@ -46,6 +46,16 @@ class TabSplitMixin:
         """
         return os.path.basename(dir_path) or dir_path
 
+    def _new_terminal(self):
+        """在当前本地目录新建标签页并立即启动默认 shell。"""
+        terminal = self.terminal
+        cwd = terminal.get_cwd() if terminal else None
+        cwd = cwd or self._window_cwd
+        idx = self._add_new_tab(tab_cwd=cwd)
+        self.tab_terminals[idx][0].start_process([get_default_shell()], cwd=cwd)
+        self._update_running_state(True)
+        return idx
+
     def _add_new_tab(self, external_splitter=None, external_terminals=None, external_session=None, tab_name=None, tab_cwd=None):
         """添加新的终端标签页
 

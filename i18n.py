@@ -204,6 +204,7 @@ TRANSLATIONS = {
     "shortcuts.act.toggle_word_wrap": {"zh": "编辑器自动换行", "en": "Toggle Word Wrap"},
     "shortcuts.act.history": {"zh": "历史记录", "en": "History"},
     "shortcuts.act.new_session": {"zh": "新建会话", "en": "New Session"},
+    "shortcuts.act.new_terminal": {"zh": "新建终端", "en": "New Terminal"},
     "shortcuts.act.new_tab": {"zh": "新建标签页", "en": "New Tab"},
     "shortcuts.act.close_tab": {"zh": "关闭标签页", "en": "Close Tab"},
     "shortcuts.act.next_tab": {"zh": "下一个标签页", "en": "Next Tab"},

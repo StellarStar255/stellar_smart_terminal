@@ -35,7 +35,7 @@ from PyQt6.QtWidgets import QApplication, QSplitter
 # 又一处"接管后串台"的入口。
 EXPECTED_SIGNALS = (
     'input_recorded', 'output_recorded', 'session_ended', 'image_pasted',
-    'close_tab_requested', 'new_tab_requested',
+    'close_tab_requested', 'new_tab_requested', 'new_terminal_requested',
     'manage_presets_requested', 'add_command_requested',
     'manage_local_presets_requested', 'add_local_command_requested',
     'close_split_requested', 'split_horizontal_requested',

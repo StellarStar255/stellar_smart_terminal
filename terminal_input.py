@@ -397,7 +397,7 @@ class TerminalInputMixin:
         event.accept()
 
     # macOS 上 Cmd+字母默认全被终端抢走（当 Ctrl 发给 shell）。这几个留给菜单栏：
-    # Cmd+N 新窗口、Cmd+O 打开文件夹（Cmd+Shift+O 打开文件）。物理 Ctrl+N/O
+    # Cmd+N 新终端、Cmd+Shift+N 新窗口、Cmd+O 打开文件夹（Cmd+Shift+O 打开文件）。物理 Ctrl+N/O
     # （MetaModifier）照旧发给 shell，不受影响。
     _MENU_RESERVED_KEYS = (Qt.Key.Key_N, Qt.Key.Key_O)
 

@@ -498,7 +498,13 @@ class TerminalMouseMixin:
             }
         """)
 
-        # 重命名/清除分屏标签（放在最上方，方便快速改名）
+        new_terminal_action = QAction(
+            t("shortcuts.act.new_terminal") + self._shortcut_hint("new_terminal", "Ctrl+N"), menu)
+        new_terminal_action.triggered.connect(self.new_terminal_requested.emit)
+        menu.addAction(new_terminal_action)
+        menu.addSeparator()
+
+        # 重命名/清除分屏标签
         rename_split_action = QAction(t("ctx.rename_split"), self)
         rename_split_action.triggered.connect(self.rename_split_requested.emit)
         menu.addAction(rename_split_action)

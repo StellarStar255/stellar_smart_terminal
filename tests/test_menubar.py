@@ -92,6 +92,68 @@ class TestMenuBar(unittest.TestCase):
         after = [w for w in self.app.topLevelWidgets() if isinstance(w, self.mw.MainWindow)]
         self.assertEqual(len(after), len(before) + 1)
 
+    def test_new_terminal_starts_shell_in_current_directory(self):
+        from terminal_widget import TerminalWidget
+        from dialogs import get_default_shell
+        source = self.win.terminal
+        count = self.win.tab_widget.count()
+        with mock.patch.object(source, 'get_cwd', return_value='/tmp'), \
+                mock.patch.object(TerminalWidget, 'start_process') as start:
+            self.win.shortcut_actions['new_terminal'].trigger()
+        self.assertEqual(self.win.tab_widget.count(), count + 1)
+        self.assertIsNot(self.win.terminal, source)
+        self.assertEqual(self.win.tab_cwds[self.win.tab_widget.currentIndex()], '/tmp')
+        start.assert_called_once_with([get_default_shell()], cwd='/tmp')
+
+    def test_creation_shortcuts_and_menu_share_actions(self):
+        from PyQt6.QtGui import QKeySequence
+        actions = self.win.shortcut_actions
+        self.assertEqual(actions['new_terminal'].shortcut(), QKeySequence('Ctrl+N'))
+        self.assertEqual(actions['new_window'].shortcut(), QKeySequence('Ctrl+Shift+N'))
+        self.assertTrue(actions['new_session'].shortcut().isEmpty())
+        for key in ('new_terminal', 'new_window'):
+            self.assertIn(actions[key], self._menus()[0].actions())
+
+    def test_context_menu_new_terminal_requests_creation(self):
+        from PyQt6.QtCore import QPoint
+        from PyQt6.QtGui import QContextMenuEvent
+        from PyQt6.QtWidgets import QMenu
+        from terminal_widget import TerminalWidget
+        from i18n import t
+        source = self.win.terminal
+        count = self.win.tab_widget.count()
+
+        def choose(menu, *args):
+            action = menu.actions()[0]
+            self.assertTrue(action.text().startswith(t('shortcuts.act.new_terminal')))
+            self.assertIn(source._shortcut_hint('new_terminal', 'Ctrl+N'), action.text())
+            action.trigger()
+
+        event = QContextMenuEvent(QContextMenuEvent.Reason.Mouse, QPoint(10, 10))
+        with mock.patch.object(QMenu, 'exec', choose), \
+                mock.patch.object(TerminalWidget, 'start_process') as start:
+            source.contextMenuEvent(event)
+        self.assertEqual(self.win.tab_widget.count(), count + 1)
+        start.assert_called_once()
+
+    @unittest.skipUnless(sys.platform == 'darwin', 'macOS Command shortcuts')
+    def test_command_n_shortcuts_with_terminal_focus(self):
+        from PyQt6.QtTest import QTest
+        from terminal_widget import TerminalWidget
+        self.win.activateWindow()
+        self.win.terminal.setFocus()
+        self.app.processEvents()
+        count = self.win.tab_widget.count()
+        with mock.patch.object(TerminalWidget, 'start_process') as start:
+            QTest.keyClick(self.win.terminal, Qt.Key.Key_N, Qt.KeyboardModifier.ControlModifier)
+        self.assertEqual(self.win.tab_widget.count(), count + 1)
+        start.assert_called_once()
+        windows = len(self.win.detached_windows)
+        QTest.keyClick(self.win.terminal, Qt.Key.Key_N,
+                       Qt.KeyboardModifier.ControlModifier | Qt.KeyboardModifier.ShiftModifier)
+        self.assertEqual(len(self.win.detached_windows), windows + 1)
+        self.assertEqual(self.win.tab_widget.count(), count + 1)
+
 
 class TestTerminalMenuReservedKeys(unittest.TestCase):
     """macOS 上 Cmd+N / Cmd+O 放给菜单栏；物理 Ctrl+N/O 仍归 shell。"""
@@ -113,6 +175,7 @@ class TestTerminalMenuReservedKeys(unittest.TestCase):
         ctrl = Qt.KeyboardModifier.MetaModifier
         with mock.patch('terminal_input.sys.platform', 'darwin'):
             self.assertTrue(self.term._is_menu_reserved_combo(Qt.Key.Key_N, cmd))
+            self.assertTrue(self.term._is_menu_reserved_combo(Qt.Key.Key_N, cmd | Qt.KeyboardModifier.ShiftModifier))
             self.assertTrue(self.term._is_menu_reserved_combo(Qt.Key.Key_O, cmd | Qt.KeyboardModifier.ShiftModifier))
             self.assertFalse(self.term._is_menu_reserved_combo(Qt.Key.Key_N, ctrl))
             self.assertFalse(self.term._is_menu_reserved_combo(Qt.Key.Key_T, cmd))

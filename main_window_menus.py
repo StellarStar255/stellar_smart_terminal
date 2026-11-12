@@ -87,10 +87,11 @@ class MenusMixin:
 
     def _build_file_menu(self, menubar):
         menu = menubar.addMenu(t("menu.file"))
+        self._shortcut_menu_action(menu, "new_terminal", "shortcuts.act.new_terminal")
         self._shortcut_menu_action(menu, "new_tab", "shortcuts.act.new_tab")
-        # Cmd+N / Cmd+O：终端聚焦时由 terminal_input 的 ShortcutOverride 放行
+        # Cmd+N / Cmd+Shift+N / Cmd+O：终端聚焦时由 ShortcutOverride 放行
         # （macOS 上 Cmd+字母默认被终端抢走），见那里的说明
-        self._own_action(menu, "menu.new_window", self._open_new_window, "Ctrl+N")
+        self._shortcut_menu_action(menu, "new_window", "menu.new_window")
         menu.addSeparator()
         self._own_action(menu, "menu.open_folder", self._browse_working_dir, "Ctrl+O")
         self._own_action(menu, "menu.open_file", self._open_file_dialog, "Ctrl+Shift+O")
