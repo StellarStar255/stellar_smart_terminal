@@ -4,7 +4,7 @@
 
 基于 PyQt6 的智能终端，集成文件管理、Git GUI、LLM 代理和 VS Code 扩展浏览。
 
-最新版本：[v1.35.35](docs/releases/v1.35.35.md)，右键菜单新增“新建终端”；macOS 使用 ⌘N 新建终端、⌘⇧N 新建窗口。
+最新版本：[v1.35.36](docs/releases/v1.35.36.md)，记住各窗口的预设和终端窗口列表顺序，修复退出时工作区状态被覆盖的问题。
 
 A PyQt6-based smart terminal with file explorer, Git GUI, LLM proxy, and VS Code extension browser.
 

@@ -63,7 +63,8 @@ class PresetSyncAcrossWindowsTest(unittest.TestCase):
         self.assertIsNot(b.presets, a.presets)          # 各窗口独立副本
         # 接收方只是采用磁盘内容，不能被标成「本窗口改过」
         self.assertFalse(b._presets_modified)
-        self.assertTrue(a._presets_modified)
+        # 成功落盘后清除脏标记，防止退出时重新覆盖磁盘新版本。
+        self.assertFalse(a._presets_modified)
         # B 窗口原先选着 Claude，同步后仍选 Claude
         self.assertEqual(b.preset_combo.currentText(), 'Claude')
 

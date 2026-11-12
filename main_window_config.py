@@ -382,6 +382,8 @@ class ConfigMixin:
             # （宁可不存，也不能把其它进程维护的字段当"损坏"覆盖掉）
             ok = app_config.update_config_with(
                 self._build_config_for_save, description='main-window')
+            if ok:
+                self._presets_modified = False
             if not ok:
                 # 写失败不再无声丢失（磁盘满/权限/文件损坏），状态栏提示
                 try:
@@ -500,6 +502,7 @@ class ConfigMixin:
             # 不能调 read_config（非重入锁会死锁）；关闭级联中不刷新
             # （防止退出时快照逐窗缩水，同 _checkpoint_workspace 的约定）。
             if (not self._closing_in_progress
+                    and not host_class(self)._batch_closing
                     and existing_config.get('workspace_restore_enabled', True)):
                 try:
                     entries = host_class(self)._collect_windows_snapshot()

@@ -4,7 +4,7 @@ English | [简体中文](README.zh-CN.md)
 
 A PyQt6-based smart terminal with file explorer, Git GUI, LLM proxy, and VS Code extension browser.
 
-Latest release: [v1.35.35](docs/releases/v1.35.35.md) adds New Terminal to the context menu, with ⌘N for a new terminal and ⌘⇧N for a new window on macOS.
+Latest release: [v1.35.36](docs/releases/v1.35.36.md) remembers each window’s preset and the terminal window list order across restarts, and protects workspace settings during quit.
 
 <img src="assets/smart_terminal.png" width="300" />
 

@@ -263,6 +263,7 @@ class WindowNavigatorPanel(QWidget):
         self._quick_close = False
         # 手动排序的窗口顺序（存储窗口ID）
         self._manual_order = []
+        self._persisted_order = []  # 工作区窗口 ID，跨重启稳定
 
         # QListWidgetItem 的 UserRole 只存 id(window)（Python int），不直接存 QObject 指针。
         # 否则 force-close 时 Qt 在 dispatchEnterLeave 等回调里读取 item.data() 会
@@ -284,6 +285,7 @@ class WindowNavigatorPanel(QWidget):
                     continue
                 self._sort_mode = nav._sort_mode
                 self._manual_order = list(nav._manual_order)
+                self._persisted_order = list(nav._persisted_order)
                 self.drag_hint_label.setVisible(self._sort_mode == 'manual')
                 break
         except Exception:
@@ -509,9 +511,11 @@ class WindowNavigatorPanel(QWidget):
 
     def _broadcast_sort_state(self):
         """把当前排序模式 + 手动顺序同步到所有导航面板并刷新，使多窗口列表保持一致。"""
+        self._save_navigator_config()
         for nav in main_window.MainWindow._iter_navigators():
             try:
                 if nav is not self:
+                    nav._persisted_order = list(self._persisted_order)
                     nav._sort_mode = self._sort_mode
                     nav._manual_order = list(self._manual_order)
                     try:
@@ -562,6 +566,14 @@ class WindowNavigatorPanel(QWidget):
                 visible.append(wid)
         rest = [wid for wid in self._manual_order if wid not in visible]
         self._manual_order = visible + rest
+        stable = []
+        for wid in self._manual_order:
+            ref = self._window_refs.get(wid)
+            window = ref() if ref else None
+            if window is not None and not sip.isdeleted(window):
+                stable.append(window._workspace_id)
+        self._persisted_order = stable + [key for key in self._persisted_order
+                                          if key not in stable]
 
     def _toggle_compact_mode(self, state):
         """切换简洁显示模式（所有窗口的导航面板共用此设置）"""
@@ -905,10 +917,13 @@ class WindowNavigatorPanel(QWidget):
                 windows.sort(key=lambda w: w.get_created_time())
             elif self._sort_mode == 'name':
                 windows.sort(key=lambda w: w.windowTitle())
-            elif self._sort_mode == 'manual' and self._manual_order:
+            elif self._sort_mode == 'manual':
                 # 手动排序：按保存的顺序排列，新窗口放到末尾
                 order_map = {wid: idx for idx, wid in enumerate(self._manual_order)}
-                windows.sort(key=lambda w: order_map.get(id(w), 9999))
+                stable_map = {key: idx for idx, key in enumerate(self._persisted_order)}
+                windows.sort(key=lambda w: stable_map.get(
+                    w._workspace_id,
+                    9999 if stable_map else order_map.get(id(w), 9999)))
         except Exception:
             # 排序过程中有窗口被删除，重置缓存并下次再刷
             self._last_window_info = []
@@ -1333,6 +1348,8 @@ class WindowNavigatorPanel(QWidget):
         """保存导航面板设置到主配置文件（app_config 单点：锁 + 原子写 + 失败日志）"""
         try:
             patch = {
+                'navigator_sort_mode': self._sort_mode,
+                'navigator_manual_order': list(self._persisted_order),
                 'navigator_font_size': self._font_size,
                 'navigator_quick_close': bool(self._quick_close),
                 'navigator_compact': bool(self._compact_mode),
@@ -1349,6 +1366,11 @@ class WindowNavigatorPanel(QWidget):
         try:
             config = app_config.read_config()
             if config:
+                mode = config.get('navigator_sort_mode', 'time')
+                self._sort_mode = mode if mode in ('time', 'name', 'manual') else 'time'
+                order = config.get('navigator_manual_order', [])
+                self._persisted_order = [key for key in order if isinstance(key, str)] if isinstance(order, list) else []
+                self.drag_hint_label.setVisible(self._sort_mode == 'manual')
                 # 恢复字体大小（下拉控件已移除，仅沿用历史值渲染列表，避免外观突变）
                 font_size = config.get('navigator_font_size', 12)
                 if 8 <= font_size <= 24:

@@ -133,6 +133,11 @@ class _QuitEventFilter(QObject):
     def eventFilter(self, obj, event):
         if event.type() != QEvent.Type.Quit or not isinstance(obj, QApplication):
             return False
+        # Quit 会同步销毁各窗口，必须在进入级联前一次性保存完整状态。
+        for window in obj.topLevelWidgets():
+            if isinstance(window, self._host) and not sip.isdeleted(window) and window.isVisible():
+                window._write_workspace_snapshot()
+                break
         self._host._batch_closing = True
         try:
             obj.event(event)   # QApplication::event(Quit)：closeAllWindows + 退出判定
@@ -2501,6 +2506,8 @@ class MainWindow(ThemeMixin, ToolbarMixin, ConfigMixin, ExplorerPanelMixin,
 
     def _init_window_state(self):
         """MainWindow 本体（非 mixin）的关窗/联动标志，唯一默认值"""
+        import uuid
+        self._workspace_id = uuid.uuid4().hex
         self._closing_in_progress = False       # closeEvent 已进入清理阶段（防重入）
         self._force_closing = False             # 强制关闭路径：跳过确认弹窗
         self._applying_shared_left_width = False  # 正在应用跨窗口同步的侧栏宽度
@@ -4446,6 +4453,8 @@ class MainWindow(ThemeMixin, ToolbarMixin, ConfigMixin, ExplorerPanelMixin,
             except Exception:
                 logger.debug("_collect_windows_snapshot: suppressed exception", exc_info=True)
             entries.append({
+                'window_id': w._workspace_id,
+                'preset_name': w.preset_combo.currentText(),
                 'cwd': getattr(w, '_window_cwd', '') or '',
                 'geometry': [geo.x(), geo.y(), geo.width(), geo.height()],
                 'maximized': bool(w.isMaximized()),
@@ -4488,7 +4497,11 @@ class MainWindow(ThemeMixin, ToolbarMixin, ConfigMixin, ExplorerPanelMixin,
         timer.start()
 
     def _write_workspace_snapshot(self):
-        if self._closing_in_progress:
+        if MainWindow._batch_closing:
+            return
+        if any(isinstance(w, MainWindow) and not sip.isdeleted(w)
+               and w._closing_in_progress
+               for w in QApplication.instance().topLevelWidgets()):
             return
         if not MainWindow.workspace_restore_enabled():
             return
@@ -4587,6 +4600,15 @@ class MainWindow(ThemeMixin, ToolbarMixin, ConfigMixin, ExplorerPanelMixin,
         目标值会让 macOS 首显挪动后 Qt 缓存与真实几何脱节，后续 setGeometry
         被当作「无变化」跳过，窗口永远校不回来）。
         """
+        window_id = entry.get('window_id')
+        if isinstance(window_id, str) and window_id:
+            self._workspace_id = window_id
+        preset_name = entry.get('preset_name')
+        if isinstance(preset_name, str):
+            index = self.preset_combo.findText(preset_name)
+            if index >= 0:
+                self.last_preset_index = index
+                self.preset_combo.setCurrentIndex(index)
         cwd = entry.get('cwd') or ''
         if cwd and os.path.isdir(cwd) and cwd != self._window_cwd:
             self.working_dir_combo.setCurrentText(cwd)
@@ -5616,6 +5638,10 @@ class MainWindow(ThemeMixin, ToolbarMixin, ConfigMixin, ExplorerPanelMixin,
 
     def _populate_presets(self):
         """填充预设到下拉框"""
+        if not getattr(self, '_preset_checkpoint_connected', False):
+            self.preset_combo.currentIndexChanged.connect(
+                lambda _index: self._checkpoint_workspace())
+            self._preset_checkpoint_connected = True
         self.preset_combo.clear()
         for preset in self.presets:
             self.preset_combo.addItem(preset.get('name', t('common.unnamed')))
@@ -5638,9 +5664,8 @@ class MainWindow(ThemeMixin, ToolbarMixin, ConfigMixin, ExplorerPanelMixin,
 
     def _apply_edited_presets(self, presets: list):
         """预设管理框确认后：本窗口采用新列表、落盘，并同步到其它窗口。"""
-        self.presets = presets
+        self._adopt_presets(presets)
         self._presets_modified = True  # 标记预设已修改
-        self._populate_presets()
         self._save_config()
         self._broadcast_presets()
         self.statusbar.showMessage(t("status.preset_saved"), 3000)
@@ -5844,6 +5869,13 @@ class MainWindow(ThemeMixin, ToolbarMixin, ConfigMixin, ExplorerPanelMixin,
                 event.ignore()
                 return
             MainWindow._quit_confirmed_at = time.monotonic()
+
+        # 在首个窗口关闭前刷新完整快照；退出级联后续窗口不可覆盖它。
+        if not MainWindow._batch_closing and not force_closing and not any(
+                   isinstance(w, MainWindow) and not sip.isdeleted(w)
+                   and w._closing_in_progress
+                   for w in QApplication.instance().topLevelWidgets()):
+            self._write_workspace_snapshot()
 
         # 标记进入清理阶段，防止重入
         self._closing_in_progress = True
