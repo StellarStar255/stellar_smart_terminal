@@ -2,6 +2,8 @@
 
 English | [简体中文](README.zh-CN.md)
 
+## Any screen size. A terminal that feels right.
+
 A PyQt6-based smart terminal with file explorer, Git GUI, LLM proxy, and VS Code extension browser.
 
 Latest release: [v1.35.38](docs/releases/v1.35.38.md) improves selection across scrolling pages in full-screen terminal applications such as Codex.

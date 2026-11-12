@@ -2,6 +2,8 @@
 
 [English](README.md) | 简体中文
 
+## 任何大小的屏幕，都能使用自如。
+
 基于 PyQt6 的智能终端，集成文件管理、Git GUI、LLM 代理和 VS Code 扩展浏览。
 
 最新版本：[v1.35.38](docs/releases/v1.35.38.md)，优化 Codex 等全屏终端应用中的跨页文本框选与复制。
