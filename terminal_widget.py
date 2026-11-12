@@ -823,6 +823,7 @@ class TerminalWidget(TerminalInputMixin, TerminalMouseMixin,
         # 鼠标选择相关（使用绝对行号，支持跨页选择）
         self._selection_start = None  # (absolute_row, col) 选择起点
         self._selection_end = None    # (absolute_row, col) 选择终点
+        self._tui_selection = None    # 全屏应用滚动选择的不可变行快照
         self._is_selecting = False    # 是否正在选择
         self._shift_extend_click = False  # 本次按下是否为 Shift+点击扩展选区
         self._shift_extend_pending = False  # Shift+按下后待定：拖动→新建，纯点击→扩展

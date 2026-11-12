@@ -240,7 +240,26 @@ class TerminalRenderMixin:
 
         # 选区高亮单独绘制（不在缓存中，避免拖动时重建缓存）
         if self._has_selection():
-            if self._select_all_mode:
+            if self._tui_selection is not None:
+                start, end = self._get_selection_range()
+                state = self._tui_selection
+                lo, hi = state['bounds']
+                if self.screen._in_alt_screen:
+                    live_rows = self._snapshot_tui_rows()
+                    for row in range(lo, min(hi, self.term_rows)):
+                        absolute = state['origin'] + row
+                        saved = state['rows'].get(absolute)
+                        if not start[0] <= absolute <= end[0] or saved is None:
+                            continue
+                        # 释放后程序继续重绘时，不把旧选区画在新内容上。
+                        if self._tui_row_key(saved) != self._tui_row_key(live_rows[row]):
+                            continue
+                        first = start[1] if absolute == start[0] else 0
+                        last = end[1] if absolute == end[0] else self.term_cols - 1
+                        x, width = self._col_tile(first, last - first + 1)
+                        y, height = self._row_tile(row)
+                        painter.fillRect(x, y, width, height, self._selection_color)
+            elif self._select_all_mode:
                 # 全选模式：高亮所有可见行
                 x, width = self._col_tile(0, self.term_cols)
                 for sel_row in range(self.term_rows):
@@ -351,6 +370,7 @@ class TerminalRenderMixin:
 
     def _rebuild_cache(self):
         """重建缓存的pixmap"""
+        self._refresh_tui_selection()
         # 防止在 widget 尺寸为 0 时创建无效 pixmap（如拖拽分离 tab 过渡期间）
         if self.width() <= 0 or self.height() <= 0:
             return

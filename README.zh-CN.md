@@ -4,7 +4,7 @@
 
 基于 PyQt6 的智能终端，集成文件管理、Git GUI、LLM 代理和 VS Code 扩展浏览。
 
-最新版本：[v1.35.37](docs/releases/v1.35.37.md)，切换默认 Preset 时同步所有窗口，保留正在运行的终端会话。
+最新版本：[v1.35.38](docs/releases/v1.35.38.md)，优化 Codex 等全屏终端应用中的跨页文本框选与复制。
 
 A PyQt6-based smart terminal with file explorer, Git GUI, LLM proxy, and VS Code extension browser.
 

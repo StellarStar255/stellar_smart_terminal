@@ -19,6 +19,8 @@ TerminalWidget 的鼠标事件/选区/文本提取/URL/拖放方法集合，纯�
 import unicodedata
 import functools
 import sys
+import time
+from difflib import SequenceMatcher
 
 from PyQt6.QtCore import QPoint, QUrl, Qt
 from PyQt6.QtGui import (
@@ -46,6 +48,86 @@ def _history_gesture(method):
 class TerminalMouseMixin:
     """TerminalWidget 的鼠标/选区方法集合（见模块 docstring）"""
 
+    def _snapshot_tui_rows(self):
+        """复制 cell 和软换行元数据；不能保留会被 TUI 原地重绘的行引用。"""
+        with self._screen_lock:
+            return [(dict(self.screen.buffer[r]),
+                     self.screen.is_soft_wrapped(self.screen.buffer[r]))
+                    for r in range(self.term_rows)]
+
+    @staticmethod
+    def _tui_row_key(row):
+        return tuple((c, ch.data) for c, ch in sorted(row[0].items())
+                     if ch.data.strip())
+
+    def _begin_tui_selection(self):
+        self._tui_selection = None
+        if self._mouse_mode and self.screen._in_alt_screen:
+            rows = self._snapshot_tui_rows()
+            self._tui_selection = dict(view=rows, origin=0,
+                rows=dict(enumerate(rows)), bounds=(0, self.term_rows),
+                pending=0, sent=0.0, size=(self.term_rows, self.term_cols))
+
+    def _refresh_tui_selection(self):
+        """将应用滚动前后的重叠行对齐，保留离屏选区，排除固定标题/输入栏。
+
+        只在选择手势发出滚轮后对齐，至少两条不同的非空行才认可位移；
+        普通输出、动画和重复空行不应被误认为翻页。
+        """
+        state = self._tui_selection
+        if state is None or not self._is_selecting:
+            return
+        if (not self.screen._in_alt_screen
+                or state['size'] != (self.term_rows, self.term_cols)):
+            self._clear_selection()
+            return
+        if not state['pending']:
+            return
+        rows = self._snapshot_tui_rows()
+        old = [self._tui_row_key(r) for r in state['view']]
+        new = [self._tui_row_key(r) for r in rows]
+        blocks = [b for b in SequenceMatcher(None, old, new, autojunk=False).get_matching_blocks()
+                  if b.size >= 2 and (b.a - b.b) * state['pending'] < 0
+                  and len({k for k in old[b.a:b.a + b.size] if k}) >= 2]
+        if not blocks:
+            return
+        block = max(blocks, key=lambda b: b.size)
+        delta = block.a - block.b
+        aligned = [b for b in blocks if b.a - b.b == delta]
+        lo = min(min(b.a, b.b) for b in aligned)
+        hi = max(max(b.a, b.b) + b.size for b in aligned)
+        if state['bounds'] != (0, self.term_rows):
+            lo = min(lo, state['bounds'][0])
+            hi = max(hi, state['bounds'][1])
+        origin = state['origin']
+        # 固定 UI 不是 transcript，不能留在跨页复制的中间。
+        if state['bounds'] == (0, self.term_rows):
+            for r in range(self.term_rows):
+                if not lo <= r < hi:
+                    state['rows'].pop(origin + r, None)
+        for r in range(lo, hi):
+            state['rows'][origin + r] = state['view'][r]
+        origin += delta
+        for r in range(lo, hi):
+            state['rows'][origin + r] = rows[r]
+        state.update(view=rows, origin=origin, bounds=(lo, hi), pending=0)
+        # 选择手势最多保留 20000 行，避免长时间拖动无限增长。
+        if len(state['rows']) > 20000:
+            self._is_selecting = False
+            self._auto_scroll_timer.stop()
+        self._update_drag_selection_after_scroll()
+
+    def _scroll_tui_selection(self, going_up, pos, notches=1):
+        self._refresh_tui_selection()
+        state = self._tui_selection
+        if state is None:
+            return
+        now = time.monotonic()
+        if state['pending'] and now - state['sent'] < 0.15:
+            return  # 等待异步重绘，避免滚得太远丢失重叠行
+        state.update(pending=1 if going_up else -1, sent=now)
+        self._send_wheel_to_app(going_up, pos, min(3, max(1, notches)))
+
     def _auto_scroll_tick(self):
         """自动滚动定时器回调 - 支持拖动选择时跨页
 
@@ -61,9 +143,15 @@ class TerminalMouseMixin:
 
         # 自适应步长：边缘 1 行/tick，越远越快
         pull = max(0, self._auto_scroll_pull)
-        step = max(1, 1 + pull // 6)
+        step = max(1, 1 + int(pull // 6))
         # 上限避免一次跨太远导致选择终点跳动失控
         step = min(step, max(self.term_rows, 8))
+
+        if self._tui_selection is not None and self.screen._in_alt_screen:
+            self._scroll_tui_selection(self._auto_scroll_direction < 0,
+                                       self._last_mouse_pos, step)
+            self.update()
+            return
 
         history_lines = self._get_history_count()
         max_scroll = history_lines
@@ -104,6 +192,11 @@ class TerminalMouseMixin:
 
         col = max(0, min(int(x / self.char_width), self.term_cols - 1))
         display_row = max(0, min(int(y / self.char_height), self.term_rows - 1))
+
+        if self._tui_selection is not None:
+            lo, hi = self._tui_selection['bounds']
+            display_row = max(lo, min(display_row, hi - 1))
+            return (self._tui_selection['origin'] + display_row, col)
 
         display_start = (self._get_display_info()[2] if self._is_selecting
                          else self._rendered_display_start)
@@ -193,6 +286,10 @@ class TerminalMouseMixin:
         force_local_selection = (event.modifiers() & Qt.KeyboardModifier.ShiftModifier) or self.scroll_offset > 0
 
         if event.button() == Qt.MouseButton.LeftButton:
+            self._refresh_tui_selection()
+            if not (event.modifiers() & Qt.KeyboardModifier.ShiftModifier
+                    and self._has_selection()):
+                self._begin_tui_selection()
             self._last_mouse_pos = event.pos()
             current_time = time.time()
             cell = self._pos_to_cell(event.pos())  # 相对坐标，用于点击检测
@@ -287,6 +384,9 @@ class TerminalMouseMixin:
             return
 
         if self._is_selecting:
+            self._refresh_tui_selection()
+            if not self._is_selecting:
+                return
             self._last_mouse_pos = event.pos()
             cur = self._pos_to_absolute_cell(event.pos())
             # Shift+按下后发生真正的拖动 → 是 Shift+拖动而非 Shift+点击 → 从按下点
@@ -301,7 +401,7 @@ class TerminalMouseMixin:
             # 检测是否需要自动滚动（鼠标在边缘区域）— 拉得越远滚得越快
             y = event.pos().y()
             edge_zone = 24  # 进入边缘的阈值（像素）
-            widget_height = self.height()
+            widget_height = self.PADDING + self._header_h + self.term_rows * self.char_height
 
             top_edge = self.PADDING + self._header_h + edge_zone
             if y < top_edge:
@@ -343,6 +443,9 @@ class TerminalMouseMixin:
             return
 
         if event.button() == Qt.MouseButton.LeftButton and self._is_selecting:
+            self._refresh_tui_selection()
+            if not self._is_selecting:
+                return
             self._selection_end = self._pos_to_absolute_cell(event.pos())
             self._is_selecting = False
 
@@ -760,6 +863,7 @@ class TerminalMouseMixin:
         "dict changed size during iteration"。
         """
         with self._screen_lock:
+            self._refresh_tui_selection()
             return self._get_selected_text_locked()
 
     def _get_selected_text_locked(self) -> str:
@@ -791,11 +895,16 @@ class TerminalMouseMixin:
 
         # 直接使用绝对行号遍历
         for abs_row in range(start_row, end_row + 1):
-            if abs_row >= total_lines:
+            if self._tui_selection is not None:
+                saved = self._tui_selection['rows'].get(abs_row)
+                if saved is None:
+                    continue
+                buffer_line, saved_soft = saved
+            elif abs_row >= total_lines:
                 break
 
             # 直接索引访问，避免创建完整列表
-            if abs_row < history_count:
+            elif abs_row < history_count:
                 buffer_line = history[abs_row]
             else:
                 buffer_row = abs_row - history_count
@@ -851,7 +960,8 @@ class TerminalMouseMixin:
             core = ''.join(c for _, c in chars).strip()
             spaceless = bool(core) and (' ' not in core)
 
-            is_soft = self.screen.is_soft_wrapped(buffer_line)
+            is_soft = (saved_soft if self._tui_selection is not None
+                       else self.screen.is_soft_wrapped(buffer_line))
             can_heuristic = (col_start == 0 and col_end == term_cols - 1)
 
             if is_soft:
@@ -895,6 +1005,7 @@ class TerminalMouseMixin:
     def _select_all(self):
         """全选当前屏幕（使用绝对坐标）"""
         # 使用渲染时记录的 display_start，确保与显示内容一致
+        self._tui_selection = None
         display_start = self._rendered_display_start
         display_end = display_start + self.term_rows - 1
 
@@ -905,6 +1016,7 @@ class TerminalMouseMixin:
     def _select_all_content(self):
         """全选所有内容（包括历史记录）"""
         # 启用全选模式
+        self._tui_selection = None
         self._select_all_mode = True
         # 设置选择范围为所有内容的绝对坐标范围
         history_count = self._get_history_count()
@@ -1003,6 +1115,11 @@ class TerminalMouseMixin:
 
     def _clear_selection(self):
         """清除选择"""
+        self._tui_selection = None
+        self._is_selecting = False
+        self._auto_scroll_direction = 0
+        self._auto_scroll_pull = 0
+        self._auto_scroll_timer.stop()
         self._selection_start = None
         self._selection_end = None
         self._select_all_mode = False

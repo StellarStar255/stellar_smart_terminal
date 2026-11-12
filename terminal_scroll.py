@@ -260,8 +260,12 @@ class TerminalScrollSearchMixin:
             notches = int(abs(self._app_wheel_accum))
             if notches:
                 self._app_wheel_accum -= notches if going_up else -notches
-                self._send_wheel_to_app(going_up, event.position().toPoint(),
-                                        notches)
+                pos = event.position().toPoint()
+                if self._is_selecting and self._tui_selection is not None:
+                    self._last_mouse_pos = pos
+                    self._scroll_tui_selection(going_up, pos, notches)
+                else:
+                    self._send_wheel_to_app(going_up, pos, notches)
             self._scroll_accum = 0.0
             event.accept()
             return
