@@ -4,6 +4,7 @@ from pathlib import Path
 import shlex
 import subprocess
 import textwrap
+import re
 
 import pytest
 
@@ -41,3 +42,26 @@ GITHUB_REF_NAME=v1.2.3
         assert result.returncode != 0
         assert missing in result.stderr
         assert 'PUBLISHED' not in result.stdout
+
+
+@pytest.mark.skipif(os.name == 'nt', reason='Release uploads run in Bash')
+@pytest.mark.parametrize('platform', [0, 1, 2])
+@pytest.mark.parametrize('draft', [True, False])
+def test_uploads_leave_public_installers_unchanged(platform, draft):
+    workflow = (Path(__file__).resolve().parents[1] / '.github/workflows/release.yml').read_text()
+    upload = workflow.split('      - name: Upload to release\n')[platform + 1]
+    body = re.search(r'(?m)^        run: \|\n((?:          .*\n|\n)*)', upload)[1]
+    script = textwrap.dedent(body)
+    mock = f'''gh() {{
+  case "$1 $2" in
+    'release view') printf '%s\\n' {str(draft).lower()} ;;
+    'release upload') echo UPLOADED ;;
+    *) return 1 ;;
+  esac
+}}
+GITHUB_REF_NAME=v1.2.3
+'''
+    result = subprocess.run(['/bin/bash', '-e'], input=mock + script, text=True,
+                            capture_output=True, timeout=5)
+    assert result.returncode == 0, result.stderr
+    assert ('UPLOADED' in result.stdout) is draft

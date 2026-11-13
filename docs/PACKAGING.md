@@ -9,7 +9,7 @@ macOS runner 跑 `build.sh` 产出 DMG + zip,Windows runner 跑 `build.bat` 产�
 并用 **Inno Setup**(`installer.iss`)额外打出 `*-windows-x64-setup.exe` 安装包,
 Linux runner(Ubuntu)跑 `build.sh` 把 onedir 打成 `*-linux-amd64.deb`(含 `.desktop`
 桌面入口与图标),三个平台都跑离屏测试套件,产物先上传到对应 Release 草稿。三平台构建和测试全部通过、五个安装包齐全后，
-由统一发布任务正式发布，避免用户下载到不完整版本。已存在的 release 只补传产物，
+由统一发布任务正式发布，避免用户下载到不完整版本。已存在的草稿只补传产物；已公开版本不覆盖附件。
 notes 不会被覆盖；新建的 release 用自动生成的 notes，之后可用 `gh release edit` 替换。
 
 Ubuntu/Debian 用户:下载 `*-linux-amd64.deb`,`sudo apt install ./Stellar-Smart-Terminal-*.deb`
@@ -72,8 +72,8 @@ gh release view v1.8.0 --json assets --jq '.assets[].name'  # 确认产物是否
 
 ## CI 失败后重新发版 / Re-running a failed release
 
-`v*` tag 的工作流跑的是 **tag 当时指向的 commit**,所以「在 main 上修一下」不会影响已推送的
-tag——需要把 tag 移到修复后的 commit 再重新触发。两种情况:
+`v*` tag 的工作流跑的是 **tag 当时指向的 commit**，在 main 上修改不会改变旧运行。
+旧流程可能没有正式版附件保护，因此已公开版本不要直接重跑旧 tag 的上传步骤。
 
 - **偶发失败(flaky),代码无需改**:直接重跑失败的 job
   ```bash
@@ -82,14 +82,16 @@ tag——需要把 tag 移到修复后的 commit 再重新触发。两种情况:
   (比如共享 CI VM 太慢卡了性能计时测试 `test_terminal_reflow.py`——阈值已放宽到 2.0s,
   仍偶发的话重跑即可。)
 
-- **需要改代码才能修**:在 main 上提交修复,再把 tag 强制移到新 commit:
+- **凭据失效**：用下文的 `scripts/update_ci_notary.py` 验证并更新公证 secrets。
+  然后在最新 main 上手动运行 Release 工作流验证，不上传或覆盖已发布版本。
+- **需要改代码才能修**：在 main 上提交修复并验证；需要发布安装包时，递增补丁版本后创建新标签：
   ```bash
   git commit -am "fix: ..." && git push origin main
-  git tag -d v1.8.0 && git tag -a v1.8.0 -m "v1.8.0"
-  git push origin v1.8.0 --force
+  # 同步 spec、pyproject 和发布说明版本后提交，再创建下一个版本的标签
+  git tag -a v1.8.1 -m "v1.8.1"
+  git push origin v1.8.1
   ```
-  重新触发后所有产物会重建并覆盖上传(`gh release upload --clobber`),已发布几分钟的
-  release 补成完整版。
+  不强推旧版本标签、不覆盖已公开附件。历史失败运行保留，新运行如实显示修复后的状态。
 
 ## 前置要求 / Prerequisites
 
@@ -175,6 +177,16 @@ base64 -i cert.p12 | pbcopy   # 粘贴到 MACOS_CERT_P12
 ```bash
 scripts/setup_ci_signing_secrets.sh ~/Desktop/cert.p12
 ```
+
+如果签名证书仍有效、只有公证凭据失效，可仅更新两个公证 secrets：
+
+```bash
+.venv-build/bin/python scripts/update_ci_notary.py --apple-id <AppleID邮箱>
+```
+
+脚本通过 macOS 隐藏输入框接收 App 专用密码，先向 Apple 验证，再经标准输入更新
+`NOTARY_APPLE_ID` 和 `NOTARY_PASSWORD`；不改动签名证书 secrets，不打印或落盘密码。
+Release 作业会在构建前检查公证凭据；重跑时不会覆盖已正式发布版本的附件。
 
 验证签名/公证是否生效(模拟用户首次下载):
 

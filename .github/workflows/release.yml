@@ -1,7 +1,7 @@
 # 推送 v* tag 时自动打包 macOS (arm64) 与 Windows (x64) 并上传到对应 Release。
 #
-# 与手动发版（docs/PACKAGING.md）兼容：release 已存在时跳过创建、只补传产物
-# （--clobber 允许覆盖同名文件）；release 不存在时创建草稿并生成默认 notes,
+# 与手动发版（docs/PACKAGING.md）兼容：已有草稿可补传产物，已公开版本不覆盖附件；
+# release 不存在时创建草稿并生成默认 notes,
 # 三个平台都成功、五个安装包齐全后才统一正式发布。
 # 之后可用 `gh release edit` 替换成手写说明。
 #
@@ -72,6 +72,19 @@ jobs:
           security set-key-partition-list -S apple-tool:,apple: \
             -s -k "$KEYCHAIN_PASS" "$KEYCHAIN" >/dev/null
           security list-keychains -d user -s "$KEYCHAIN" login.keychain-db
+
+      - name: Verify notarization credentials
+        env:
+          NOTARY_APPLE_ID: ${{ secrets.NOTARY_APPLE_ID }}
+          NOTARY_PASSWORD: ${{ secrets.NOTARY_PASSWORD }}
+          NOTARY_TEAM_ID: 3QCL9WNFBB
+        run: |
+          if [ -z "$NOTARY_APPLE_ID" ] || [ -z "$NOTARY_PASSWORD" ]; then
+            echo "::error::Apple notarization secrets are missing. Update NOTARY_APPLE_ID and NOTARY_PASSWORD."
+            exit 1
+          fi
+          xcrun notarytool history --apple-id "$NOTARY_APPLE_ID" \
+            --password "$NOTARY_PASSWORD" --team-id "$NOTARY_TEAM_ID" >/dev/null
 
       - name: Build .app + DMG
         env:
@@ -148,6 +161,10 @@ jobs:
               --title "$GITHUB_REF_NAME" --generate-notes ||
               gh release view "$GITHUB_REF_NAME" >/dev/null
           fi
+          if [ "$(gh release view "$GITHUB_REF_NAME" --json isDraft --jq .isDraft)" != "true" ]; then
+            echo "Release is already public; leaving published installers unchanged."
+            exit 0
+          fi
           gh release upload "$GITHUB_REF_NAME" --clobber \
             dist/Stellar-Smart-Terminal-v*-macOS-arm64.dmg \
             dist/Stellar-Smart-Terminal-v*-macOS-arm64.zip
@@ -215,6 +232,10 @@ jobs:
               --title "$GITHUB_REF_NAME" --generate-notes ||
               gh release view "$GITHUB_REF_NAME" >/dev/null
           fi
+          if [ "$(gh release view "$GITHUB_REF_NAME" --json isDraft --jq .isDraft)" != "true" ]; then
+            echo "Release is already public; leaving published installers unchanged."
+            exit 0
+          fi
           gh release upload "$GITHUB_REF_NAME" --clobber \
             dist/Stellar-Smart-Terminal-v*-windows-x64.zip \
             dist/Stellar-Smart-Terminal-v*-windows-x64-setup.exe
@@ -272,6 +293,10 @@ jobs:
             gh release create "$GITHUB_REF_NAME" --verify-tag --draft \
               --title "$GITHUB_REF_NAME" --generate-notes ||
               gh release view "$GITHUB_REF_NAME" >/dev/null
+          fi
+          if [ "$(gh release view "$GITHUB_REF_NAME" --json isDraft --jq .isDraft)" != "true" ]; then
+            echo "Release is already public; leaving published installers unchanged."
+            exit 0
           fi
           gh release upload "$GITHUB_REF_NAME" --clobber \
             dist/Stellar-Smart-Terminal-v*-linux-amd64.deb
