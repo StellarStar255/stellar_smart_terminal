@@ -683,33 +683,7 @@ class TerminalMouseMixin:
         local_cmd_menu = QMenu(t("ctx.local_quick_commands"), menu)
         local_cmd_menu.setStyleSheet(menu.styleSheet())
 
-        if self.local_quick_commands_provider:
-            local_presets = self.local_quick_commands_provider()
-            if local_presets:
-                for preset in local_presets:
-                    preset_name = preset.get('name', t("common.unnamed"))
-                    commands = preset.get('commands', [])
-                    if commands:
-                        # 点击预设名称直接执行全部命令
-                        preset_action = QAction(preset_name, self)
-                        preset_action.triggered.connect(
-                            lambda checked, cmds=commands: self._execute_commands(cmds)
-                        )
-                        local_cmd_menu.addAction(preset_action)
-
-                local_cmd_menu.addSeparator()
-            else:
-                # 无本地命令时显示提示
-                no_cmd_action = QAction(t("ctx.no_local_commands"), self)
-                no_cmd_action.setEnabled(False)
-                local_cmd_menu.addAction(no_cmd_action)
-                local_cmd_menu.addSeparator()
-        else:
-            # 无本地命令时显示提示
-            no_cmd_action = QAction(t("ctx.no_local_commands"), self)
-            no_cmd_action.setEnabled(False)
-            local_cmd_menu.addAction(no_cmd_action)
-            local_cmd_menu.addSeparator()
+        self._populate_local_commands_menu(local_cmd_menu)
 
         # 添加"添加命令..."选项
         add_local_cmd_action = QAction(t("ctx.add_command"), self)
@@ -799,6 +773,24 @@ class TerminalMouseMixin:
         menu.addAction(move_up_action)
 
         menu.exec(event.globalPos())
+
+    def _populate_local_commands_menu(self, menu):
+        """内置 Shell 始终可用；项目命令保留原来的顺序与执行方式。"""
+        shell = self._get_local_shell_command()
+        shell_action = menu.addAction(shell)
+        shell_action.triggered.connect(
+            lambda checked=False: self._execute_commands([shell]))
+        presets = (self.local_quick_commands_provider()
+                   if self.local_quick_commands_provider else [])
+        if presets:
+            menu.addSeparator()
+            for preset in presets:
+                commands = preset.get('commands', [])
+                if commands:
+                    action = menu.addAction(preset.get('name', t("common.unnamed")))
+                    action.triggered.connect(
+                        lambda checked=False, cmds=commands: self._execute_commands(cmds))
+        menu.addSeparator()
 
     def _has_selection(self) -> bool:
         """检查是否有选中的内容"""

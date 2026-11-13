@@ -2576,6 +2576,14 @@ class TerminalWidget(TerminalInputMixin, TerminalMouseMixin,
                     return shell
             return 'sh'
 
+    def _get_local_shell_command(self) -> str:
+        """本地快速命令的内置 Shell，不改动终端启动预设或项目配置。"""
+        if sys.platform == 'win32':
+            for shell in ('pwsh.exe', 'powershell.exe'):
+                if shutil.which(shell):
+                    return shell
+        return self._get_default_shell()
+
     def _execute_commands(self, commands: list):
         """执行多个命令（依次执行）"""
         if not commands:
