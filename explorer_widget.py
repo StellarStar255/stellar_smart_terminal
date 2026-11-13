@@ -979,6 +979,15 @@ class ExplorerPanel(QWidget, explorer_common.TransferJobHost):
         self.tree_view.doubleClicked.connect(self._on_double_click)
         self.tree_view.customContextMenuRequested.connect(self._show_context_menu)
 
+        # Qt 在 macOS 上将 Command 映射为 Ctrl；仅 Explorer 内有焦点时导航，
+        # 不抢终端的 Cmd+↑（跳转历史）或其它窗口的按键。
+        self._go_up_shortcut = QShortcut(
+            QKeySequence('Ctrl+Up' if sys.platform == 'darwin' else 'Alt+Up'), self)
+        self._go_up_shortcut.setContext(Qt.ShortcutContext.WidgetWithChildrenShortcut)
+        self._go_up_shortcut.activated.connect(self.go_up)
+        shortcut_text = self._go_up_shortcut.key().toString(QKeySequence.SequenceFormat.NativeText)
+        self.up_btn.setToolTip(f'{t("explorer.go_up")} ({shortcut_text})')
+
         # Cmd+C / Cmd+X / Cmd+V — 当 tree_view 或其子项有焦点时触发
         copy_sc = QShortcut(QKeySequence.StandardKey.Copy, self.tree_view)
         copy_sc.setContext(Qt.ShortcutContext.WidgetWithChildrenShortcut)
