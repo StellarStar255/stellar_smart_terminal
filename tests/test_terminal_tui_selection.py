@@ -1,7 +1,8 @@
 """Full-screen transcript selection survives application-owned scrolling/redraw."""
 import os
 import unittest
-from unittest.mock import Mock
+import re
+from unittest.mock import Mock, patch
 
 os.environ.setdefault('QT_QPA_PLATFORM', 'offscreen')
 from PyQt6.QtCore import QEvent, QPoint, QPointF, Qt
@@ -99,10 +100,84 @@ class TestTuiSelection(unittest.TestCase):
         self.assertIn(b'\x1b[<65;', self.w._write_to_backend.call_args.args[0])
 
     def test_wheel_uses_snapshot_path(self):
+        self.pos = self.cell(self.w.term_rows - 1)  # wheel while pointer is over input/footer
         self.w.wheelEvent(QWheelEvent(QPointF(self.pos), QPointF(self.pos),
             QPoint(), QPoint(0, 240), Qt.MouseButton.LeftButton,
             Qt.KeyboardModifier.NoModifier, Qt.ScrollPhase.NoScrollPhase, False))
         self.assertEqual(self.w._tui_selection['pending'], 1)
+        self.w._write_to_backend.assert_called_once()
+        self.assertEqual(self.w._write_to_backend.call_args.args[0], b'\x1b[<64;1;5M')
+
+    def test_edge_drag_obeys_codex_transcript_hit_testing_and_scroll_speed(self):
+        """Codex ignores wheel events over its footer; one notch scrolls three rows.
+
+        Unlike the old fixture, pages change only when an accepted SGR event
+        arrives, rather than unconditionally after asking the terminal to scroll.
+        """
+        accepted = []
+
+        def codex_wheel(data):
+            for button, col, row in re.findall(rb'\x1b\[<(64|65);(\d+);(\d+)M', data):
+                if not 2 <= int(row) <= self.w.term_rows - 3:
+                    continue
+                accepted.append((int(button), int(row)))
+                self.offset += -3 if button == b'64' else 3
+                self.draw()
+            return True
+
+        self.w._write_to_backend = Mock(side_effect=codex_wheel)
+        self.pos = self.cell(self.w.term_rows + 3, self.w.term_cols - 1)
+        self.mouse(QEvent.Type.MouseMove, Qt.MouseButton.LeftButton)
+        for _ in range(20):
+            self.w._auto_scroll_tick()
+        self.mouse(QEvent.Type.MouseButtonRelease, Qt.MouseButton.NoButton)
+        self.assertEqual(len(accepted), 20)
+        self.assertTrue(all(row == 5 for _, row in accepted))
+        expected = '\n'.join(f'row {i:04d} 中文 sample'
+                             for i in range(104, self.offset + self.w.term_rows - 3))
+        self.assertEqual(self.w._get_selected_text(), expected)
+        # 每个 tick 只发送一格，不能被应用滚速再放大成整页跳跃。
+        self.assertTrue(all(c.args[0].count(b'M') == 1
+                            for c in self.w._write_to_backend.call_args_list))
+
+    def test_top_edge_reports_the_original_transcript_position(self):
+        self.pos = self.cell(-3)
+        self.mouse(QEvent.Type.MouseMove, Qt.MouseButton.LeftButton)
+        self.w._auto_scroll_tick()
+        report = self.w._write_to_backend.call_args.args[0]
+        self.assertEqual(report, b'\x1b[<64;1;5M')
+
+    def test_selection_starting_on_sticky_header_retries_inside_transcript(self):
+        self.pos = self.cell(0)
+        self.mouse(QEvent.Type.MouseButtonPress, Qt.MouseButton.LeftButton)
+
+        def codex_wheel(data):
+            for button, col, row in re.findall(rb'\x1b\[<(64|65);(\d+);(\d+)M', data):
+                if 2 <= int(row) <= self.w.term_rows - 3:
+                    self.offset += 3
+                    self.draw()
+            return True
+
+        self.w._write_to_backend = Mock(side_effect=codex_wheel)
+        self.w._scroll_tui_selection(False, self.pos)
+        self.assertEqual(self.offset, 100)  # pinned header ignored by Codex
+        # A progress/status update must not make an ignored header wheel look
+        # like a page redraw and block all subsequent scrolling.
+        self.w.stream.feed(f'\x1b[{self.w.term_rows};1HWorking status update')
+        sent = self.w._tui_selection['sent']
+        with patch('terminal_mouse.time.monotonic', return_value=sent + 1):
+            self.w._scroll_tui_selection(False, self.pos)
+        self.w._refresh_tui_selection()
+        self.assertEqual(self.offset, 103)
+        self.assertEqual(self.w._tui_selection['origin'], 3)
+
+    def test_changed_unaligned_frame_does_not_send_more_wheel_events(self):
+        self.w._scroll_tui_selection(False, self.pos)
+        sent = self.w._tui_selection['sent']
+        self.offset += 1000  # no overlap; may be an incomplete redraw or unrelated output
+        self.draw()
+        with patch('terminal_mouse.time.monotonic', return_value=sent + 1):
+            self.w._scroll_tui_selection(False, self.pos)
         self.w._write_to_backend.assert_called_once()
 
     def test_unrelated_redraw_does_not_invent_a_scroll(self):

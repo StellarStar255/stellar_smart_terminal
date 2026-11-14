@@ -6,7 +6,7 @@ English | [简体中文](README.zh-CN.md)
 
 A PyQt6-based smart terminal with file explorer, Git GUI, LLM proxy, and VS Code extension browser.
 
-Latest release: [v1.35.40](docs/releases/v1.35.40.md) adds parent-folder navigation in Explorer with ⌘↑ on macOS and Alt+↑ on Windows/Linux.
+Latest release: [v1.35.41](docs/releases/v1.35.41.md) fixes edge scrolling and cross-page selection in Codex, including selections starting on pinned messages.
 
 <img src="assets/smart_terminal.png" width="300" />
 

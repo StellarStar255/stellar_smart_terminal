@@ -60,13 +60,15 @@ class TerminalMouseMixin:
         return tuple((c, ch.data) for c, ch in sorted(row[0].items())
                      if ch.data.strip())
 
-    def _begin_tui_selection(self):
+    def _begin_tui_selection(self, pos=None):
         self._tui_selection = None
         if self._mouse_mode and self.screen._in_alt_screen:
             rows = self._snapshot_tui_rows()
             self._tui_selection = dict(view=rows, origin=0,
                 rows=dict(enumerate(rows)), bounds=(0, self.term_rows),
-                pending=0, sent=0.0, size=(self.term_rows, self.term_cols))
+                pending=0, sent=0.0, pending_changed=False,
+                wheel_pos=QPoint(pos) if pos is not None else None,
+                size=(self.term_rows, self.term_cols))
 
     def _refresh_tui_selection(self):
         """将应用滚动前后的重叠行对齐，保留离屏选区，排除固定标题/输入栏。
@@ -90,6 +92,11 @@ class TerminalMouseMixin:
                   if b.size >= 2 and (b.a - b.b) * state['pending'] < 0
                   and len({k for k in old[b.a:b.a + b.size] if k}) >= 2]
         if not blocks:
+            lo, hi = state['bounds']
+            changed = sum(old[r] != new[r] for r in range(lo, hi))
+            # 少量状态/进度文字刷新不代表已经翻页，不能阻断正文坐标重试。
+            # 大片文本已变但尚未对齐时继续等待，避免再滚一格丢失重叠部分。
+            state['pending_changed'] = changed > max(1, min(3, (hi - lo) // 4))
             return
         block = max(blocks, key=lambda b: b.size)
         delta = block.a - block.b
@@ -110,7 +117,8 @@ class TerminalMouseMixin:
         origin += delta
         for r in range(lo, hi):
             state['rows'][origin + r] = rows[r]
-        state.update(view=rows, origin=origin, bounds=(lo, hi), pending=0)
+        state.update(view=rows, origin=origin, bounds=(lo, hi), pending=0,
+                     pending_changed=False)
         # 选择手势最多保留 20000 行，避免长时间拖动无限增长。
         if len(state['rows']) > 20000:
             self._is_selecting = False
@@ -123,10 +131,23 @@ class TerminalMouseMixin:
         if state is None:
             return
         now = time.monotonic()
-        if state['pending'] and now - state['sent'] < 0.15:
-            return  # 等待异步重绘，避免滚得太远丢失重叠行
-        state.update(pending=1 if going_up else -1, sent=now)
-        self._send_wheel_to_app(going_up, pos, min(3, max(1, notches)))
+        if state['pending']:
+            if now - state['sent'] < 0.15 or state['pending_changed']:
+                return  # 新页尚未对齐时不能继续发送，否则会丢失中间文本
+            # 起点也可能是 Codex 的置顶用户消息（正文外）。没有检测到页面
+            # 移动或大面积重绘时，换内部坐标重试；页面移动后即沿用该点。
+            probe = state.get('wheel_probe', 0)
+            row = (self.term_rows // 3, self.term_rows // 2,
+                   self.term_rows // 4)[probe % 3]
+            state['wheel_probe'] = probe + 1
+            state['wheel_pos'] = QPoint(
+                int(self.PADDING + (self.term_cols // 2 + .5) * self.char_width),
+                int(self.PADDING + self._header_h + (row + .5) * self.char_height))
+        state.update(pending=1 if going_up else -1, sent=now, pending_changed=False)
+        # Codex 只接收正文区域内的滚轮；拖到终端边缘时坐标已落在标题、
+        # 输入栏或状态栏，程序会忽略。沿用本次从正文开始选择的位置上报。
+        # 每次只发一格：应用自己还会乘滚速，多格会把短视口整个跳过去。
+        self._send_wheel_to_app(going_up, state['wheel_pos'] or pos, 1)
 
     def _auto_scroll_tick(self):
         """自动滚动定时器回调 - 支持拖动选择时跨页
@@ -289,7 +310,7 @@ class TerminalMouseMixin:
             self._refresh_tui_selection()
             if not (event.modifiers() & Qt.KeyboardModifier.ShiftModifier
                     and self._has_selection()):
-                self._begin_tui_selection()
+                self._begin_tui_selection(event.pos())
             self._last_mouse_pos = event.pos()
             current_time = time.time()
             cell = self._pos_to_cell(event.pos())  # 相对坐标，用于点击检测

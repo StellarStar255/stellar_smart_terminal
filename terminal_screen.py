@@ -364,6 +364,7 @@ class CompatibleHistoryScreen(pyte.HistoryScreen):
         # 拆开而漏掉（以前 widget 用块内子串扫描）。_tracked_mode_gen 每次变化
         # 自增，widget 据此判断是否要把值同步到自己的属性上。
         self._mouse_mode = False
+        self._active_mouse_modes = set()
         self._focus_report = False
         self._tracked_mode_gen = 0
 
@@ -411,8 +412,13 @@ class CompatibleHistoryScreen(pyte.HistoryScreen):
         """记录鼠标上报 / 焦点上报开关（任一变化让 _tracked_mode_gen 自增）。"""
         changed = False
         if self._MOUSE_MODES & set(modes):
-            if self._mouse_mode != on:
-                self._mouse_mode = on
+            if on:
+                self._active_mouse_modes.update(self._MOUSE_MODES & set(modes))
+            else:
+                self._active_mouse_modes.difference_update(modes)
+            mouse_mode = bool(self._active_mouse_modes)
+            if self._mouse_mode != mouse_mode:
+                self._mouse_mode = mouse_mode
                 changed = True
         if 1004 in modes:
             if self._focus_report != on:
@@ -691,6 +697,7 @@ class CompatibleHistoryScreen(pyte.HistoryScreen):
             self._in_draw = False
         if hasattr(self, '_tracked_mode_gen'):
             # RIS 清掉所有模式（pyte 会清 self.mode），追踪值同步复位
+            self._active_mouse_modes.clear()
             if self._mouse_mode or self._focus_report:
                 self._mouse_mode = False
                 self._focus_report = False

@@ -68,6 +68,18 @@ class TestFocusAndMouseModeAcrossChunks(_Base):
         self.feed('\x1b[?1006;1002;1000l')
         self.assertFalse(self.w._mouse_mode)
 
+    def test_disabling_one_mouse_mode_keeps_remaining_modes_active(self):
+        self.feed('\x1b[?1000;1002;1003;1006h')
+        for mode in ('1003', '1006', '1002'):
+            self.feed('\x1b[?' + mode + 'l')
+            self.assertTrue(self.w._mouse_mode)
+        self.feed('\x1b[?1000l')
+        self.assertFalse(self.w._mouse_mode)
+
+    def test_reset_clears_the_active_mouse_mode_set(self):
+        self.feed('\x1b[?1000;1002;1006h', '\x1bc', '\x1b[?1003h', '\x1b[?1003l')
+        self.assertFalse(self.w._mouse_mode)
+
     def test_externally_set_flag_not_clobbered_by_unrelated_output(self):
         """测试/外部直接设的值：没有模式变化的输出不会把它冲掉。"""
         self.w._mouse_mode = True
