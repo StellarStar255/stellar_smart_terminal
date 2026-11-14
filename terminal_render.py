@@ -201,6 +201,7 @@ class TerminalRenderMixin:
             and self._cache_pixmap is not None
             and not self._cache_pixmap.isNull()
         )
+        rebuild_deferred = False
         if not fast_scale:
             need_rebuild = (
                 self._cache_pixmap is None or
@@ -214,8 +215,16 @@ class TerminalRenderMixin:
                 # 持锁重建：_rebuild_cache 会迭代 screen.buffer / history.top 的活对象，
                 # 一旦 feed 移到读取线程，并发 mutate 会撕裂迭代。在调用处持锁覆盖整段
                 # 重建（含绘图），代价是读取线程在重建期间(几 ms)短暂等待，可接受。
-                with self._screen_lock:
-                    self._rebuild_cache()
+                if self._screen_lock.acquire(blocking=False):
+                    try:
+                        self._rebuild_cache()
+                    finally:
+                        self._screen_lock.release()
+                else:
+                    # 输出解析/重排仍在使用屏幕：保留上一帧，由刷新定时器
+                    # 重试，不能让 GUI 排队等锁（控制序列的耗时并不受字节数限制）。
+                    rebuild_deferred = True
+                    self._content_dirty = True
 
         opaque_bg = QColor(self.bg_color)
         opaque_bg.setAlpha(255)
@@ -230,6 +239,10 @@ class TerminalRenderMixin:
             # 拉伸/压缩；动画结束后 set_fast_resize(False) 按最终尺寸重建。
             painter.drawPixmap(0, 0, self._cache_pixmap)
         painter.setCompositionMode(QPainter.CompositionMode.CompositionMode_SourceOver)
+
+        if rebuild_deferred:
+            # 选区/光标也不能从正在被后台修改的屏幕取新坐标。
+            return
 
         # 滚动指示器（右上角）。画在缓存外：回看滚动时缓存可整体平移复用，
         # 不必为了指示器重绘顶部行

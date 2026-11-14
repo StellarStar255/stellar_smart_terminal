@@ -1008,15 +1008,16 @@ class TerminalWidget(TerminalInputMixin, TerminalMouseMixin,
                 # 缩小后的"提示符归顶"整理延迟到 reflow 收尾（同步/异步共用）
                 self._pending_shrink_rows = True
 
+            if self._reflow_inflight:
+                # 必须在读取历史（需要屏幕锁）之前检查，否则连续 resize
+                # 会在这里等正在执行的后台 reflow，重新堵住 GUI。
+                return
+
             # 参与 reflow 的行数（粗略）。用真实历史长度而非 _get_history_count：
             # 备用屏幕(tmux/vim)期间 resize 同样会 reflow 被保存的主屏+历史
             reflow_lines = self._raw_history_count() + old_rows
             logger.debug(f"[Terminal] Size: {old_cols}x{old_rows} -> {new_cols}x{new_rows} (widget: {self.width()}x{self.height()}, char_w: {self.char_width:.1f})")
 
-            if self._reflow_inflight:
-                # 后台 reflow 在途：目标尺寸（term_cols/rows）已更新，worker
-                # 完成后发现 screen 尺寸仍不匹配会自动续跑到最新目标
-                return
             predicted_ms = reflow_lines * self._reflow_ms_per_line
             if self._ASYNC_REFLOW_ENABLED and predicted_ms >= self._ASYNC_REFLOW_MIN_MS:
                 self._start_async_reflow(reflow_lines)

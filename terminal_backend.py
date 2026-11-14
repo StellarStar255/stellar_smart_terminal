@@ -94,7 +94,12 @@ def coalesce_reads(first: bytes, wait_more, read_more, *, window: float,
             break
         if not wait_more(remaining):
             break
-        more = read_more()
+        try:
+            more = read_more()
+        except (BlockingIOError, InterruptedError):
+            # select 的就绪通知不是读成功的保证。保留已读取的输出；
+            # 暂时无数据/信号中断不能被 Unix 读取循环误判成 PTY 关闭。
+            break
         if not more:
             break
         chunks.append(more)
@@ -916,6 +921,8 @@ else:
                                     self._read_master_once):
                                 # EOF - 进程已退出
                                 break
+                        except (BlockingIOError, InterruptedError):
+                            continue
                         except OSError:
                             break
                     else:
