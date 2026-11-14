@@ -1,7 +1,6 @@
 """File clipboard URLs must reach the TUI as complete, individually escaped paths."""
 import os
 import shlex
-import sys
 from types import SimpleNamespace
 from unittest.mock import Mock, patch
 
