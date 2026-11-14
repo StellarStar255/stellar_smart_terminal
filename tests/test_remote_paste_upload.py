@@ -11,6 +11,7 @@ import sys
 import tempfile
 import threading
 import time
+import shlex
 import unittest
 from concurrent.futures import Future
 
@@ -118,7 +119,8 @@ class TestRemotePasteUpload(unittest.TestCase):
         term._deliver_media_path(self.local, prefix='', suffix='')
         self._wait(lambda: typed)
 
-        self.assertEqual(typed, [b'/data/proj/.images/shot one.png'])
+        self.assertEqual(len(typed), 1)
+        self.assertEqual(shlex.split(typed[0].decode()), ['/data/proj/.images/shot one.png'])
         self.assertIn(('mkdir', '/data/proj/.images'), sess.calls)
         self.assertIn(('upload', self.local, '/data/proj/.images/shot one.png'), sess.calls)
         self.assertEqual(pasted, [self.local])       # 画廊仍用本地缩略图
@@ -137,7 +139,8 @@ class TestRemotePasteUpload(unittest.TestCase):
         self.win._ask_connect_for_paste = lambda host: False   # 没会话时的引导框：这里选「用本地路径」
         term._deliver_media_path(self.local, prefix='', suffix='')
         self._wait(lambda: typed)
-        self.assertEqual(typed, [self.local.encode()])
+        self.assertEqual(len(typed), 1)
+        self.assertEqual(shlex.split(typed[0].decode()), [self.local])
         self.assertEqual(pasted, [self.local])
 
     def test_upload_failure_falls_back_to_local_path(self):
@@ -145,7 +148,8 @@ class TestRemotePasteUpload(unittest.TestCase):
         self.win.remote_panel = _FakePanel(_FakeSession('gpu13', fail=True), '/data/proj')
         term._deliver_media_path(self.local, prefix='', suffix='')
         self._wait(lambda: typed)
-        self.assertEqual(typed, [self.local.encode()])
+        self.assertEqual(len(typed), 1)
+        self.assertEqual(shlex.split(typed[0].decode()), [self.local])
         self.assertEqual(term._pending_remote_pastes, {})
 
     def test_local_tab_is_untouched(self):
@@ -153,7 +157,8 @@ class TestRemotePasteUpload(unittest.TestCase):
         self.win.remote_panel = _FakePanel(_FakeSession('gpu13'), '/data/proj')
         term._deliver_media_path(self.local, prefix='', suffix='')
         self._wait(lambda: typed)
-        self.assertEqual(typed, [self.local.encode()])
+        self.assertEqual(len(typed), 1)
+        self.assertEqual(shlex.split(typed[0].decode()), [self.local])
 
     def test_process_scan_runs_off_gui_thread(self):
         """识别 ssh 要起一次 ps（最坏 3 秒）：不能卡在 GUI 线程里。"""
@@ -164,7 +169,8 @@ class TestRemotePasteUpload(unittest.TestCase):
             lambda pid, processes=None: seen.append(threading.get_ident()) or "ssh -tt gpu13")
         term._deliver_media_path(self.local, prefix='', suffix='')
         self._wait(lambda: typed)
-        self.assertEqual(typed, [b'/data/proj/.images/shot one.png'])
+        self.assertEqual(len(typed), 1)
+        self.assertEqual(shlex.split(typed[0].decode()), ['/data/proj/.images/shot one.png'])
         self.assertTrue(seen, "没做 ssh 探测")
         self.assertNotIn(threading.get_ident(), seen, "ps 探测在 GUI 线程里跑了")
 

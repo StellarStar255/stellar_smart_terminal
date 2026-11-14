@@ -16,6 +16,8 @@ TerminalWidget 的按键/输入法/焦点/粘贴方法集合，纯方法搬迁�
 import os
 import re
 import sys
+import shlex
+import json
 from pathlib import Path
 
 from PyQt6.QtCore import QEvent, Qt
@@ -661,13 +663,37 @@ class TerminalInputMixin:
         self._type_media_path(local_path, prefix, suffix, local_path)
 
     def _type_media_path(self, path: str, prefix: str, suffix: str, local_path: str):
-        if ' ' in path and not prefix:
-            path_text = f'"{path}"{suffix}' if suffix else path
-        else:
-            path_text = prefix + path + suffix
+        path_text = (prefix + path if prefix else self._quote_pasted_path(path)) + suffix
         if self._write_paste(path_text.encode('utf-8')):
             self.input_buffer += path_text
             self.image_pasted.emit(local_path)
+
+    @staticmethod
+    def _quote_pasted_path(path: str) -> str:
+        """一个完整路径作为一个参数；Codex 的图片粘贴也支持 shell 引号。"""
+        if sys.platform == 'win32':
+            import subprocess
+            return subprocess.list2cmdline([path])
+        return shlex.quote(path)
+
+    def _paste_file_paths(self, paths) -> bool:
+        """文件 URL 粘贴与拖放共用，逐个投递而不回退成 Finder 的文件名文本。"""
+        handled = False
+        for path in paths:
+            if not isinstance(path, str) or not path:
+                continue
+            handled = True
+            ext = Path(path).suffix.lower()
+            is_media = (ext in self._AUDIO_EXTENSIONS or ext in self._VIDEO_EXTENSIONS
+                        or ext in self._IMAGE_EXTENSIONS)
+            if is_media:
+                prefix = '@' if self.image_prefix_enabled else ''
+                self._deliver_media_path(path, prefix=prefix, suffix=' ')
+            else:
+                text = self._quote_pasted_path(path) + ' '
+                if self._write_paste(text.encode('utf-8')):
+                    self.input_buffer += text
+        return handled
 
     def _on_remote_upload_done(self, local_path: str, remote_path: str):
         """远端上传结束（GUI 线程）：成功敲远端路径，失败退回本地路径。"""
@@ -774,21 +800,38 @@ class TerminalInputMixin:
 ObjC.import('AppKit');
 var pb = $.NSPasteboard.generalPasteboard;
 var types = pb.types;
-var hasFileURL = types.containsObject('public.file-url');
-var hasTIFF = types.containsObject('public.tiff');
-var hasPNG = types.containsObject('public.png');
-if (hasFileURL) {{
-    var urls = pb.readObjectsForClassesOptions([$.NSURL], null);
-    if (urls && urls.count > 0) {{
-        var paths = [];
-        for (var i = 0; i < urls.count; i++) {{
-            var p = urls.objectAtIndex(i).path;
-            if (p) paths.push(p.js);
+var hasTIFF = types && types.containsObject('public.tiff');
+var hasPNG = types && types.containsObject('public.png');
+var paths = [];
+function addFileURL(value) {{
+    if (!value) return;
+    var url = $.NSURL.URLWithString(value);
+    if (url && url.isFileURL) {{
+        var path = ObjC.unwrap(url.path);
+        if (path && paths.indexOf(path) < 0) paths.push(path);
+    }}
+}}
+// 不把 JS 类数组传给 readObjectsForClassesOptions：JXA 会将其中的类
+// 桥接成 NSDictionary，NSPasteboard 因而拒绝读取并返回空结果。
+var items = pb.pasteboardItems;
+if (items) {{
+    for (var i = 0; i < items.count; i++) {{
+        addFileURL(items.objectAtIndex(i).stringForType('public.file-url'));
+    }}
+}}
+if (paths.length === 0) addFileURL(pb.stringForType('public.file-url'));
+var legacy = pb.propertyListForType('NSFilenamesPboardType');
+if (legacy) {{
+    var files = ObjC.deepUnwrap(legacy);
+    if (Array.isArray(files)) {{
+        for (var j = 0; j < files.length; j++) {{
+            if (typeof files[j] === 'string' && files[j]
+                && paths.indexOf(files[j]) < 0) paths.push(files[j]);
         }}
-        if (paths.length > 0) {{
-            "FILES:" + paths.join("\\n");
-        }} else {{ "NOTHING"; }}
-    }} else {{ "NOTHING"; }}
+    }}
+}}
+if (paths.length > 0) {{
+    "FILES_JSON:" + JSON.stringify(paths);
 }} else if (hasTIFF || hasPNG) {{
     var imgData = hasPNG ? pb.dataForType('public.png') : pb.dataForType('public.tiff');
     if (imgData && imgData.length > 0) {{
@@ -825,7 +868,7 @@ if (hasFileURL) {{
                     logger.debug("image paste: move to save dir failed", exc_info=True)
                     save_path = tmp_path   # 移不动就用临时文件本身，粘贴不该失败
                     tmp_path = None        # 别让 finally 把它删了
-                # 粘贴图片时只发送原始路径（不加 @ 前缀、不加尾部空格）。
+                # 粘贴图片时发送正确转义的路径（不加 @ 前缀、不加尾部空格）。
                 # 若应用（如 Claude Code）启用了 Bracketed Paste，_write_paste
                 # 会将内容包裹在 ESC[200~/ESC[201~ 之间，应用据此识别为整块粘贴
                 # 并把路径显示为 [Image #N]；未启用时则直接落为原始路径文本。
@@ -833,30 +876,10 @@ if (hasFileURL) {{
                 self._deliver_media_path(save_path, prefix='', suffix='')
                 return True
 
-            elif output.startswith("FILES:"):
-                file_paths = output[6:].split('\n')
-                for fp in file_paths:
-                    fp = fp.strip()
-                    if not fp:
-                        continue
-                    ext = Path(fp).suffix.lower()
-                    is_media = (ext in self._AUDIO_EXTENSIONS or
-                                ext in self._VIDEO_EXTENSIONS or
-                                ext in self._IMAGE_EXTENSIONS)
-                    prefix = '@' if (is_media and self.image_prefix_enabled) else ''
-                    if is_media:
-                        self._deliver_media_path(fp, prefix=prefix, suffix=' ')
-                        continue
-                    if ' ' in fp and not prefix:
-                        path_text = f'"{fp}" '
-                    else:
-                        path_text = prefix + fp + ' '
-                    data = path_text.encode('utf-8')
-                    if self._write_paste(data):
-                        self.input_buffer += path_text
-                # 只要 JXA 检测到 file-url，就算处理完毕（即使写入失败也不应
-                # 回落到文本粘贴，否则会把文件路径的文本表示重复粘一次）
-                return True
+            elif output.startswith("FILES_JSON:"):
+                paths = json.loads(output[len("FILES_JSON:"):])
+                if isinstance(paths, list):
+                    return self._paste_file_paths(paths)
 
             # output == "NOTHING" 或其他非预期输出：剪贴板无图片/文件
             # 只有明确的 NOTHING 才允许下次跳过探测（osascript 出错要重探）
@@ -881,15 +904,9 @@ if (hasFileURL) {{
 
         # 检查是否有文件URL（可能是音频、视频、图片等文件）
         if mime_data.hasUrls():
-            urls = mime_data.urls()
-            for url in urls:
-                if url.isLocalFile():
-                    file_path = url.toLocalFile()
-                    ext = Path(file_path).suffix.lower()
-                    if ext in self._AUDIO_EXTENSIONS or ext in self._VIDEO_EXTENSIONS or ext in self._IMAGE_EXTENSIONS:
-                        prefix = '@' if self.image_prefix_enabled else ''
-                        self._deliver_media_path(file_path, prefix=prefix, suffix=' ')
-                        return
+            paths = [url.toLocalFile() for url in mime_data.urls() if url.isLocalFile()]
+            if self._paste_file_paths(paths):
+                return
 
         # 检查是否有图片
         if mime_data.hasImage():

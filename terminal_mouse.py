@@ -1444,19 +1444,7 @@ class TerminalMouseMixin:
         if mime_data is None:
             return
 
-        urls = mime_data.urls()
-        paths = []
-        for url in urls:
-            if url.isLocalFile():
-                path = url.toLocalFile()
-                # 如果路径包含空格，加引号
-                if ' ' in path:
-                    path = f'"{path}"'
-                paths.append(path)
-
-        if paths:
-            text = ' '.join(paths) + ' '
-            if self._write_to_backend(text.encode('utf-8')):
-                self.input_buffer += text
+        paths = [url.toLocalFile() for url in mime_data.urls() if url.isLocalFile()]
+        self._paste_file_paths(paths)
 
         event.acceptProposedAction()
