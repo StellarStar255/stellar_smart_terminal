@@ -177,6 +177,31 @@ class TerminalRenderMixin:
         return x_start, x_end - x_start
 
     def paintEvent(self, event: QPaintEvent):
+        # 即使缓存有效，TUI 选区仍要读取屏幕。一次非阻塞加锁覆盖整帧，
+        # 防止在缓存重建之后、选区绘制之前又被解析/重排线程抢走锁。
+        if self.width() <= 0 or self.height() <= 0:
+            return
+        if not self._screen_lock.acquire(blocking=False):
+            painter = QPainter(self)
+            if painter.isActive():
+                self._draw_cached_frame(painter)
+            self._content_dirty = True
+            return
+        try:
+            self._paint_screen(event)
+        finally:
+            self._screen_lock.release()
+
+    def _draw_cached_frame(self, painter):
+        opaque_bg = QColor(self.bg_color)
+        opaque_bg.setAlpha(255)
+        painter.setCompositionMode(QPainter.CompositionMode.CompositionMode_Source)
+        painter.fillRect(self.rect(), opaque_bg)
+        if self._cache_pixmap and not self._cache_pixmap.isNull():
+            painter.drawPixmap(0, 0, self._cache_pixmap)
+        painter.setCompositionMode(QPainter.CompositionMode.CompositionMode_SourceOver)
+
+    def _paint_screen(self, event: QPaintEvent):
         """绘制终端 - 使用双缓冲提高性能"""
         # 防止在 widget 尺寸为 0 时绘制（如拖拽分离 tab 过渡期间），避免 segfault
         if self.width() <= 0 or self.height() <= 0:
@@ -195,13 +220,12 @@ class TerminalRenderMixin:
         # 快速 resize 模式（弹簧/动画期间）或后台 reflow 在途：只要有可用的
         # 旧缓存，就直接贴旧图，跳过整屏重建。reflow 在途时重建会卡在
         # _screen_lock 上（worker 正持锁 mutate 屏幕/历史，可达一两百 ms），
-        # 贴旧帧让 GUI 全程不冻结。无缓存时退回正常重建路径（会短暂等锁）。
+        # 无缓存时重建；锁忙时 paintEvent 已贴旧帧并返回。
         fast_scale = (
             (self._fast_resize or self._reflow_scaling)
             and self._cache_pixmap is not None
             and not self._cache_pixmap.isNull()
         )
-        rebuild_deferred = False
         if not fast_scale:
             need_rebuild = (
                 self._cache_pixmap is None or
@@ -215,34 +239,9 @@ class TerminalRenderMixin:
                 # 持锁重建：_rebuild_cache 会迭代 screen.buffer / history.top 的活对象，
                 # 一旦 feed 移到读取线程，并发 mutate 会撕裂迭代。在调用处持锁覆盖整段
                 # 重建（含绘图），代价是读取线程在重建期间(几 ms)短暂等待，可接受。
-                if self._screen_lock.acquire(blocking=False):
-                    try:
-                        self._rebuild_cache()
-                    finally:
-                        self._screen_lock.release()
-                else:
-                    # 输出解析/重排仍在使用屏幕：保留上一帧，由刷新定时器
-                    # 重试，不能让 GUI 排队等锁（控制序列的耗时并不受字节数限制）。
-                    rebuild_deferred = True
-                    self._content_dirty = True
+                self._rebuild_cache()
 
-        opaque_bg = QColor(self.bg_color)
-        opaque_bg.setAlpha(255)
-
-        # 使用 Source 合成模式：完全替换像素，不做 alpha 混合。
-        # 先填充背景确保终端区域自身完全不透明（防止父/兄弟 widget 内容透出）。
-        painter.setCompositionMode(QPainter.CompositionMode.CompositionMode_Source)
-        painter.fillRect(self.rect(), opaque_bg)
-        if self._cache_pixmap and not self._cache_pixmap.isNull():
-            # fast_resize（弹簧动画）期间跳过重建，旧缓存按原尺寸左上角贴图、
-            # 不缩放：变宽时右侧暂露背景色、变窄时右侧裁剪，避免文字被横向
-            # 拉伸/压缩；动画结束后 set_fast_resize(False) 按最终尺寸重建。
-            painter.drawPixmap(0, 0, self._cache_pixmap)
-        painter.setCompositionMode(QPainter.CompositionMode.CompositionMode_SourceOver)
-
-        if rebuild_deferred:
-            # 选区/光标也不能从正在被后台修改的屏幕取新坐标。
-            return
+        self._draw_cached_frame(painter)
 
         # 滚动指示器（右上角）。画在缓存外：回看滚动时缓存可整体平移复用，
         # 不必为了指示器重绘顶部行

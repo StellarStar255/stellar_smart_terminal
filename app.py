@@ -556,10 +556,20 @@ def _install_stack_dump_watchdog():
         print(f"STELLAR_STACK_DUMP disabled: {e}", file=sys.stderr)
 
 
+def configure_gui_thread_scheduling():
+    """缩短 CPU 密集的终端解析线程交还 GIL 的间隔，给 GUI 更多运行机会。"""
+    # 四个终端同时输出时，默认 5ms 时间片会让 Qt 绘制期间的多次 GIL
+    # 重获累积成 100~250ms 的事件延迟。1ms 在持续输出实测中不降低吞吐，
+    # 明显改善响应；保留启动器/用户已经设置的更短间隔。
+    if sys.getswitchinterval() > .001:
+        sys.setswitchinterval(.001)
+
+
 def main():
     """主函数"""
     # 尽早初始化日志系统，保证后续所有模块的 logger 输出有处可去
     setup_logging()
+    configure_gui_thread_scheduling()
     _install_stack_dump_watchdog()
 
     # 尽早安装全局异常钩子：把 Qt 回调中的未捕获异常从“闪退(abort)”降级为

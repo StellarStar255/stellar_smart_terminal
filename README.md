@@ -6,7 +6,7 @@ English | [简体中文](README.zh-CN.md)
 
 A PyQt6-based smart terminal with file explorer, Git GUI, LLM proxy, and VS Code extension browser.
 
-Latest release: [v1.35.42](docs/releases/v1.35.42.md) fixes Finder file pasting into Codex, preserving complete paths, special characters, and multiple files.
+Latest release: [v1.35.43](docs/releases/v1.35.43.md) fixes terminal stalls during output, searching, resizing, pasting, and closing, and improves responsiveness with multiple busy terminals.
 
 <img src="assets/smart_terminal.png" width="300" />
 

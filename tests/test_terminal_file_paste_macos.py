@@ -4,6 +4,7 @@ import os
 import shlex
 import subprocess
 import sys
+import time
 import uuid
 from types import SimpleNamespace
 from unittest.mock import Mock, patch
@@ -12,6 +13,7 @@ os.environ.setdefault('QT_QPA_PLATFORM', 'offscreen')
 
 import pytest
 from PyQt6.QtGui import QImage, QColor
+from PyQt6.QtCore import QProcess
 from PyQt6.QtWidgets import QApplication
 from terminal_widget import TerminalWidget
 
@@ -46,16 +48,21 @@ def pasteboard(tmp_path):
         return result
 
     def paste():
-        def isolated(cmd, **kwargs):
-            assert cmd[0] == 'osascript'
-            cmd = list(cmd)
-            cmd[-1] = cmd[-1].replace('$.NSPasteboard.generalPasteboard', board)
-            result = real_run(cmd, **kwargs)
-            assert result.returncode == 0, result.stderr
-            return result
+        real_start = QProcess.start
+
+        def isolated(process, program, arguments):
+            assert program == 'osascript'
+            arguments = list(arguments)
+            arguments[-1] = arguments[-1].replace('$.NSPasteboard.generalPasteboard', board)
+            return real_start(process, program, arguments)
         clipboard = SimpleNamespace(text=Mock(side_effect=AssertionError('file became filename text')))
-        with patch('subprocess.run', side_effect=isolated):
+        with patch.object(QProcess, 'start', new=isolated):
             widget._paste_from_clipboard_macos(clipboard)
+            deadline = time.monotonic() + 10
+            while (widget._native_paste_process is not None or widget._native_paste_queue):
+                assert time.monotonic() < deadline, 'asynchronous paste did not finish'
+                _APP.processEvents()
+                time.sleep(.005)
         clipboard.text.assert_not_called()
 
     image = QImage(2, 2, QImage.Format.Format_ARGB32)

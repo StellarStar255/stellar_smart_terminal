@@ -43,7 +43,7 @@ logger = get_logger(__name__)
 # （切标签页/分屏/粘贴图片都会触发）。更糟的是 cwd 落在挂死的网络挂载点上时
 # lsof 会一路顶到 2s 超时——多标签场景下表现为「别的终端也跟着卡住」。
 # 原生接口约 0.2ms 且不会阻塞：Linux 读 /proc，macOS 走 libproc。
-# lsof 仅作为两者都失败时的兜底。
+# lsof 仅作为两者都失败时的后台兜底，GUI 不等待它。
 _PROC_PIDVNODEPATHINFO = 9      # <sys/proc_info.h>
 _VNODE_PATH_OFFSET = 152        # offsetof(struct vnode_info_path, vip_path)
 _PROC_VNODEPATHINFO_SIZE = 2352  # sizeof(struct proc_vnodepathinfo)
@@ -84,6 +84,22 @@ def _cwd_via_native(pid: int) -> Optional[str]:
     except Exception:
         logger.debug("proc_pidinfo failed", exc_info=True)
         return None
+
+
+def _cwd_via_lsof(pid: int) -> Optional[str]:
+    """仅在线程池运行；不 stat 目录，避免网络挂载点拖住调用线程。"""
+    import subprocess
+    try:
+        result = subprocess.run(
+            ['lsof', '-a', '-d', 'cwd', '-p', str(pid), '-Fn'],
+            capture_output=True, text=True, timeout=2)
+        if result.returncode == 0:
+            for line in result.stdout.splitlines():
+                if line.startswith('n/'):
+                    return line[1:]
+    except Exception:
+        logger.debug("cwd fallback failed", exc_info=True)
+    return None
 
 
 # 复制拼接时用于识别「新的结构行」（列表项/有序列表/标题/引用）。
@@ -573,9 +589,14 @@ class TerminalWidget(TerminalInputMixin, TerminalMouseMixin,
         # 用可重入锁(RLock)：同线程内嵌套读取(render→helper)不会自锁；后续把 feed
         # 挪到读取线程时，这把锁即提供真正的互斥。
         self._screen_lock = threading.RLock()
+        self._output_cancelled = threading.Event()
         # 显示路径用的历史行数缓存：异步 reflow worker 持锁期间滚动条/滚轮
         # 不必在锁上等（见 _get_history_count）
         self._history_count_cached = 0
+        self._cwd_backend = None
+        self._cwd_cached = None
+        self._cwd_future = None
+        self._cwd_retry_after = 0.0
         # 手势期间的历史快照（仅 GUI 线程，见 _history_gesture）
         self._gesture_history = None
 
@@ -964,7 +985,7 @@ class TerminalWidget(TerminalInputMixin, TerminalMouseMixin,
 
     def _update_terminal_size(self):
         """根据窗口大小更新终端尺寸"""
-        if self.width() <= 0 or self.height() <= 0:
+        if getattr(self, '_cleaned_up', False) or self.width() <= 0 or self.height() <= 0:
             return
 
         # 在高 DPI 屏幕上，__init__ 中通过 QFontMetricsF(font) 计算的 char_width
@@ -1013,25 +1034,31 @@ class TerminalWidget(TerminalInputMixin, TerminalMouseMixin,
                 # 会在这里等正在执行的后台 reflow，重新堵住 GUI。
                 return
 
-            # 参与 reflow 的行数（粗略）。用真实历史长度而非 _get_history_count：
-            # 备用屏幕(tmux/vim)期间 resize 同样会 reflow 被保存的主屏+历史
-            reflow_lines = self._raw_history_count() + old_rows
-            logger.debug(f"[Terminal] Size: {old_cols}x{old_rows} -> {new_cols}x{new_rows} (widget: {self.width()}x{self.height()}, char_w: {self.char_width:.1f})")
-
-            predicted_ms = reflow_lines * self._reflow_ms_per_line
-            if self._ASYNC_REFLOW_ENABLED and predicted_ms >= self._ASYNC_REFLOW_MIN_MS:
-                self._start_async_reflow(reflow_lines)
+            if not self._screen_lock.acquire(blocking=not self._ASYNC_REFLOW_ENABLED):
+                # 首次 resize 也可能撞上解析线程；先排到后台，不能为估算
+                # 历史行数或小缓冲的同步 resize 而等待。worker 会取最新尺寸。
+                self._start_async_reflow(self._history_count_cached + old_rows)
                 return
+            try:
+                self._resize_screen(old_cols, old_rows, new_cols, new_rows)
+            finally:
+                self._screen_lock.release()
 
-            # 同步路径（小缓冲，几 ms 内完成）
-            # 重新创建screen（HistoryScreen的resize参数顺序是lines, columns）
-            # reflow 整屏 mutate（重建行对象/历史），与跨线程读取者互斥
-            with self._screen_lock:
-                _t0 = time.perf_counter()
-                self.screen.resize(self.term_rows, self.term_cols)
-                reflow_ms = (time.perf_counter() - _t0) * 1000.0
-                self._history_count_cached = self._history_count_locked()
-            self._finish_reflow(reflow_lines, reflow_ms)
+    def _resize_screen(self, old_cols, old_rows, new_cols, new_rows):
+        """尺寸更新的同步/异步选择，调用方已经取得屏幕锁。"""
+        # 备用屏幕仍会 reflow 被保存的主屏+历史，须用真实历史行数估算。
+        reflow_lines = self._raw_history_count() + old_rows
+        logger.debug(f"[Terminal] Size: {old_cols}x{old_rows} -> {new_cols}x{new_rows} (widget: {self.width()}x{self.height()}, char_w: {self.char_width:.1f})")
+        predicted_ms = reflow_lines * self._reflow_ms_per_line
+        if self._ASYNC_REFLOW_ENABLED and predicted_ms >= self._ASYNC_REFLOW_MIN_MS:
+            self._start_async_reflow(reflow_lines)
+            return
+
+        _t0 = time.perf_counter()
+        self.screen.resize(self.term_rows, self.term_cols)
+        reflow_ms = (time.perf_counter() - _t0) * 1000.0
+        self._history_count_cached = self._history_count_locked()
+        self._finish_reflow(reflow_lines, reflow_ms)
 
     def _finish_reflow(self, reflow_lines: int, reflow_ms: float):
         """reflow 完成后的 GUI 线程收尾（同步路径与异步 worker 共用）。"""
@@ -1097,6 +1124,8 @@ class TerminalWidget(TerminalInputMixin, TerminalMouseMixin,
         reflow_ms = 0.0
         try:
             with self._screen_lock:
+                if self._cleaned_up:
+                    return
                 rows, cols = self.term_rows, self.term_cols
                 if (self.screen.lines, self.screen.columns) != (rows, cols):
                     _t0 = time.perf_counter()
@@ -1113,13 +1142,24 @@ class TerminalWidget(TerminalInputMixin, TerminalMouseMixin,
 
     def _on_reflow_finished(self, reflow_lines: int, reflow_ms: float):
         """GUI 线程：后台 reflow 完成。尺寸已过期则续跑，否则收尾。"""
-        self._reflow_inflight = False
-        if (self.screen.lines, self.screen.columns) != (self.term_rows, self.term_cols):
-            # worker 执行期间用户又改了尺寸 → 续跑（保持贴图模式，不闪烁）
-            self._start_async_reflow(self._raw_history_count() + self.screen.lines)
+        if self._cleaned_up:
+            self._reflow_inflight = False
+            self._reflow_scaling = False
             return
-        self._reflow_scaling = False
-        self._finish_reflow(reflow_lines, reflow_ms)
+        if not self._screen_lock.acquire(blocking=False):
+            # worker 结束后解析线程可能已经取得锁。收尾也不能同步等它；
+            # 保留 inflight，让此期间的新 resize 只更新目标尺寸。
+            QTimer.singleShot(50, lambda: self._on_reflow_finished(reflow_lines, reflow_ms))
+            return
+        try:
+            self._reflow_inflight = False
+            if (self.screen.lines, self.screen.columns) != (self.term_rows, self.term_cols):
+                self._start_async_reflow(self._raw_history_count() + self.screen.lines)
+                return
+            self._reflow_scaling = False
+            self._finish_reflow(reflow_lines, reflow_ms)
+        finally:
+            self._screen_lock.release()
 
     def _reflow_idle_prompt_to_top(self):
         """缩小终端后，若光标处于空闲提示符（其下方没有任何内容），但上方残留若干空行，
@@ -1290,6 +1330,7 @@ class TerminalWidget(TerminalInputMixin, TerminalMouseMixin,
             self.stop_process()
 
         self._utf8_decoder.reset()
+        self._output_cancelled = threading.Event()
         self._sequence_buffer = TerminalSequenceBuffer()
         # 更新终端大小
         self._update_terminal_size()
@@ -1309,19 +1350,24 @@ class TerminalWidget(TerminalInputMixin, TerminalMouseMixin,
         self._signal_bridge = TerminalSignalBridge()
         self._signal_bridge.output_received.connect(self._on_output)
         self._signal_bridge.process_finished.connect(self._on_process_finished)
+        backend = self._backend
+        bridge = self._signal_bridge
 
         # 设置后端回调（在后端读取线程上调用）
         def on_output(data: bytes):
+            if self._backend is not backend or self._cleaned_up:
+                return
             if TerminalWidget.PARSE_ON_READER_THREAD:
                 # 直接在读取线程解析：pyte feed 不再占用 GUI 线程。screen 读写由
                 # _screen_lock 互斥，QTimer 类操作经 _output_activity 信号回 GUI。
                 self._on_output(data)
             else:
                 # 原行为：marshal 到 GUI 线程解析。
-                self._signal_bridge.output_received.emit(data)
+                bridge.output_received.emit(data)
 
         def on_exit(status: int):
-            self._signal_bridge.process_finished.emit(status)
+            if self._backend is backend and not self._cleaned_up:
+                bridge.process_finished.emit(status)
 
         self._backend.on_output = on_output
         self._backend.on_exit = on_exit
@@ -1338,6 +1384,8 @@ class TerminalWidget(TerminalInputMixin, TerminalMouseMixin,
 
     def _on_output(self, data: bytes):
         """处理输出数据（读取线程或 GUI 线程，取决于 PARSE_ON_READER_THREAD）"""
+        if self._cleaned_up or self._output_cancelled.is_set():
+            return
         try:
             text = self._utf8_decoder.decode(data)
             self._process_output_text(text)
@@ -1365,6 +1413,9 @@ class TerminalWidget(TerminalInputMixin, TerminalMouseMixin,
         按查询点**之前**已上屏的内容给光标位置。以前在块内找子串既漏跨块又要
         手工切块递归。
         """
+        cancelled = self._output_cancelled
+        if self._cleaned_up or cancelled.is_set():
+            return
         # ssh 密码提示一次性自动回填（Remote 面板里已输入过该主机密码）
         if getattr(self, '_pending_ssh_password', None):
             self._maybe_autofill_password(text)
@@ -1465,21 +1516,31 @@ class TerminalWidget(TerminalInputMixin, TerminalMouseMixin,
         screen = self.screen
         lock = self._screen_lock
         while True:
+            if cancelled.is_set():
+                return
             piece = text if n <= step else text[pos:pos + step]
-            pos += step
-            last = pos >= n
-            with lock:
+            # 关闭时读取线程可能正等后台 reflow 的锁。可取消的等待避免
+            # GUI 在 backend.stop().join() 上为每个终端再停顿两秒。
+            if not lock.acquire(timeout=.02):
+                continue
+            try:
+                if cancelled.is_set():
+                    return
+                pos += step
+                last = pos >= n
                 old_total = screen._total_history_lines
                 self._feed_locked(piece)
                 lines_added += screen._total_history_lines - old_total
                 if last:
                     # 顺手刷新显示用的历史行数缓存（len() 一次，几乎免费）
                     self._history_count_cached = self._history_count_locked()
+            finally:
+                lock.release()
             if last:
                 break
             # 片间真让出：RLock 不公平，释放后立刻重进锁，GUI 线程即使已在等
             # 也抢不到（macOS 上 sleep(0) 不换线程），短睡才能把锁让出去
-            time.sleep(self._FEED_SLICE_YIELD_S)
+            cancelled.wait(self._FEED_SLICE_YIELD_S)
 
         # 鼠标/焦点上报模式：screen 钩子里追踪，按代数同步到 widget 属性
         # （读取线程写、GUI 线程读，都是简单赋值；不清零测试/外部直接设的值）
@@ -1526,6 +1587,8 @@ class TerminalWidget(TerminalInputMixin, TerminalMouseMixin,
 
     def _on_output_activity(self, n: int):
         """GUI 线程：标记有输出活动并重置“执行完毕”空闲计时器。"""
+        if self._cleaned_up:
+            return
         self._had_output_activity = True
         self._activity_bytes += n
         self._activity_idle_timer.start(self._ACTIVITY_IDLE_MS)
@@ -1602,14 +1665,22 @@ class TerminalWidget(TerminalInputMixin, TerminalMouseMixin,
         否则按"执行完毕"处理：是否真正打标由 MainWindow 决定（正在看的活动
         终端不打扰）。只在确有一定量输出后才上报，过滤掉纯按键回显这类微小活动。
         """
-        if not self._had_output_activity:
+        if self._cleaned_up or not self._had_output_activity:
             return
         substantial = self._activity_bytes >= 4
+        if substantial:
+            if not self._screen_lock.acquire(blocking=False):
+                # reflow/解析还在运行：保留活动计数和待通知命令，稍后再判定。
+                self._activity_idle_timer.start(50)
+                return
+            try:
+                sig = self._detect_interaction_prompt()
+            finally:
+                self._screen_lock.release()
         self._had_output_activity = False
         self._activity_bytes = 0
         if not substantial:
             return
-        sig = self._detect_interaction_prompt()
         if sig is not None:
             if sig != self._last_interaction_sig:
                 self._last_interaction_sig = sig
@@ -1995,6 +2066,7 @@ class TerminalWidget(TerminalInputMixin, TerminalMouseMixin,
 
     def stop_process(self):
         """停止进程并清理资源"""
+        self._output_cancelled.set()
         # 先断开信号连接，防止在清理过程中触发回调
         if self._signal_bridge:
             try:
@@ -2017,6 +2089,12 @@ class TerminalWidget(TerminalInputMixin, TerminalMouseMixin,
         # 标记已清理：Qt 可能在控件销毁前仍投递排队中的鼠标事件，
         # 事件处理器据此提前返回，避免访问已置 None 的定时器导致闪退。
         self._cleaned_up = True
+        self._output_cancelled.set()
+        self._cancel_clipboard_probes()
+        if self._cwd_future is not None:
+            self._cwd_future.cancel()
+            self._cwd_future = None
+        self._cwd_backend = None
 
         # 停止所有定时器
         if hasattr(self, 'cursor_timer') and self.cursor_timer:
@@ -2196,40 +2274,49 @@ class TerminalWidget(TerminalInputMixin, TerminalMouseMixin,
         # 颜色映射变化 → 渲染状态失配，强制下次整屏重绘
         self._render_epoch += 1
 
+    _cwd_executor = None
+
+    @classmethod
+    def _get_cwd_executor(cls):
+        with cls._reflow_executor_lock:
+            if cls._cwd_executor is None:
+                from concurrent.futures import ThreadPoolExecutor
+                cls._cwd_executor = ThreadPoolExecutor(
+                    max_workers=2, thread_name_prefix='terminal-cwd')
+            return cls._cwd_executor
+
     def get_cwd(self) -> Optional[str]:
-        """获取子进程的当前工作目录"""
+        """优先读取原生 cwd；失败时返回缓存并在后台查询，不等待 lsof。"""
         if self._backend is None or not self._backend.is_running:
             return None
-
-        # 在 Unix/macOS 上获取子进程的当前工作目录
-        if sys.platform != 'win32':
+        child_pid = getattr(self._backend, '_child_pid', None)
+        if sys.platform == 'win32' or not child_pid or self._cleaned_up:
+            return None
+        if self._cwd_backend is not self._backend:
+            if self._cwd_future is not None:
+                self._cwd_future.cancel()
+            self._cwd_backend = self._backend
+            self._cwd_cached = None
+            self._cwd_future = None
+            self._cwd_retry_after = 0.0
+        native = _cwd_via_native(child_pid)
+        if native:
+            # proc 已给出 cwd；额外 isdir 会在失联的网络挂载点上阻塞。
+            self._cwd_cached = native
+            if self._cwd_future is not None:
+                self._cwd_future.cancel()
+                self._cwd_future = None
+            return native
+        if self._cwd_future is not None and self._cwd_future.done():
             try:
-                # 获取后端的进程 ID（仅 Unix 后端支持）
-                child_pid = getattr(self._backend, '_child_pid', None)
-                if child_pid:
-                    # 优先原生接口：不 fork、约 0.2ms、不会被挂死的挂载点拖住
-                    native = _cwd_via_native(child_pid)
-                    if native and os.path.isdir(native):
-                        return native
-                    import subprocess
-                    result = subprocess.run(
-                        ['lsof', '-a', '-d', 'cwd', '-p', str(child_pid), '-Fn'],
-                        capture_output=True,
-                        text=True,
-                        timeout=2
-                    )
-                    if result.returncode == 0:
-                        for line in result.stdout.split('\n'):
-                            if line.startswith('n/'):
-                                path = line[1:]  # 去掉开头的 'n'
-                                if os.path.isdir(path):
-                                    return path
+                self._cwd_cached = self._cwd_future.result() or self._cwd_cached
             except Exception:
-                logger.debug("get_cwd: suppressed exception", exc_info=True)
-
-        # 无法获取实际的子进程工作目录时返回 None，让调用方使用其自己的回退逻辑
-        # 不再回退到 os.getcwd()，因为那是主进程的工作目录，不是终端的工作目录
-        return None
+                logger.debug("cwd lookup failed", exc_info=True)
+            self._cwd_future = None
+        if self._cwd_future is None and time.monotonic() >= self._cwd_retry_after:
+            self._cwd_retry_after = time.monotonic() + 2.0
+            self._cwd_future = self._get_cwd_executor().submit(_cwd_via_lsof, child_pid)
+        return self._cwd_cached
 
     def get_content(self) -> str:
         """获取终端当前内容"""

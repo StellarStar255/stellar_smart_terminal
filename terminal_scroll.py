@@ -555,6 +555,8 @@ class TerminalScrollSearchMixin:
         （历史行列表 + 当前屏幕行的提取结果），匹配交给 worker，结果经
         _search_finished 回 GUI；期间查询变了（序号不符）结果直接丢弃。
         """
+        if getattr(self, '_cleaned_up', False):
+            return
         import terminal_widget as _tw  # 延迟引用，避免循环 import
         text = self._search_pending_text
         self._search_seq += 1
@@ -567,8 +569,12 @@ class TerminalScrollSearchMixin:
             self.update()
             return
 
-        history = self._get_history_top()
-        with self._screen_lock:
+        if not self._screen_lock.acquire(blocking=False):
+            # 防抖定时器重试最新查询；不能在 GUI 里等输出解析/重排结束。
+            self._search_debounce_timer.start(50)
+            return
+        try:
+            history = self._get_history_top()
             columns = self.screen.columns
             buffer = self.screen.buffer
             # 当前屏幕行可变：提取必须在锁内完成；历史行已冻结，交给 worker
@@ -576,6 +582,9 @@ class TerminalScrollSearchMixin:
                 self._extract_search_line(buffer[row], columns)
                 for row in range(self.term_rows)
             ]
+        finally:
+            self._screen_lock.release()
+        self._search_debounce_timer.stop()
         _tw.TerminalWidget._get_search_executor().submit(
             self._search_worker, seq, text, history, screen_lines, columns,
             self.term_rows, self.scroll_offset)

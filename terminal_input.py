@@ -627,8 +627,18 @@ class TerminalInputMixin:
         正常的图片粘贴流程。
         """
         # 先用原生 API 处理图片/文件。若处理成功（含图片/文件），直接返回。
-        if self._paste_clipboard_data_macos_native():
+        backend = self._backend
+
+        def finished(handled):
+            if not handled and not self._cleaned_up and self._backend is backend:
+                self._paste_clipboard_text(clipboard)
+
+        if self._paste_clipboard_data_macos_native(on_finished=finished):
             return
+
+        self._paste_clipboard_text(clipboard)
+
+    def _paste_clipboard_text(self, clipboard):
 
         # 剪贴板中没有图片/文件，按普通文本处理
         # clipboard.text() 在此分支是安全的（无图片数据，不会触发 TIFF segfault）
@@ -748,6 +758,7 @@ class TerminalInputMixin:
     def _on_clipboard_data_changed(self):
         """QClipboard.dataChanged：剪贴板变了，上次探测结果作废。"""
         self._clipboard_probe_stale = True
+        self._clipboard_generation = getattr(self, '_clipboard_generation', 0) + 1
 
     def _ensure_clipboard_watch(self):
         if getattr(self, '_clipboard_watch_connected', False):
@@ -758,11 +769,11 @@ class TerminalInputMixin:
         except Exception:
             logger.debug("_ensure_clipboard_watch: connect failed", exc_info=True)
 
-    def _paste_clipboard_data_macos_native(self) -> bool:
+    def _paste_clipboard_data_macos_native(self, on_finished=None) -> bool:
         """macOS: 使用 osascript + JXA 原生 API 安全处理剪贴板图片/文件
 
-        返回 True 表示剪贴板中含图片/文件并已处理；返回 False 表示剪贴板里
-        没有图片或文件 URL（调用方应回落到文本粘贴）。
+        on_finished 非空时异步处理：True 表示已排队，实际是否处理了媒体
+        经回调返回；False 表示可立即回落到文本。无回调时提供同步结果。
 
         两处省开销：
         · 剪贴板自上次探测起没变（dataChanged 没响 且 changeCount 相同）且上次
@@ -770,7 +781,6 @@ class TerminalInputMixin:
         · 图片先由 JXA 写到系统临时文件，确认真是图片后才创建 .images 目录并
           移过去；以前每次 Cmd+V（含纯文本）都先在 cwd 下 mkdir .images。
         """
-        import shutil
         import subprocess
         import tempfile
         from datetime import datetime
@@ -851,13 +861,105 @@ if (paths.length > 0) {{
         self._clipboard_probe_stale = False
         self._clipboard_probe_token = token
         self._clipboard_probe_none = False
+        if on_finished is not None:
+            self._queue_clipboard_probe(jxa_script, tmp_path, token, on_finished)
+            return True
         try:
             result = subprocess.run(
                 ['osascript', '-l', 'JavaScript', '-e', jxa_script],
                 capture_output=True, text=True, timeout=10
             )
             output = result.stdout.strip()
+        except Exception:
+            output = ''
+        return self._finish_clipboard_probe(output, tmp_path)
 
+    def _queue_clipboard_probe(self, script, path, token, callback):
+        from collections import deque
+        if not hasattr(self, '_native_paste_queue'):
+            self._native_paste_queue = deque()
+            self._native_paste_process = None
+        generation = getattr(self, '_clipboard_generation', 0)
+        self._native_paste_queue.append((script, path, token, self._backend, callback, generation))
+        if self._native_paste_process is None:
+            self._start_next_clipboard_probe()
+
+    @staticmethod
+    def _remove_clipboard_temp(path):
+        try:
+            os.unlink(path)
+        except OSError:
+            pass
+
+    def _start_next_clipboard_probe(self):
+        """一次只启动一个异步脚本，保持连续 Cmd+V 的投递顺序。"""
+        from PyQt6.QtCore import QProcess, QTimer
+        queue = self._native_paste_queue
+        while queue:
+            script, path, token, backend, callback, generation = queue[0]
+            current_token = self._clipboard_change_token()
+            if (self._cleaned_up or self._backend is not backend
+                    or generation != getattr(self, '_clipboard_generation', 0)
+                    or (token is not None and current_token is not None
+                        and current_token != token)):
+                queue.popleft()
+                self._remove_clipboard_temp(path)
+                continue
+            process = QProcess(self)
+            self._native_paste_process = process
+            timer = QTimer(process)
+            timer.setSingleShot(True)
+            timer.timeout.connect(process.kill)
+            completed = False
+
+            def finish(*args):
+                nonlocal completed
+                if completed:
+                    return
+                completed = True
+                timer.stop()
+                output = bytes(process.readAllStandardOutput()).decode('utf-8', 'replace').strip()
+                current = self._clipboard_change_token()
+                valid = (not self._cleaned_up and self._backend is backend
+                         and generation == getattr(self, '_clipboard_generation', 0)
+                         and (token is None or current is None or current == token))
+                # cleanup 可能已经清空队列；晚到的 finished 不能移除新请求。
+                if queue and queue[0][1] == path:
+                    queue.popleft()
+                try:
+                    if valid:
+                        callback(self._finish_clipboard_probe(output, path))
+                    else:
+                        self._remove_clipboard_temp(path)
+                except Exception:
+                    logger.exception('Clipboard paste completion failed')
+                finally:
+                    self._native_paste_process = None
+                    process.deleteLater()
+                    self._start_next_clipboard_probe()
+
+            process.finished.connect(finish)
+            process.errorOccurred.connect(
+                lambda error: finish() if error == QProcess.ProcessError.FailedToStart else None)
+            timer.start(10_000)
+            process.start('osascript', ['-l', 'JavaScript', '-e', script])
+            return
+
+    def _cancel_clipboard_probes(self):
+        process = getattr(self, '_native_paste_process', None)
+        if process is not None:
+            process.kill()
+        queue = getattr(self, '_native_paste_queue', ())
+        for _, path, _, _, _, _ in queue:
+            self._remove_clipboard_temp(path)
+        if queue:
+            queue.clear()
+
+    def _finish_clipboard_probe(self, output, tmp_path):
+        import shutil
+        from datetime import datetime
+
+        try:
             if output == "IMAGE_OK" and os.path.isfile(tmp_path):
                 # 确认是图片了，才解析/创建存图目录并把临时文件移过去
                 timestamp = datetime.now().strftime("%Y%m%d_%H%M%S_%f")
