@@ -693,6 +693,8 @@ class CompatibleHistoryScreen(pyte.HistoryScreen):
 
     def reset(self):
         # reset() 可能在 __init__ 中被 super().__init__() 调用
+        self._decckm = False
+        self._bracketed_paste = False
         if hasattr(self, '_in_draw'):
             self._in_draw = False
         if hasattr(self, '_tracked_mode_gen'):

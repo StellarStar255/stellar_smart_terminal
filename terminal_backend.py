@@ -959,6 +959,7 @@ else:
                             try:
                                 pid, status = os.waitpid(self._child_pid, os.WNOHANG)
                                 if pid != 0:
+                                    self._child_pid = None
                                     self._running = False
                                     exit_code = self._decode_wait_status(status)
                                     exit_callback = self.on_exit
@@ -966,6 +967,7 @@ else:
                                         exit_callback(exit_code)
                                     return  # already reaped, skip post-loop reap
                             except ChildProcessError:
+                                self._child_pid = None
                                 break
 
                 except ChildProcessError:
@@ -1007,6 +1009,7 @@ else:
                 for i in range(attempts):
                     pid, status = os.waitpid(self._child_pid, os.WNOHANG)
                     if pid != 0:
+                        self._child_pid = None
                         self._running = False
                         exit_code = self._decode_wait_status(status)
                         exit_callback = self.on_exit
@@ -1016,6 +1019,7 @@ else:
                     if i + 1 < attempts:
                         time.sleep(0.02)
             except ChildProcessError:
+                self._child_pid = None
                 if wait:
                     self._running = False
                 return

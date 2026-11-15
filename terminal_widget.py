@@ -1708,6 +1708,11 @@ class TerminalWidget(TerminalInputMixin, TerminalMouseMixin,
         self._activity_bytes = 0
         self._pending_user_command = False
         self._pending_ssh_password = None
+        # 已退出的标签页仍保留屏幕供查看，但不能继续占用输入线程和 PTY。
+        # 保留后端对象，使 has_started() 不把历史标签页当作未使用的空终端。
+        backend = self._backend
+        if backend is not None and not getattr(backend, 'is_running', True):
+            backend.stop()
         # 程序被杀/崩溃时来不及发 \x1b[?1004l：这里复位，下一个 shell 的点击定位才正常
         # （screen 侧同步复位、不改代数：下次真的收到 ?1004h 才会再同步成 True）
         self._focus_report_mode = False

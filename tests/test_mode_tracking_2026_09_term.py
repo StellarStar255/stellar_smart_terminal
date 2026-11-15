@@ -80,6 +80,20 @@ class TestFocusAndMouseModeAcrossChunks(_Base):
         self.feed('\x1b[?1000;1002;1006h', '\x1bc', '\x1b[?1003h', '\x1b[?1003l')
         self.assertFalse(self.w._mouse_mode)
 
+    def test_terminal_reset_restores_plain_paste_and_cursor_keys(self):
+        from PyQt6.QtCore import QEvent, Qt
+        from PyQt6.QtGui import QKeyEvent
+
+        self.feed('\x1b[?1;2004h')
+        self.assertTrue(self.w.screen._decckm)
+        self.assertTrue(self.w._is_bracketed_paste_enabled())
+        self.feed('\x1bc')
+        self.w._write_paste(b'plain text')
+        self.w.keyPressEvent(QKeyEvent(QEvent.Type.KeyPress, Qt.Key.Key_Up,
+                                      Qt.KeyboardModifier.NoModifier))
+        self.assertEqual(self.writes, [b'plain text', b'\x1b[A'])
+        self.assertFalse(self.w.screen._decckm)
+
     def test_externally_set_flag_not_clobbered_by_unrelated_output(self):
         """测试/外部直接设的值：没有模式变化的输出不会把它冲掉。"""
         self.w._mouse_mode = True
