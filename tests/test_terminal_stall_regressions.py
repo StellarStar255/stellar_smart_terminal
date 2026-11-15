@@ -525,6 +525,34 @@ def test_preset_commands_wait_for_start_and_stay_with_their_session(app, complet
         terminal.send_text.assert_not_called()
 
 
+@pytest.mark.parametrize('action', ['ready', 'stop', 'replace'])
+def test_quick_command_waits_for_a_shell_started_after_reflow(app, action):
+    widget = TerminalWidget()
+    backend = Mock(is_running=True)
+    backend.start.return_value = True
+    backend.write.return_value = True
+    try:
+        with patch('terminal_widget.create_backend', return_value=backend):
+            with busy_screen(widget):
+                widget._start_and_execute(['quick command'])
+                assert widget.is_starting()
+                if action == 'stop':
+                    widget.stop_process()
+                elif action == 'replace':
+                    widget.start_process(['replacement shell'])
+            deadline = time.monotonic() + .5
+            while time.monotonic() < deadline:
+                app.processEvents()
+                time.sleep(.005)
+        if action == 'ready':
+            backend.write.assert_called_once_with(b'quick command\r')
+        else:
+            backend.write.assert_not_called()
+    finally:
+        widget.cleanup()
+        widget.deleteLater()
+
+
 @pytest.mark.parametrize('error', [BlockingIOError(), InterruptedError()])
 def test_coalescing_delivers_prefix_after_transient_read_error(error):
     def read_more():

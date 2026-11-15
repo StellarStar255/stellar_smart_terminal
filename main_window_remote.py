@@ -746,31 +746,56 @@ class RemotePanelMixin:
         """
         if not line:
             return
-        state = {"done": False}
+        token = term._process_start_token
+        if token is None:
+            return
+        state = {"done": False, "scheduled": False}
+
+        def _cancel():
+            state["done"] = True
+            if sip.isdeleted(term):
+                return
+            for signal, callback in ((term._output_activity, _on_output),
+                                     (term.session_ended, _cancel)):
+                try:
+                    signal.disconnect(callback)
+                except (TypeError, RuntimeError):
+                    pass
+
+        def _is_current():
+            return (not sip.isdeleted(term)
+                    and term._process_start_token is token and term.is_running())
 
         def _send():
             if state["done"]:
                 return
-            state["done"] = True
             try:
-                if sip.isdeleted(term):
+                if not _is_current():
+                    _cancel()
                     return
+                _cancel()
                 term.send_text(line + "\n")
             except Exception:
                 logger.debug("_send_bastion_boot_line: send failed", exc_info=True)
 
         def _on_output(_data):
-            if state["done"]:
+            if state["done"] or state["scheduled"]:
                 return
+            if not _is_current():
+                _cancel()
+                return
+            state["scheduled"] = True
             try:
-                term.raw_output_received.disconnect(_on_output)
+                term._output_activity.disconnect(_on_output)
             except Exception:
                 logger.debug("_send_bastion_boot_line: disconnect failed",
                              exc_info=True)
             QTimer.singleShot(settle_ms, _send)
 
         try:
-            term.raw_output_received.connect(_on_output)
+            # 常规输出活动不依赖 API 服务器开启，也无需复制每块原始输出。
+            term._output_activity.connect(_on_output)
+            term.session_ended.connect(_cancel)
         except Exception:
             logger.debug("_send_bastion_boot_line: connect failed", exc_info=True)
 

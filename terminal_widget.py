@@ -2784,9 +2784,18 @@ class TerminalWidget(TerminalInputMixin, TerminalMouseMixin,
         # 启动默认 shell
         shell = self._get_default_shell()
         self.start_process([shell], cwd=cwd)
+        token = self._process_start_token
         backend = self._backend
+        commands = list(commands)
         # 延迟执行命令，等待终端启动完成
         def delayed_execute():
-            if backend is not None and self._backend is backend and backend.is_running:
+            if self._cleaned_up or self._process_start_token is not token:
+                return
+            if backend is not None and self._backend is not backend:
+                return
+            if self.is_starting():
+                QTimer.singleShot(50, delayed_execute)
+                return
+            if self.is_running():
                 self._execute_commands(commands)
         QTimer.singleShot(300, delayed_execute)

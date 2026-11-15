@@ -675,11 +675,16 @@ class TestBastionTerminalWiring(unittest.TestCase):
         from PyQt6.QtCore import QObject, pyqtSignal
 
         class _Term(QObject):
-            raw_output_received = pyqtSignal(str)
+            _output_activity = pyqtSignal(int)
+            session_ended = pyqtSignal()
 
             def __init__(self):
                 super().__init__()
                 self.sent = []
+                self._process_start_token = object()
+
+            def is_running(self):
+                return True
 
             def send_text(self, text):
                 self.sent.append(text)
@@ -690,12 +695,12 @@ class TestBastionTerminalWiring(unittest.TestCase):
         self.app.processEvents()
         self.assertEqual(term.sent, [], '远端还没出声就不能敲')
 
-        term.raw_output_received.emit('Last login: ...\n[root@host ~]# ')
+        term._output_activity.emit(40)
         self.app.processEvents()
         self.assertEqual(term.sent, ["export X=1; cd -- /root\n"])
 
         # 只敲一次：后续输出不该再触发
-        term.raw_output_received.emit('more output')
+        term._output_activity.emit(11)
         self.app.processEvents()
         self.assertEqual(len(term.sent), 1)
 
