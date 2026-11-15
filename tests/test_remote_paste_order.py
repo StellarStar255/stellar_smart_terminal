@@ -10,7 +10,7 @@ os.environ.setdefault('QT_QPA_PLATFORM', 'offscreen')
 
 import pytest
 from PyQt6.QtWidgets import QApplication
-from PyQt6.QtCore import QObject
+from PyQt6.QtCore import QObject, QTimer
 from main_window_remote import RemotePanelMixin
 from terminal_widget import TerminalWidget
 
@@ -261,3 +261,86 @@ def test_transferring_terminal_cancels_upload_owned_by_previous_window(remote):
     finally:
         old.deleteLater()
         new.deleteLater()
+
+
+@pytest.mark.parametrize('stage', ['probe', 'upload'])
+def test_rejected_remote_job_completes_request_and_unblocks_input(remote, tmp_path, stage):
+    widget, written, _ = remote
+    window = _ProbeWindow()
+    widget._owner_window = window
+    path = tmp_path / 'image.png'
+    path.write_bytes(b'fixture')
+    rejected = SimpleNamespace(submit=Mock(side_effect=RuntimeError('executor closed')))
+    if stage == 'probe':
+        window._paste_probe_executor = rejected
+    else:
+        # 上传提交发生在探测回调里，已不在 _deliver_media_path 的异常保护中。
+        widget._owner_window = SimpleNamespace(_upload_pasted_media_for_terminal=lambda *a, **kw: True)
+    try:
+        widget._deliver_media_path(str(path))
+        if stage == 'upload':
+            request = next(iter(widget._pending_remote_pastes))
+            window._start_paste_upload(widget, SimpleNamespace(alias='host'), rejected,
+                                       str(path), request)
+        assert widget._pending_remote_pastes == {}
+        assert not widget._native_paste_queue
+        widget.send_text('\r')
+        assert len(written) == 2 and written[1] == b'\r'
+    finally:
+        window._paste_probe_executor = None
+        window.dispose()
+
+
+def test_releasing_many_queued_inputs_yields_to_gui_events(remote):
+    widget, written, uploads = remote
+
+    def slow_write(data):
+        time.sleep(.001)
+        written.append(data)
+        return True
+
+    widget._backend.write = slow_write
+    widget._deliver_media_path('/tmp/a.png')
+    for _ in range(80):
+        widget.send_text('x')
+    heartbeats = []
+    QTimer.singleShot(0, lambda: heartbeats.append(len(written)))
+    start = time.monotonic()
+    complete(widget, uploads[0], '/remote/a.png')
+    assert time.monotonic() - start < .2
+    assert len(written) < 81
+    deadline = time.monotonic() + 2
+    while len(written) < 81 and time.monotonic() < deadline:
+        _APP.processEvents()
+        time.sleep(.001)
+    assert len(written) == 81
+    assert heartbeats and heartbeats[0] < 81
+    assert written == [b'/remote/a.png'] + [b'x'] * 80
+
+
+def test_rejected_paste_does_not_send_following_enter(remote):
+    widget, written, uploads = remote
+    widget._deliver_media_path('/tmp/a.png')
+    widget.send_text('\r')
+
+    def reject_path(data):
+        if data != b'\r':
+            return False
+        written.append(data)
+        return True
+
+    widget._backend.write = reject_path
+    complete(widget, uploads[0], '/remote/a.png')
+    assert written == []
+    assert not widget._native_paste_queue
+
+
+def test_programmatic_return_records_and_clears_command(remote):
+    widget, written, _ = remote
+    recorded = []
+    widget.input_recorded.connect(recorded.append)
+    widget.send_text('echo test')
+    widget.send_text('\r')
+    assert written == [b'echo test', b'\r']
+    assert recorded == ['echo test']
+    assert widget.input_buffer == ''

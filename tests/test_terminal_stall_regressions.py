@@ -337,6 +337,34 @@ def test_url_hover_does_not_wait_for_background_screen_lock(app):
         widget.deleteLater()
 
 
+@pytest.mark.parametrize('operation', ['clear_screen', 'clear_scrollback'])
+def test_clear_operations_retry_without_waiting_for_screen_lock(app, operation):
+    widget = TerminalWidget()
+    widget.stream.feed(''.join(f'line {i}\r\n' for i in range(150)) + 'visible marker')
+    before = '\n'.join(widget.screen.display)
+    assert widget._get_history_count() > 0
+    try:
+        with busy_screen(widget):
+            start = time.monotonic()
+            getattr(widget, operation)()
+            assert time.monotonic() - start < .2
+            assert '\n'.join(widget.screen.display) == before
+        deadline = time.monotonic() + 2
+        if operation == 'clear_screen':
+            done = lambda: 'visible marker' not in '\n'.join(widget.screen.display)
+        else:
+            done = lambda: widget._get_history_count() == 0
+        while not done() and time.monotonic() < deadline:
+            app.processEvents()
+            time.sleep(.005)
+        assert done()
+        if operation == 'clear_scrollback':
+            assert '\n'.join(widget.screen.display) == before
+    finally:
+        widget.cleanup()
+        widget.deleteLater()
+
+
 @pytest.mark.parametrize('error', [BlockingIOError(), InterruptedError()])
 def test_coalescing_delivers_prefix_after_transient_read_error(error):
     def read_more():

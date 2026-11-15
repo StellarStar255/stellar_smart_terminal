@@ -2,8 +2,9 @@
 import os
 import threading
 import time
+from concurrent.futures import Future
 from types import SimpleNamespace
-from unittest.mock import patch
+from unittest.mock import Mock, patch
 
 os.environ.setdefault('QT_QPA_PLATFORM', 'offscreen')
 
@@ -114,3 +115,29 @@ def test_cancel_replacement_or_failure_never_inserts_image_or_enter(image_termin
         pump_until(lambda: not list((tmp_path / '.images').glob('*.png')))
     finally:
         release.set()
+
+
+def test_rejected_image_job_does_not_leave_input_queue_blocked(image_terminal):
+    widget, written, clipboard = image_terminal
+    executor = SimpleNamespace(submit=Mock(side_effect=RuntimeError('executor closed')))
+    with patch.object(widget, '_get_image_save_executor', return_value=executor):
+        widget._paste_from_clipboard_qt(clipboard)
+    assert widget._pending_image_saves == {}
+    assert not widget._native_paste_queue
+    widget.send_text('fresh')
+    assert written == [b'fresh']
+
+
+def test_cancelled_image_future_does_not_leave_input_queue_blocked(image_terminal):
+    widget, written, clipboard = image_terminal
+    future = Future()
+    executor = SimpleNamespace(submit=lambda *args: future)
+    with patch.object(widget, '_get_image_save_executor', return_value=executor):
+        widget._paste_from_clipboard_qt(clipboard)
+        widget.send_text('\r')
+        future.cancel()
+        _APP.processEvents()
+    assert widget._pending_image_saves == {}
+    assert not widget._native_paste_queue
+    widget.send_text('fresh')
+    assert written == [b'fresh']

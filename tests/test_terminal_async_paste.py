@@ -278,7 +278,8 @@ def test_startup_preset_does_not_run_in_replacement_session(terminal, replace_se
     assert written == ([] if replace_session else [b'preset\r'])
 
 
-def test_native_image_disk_write_runs_off_gui_and_keeps_enter_order(terminal, tmp_path):
+@pytest.mark.parametrize('copy_during_save', [False, True, 'queued_paste'])
+def test_native_image_disk_write_runs_off_gui_and_keeps_enter_order(terminal, tmp_path, copy_during_save):
     import shutil
     widget, written = terminal
     widget.image_save_local = True
@@ -310,9 +311,20 @@ def test_native_image_disk_write_runs_off_gui_and_keeps_enter_order(terminal, tm
             assert entered.is_set()
             widget.send_text('\r')
             assert written == []
+            queued_clipboard = None
+            if copy_during_save == 'queued_paste':
+                queued_clipboard = SimpleNamespace(text=Mock(return_value='obsolete second paste'))
+                widget._paste_from_clipboard_macos(queued_clipboard)
+                widget.send_text('\r')
+            if copy_during_save:
+                widget._on_clipboard_data_changed()
+                widget._clipboard_change_token = lambda: 8
             release.set()
             pump_until(lambda: len(written) == 2)
+            pump_until(lambda: not widget._native_paste_queue)
         assert workers and workers[0] != threading.get_ident()
         assert written[1] == b'\r'
+        if queued_clipboard is not None:
+            queued_clipboard.text.assert_not_called()
     finally:
         release.set()

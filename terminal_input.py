@@ -19,6 +19,7 @@ import sys
 import shlex
 import json
 import uuid
+import time
 from dataclasses import dataclass
 from pathlib import Path
 
@@ -29,6 +30,17 @@ from PyQt6.QtWidgets import QApplication
 from app_logging import get_logger
 
 logger = get_logger(__name__)
+
+
+_CLIPBOARD_PASTE_ACTION = object()
+
+
+@dataclass(eq=False)
+class _ClipboardPasteContext:
+    token: object
+    generation: int
+    captured: bool = False
+    cancelled: bool = False
 
 
 @dataclass(eq=False)
@@ -113,6 +125,9 @@ def _save_paste_image(request):
 
 class TerminalInputMixin:
     """TerminalWidget 的键盘/输入法/粘贴方法集合（见模块 docstring）"""
+
+    _PASTE_DRAIN_MAX_ACTIONS = 64
+    _PASTE_DRAIN_BUDGET_S = .004
 
     def keyPressEvent(self, event: QKeyEvent):
         """处理键盘输入"""
@@ -366,6 +381,9 @@ class TerminalInputMixin:
             self.scroll_to_bottom()
 
         data = b''
+        previous_input = self.input_buffer
+        submitted_command = None
+        record_mark = False
 
         # 检测物理 Ctrl 键按下（不包含 Shift/Alt）
         # macOS: 物理 Ctrl → MetaModifier, Cmd → ControlModifier
@@ -408,10 +426,10 @@ class TerminalInputMixin:
                 # 普通 Enter: 发送回车
                 data = b'\r'
                 if self.input_buffer.strip():
-                    self.input_recorded.emit(self.input_buffer)
+                    submitted_command = self.input_buffer
                 self.input_buffer = ""
                 # 记录命令标记（Alt+↑/↓ 跳转 + 滚动条刻度）
-                self._record_command_mark()
+                record_mark = True
         elif key == Qt.Key.Key_Backspace:
             data = b'\x7f'
             if self.input_buffer:
@@ -456,7 +474,15 @@ class TerminalInputMixin:
             self.input_buffer += text
 
         if data:
-            self._write_to_backend(data)
+            if not self._write_to_backend(data):
+                self.input_buffer = previous_input
+                self._cancel_clipboard_probes()
+                event.accept()
+                return
+            if submitted_command is not None:
+                self.input_recorded.emit(submitted_command)
+            if record_mark:
+                self._record_command_mark()
             # 用户按键 = 已在处理该终端 → 解除提醒静默，下一次事故重新提醒
             self._alert_muted_until = 0.0
             event.accept()
@@ -490,6 +516,8 @@ class TerminalInputMixin:
             return
         if self._write_to_backend(text.encode('utf-8')):
             self.input_buffer += text
+        else:
+            self._cancel_clipboard_probes()
 
     # macOS 上 Cmd+字母默认全被终端抢走（当 Ctrl 发给 shell）。这几个留给菜单栏：
     # Cmd+N 新终端、Cmd+Shift+N 新窗口、Cmd+O 打开文件夹（Cmd+Shift+O 打开文件）。物理 Ctrl+N/O
@@ -634,12 +662,14 @@ class TerminalInputMixin:
             return
         try:
             data = text.encode('utf-8')
-            self._write_to_backend(data)
+            if not self._write_to_backend(data):
+                self._cancel_clipboard_probes()
+                return
 
             # 如果文本以换行结尾，说明是提交命令
-            if text.endswith('\n'):
+            if text.endswith(('\r', '\n')):
                 # 获取命令内容（不含换行）
-                cmd = text.rstrip('\n')
+                cmd = text.rstrip('\r\n')
                 # 将当前缓冲区内容加上新命令一起记录
                 full_input = self.input_buffer + cmd if self.input_buffer else cmd
                 if full_input.strip():
@@ -694,7 +724,11 @@ class TerminalInputMixin:
         if self._is_bracketed_paste_enabled():
             data = data.rstrip(b'\r\n')
             data = b'\x1b[200~' + data + b'\x1b[201~'
-        return self._write_to_backend(data)
+        accepted = self._write_to_backend(data)
+        if not accepted:
+            # 粘贴未进入后端时不能继续回放已排队的回车/后续字符。
+            self._cancel_clipboard_probes()
+        return accepted
 
     def _is_bracketed_paste_enabled(self) -> bool:
         try:
@@ -713,7 +747,7 @@ class TerminalInputMixin:
         text = text.replace('\r\n', '\r').replace('\n', '\r')
         return text.encode('utf-8')
 
-    def _paste_from_clipboard_macos(self, clipboard):
+    def _paste_from_clipboard_macos(self, clipboard, context=None):
         """macOS 粘贴处理 - 避免调用 mimeData() 防止 segfault
 
         重要顺序：先通过原生 JXA 检查图片/文件（public.file-url / public.tiff /
@@ -726,7 +760,16 @@ class TerminalInputMixin:
         clipboard.text()，就会把那段文本路径原样粘入终端，从而绕过图片保存与
         正常的图片粘贴流程。
         """
-        if self._defer_native_paste_input(lambda: self._paste_from_clipboard_macos(clipboard)):
+        if context is None:
+            context = _ClipboardPasteContext(self._clipboard_change_token(),
+                                             getattr(self, '_clipboard_generation', 0))
+            self._input_paste_context = context
+        if self._defer_native_paste_input(
+                lambda: self._paste_from_clipboard_macos(clipboard, context),
+                context=context, clipboard_action=True):
+            return
+        if not self._clipboard_request_is_current(context.token, context):
+            context.cancelled = True
             return
         # 先用原生 API 处理图片/文件。若处理成功（含图片/文件），直接返回。
         backend = self._backend
@@ -735,9 +778,10 @@ class TerminalInputMixin:
             if not handled and not self._cleaned_up and self._backend is backend:
                 self._paste_clipboard_text(clipboard)
 
-        if self._paste_clipboard_data_macos_native(on_finished=finished):
+        if self._paste_clipboard_data_macos_native(on_finished=finished, context=context):
             return
 
+        context.captured = True
         self._paste_clipboard_text(clipboard)
 
     def _paste_clipboard_text(self, clipboard):
@@ -899,18 +943,25 @@ class TerminalInputMixin:
         self._pending_image_saves[request] = request
         self._insert_paste_request((request, None, None, self._backend,
                                     lambda: self._complete_image_save(request), None))
-        request.future = self._get_image_save_executor().submit(_save_paste_image, request)
+        try:
+            request.future = self._get_image_save_executor().submit(_save_paste_image, request)
+        except Exception:
+            logger.exception('Could not queue clipboard image save')
+            _remove_paste_file(source)
+            self._on_image_save_finished(request, None)
+            return
 
         def finished(future):
             request.future = None
             if future.cancelled():
                 _remove_paste_file(source)
-                return
-            try:
-                path = future.result()
-            except Exception:
-                logger.exception('Clipboard image worker failed')
                 path = None
+            else:
+                try:
+                    path = future.result()
+                except Exception:
+                    logger.exception('Clipboard image worker failed')
+                    path = None
             if request.cancelled:
                 _remove_paste_file(path)
                 return
@@ -934,7 +985,10 @@ class TerminalInputMixin:
             self._pending_image_saves.pop(request, None)
             request.cancelled = True
             if path:
-                self._get_image_save_executor().submit(_remove_paste_file, path)
+                try:
+                    self._get_image_save_executor().submit(_remove_paste_file, path)
+                except RuntimeError:
+                    logger.warning('Image cleanup executor is already closed')
             self._start_next_clipboard_probe()
             return
         if not path:
@@ -980,7 +1034,7 @@ class TerminalInputMixin:
         except Exception:
             logger.debug("_ensure_clipboard_watch: connect failed", exc_info=True)
 
-    def _paste_clipboard_data_macos_native(self, on_finished=None) -> bool:
+    def _paste_clipboard_data_macos_native(self, on_finished=None, context=None) -> bool:
         """macOS: 使用 osascript + JXA 原生 API 安全处理剪贴板图片/文件
 
         on_finished 非空时异步处理：True 表示已排队，实际是否处理了媒体
@@ -997,7 +1051,7 @@ class TerminalInputMixin:
         from datetime import datetime
 
         self._ensure_clipboard_watch()
-        token = self._clipboard_change_token()
+        token = context.token if context is not None else self._clipboard_change_token()
         if (token is not None
                 and not getattr(self, '_clipboard_probe_stale', True)
                 and getattr(self, '_clipboard_probe_none', False)
@@ -1074,7 +1128,7 @@ if (paths.length > 0) {{
         self._clipboard_probe_token = token
         self._clipboard_probe_none = False
         if on_finished is not None:
-            self._queue_clipboard_probe(jxa_script, tmp_path, token, on_finished)
+            self._queue_clipboard_probe(jxa_script, tmp_path, token, on_finished, context)
             return True
         try:
             result = subprocess.run(
@@ -1105,24 +1159,42 @@ if (paths.length > 0) {{
         # 路径等数据已经捕获，不需要再次依赖剪贴板内容，只检查终端会话。
         self._insert_paste_request((None, None, None, self._backend, callback, None))
 
-    def _queue_clipboard_probe(self, script, path, token, callback):
-        generation = getattr(self, '_clipboard_generation', 0)
+    def _queue_clipboard_probe(self, script, path, token, callback, context=None):
+        generation = context if context is not None else getattr(self, '_clipboard_generation', 0)
         request = (script, path, token, self._backend, callback, generation)
         self._insert_paste_request(request)
         if self._native_paste_process is None:
             self._start_next_clipboard_probe()
 
-    def _defer_native_paste_input(self, callback):
+    def _defer_native_paste_input(self, callback, *, context=None, clipboard_action=False):
         """按用户操作顺序排队；设备查询应答仍走 _write_to_backend 立即发送。"""
         if getattr(self, '_native_paste_dispatching', False):
             return False
         queue = getattr(self, '_native_paste_queue', None)
         if getattr(self, '_native_paste_process', None) is None and not queue:
             return False
-        token = self._clipboard_change_token()
-        generation = getattr(self, '_clipboard_generation', 0)
-        queue.append((None, None, token, self._backend, callback, generation))
+        if context is None:
+            context = getattr(self, '_input_paste_context', None)
+            if context is not None and context.cancelled:
+                context = None
+        token = context.token if context is not None else None
+        kind = _CLIPBOARD_PASTE_ACTION if clipboard_action else None
+        queue.append((kind, None, token, self._backend, callback, context))
         return True
+
+    def _clipboard_request_is_current(self, token, generation):
+        if isinstance(generation, _ClipboardPasteContext):
+            if generation.cancelled:
+                return False
+            if generation.captured:
+                return True
+            generation = generation.generation
+        if generation is not None and generation != getattr(self, '_clipboard_generation', 0):
+            return False
+        if token is None:
+            return True
+        current = self._clipboard_change_token()
+        return current is None or token == current
 
     def _defer_native_paste_key(self, event):
         if (getattr(self, '_native_paste_dispatching', False)
@@ -1146,7 +1218,8 @@ if (paths.length > 0) {{
             pass
 
     def _start_next_clipboard_probe(self):
-        if (getattr(self, '_native_paste_draining', False)
+        if (self._cleaned_up or getattr(self, '_paste_drain_scheduled', False)
+                or getattr(self, '_native_paste_draining', False)
                 or getattr(self, '_native_paste_dispatching', False)):
             return
         self._native_paste_draining = True
@@ -1155,15 +1228,27 @@ if (paths.length > 0) {{
         finally:
             self._native_paste_draining = False
 
+    def _continue_paste_drain(self):
+        self._paste_drain_scheduled = False
+        self._start_next_clipboard_probe()
+
     def _drain_clipboard_probes(self):
         """一次只启动一个异步脚本，保持连续 Cmd+V 的投递顺序。"""
         queue = self._native_paste_queue
+        started = time.monotonic()
+        processed = 0
         while queue and self._native_paste_process is None:
+            if processed and (processed >= self._PASTE_DRAIN_MAX_ACTIONS
+                              or time.monotonic() - started >= self._PASTE_DRAIN_BUDGET_S):
+                # 上传完成后可能积压大量按键/API 输入，分批回放，留出 GUI 事件时间。
+                from PyQt6.QtCore import QTimer
+                self._paste_drain_scheduled = True
+                QTimer.singleShot(0, self._continue_paste_drain)
+                return
+            processed += 1
             script, path, token, backend, callback, generation = queue[0]
-            current_token = self._clipboard_change_token()
             valid = (not self._cleaned_up and self._backend is backend
-                     and (generation is None or generation == getattr(self, '_clipboard_generation', 0))
-                     and (token is None or current_token is None or current_token == token))
+                     and self._clipboard_request_is_current(token, generation))
             if isinstance(script, (_RemotePasteRequest, _ImageSaveRequest)):
                 is_image = isinstance(script, _ImageSaveRequest)
                 current = (self._image_save_is_current(script) if is_image
@@ -1181,7 +1266,7 @@ if (paths.length > 0) {{
                         future, script.future = script.future, None
                         future.cancel()
                     continue
-            if script is None:
+            if script is None or script is _CLIPBOARD_PASTE_ACTION:
                 queue.popleft()
                 if valid:
                     self._native_paste_dispatching = True
@@ -1193,8 +1278,12 @@ if (paths.length > 0) {{
                     finally:
                         self._native_paste_dispatching = False
                         self._native_paste_insertions = 0
+                elif script is _CLIPBOARD_PASTE_ACTION and isinstance(generation, _ClipboardPasteContext):
+                    generation.cancelled = True
                 continue
             if not valid:
+                if isinstance(generation, _ClipboardPasteContext):
+                    generation.cancelled = True
                 queue.popleft()
                 self._remove_clipboard_temp(path)
                 continue
@@ -1223,11 +1312,12 @@ if (paths.length > 0) {{
             completed = True
             timer.stop()
             output = bytes(process.readAllStandardOutput()).decode('utf-8', 'replace').strip()
-            current = self._clipboard_change_token()
             valid = (not self._cleaned_up and self._backend is backend
                      and epoch == getattr(self, '_native_paste_epoch', 0)
-                     and generation == getattr(self, '_clipboard_generation', 0)
-                     and (token is None or current is None or current == token))
+                     and self._clipboard_request_is_current(token, generation))
+            if isinstance(generation, _ClipboardPasteContext):
+                generation.captured = valid
+                generation.cancelled = not valid
             if queue and queue[0][1] == path:
                 queue.popleft()
             try:
@@ -1254,6 +1344,10 @@ if (paths.length > 0) {{
 
     def _cancel_clipboard_probes(self):
         self._native_paste_epoch = getattr(self, '_native_paste_epoch', 0) + 1
+        context = getattr(self, '_input_paste_context', None)
+        if context is not None:
+            context.cancelled = True
+        self._input_paste_context = None
         requests = list(self._pending_remote_pastes) + list(self._pending_image_saves)
         self._pending_remote_pastes.clear()
         self._pending_image_saves.clear()

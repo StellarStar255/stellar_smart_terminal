@@ -2028,15 +2028,22 @@ class TerminalWidget(TerminalInputMixin, TerminalMouseMixin,
         丢弃上方积累的历史行并释放其内存,然后复位滚动位置、刷新滚动条与重绘。
         对运行中的终端立即生效。
         """
+        if self._cleaned_up:
+            return
         screen = getattr(self, 'screen', None)
         if screen is None or not hasattr(screen, 'clear_scrollback'):
             return
         # 持锁清空：读取线程可能正 feed 向 history deque append，
         # 无锁清空会触发 "deque mutated during iteration" 崩溃
-        with self._screen_lock:
+        if not self._screen_lock.acquire(blocking=False):
+            QTimer.singleShot(50, self.clear_scrollback)
+            return
+        try:
             screen.clear_scrollback()
             self.scroll_offset = 0
             self._history_count_cached = self._history_count_locked()
+        finally:
+            self._screen_lock.release()
         with self._search_cache_lock:
             self._search_line_cache.clear()
         self._invalidate_render_cache()
@@ -2169,8 +2176,15 @@ class TerminalWidget(TerminalInputMixin, TerminalMouseMixin,
 
     def clear_screen(self):
         """清屏"""
-        with self._screen_lock:
+        if self._cleaned_up:
+            return
+        if not self._screen_lock.acquire(blocking=False):
+            QTimer.singleShot(50, self.clear_screen)
+            return
+        try:
             self.screen.reset()
+        finally:
+            self._screen_lock.release()
         self._invalidate_render_cache()
 
     def refresh_terminal(self):

@@ -445,7 +445,12 @@ class RemotePanelMixin:
             except RuntimeError:
                 pass  # 窗口已销毁：没人等这个结果了
 
-        future = self._paste_probe_pool().submit(_probe)
+        try:
+            future = self._paste_probe_pool().submit(_probe)
+        except Exception:
+            logger.exception('[RemotePaste] could not queue host probe')
+            self._paste_fallback(term, local_path, request)
+            return True
         if request is not None:
             request.future = future
         return True
@@ -641,7 +646,12 @@ class RemotePanelMixin:
                 pass  # 缓存失效只是锦上添花
             return rpath
 
-        fut = sess.submit(_job)
+        try:
+            fut = sess.submit(_job)
+        except Exception:
+            logger.exception('[RemotePaste] could not queue upload')
+            self._paste_fallback(term, local_path, request)
+            return
         if request is not None:
             request.future = fut
 
