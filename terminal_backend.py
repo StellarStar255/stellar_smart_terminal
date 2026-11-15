@@ -3,6 +3,7 @@
 支持 Unix (pty/fork) 和 Windows (ConPTY passthrough via ctypes)
 """
 import os
+import errno
 import sys
 import threading
 import time
@@ -922,7 +923,14 @@ else:
                 logger.debug("_set_pty_size: suppressed exception", exc_info=True)
 
         def _read_master_once(self) -> bytes:
-            return os.read(self._master_fd, 65536)
+            try:
+                return os.read(self._master_fd, 65536)
+            except OSError as error:
+                # Linux PTY 在 slave 关闭后以 EIO 表示 EOF。将其统一为空读，
+                # 让攒批逻辑先交付此前已读取的最后一段，再在下一轮收尾。
+                if error.errno == errno.EIO:
+                    return b''
+                raise
 
         def _master_has_data(self, timeout: float) -> bool:
             r, _, _ = select.select([self._master_fd], [], [], max(0.0, timeout))

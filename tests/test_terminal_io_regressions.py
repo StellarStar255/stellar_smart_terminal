@@ -1,9 +1,10 @@
 """Real PTY backpressure, escape framing, and prompt submission regressions."""
 import os
+import errno
 import threading
 import time
 from types import SimpleNamespace
-from unittest.mock import Mock
+from unittest.mock import Mock, patch
 
 import pytest
 from PyQt6.QtWidgets import QApplication
@@ -13,6 +14,27 @@ from terminal_writer import TerminalWriter
 from terminal_widget import TerminalWidget
 
 _APP = None
+
+
+@pytest.mark.skipif(os.name == 'nt', reason='Unix PTY EOF semantics')
+def test_linux_pty_eio_delivers_buffered_output_before_exit():
+    from terminal_backend import UnixBackend
+    backend = UnixBackend()
+    received = []
+    backend.on_output = received.append
+    backend._running = True
+    try:
+        with patch('terminal_backend.os.read',
+                   side_effect=[b'FINAL_OUTPUT', OSError(errno.EIO, 'PTY slave closed')]), \
+                patch.object(backend, '_master_has_data', return_value=True):
+            assert backend._pump_reads(backend._read_master_once,
+                                       backend._master_has_data, backend._read_master_once)
+        assert received == [b'FINAL_OUTPUT']
+        with patch('terminal_backend.os.read', side_effect=OSError(errno.EIO, 'PTY slave closed')):
+            assert not backend._pump_reads(backend._read_master_once,
+                                           backend._master_has_data, backend._read_master_once)
+    finally:
+        backend.stop()
 
 
 @pytest.fixture

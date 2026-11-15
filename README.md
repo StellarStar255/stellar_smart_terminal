@@ -6,7 +6,7 @@ English | [简体中文](README.zh-CN.md)
 
 A PyQt6-based smart terminal with file explorer, Git GUI, LLM proxy, and VS Code extension browser.
 
-Latest release: [v1.35.44](docs/releases/v1.35.44.md) improves paste and interrupt handling, releases resources after sessions exit, and prevents old terminal state or delayed commands from affecting replacement sessions.
+Latest release: [v1.35.45](docs/releases/v1.35.45.md) improves paste and interrupt handling, releases resources after sessions exit, preserves final Linux PTY output, and prevents old state or delayed commands from affecting replacement sessions.
 
 <img src="assets/smart_terminal.png" width="300" />
 
