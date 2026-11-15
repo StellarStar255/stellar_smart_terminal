@@ -365,6 +365,49 @@ def test_clear_operations_retry_without_waiting_for_screen_lock(app, operation):
         widget.deleteLater()
 
 
+def test_queued_old_backend_signals_cannot_modify_replacement_session(app):
+    class Backend:
+        is_running = False
+
+        def start(self, *args):
+            self.is_running = True
+            return True
+
+        def stop(self):
+            self.is_running = False
+
+        def write(self, data):
+            return True
+
+        def resize(self, *args):
+            pass
+
+    widget = TerminalWidget()
+    old, new = Backend(), Backend()
+    ended = []
+    widget.session_ended.connect(lambda: ended.append(True))
+    try:
+        with patch('terminal_widget.create_backend', side_effect=[old, new]):
+            widget.start_process(['old'])
+            bridge = widget._signal_bridge
+            def emit_old():
+                bridge.output_received.emit(b'stale output')
+                bridge.process_finished.emit(0)
+            worker = threading.Thread(target=emit_old)
+            worker.start()
+            worker.join(1)
+            old.is_running = False
+            widget.start_process(['new'])
+            widget.arm_password_autofill('new session secret')
+            app.processEvents()
+        assert not ended
+        assert 'stale output' not in '\n'.join(widget.screen.display)
+        assert widget._pending_ssh_password == 'new session secret'
+    finally:
+        widget.cleanup()
+        widget.deleteLater()
+
+
 @pytest.mark.parametrize('error', [BlockingIOError(), InterruptedError()])
 def test_coalescing_delivers_prefix_after_transient_read_error(error):
     def read_more():

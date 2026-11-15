@@ -274,7 +274,7 @@ class TerminalMouseMixin:
         suffix = 'M' if event_type in ('press', 'move') else 'm'
         # 坐标是1-based
         seq = f'\x1b[<{button};{col + 1};{row + 1}{suffix}'
-        self._write_to_backend(seq.encode())
+        self._write_ordered_input(seq.encode())
 
     def _send_wheel_to_app(self, going_up: bool, pos: QPoint, notches: int):
         """鼠标模式下把滚轮转发给程序（SGR 1006：64=上滚 / 65=下滚，按下用 M）。
@@ -288,7 +288,7 @@ class TerminalMouseMixin:
         row, col = self._pos_to_cell(pos)
         button = 64 if going_up else 65
         seq = f'\x1b[<{button};{col + 1};{row + 1}M'
-        self._write_to_backend(seq.encode() * max(1, notches))
+        self._write_ordered_input(seq.encode() * max(1, notches))
 
     def mousePressEvent(self, event: QMouseEvent):
         """鼠标按下 - 开始选择，支持双击选词、三击选行、Cmd+点击URL
@@ -528,6 +528,10 @@ class TerminalMouseMixin:
         支持 Python REPL 等交互式程序中的光标定位。
         """
         if not click_pos or self._backend is None:
+            return
+        if (getattr(self, '_native_paste_process', None) is not None
+                or getattr(self, '_native_paste_queue', None)):
+            # 粘贴尚未回显，不能根据旧光标位置推算并注入方向键。
             return
         if self._click_cursor_move_blocked():
             return

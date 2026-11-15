@@ -1232,7 +1232,7 @@ class TerminalWidget(TerminalInputMixin, TerminalMouseMixin,
 
     def _write_to_backend(self, data: bytes) -> bool:
         """写入数据到终端后端"""
-        if self._backend is None:
+        if self._backend is None or not getattr(self._backend, 'is_running', True):
             return False
         try:
             ok = self._backend.write(data)
@@ -1592,7 +1592,8 @@ class TerminalWidget(TerminalInputMixin, TerminalMouseMixin,
 
     def _on_output_activity(self, n: int):
         """GUI 线程：标记有输出活动并重置“执行完毕”空闲计时器。"""
-        if self._cleaned_up:
+        if (self._cleaned_up
+                or (self._backend is not None and not getattr(self._backend, 'is_running', True))):
             return
         self._had_output_activity = True
         self._activity_bytes += n
@@ -1699,6 +1700,14 @@ class TerminalWidget(TerminalInputMixin, TerminalMouseMixin,
 
     def _on_process_finished(self, status: int):
         """进程结束"""
+        if self._cleaned_up:
+            return
+        self._cancel_clipboard_probes()
+        self._activity_idle_timer.stop()
+        self._had_output_activity = False
+        self._activity_bytes = 0
+        self._pending_user_command = False
+        self._pending_ssh_password = None
         # 程序被杀/崩溃时来不及发 \x1b[?1004l：这里复位，下一个 shell 的点击定位才正常
         # （screen 侧同步复位、不改代数：下次真的收到 ?1004h 才会再同步成 True）
         self._focus_report_mode = False

@@ -348,7 +348,7 @@ class TerminalInputMixin:
             return
 
         # === 终端未运行时的 GUI 快捷键 ===
-        if self._backend is None:
+        if self._backend is None or not getattr(self._backend, 'is_running', True):
             if event.matches(QKeySequence.StandardKey.SelectAll):
                 self._select_all_content()
                 event.accept()
@@ -651,7 +651,8 @@ class TerminalInputMixin:
 
     def send_text(self, text: str):
         """发送文本到终端"""
-        if self._backend is None:
+        if self._backend is None or not getattr(self._backend, 'is_running', True):
+            self._cancel_clipboard_probes()
             return
         if text == '\x03':
             self._cancel_clipboard_probes()
@@ -689,7 +690,7 @@ class TerminalInputMixin:
         因此在 macOS 上完全避免调用 mimeData()，
         改用 clipboard.text()（安全）+ osascript 原生命令处理图片/文件。
         """
-        if self._backend is None:
+        if self._backend is None or not getattr(self._backend, 'is_running', True):
             return
 
         try:
@@ -727,6 +728,15 @@ class TerminalInputMixin:
         accepted = self._write_to_backend(data)
         if not accepted:
             # 粘贴未进入后端时不能继续回放已排队的回车/后续字符。
+            self._cancel_clipboard_probes()
+        return accepted
+
+    def _write_ordered_input(self, data):
+        """鼠标等事件按操作顺序投递，不把控制序列记进命令历史。"""
+        if self._defer_native_paste_input(lambda: self._write_ordered_input(data)):
+            return True
+        accepted = self._write_to_backend(data)
+        if not accepted:
             self._cancel_clipboard_probes()
         return accepted
 

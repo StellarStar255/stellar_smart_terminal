@@ -124,6 +124,33 @@ class TerminalBackend(ABC):
         self._running = False
         self._input_writer = None
         self._input_closed = False
+        self._interrupt_suffix_pending = b''
+
+    def _queue_input(self, data, create_writer):
+        """调用方持写锁；Ctrl+C 取消未发送的旧输入，再优先排入新写入器。"""
+        interrupt = data == b'\x03'
+        suffix = getattr(self, '_interrupt_suffix_pending', b'')
+        if interrupt:
+            if self._input_writer is not None:
+                previous = self._input_writer
+                cancelled_suffix = previous.cancel_pending()
+                suffix = suffix or cancelled_suffix
+                self._interrupt_suffix_pending = suffix
+                previous.close()
+                if previous.thread.is_alive():
+                    logger.warning('Could not stop pending terminal input for interrupt')
+                    return False
+                self._input_writer = None
+            data = suffix + data
+        elif suffix:
+            # 上一次取消尚未完成，不能把普通字符送进未退出的括号粘贴模式。
+            return False
+        if self._input_writer is None:
+            self._input_writer = create_writer()
+        accepted = self._input_writer.write(data)
+        if interrupt and accepted:
+            self._interrupt_suffix_pending = b''
+        return accepted
 
     def _pump_reads(self, read_first, wait_more, read_more,
                     clock=time.monotonic) -> bool:
@@ -627,9 +654,8 @@ if IS_WINDOWS:
                 if self._pipe_in_write is None or self._input_closed:
                     return False
                 try:
-                    if self._input_writer is None:
-                        self._input_writer = TerminalWriter.for_windows_pipe(self._pipe_in_write)
-                    return self._input_writer.write(data)
+                    return self._queue_input(
+                        data, lambda: TerminalWriter.for_windows_pipe(self._pipe_in_write))
                 except OSError:
                     logger.warning('Could not queue terminal input', exc_info=True)
                     return False
@@ -1007,9 +1033,7 @@ else:
                 if self._master_fd is None or self._input_closed:
                     return False
                 try:
-                    if self._input_writer is None:
-                        self._input_writer = TerminalWriter.for_fd(self._master_fd)
-                    return self._input_writer.write(data)
+                    return self._queue_input(data, lambda: TerminalWriter.for_fd(self._master_fd))
                 except OSError:
                     logger.warning('Could not queue terminal input', exc_info=True)
                     return False

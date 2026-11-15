@@ -344,3 +344,54 @@ def test_programmatic_return_records_and_clears_command(remote):
     assert written == [b'echo test', b'\r']
     assert recorded == ['echo test']
     assert widget.input_buffer == ''
+
+
+def test_natural_process_exit_cancels_pending_upload_and_enter(remote):
+    widget, written, uploads = remote
+    widget._deliver_media_path('/tmp/a.png')
+    widget.send_text('\r')
+    widget._backend.is_running = False
+    widget._on_process_finished(0)
+    assert widget._pending_remote_pastes == {}
+    assert not widget._native_paste_queue
+    complete(widget, uploads[0], '/remote/a.png')
+    assert written == []
+
+
+def test_mouse_reports_do_not_overtake_pending_paste(remote):
+    from PyQt6.QtCore import QEvent, QPointF, Qt
+    from PyQt6.QtGui import QMouseEvent
+    widget, written, uploads = remote
+    widget._deliver_media_path('/tmp/a.png')
+    pos = QPointF(widget.PADDING + widget.char_width / 2,
+                  widget.PADDING + widget._header_h + widget.char_height / 2)
+    event = QMouseEvent(QEvent.Type.MouseButtonPress, pos, Qt.MouseButton.LeftButton,
+                        Qt.MouseButton.LeftButton, Qt.KeyboardModifier.NoModifier)
+    widget._send_mouse_event(event, 'press')
+    widget._send_wheel_to_app(True, event.pos(), 1)
+    widget.send_text('\r')
+    assert written == []
+    complete(widget, uploads[0], '/remote/a.png')
+    assert written == [b'/remote/a.png', b'\x1b[<0;1;1M', b'\x1b[<64;1;1M', b'\r']
+
+
+def test_cursor_click_does_not_use_position_before_paste_echo(remote):
+    widget, written, uploads = remote
+    widget.screen.cursor.x = widget.screen.cursor.y = 0
+    widget._deliver_media_path('/tmp/a.png')
+    widget._move_cursor_to_click((0, 5))
+    assert written == []
+    complete(widget, uploads[0], '/remote/a.png')
+    widget._move_cursor_to_click((0, 5))
+    assert written == [b'/remote/a.png', b'\x1b[C' * 5]
+
+
+def test_paste_after_process_exit_does_not_read_clipboard_or_start_work(remote):
+    widget, written, _ = remote
+    widget._backend.is_running = False
+    widget._on_process_finished(0)
+    with patch('terminal_input.QApplication.clipboard') as clipboard:
+        widget._paste_from_clipboard()
+        clipboard.assert_not_called()
+    widget.send_text('must not send')
+    assert written == []

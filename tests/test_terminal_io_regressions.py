@@ -72,6 +72,143 @@ def test_queue_bound_includes_inflight_data_and_preserves_input_order():
     assert not writer.write(b'after close')
 
 
+@pytest.mark.skipif(os.name == 'nt', reason='Unix PTY')
+@pytest.mark.parametrize('bracketed', [False, True])
+def test_ctrl_c_discards_unsent_bulk_input_and_closes_bracketed_paste(bracketed):
+    import select
+    import tty
+    from terminal_backend import UnixBackend
+    master, slave = os.openpty()
+    tty.setraw(slave)
+    backend = UnixBackend()
+    backend._master_fd = master
+    payload = b'x' * (1024 * 1024)
+    if bracketed:
+        payload = b'\x1b[200~' + payload + b'\x1b[201~'
+    try:
+        assert backend.write(payload)
+        assert not backend._input_writer.flush(.05)
+        start = time.monotonic()
+        assert backend.write(b'\x03')
+        assert time.monotonic() - start < .3
+        received = bytearray()
+        deadline = time.monotonic() + 2
+        while b'\x03' not in received and time.monotonic() < deadline:
+            if select.select([slave], [], [], .05)[0]:
+                received.extend(os.read(slave, 65536))
+        assert received.endswith(b'\x03')
+        assert len(received) < 128 * 1024, 'Ctrl+C waited behind the entire megabyte paste'
+        if bracketed:
+            assert received.startswith(b'\x1b[200~')
+            assert received.endswith(b'\x1b[201~\x03')
+    finally:
+        backend.stop()
+        os.close(slave)
+
+
+@pytest.mark.skipif(os.name == 'nt', reason='Unix PTY')
+def test_ctrl_c_is_accepted_when_input_writer_is_full():
+    import tty
+    from terminal_backend import UnixBackend
+    master, slave = os.openpty()
+    tty.setraw(slave)
+    backend = UnixBackend()
+    backend._master_fd = master
+    try:
+        assert backend.write(b'x' * TerminalWriter.MAX_PENDING_BYTES)
+        assert not backend._input_writer.flush(.05)
+        assert backend.write(b'\x03'), 'full input queue rejected the interrupt'
+    finally:
+        backend.stop()
+        os.close(slave)
+
+
+def test_interrupt_replaces_cancellable_pipe_writer_after_it_stops():
+    from terminal_backend import TerminalBackend
+    entered, cancel = threading.Event(), threading.Event()
+    released, received = [], bytearray()
+
+    def blocked(chunk):
+        entered.set()
+        assert cancel.wait(1)
+        raise OSError('cancelled synchronous write')
+
+    old = TerminalWriter(blocked, lambda: released.append('old'), cancel=lambda _: cancel.set())
+    new = TerminalWriter(lambda chunk: received.extend(chunk) or len(chunk), lambda: None)
+    backend = SimpleNamespace(_input_writer=old)
+    try:
+        assert old.write(b'\x1b[200~' + b'x' * 8192 + b'\x1b[201~')
+        assert entered.wait(1)
+        assert TerminalBackend._queue_input(backend, b'\x03', lambda: new)
+        assert not old.thread.is_alive()
+        assert released == ['old']
+        assert new.flush()
+        assert received == b'\x1b[201~\x03'
+    finally:
+        cancel.set()
+        old.close()
+        new.close()
+
+
+def test_interrupt_retry_keeps_bracketed_paste_terminator():
+    from terminal_backend import TerminalBackend
+    entered, release = threading.Event(), threading.Event()
+    received = bytearray()
+    def blocked(chunk):
+        entered.set()
+        assert release.wait(1)
+        return len(chunk)
+    old = TerminalWriter(blocked, lambda: None)
+    new = TerminalWriter(lambda chunk: received.extend(chunk) or len(chunk), lambda: None)
+    backend = SimpleNamespace(_input_writer=old)
+    close = old.close
+    try:
+        assert old.write(b'\x1b[200~body\x1b[201~')
+        assert entered.wait(1)
+        old.close = Mock()  # 第一次取消未能让平台 I/O 结束。
+        assert not TerminalBackend._queue_input(backend, b'\x03', lambda: new)
+        release.set()
+        close()
+        assert not old.thread.is_alive()
+        assert TerminalBackend._queue_input(backend, b'\x03', lambda: new)
+        assert new.flush()
+        assert received == b'\x1b[201~\x03'
+    finally:
+        release.set()
+        close()
+        new.close()
+
+
+@pytest.mark.skipif(os.name == 'nt', reason='Unix PTY foreground signals')
+def test_ctrl_c_reaches_foreground_process_during_bulk_input():
+    import sys
+    from terminal_backend import UnixBackend
+    backend = UnixBackend()
+    ready, interrupted = threading.Event(), threading.Event()
+    output = bytearray()
+
+    def receive(data):
+        output.extend(data)
+        if b'READY' in output:
+            ready.set()
+        if b'INTERRUPTED' in output:
+            interrupted.set()
+
+    code = ('import os,signal,time; '
+            'signal.signal(signal.SIGINT, lambda *a: '
+            '(os.write(1,b"INTERRUPTED\\n"), os._exit(0))); '
+            'os.write(1,b"READY\\n"); time.sleep(10)')
+    backend.on_output = receive
+    try:
+        assert backend.start([sys.executable, '-u', '-c', code])
+        assert ready.wait(2)
+        assert backend.write(b'x' * TerminalWriter.MAX_PENDING_BYTES)
+        assert backend.write(b'\x03')
+        assert interrupted.wait(1), 'foreground process did not receive SIGINT'
+    finally:
+        backend.stop()
+
+
 @pytest.mark.parametrize('sequence', ['\x1b]11;?\x07', '\x1b]10;?\x1b\\',
                                       '\x1b[>c', '\x1b[>0c', '\x1b[>0q'])
 def test_terminal_queries_reply_once_at_every_split(app, sequence):

@@ -23,6 +23,7 @@ class TerminalWriter:
         self._cancel = cancel
         self._queue = deque()
         self._pending = 0
+        self._active_paste_end = False
         self._condition = threading.Condition()
         self.stopped = threading.Event()
         self.thread = threading.Thread(target=self._run, name='terminal-input', daemon=True)
@@ -48,6 +49,9 @@ class TerminalWriter:
                     if self.stopped.is_set():
                         break
                     data = self._queue.popleft()
+                    self._active_paste_end = (
+                        (data.startswith(b'\x1b[200~') and data.endswith(b'\x1b[201~'))
+                        or data == b'\x1b[201~\x03')
                 view = memoryview(data)
                 sent = 0
                 while sent < len(view) and not self.stopped.is_set():
@@ -57,6 +61,7 @@ class TerminalWriter:
                     sent += count
                 with self._condition:
                     self._pending -= len(data)
+                    self._active_paste_end = False
                     self._condition.notify_all()
         except OSError:
             if not self.stopped.is_set():
@@ -66,14 +71,21 @@ class TerminalWriter:
             with self._condition:
                 self._queue.clear()
                 self._pending = 0
+                self._active_paste_end = False
                 self._condition.notify_all()
             self._release()
 
-    def close(self):
-        self.stopped.set()
+    def cancel_pending(self):
+        """原子停止取队列并记录尚需发送的括号粘贴结束标记。"""
         with self._condition:
+            self.stopped.set()
+            suffix = b'\x1b[201~' if self._active_paste_end else b''
             self._queue.clear()
             self._condition.notify_all()
+            return suffix
+
+    def close(self):
+        self.cancel_pending()
         # Bounded cancellation: Unix polls at 50 ms; Windows synchronous pipe
         # writes use CancelSynchronousIo (not CancelIoEx).
         deadline = time.monotonic() + 0.2
@@ -94,10 +106,16 @@ class TerminalWriter:
             os.set_blocking(fd, False)
             def write(chunk):
                 try:
-                    if not select.select([], [fd], [], 0.05)[1]:
-                        return 0
                     return os.write(fd, chunk)
-                except (BlockingIOError, InterruptedError):
+                except BlockingIOError:
+                    # 先尝试非阻塞写，VINTR 等控制字符可能在普通输入满时仍可被
+                    # 行规程接收；真正背压时才等可写，避免忙循环。
+                    try:
+                        select.select([], [fd], [], 0.05)
+                    except InterruptedError:
+                        pass
+                    return 0
+                except InterruptedError:
                     return 0
             return cls(write, lambda: os.close(fd))
         except BaseException:
