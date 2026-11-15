@@ -142,6 +142,7 @@ class MenusMixin:
             except Exception:
                 logger.debug("_open_new_window: color failed", exc_info=True)
             win.show()
+            win._start_empty_terminal_shell()
             win.raise_()
             win.activateWindow()
             self._track_detached_window(win)

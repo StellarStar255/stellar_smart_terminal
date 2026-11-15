@@ -11,7 +11,7 @@ from PyQt6 import sip
 from PyQt6.QtCore import QPoint, QRect, QRectF, QTimer, Qt
 from PyQt6.QtGui import QCursor
 from PyQt6.QtWidgets import (QApplication, QMenu, QMessageBox, QSplitter, QTabBar)
-from dialogs import get_default_shell
+from dialogs import get_terminal_shell
 from i18n import t
 from widgets import InlineRenameEdit, TabCloseButton, TabDragPreview
 from app_logging import get_logger
@@ -52,9 +52,18 @@ class TabSplitMixin:
         cwd = terminal.get_cwd() if terminal else None
         cwd = cwd or self._window_cwd
         idx = self._add_new_tab(tab_cwd=cwd)
-        self.tab_terminals[idx][0].start_process([get_default_shell()], cwd=cwd)
-        self._update_running_state(True)
+        self._start_empty_terminal_shell()
         return idx
+
+    def _start_empty_terminal_shell(self):
+        """让当前新建的空终端直接可用，不重启已运行或待启动的会话。"""
+        terminal = self.terminal
+        if terminal is None or terminal._cleaned_up or terminal.has_started():
+            return
+        cwd = self.tab_cwds.get(self.tab_widget.currentIndex()) or self._window_cwd
+        terminal.set_working_dir(cwd)
+        terminal.start_process([get_terminal_shell()], cwd=cwd)
+        self._update_running_state(True)
 
     def _add_new_tab(self, external_splitter=None, external_terminals=None, external_session=None, tab_name=None, tab_cwd=None):
         """添加新的终端标签页
@@ -359,7 +368,7 @@ class TabSplitMixin:
         self._refresh_pane_handles(idx)
 
         # 启动 shell 在当前终端的工作目录
-        new_terminal.start_process([get_default_shell()], cwd=current_cwd)
+        new_terminal.start_process([get_terminal_shell()], cwd=current_cwd)
 
         # 设置新终端为活动终端
         self.active_terminal = new_terminal
@@ -453,7 +462,7 @@ class TabSplitMixin:
         self._refresh_pane_handles(idx)
 
         # 启动新终端
-        new_terminal.start_process([get_default_shell()], cwd=current_cwd)
+        new_terminal.start_process([get_terminal_shell()], cwd=current_cwd)
 
         # 设置新终端为活动终端
         self.active_terminal = new_terminal
@@ -687,9 +696,7 @@ class TabSplitMixin:
 
         # 如果没有标签页了，根据参数决定是否创建新的
         if self.tab_widget.count() == 0 and auto_create_new:
-            self._add_new_tab()
-            # 确保新 tab 的 UI 状态正确（启动按钮可用）
-            self._update_running_state(False)
+            self._new_terminal()
 
     def _close_current_tab(self):
         """关闭当前标签页"""
@@ -1017,8 +1024,7 @@ class TabSplitMixin:
 
         # 如果主窗口没有标签页了，创建一个新的
         if self.tab_widget.count() == 0:
-            self._add_new_tab()
-            self._update_running_state(False)
+            self._new_terminal()
 
     def _take_tab_out(self, index):
         """把第 index 页从本窗口摘下来（不销毁内容），返回它的全部随身数据。
@@ -1217,8 +1223,7 @@ class TabSplitMixin:
             # 关闭被拒（编辑器里有未保存改动、用户点了取消）→ 别留一个零标签
             # 的死壳，补一个空白标签让窗口还能用
             if not self.close() and self.tab_widget.count() == 0:
-                self._add_new_tab()
-                self._update_running_state(False)
+                self._new_terminal()
 
         QTimer.singleShot(0, _close)
 

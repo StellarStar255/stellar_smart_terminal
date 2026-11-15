@@ -665,6 +665,9 @@ def main():
     if not MainWindow.restore_windows_after_update(window) and not cli_working_dir:
         MainWindow.restore_workspace_on_start(window)
 
+    if not cli_working_dir:
+        QTimer.singleShot(0, window._start_empty_terminal_shell)
+
     # 首次启动（配置里还没有"教程已看过"标记）：等布局稳定后弹互动教程。
     # 只在首个窗口弹；看完/退出都会写标记，之后从「帮助 › 新手教程」重看。
     if should_show_onboarding(app_config.read_config()):

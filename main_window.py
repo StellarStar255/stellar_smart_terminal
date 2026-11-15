@@ -995,7 +995,7 @@ class MainWindow(ThemeMixin, ToolbarMixin, ConfigMixin, ExplorerPanelMixin,
                 background-color: #22c55e;
             }
         """)
-        self.new_tab_btn.clicked.connect(self._add_new_tab)
+        self.new_tab_btn.clicked.connect(self._new_terminal)
         new_tab_layout.addWidget(self.new_tab_btn)
         self.tab_widget.setCornerWidget(self.new_tab_container, Qt.Corner.TopRightCorner)
 
@@ -1559,7 +1559,7 @@ class MainWindow(ThemeMixin, ToolbarMixin, ConfigMixin, ExplorerPanelMixin,
         ("new_terminal",    "Ctrl+N",         "shortcuts.act.new_terminal",    "_new_terminal"),
         ("new_window",      "Ctrl+Shift+N",   "menu.new_window",              "_open_new_window"),
         ("new_session",     "",               "shortcuts.act.new_session",     "_start_session"),
-        ("new_tab",         "Ctrl+T",         "shortcuts.act.new_tab",         "_add_new_tab"),
+        ("new_tab",         "Ctrl+T",         "shortcuts.act.new_tab",         "_new_terminal"),
         ("close_tab",       "Ctrl+W",         "shortcuts.act.close_tab",       "_close_tab_or_window"),
         ("next_tab",        "Ctrl+Tab",       "shortcuts.act.next_tab",        "_next_tab"),
         ("prev_tab",        "Ctrl+Shift+Tab", "shortcuts.act.prev_tab",        "_prev_tab"),
@@ -2554,7 +2554,7 @@ class MainWindow(ThemeMixin, ToolbarMixin, ConfigMixin, ExplorerPanelMixin,
             'session_ended': lambda t=terminal: self._on_terminal_ended(t),
             'image_pasted': self._on_image_pasted,
             'close_tab_requested': self._close_tab_or_window,
-            'new_tab_requested': self._add_new_tab,
+            'new_tab_requested': self._new_terminal,
             'new_terminal_requested': self._new_terminal,
             'manage_presets_requested': self._manage_presets,
             'add_command_requested': self._add_new_preset,

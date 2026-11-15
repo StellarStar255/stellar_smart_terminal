@@ -94,7 +94,7 @@ class TestMenuBar(unittest.TestCase):
 
     def test_new_terminal_starts_shell_in_current_directory(self):
         from terminal_widget import TerminalWidget
-        from dialogs import get_default_shell
+        from dialogs import get_terminal_shell
         source = self.win.terminal
         count = self.win.tab_widget.count()
         with mock.patch.object(source, 'get_cwd', return_value='/tmp'), \
@@ -103,7 +103,29 @@ class TestMenuBar(unittest.TestCase):
         self.assertEqual(self.win.tab_widget.count(), count + 1)
         self.assertIsNot(self.win.terminal, source)
         self.assertEqual(self.win.tab_cwds[self.win.tab_widget.currentIndex()], '/tmp')
-        start.assert_called_once_with([get_default_shell()], cwd='/tmp')
+        start.assert_called_once_with([get_terminal_shell()], cwd='/tmp')
+
+    def test_plus_button_and_new_tab_shortcut_start_shell(self):
+        from terminal_widget import TerminalWidget
+        for create in (self.win.new_tab_btn.click,
+                       self.win.shortcut_actions['new_tab'].trigger):
+            with self.subTest(create=create), \
+                    mock.patch.object(TerminalWidget, 'start_process') as start:
+                count = self.win.tab_widget.count()
+                create()
+                self.assertEqual(self.win.tab_widget.count(), count + 1)
+                start.assert_called_once()
+                self.assertEqual(self.win.terminal._working_dir, start.call_args.kwargs['cwd'])
+
+    def test_empty_window_starts_once_and_does_not_nest_shells(self):
+        from terminal_widget import TerminalWidget
+        with mock.patch.object(TerminalWidget, 'start_process') as start:
+            win = self.win._open_new_window()
+            start.assert_called_once()
+            win.terminal._pending_process_start = object()
+            win._start_empty_terminal_shell()
+            start.assert_called_once()
+            win.terminal._pending_process_start = None
 
     def test_creation_shortcuts_and_menu_share_actions(self):
         from PyQt6.QtGui import QKeySequence

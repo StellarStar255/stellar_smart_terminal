@@ -803,22 +803,18 @@ class TerminalMouseMixin:
         menu.exec(event.globalPos())
 
     def _populate_local_commands_menu(self, menu):
-        """内置 Shell 始终可用；项目命令保留原来的顺序与执行方式。"""
-        shell = self._get_local_shell_command()
-        shell_action = menu.addAction(shell)
-        shell_action.triggered.connect(
-            lambda checked=False: self._execute_commands([shell]))
+        """只列出用户配置的本地命令。Shell 由新建终端流程启动。"""
         presets = (self.local_quick_commands_provider()
                    if self.local_quick_commands_provider else [])
         if presets:
-            menu.addSeparator()
             for preset in presets:
                 commands = preset.get('commands', [])
                 if commands:
                     action = menu.addAction(preset.get('name', t("common.unnamed")))
                     action.triggered.connect(
                         lambda checked=False, cmds=commands: self._execute_commands(cmds))
-        menu.addSeparator()
+        if menu.actions():
+            menu.addSeparator()
 
     def _has_selection(self) -> bool:
         """检查是否有选中的内容"""

@@ -66,6 +66,15 @@ def get_default_shell():
         return 'sh'
 
 
+def get_terminal_shell():
+    """交互式新终端：Windows 优先 PowerShell，其他平台尊重登录 shell。"""
+    if sys.platform == 'win32':
+        for shell in ('pwsh.exe', 'powershell.exe'):
+            if shutil.which(shell):
+                return shell
+    return get_default_shell()
+
+
 class _IndentingPlainTextEdit(QPlainTextEdit):
     """命令编辑框：像代码编辑器一样用 Tab/Shift+Tab 缩进，4 空格为一级。
 
