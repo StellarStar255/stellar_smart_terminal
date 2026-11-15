@@ -18,6 +18,8 @@ import re
 import sys
 import shlex
 import json
+import uuid
+from dataclasses import dataclass
 from pathlib import Path
 
 from PyQt6.QtCore import QEvent, Qt
@@ -27,6 +29,86 @@ from PyQt6.QtWidgets import QApplication
 from app_logging import get_logger
 
 logger = get_logger(__name__)
+
+
+@dataclass(eq=False)
+class _RemotePasteRequest:
+    local_path: str
+    prefix: str
+    suffix: str
+    backend: object
+    epoch: int
+    ready: bool = False
+    remote_path: str = ''
+    cancelled: bool = False
+    future: object = None
+    upload_name: str = ''
+
+    def __post_init__(self):
+        self.upload_name = uuid.uuid4().hex + Path(self.local_path).suffix
+
+
+@dataclass(eq=False)
+class _ImageSaveRequest:
+    source: object
+    image: object
+    candidates: list
+    backend: object
+    epoch: int
+    ready: bool = False
+    path: object = None
+    cancelled: bool = False
+    future: object = None
+
+
+def _image_directory(candidates):
+    import tempfile
+    for directory in candidates:
+        try:
+            directory.mkdir(exist_ok=True)
+            return directory
+        except OSError:
+            continue
+    return Path(tempfile.gettempdir())
+
+
+def _remove_paste_file(path):
+    if path is not None:
+        try:
+            os.unlink(path)
+        except OSError:
+            pass
+
+
+def _save_paste_image(request):
+    """只做文件操作和 QImage 编码；不读取控件、不发送终端输入。"""
+    import shutil
+    import tempfile
+    target = result = None
+    try:
+        if request.cancelled:
+            return None
+        if request.source and os.path.getsize(request.source) == 0:
+            return None
+        directory = _image_directory(request.candidates)
+        fd, target = tempfile.mkstemp(prefix='paste_', suffix='.png', dir=directory)
+        os.close(fd)
+        if request.source:
+            try:
+                shutil.move(request.source, target)
+                result = target
+            except OSError:
+                result = request.source  # 已编码的临时图片仍可直接使用
+        elif request.image.save(target, 'PNG'):
+            result = target
+        return None if request.cancelled else result
+    except Exception:
+        logger.warning('Could not save clipboard image', exc_info=True)
+        return None
+    finally:
+        for path in (request.source, target):
+            if path and (request.cancelled or path != result):
+                _remove_paste_file(path)
 
 
 class TerminalInputMixin:
@@ -75,6 +157,8 @@ class TerminalInputMixin:
                 if sys.platform != 'darwin' and self._has_selection():
                     self._copy_selection_to_clipboard()
                 elif self._backend is not None:
+                    self._cancel_clipboard_probes()
+                    self.input_buffer = ''
                     self._write_to_backend(b'\x03')
                 return
 
@@ -163,11 +247,15 @@ class TerminalInputMixin:
         if sys.platform == 'darwin':
             if (modifiers & Qt.KeyboardModifier.ControlModifier) and key == Qt.Key.Key_Right:
                 if self._backend is not None:
+                    if self._defer_native_paste_key(event):
+                        return
                     self._write_to_backend(b'\x05')
                 event.accept()
                 return
             if (modifiers & Qt.KeyboardModifier.ControlModifier) and key == Qt.Key.Key_Left:
                 if self._backend is not None:
+                    if self._defer_native_paste_key(event):
+                        return
                     self._write_to_backend(b'\x01')
                 event.accept()
                 return
@@ -268,6 +356,9 @@ class TerminalInputMixin:
         if key in (Qt.Key.Key_Shift, Qt.Key.Key_Control, Qt.Key.Key_Meta,
                    Qt.Key.Key_Alt, Qt.Key.Key_AltGr, Qt.Key.Key_CapsLock):
             event.accept()
+            return
+
+        if self._defer_native_paste_key(event):
             return
 
         # 输入时自动滚动到底部（走整屏重绘路径，并同步滚动条）
@@ -388,15 +479,17 @@ class TerminalInputMixin:
         # 处理已确认提交的文本
         commit_string = event.commitString()
         if commit_string and self._backend is not None:
-            try:
-                data = commit_string.encode('utf-8')
-                self._write_to_backend(data)
-                self.input_buffer += commit_string
-                # 提交后清除预编辑文本
-                self._preedit_string = ""
-            except OSError:  # 尽力而为，失败不影响主流程
-                pass
+            self._commit_ime_text(commit_string)
+            self._preedit_string = ''
         event.accept()
+
+    def _commit_ime_text(self, text):
+        if self._cleaned_up or self._backend is None:
+            return
+        if self._defer_native_paste_input(lambda: self._commit_ime_text(text)):
+            return
+        if self._write_to_backend(text.encode('utf-8')):
+            self.input_buffer += text
 
     # macOS 上 Cmd+字母默认全被终端抢走（当 Ctrl 发给 shell）。这几个留给菜单栏：
     # Cmd+N 新终端、Cmd+Shift+N 新窗口、Cmd+O 打开文件夹（Cmd+Shift+O 打开文件）。物理 Ctrl+N/O
@@ -532,6 +625,13 @@ class TerminalInputMixin:
         """发送文本到终端"""
         if self._backend is None:
             return
+        if text == '\x03':
+            self._cancel_clipboard_probes()
+            self.input_buffer = ''
+            self._write_to_backend(b'\x03')
+            return
+        elif self._defer_native_paste_input(lambda: self.send_text(text)):
+            return
         try:
             data = text.encode('utf-8')
             self._write_to_backend(data)
@@ -626,6 +726,8 @@ class TerminalInputMixin:
         clipboard.text()，就会把那段文本路径原样粘入终端，从而绕过图片保存与
         正常的图片粘贴流程。
         """
+        if self._defer_native_paste_input(lambda: self._paste_from_clipboard_macos(clipboard)):
+            return
         # 先用原生 API 处理图片/文件。若处理成功（含图片/文件），直接返回。
         backend = self._backend
 
@@ -644,9 +746,13 @@ class TerminalInputMixin:
         # clipboard.text() 在此分支是安全的（无图片数据，不会触发 TIFF segfault）
         text = clipboard.text()
         if text:
-            data = self._prepare_paste_text(text)
-            if self._write_paste(data):
-                self.input_buffer += text
+            self._paste_text_value(text)
+
+    def _paste_text_value(self, text):
+        if self._defer_native_paste_input(lambda: self._paste_text_value(text)):
+            return
+        if self._write_paste(self._prepare_paste_text(text)):
+            self.input_buffer += text
 
     # ---- 媒体路径投递：本地直接敲；SSH 标签先上传远端再敲远端路径 ----
 
@@ -658,18 +764,32 @@ class TerminalInputMixin:
         连接），传完由 remote_upload_done 回到 GUI 线程敲远端路径；传不了
         （面板没连着这台机器）就退回敲本地路径，至少不吞掉这次粘贴。
         """
+        if self._cleaned_up:
+            return
+        if (not getattr(self, '_native_paste_dispatching', False)
+                and (getattr(self, '_native_paste_process', None) is not None
+                     or getattr(self, '_native_paste_queue', None))):
+            self._queue_terminal_action(lambda: self._deliver_media_path(local_path, prefix, suffix))
+            self._start_next_clipboard_probe()
+            return
         # 是否在 ssh 里由归属窗口看进程决定（手敲的 ssh、重启恢复的标签也算），
         # 不再只认标签打开时记的 _ssh_host_config
         owner = getattr(self, '_owner_window', None)
         uploader = getattr(owner, '_upload_pasted_media_for_terminal', None)
         if uploader is not None:
-            self._pending_remote_pastes[local_path] = (prefix, suffix)
+            self._ensure_paste_queue()
+            request = _RemotePasteRequest(local_path, prefix, suffix, self._backend,
+                                          getattr(self, '_native_paste_epoch', 0))
+            self._pending_remote_pastes[request] = request
+            self._insert_paste_request((request, None, None, self._backend,
+                                        lambda: self._complete_remote_paste(request), None))
             try:
-                if uploader(self, local_path):
-                    return          # 传完会经 remote_upload_done 回来
+                if uploader(self, local_path, request=request):
+                    return
             except Exception:
                 logger.debug("_deliver_media_path: uploader failed", exc_info=True)
-            self._pending_remote_pastes.pop(local_path, None)
+            self._on_remote_paste_finished(request, '')
+            return
         self._type_media_path(local_path, prefix, suffix, local_path)
 
     def _type_media_path(self, path: str, prefix: str, suffix: str, local_path: str):
@@ -688,27 +808,52 @@ class TerminalInputMixin:
 
     def _paste_file_paths(self, paths) -> bool:
         """文件 URL 粘贴与拖放共用，逐个投递而不回退成 Finder 的文件名文本。"""
-        handled = False
+        paths = [path for path in paths if isinstance(path, str) and path]
         for path in paths:
-            if not isinstance(path, str) or not path:
-                continue
-            handled = True
-            ext = Path(path).suffix.lower()
-            is_media = (ext in self._AUDIO_EXTENSIONS or ext in self._VIDEO_EXTENSIONS
-                        or ext in self._IMAGE_EXTENSIONS)
-            if is_media:
-                prefix = '@' if self.image_prefix_enabled else ''
-                self._deliver_media_path(path, prefix=prefix, suffix=' ')
-            else:
-                text = self._quote_pasted_path(path) + ' '
-                if self._write_paste(text.encode('utf-8')):
-                    self.input_buffer += text
-        return handled
+            self._queue_terminal_action(lambda path=path: self._paste_one_file_path(path))
+        if paths:
+            self._start_next_clipboard_probe()
+        return bool(paths)
+
+    def _paste_one_file_path(self, path):
+        ext = Path(path).suffix.lower()
+        if ext in self._AUDIO_EXTENSIONS or ext in self._VIDEO_EXTENSIONS or ext in self._IMAGE_EXTENSIONS:
+            prefix = '@' if self.image_prefix_enabled else ''
+            self._deliver_media_path(path, prefix=prefix, suffix=' ')
+        else:
+            text = self._quote_pasted_path(path) + ' '
+            if self._write_paste(text.encode('utf-8')):
+                self.input_buffer += text
 
     def _on_remote_upload_done(self, local_path: str, remote_path: str):
-        """远端上传结束（GUI 线程）：成功敲远端路径，失败退回本地路径。"""
-        prefix, suffix = self._pending_remote_pastes.pop(local_path, ('', ''))
-        self._type_media_path(remote_path or local_path, prefix, suffix, local_path)
+        """旧信号没有请求身份，不能用同名文件匹配新请求并向终端写入。"""
+        logger.debug('Ignoring remote paste result without request identity')
+
+    def _remote_paste_is_current(self, request):
+        return (not self._cleaned_up and not request.cancelled
+                and self._pending_remote_pastes.get(request) is request
+                and self._backend is request.backend
+                and request.epoch == getattr(self, '_native_paste_epoch', 0))
+
+    def _on_remote_paste_finished(self, request, remote_path):
+        if not self._remote_paste_is_current(request):
+            self._pending_remote_pastes.pop(request, None)
+            request.cancelled = True
+            self._start_next_clipboard_probe()
+            return
+        if request.ready:
+            return
+        request.remote_path = remote_path
+        request.future = None
+        request.ready = True
+        self._start_next_clipboard_probe()
+
+    def _complete_remote_paste(self, request):
+        if not self._remote_paste_is_current(request):
+            return
+        self._pending_remote_pastes.pop(request)
+        self._type_media_path(request.remote_path or request.local_path,
+                              request.prefix, request.suffix, request.local_path)
 
     def _image_save_dir(self) -> Path:
         """「Image to CWD」存图的目标目录（带兜底，绝不抛异常）。
@@ -720,6 +865,10 @@ class TerminalInputMixin:
         运行时恰好从项目目录启动，两个 cwd 重合掩盖了此 bug）。
         目录创建失败逐级回退到临时目录——存图路径永远不该让粘贴失败。
         """
+        return _image_directory(self._image_save_candidates())
+
+    def _image_save_candidates(self):
+        """GUI 只捕获目标目录；mkdir、复制及编码由保存线程执行。"""
         import tempfile
         candidates = []
         if self.image_save_local:
@@ -731,13 +880,75 @@ class TerminalInputMixin:
             cwd = cwd or getattr(self, '_working_dir', None) or str(Path.home())
             candidates.append(Path(cwd) / ".images")
         candidates.append(Path(tempfile.gettempdir()) / "smart_terminal_images")
-        for d in candidates:
+        return candidates
+
+    _image_save_executor = None
+
+    @classmethod
+    def _get_image_save_executor(cls):
+        with cls._reflow_executor_lock:
+            if cls._image_save_executor is None:
+                from concurrent.futures import ThreadPoolExecutor
+                cls._image_save_executor = ThreadPoolExecutor(
+                    max_workers=2, thread_name_prefix='paste-image')
+            return cls._image_save_executor
+
+    def _queue_image_save(self, source=None, image=None):
+        request = _ImageSaveRequest(source, image, self._image_save_candidates(), self._backend,
+                                    getattr(self, '_native_paste_epoch', 0))
+        self._pending_image_saves[request] = request
+        self._insert_paste_request((request, None, None, self._backend,
+                                    lambda: self._complete_image_save(request), None))
+        request.future = self._get_image_save_executor().submit(_save_paste_image, request)
+
+        def finished(future):
+            request.future = None
+            if future.cancelled():
+                _remove_paste_file(source)
+                return
             try:
-                d.mkdir(exist_ok=True)
-                return d
-            except OSError:
-                continue
-        return Path(tempfile.gettempdir())   # 理论兜底：临时目录本身必然存在
+                path = future.result()
+            except Exception:
+                logger.exception('Clipboard image worker failed')
+                path = None
+            if request.cancelled:
+                _remove_paste_file(path)
+                return
+            try:
+                self._image_save_finished.emit(request, path)
+            except RuntimeError:
+                _remove_paste_file(path)
+
+        request.future.add_done_callback(finished)
+        self._start_next_clipboard_probe()
+
+    def _image_save_is_current(self, request):
+        return (not self._cleaned_up and not request.cancelled
+                and self._pending_image_saves.get(request) is request
+                and self._backend is request.backend
+                and request.epoch == getattr(self, '_native_paste_epoch', 0))
+
+    def _on_image_save_finished(self, request, path):
+        request.image = None
+        if not self._image_save_is_current(request):
+            self._pending_image_saves.pop(request, None)
+            request.cancelled = True
+            if path:
+                self._get_image_save_executor().submit(_remove_paste_file, path)
+            self._start_next_clipboard_probe()
+            return
+        if not path:
+            # 保存失败不能继续发送已排队的回车，避免执行不完整的输入。
+            self._cancel_clipboard_probes()
+            return
+        request.path = path
+        request.ready = True
+        self._start_next_clipboard_probe()
+
+    def _complete_image_save(self, request):
+        if self._image_save_is_current(request):
+            self._pending_image_saves.pop(request)
+            self._deliver_media_path(request.path, prefix='', suffix='')
 
     # ---- macOS 剪贴板探测的跳过条件 ----
 
@@ -849,8 +1060,9 @@ if (paths.length > 0) {{
         if (rep) {{
             var pngData = rep.representationUsingTypeProperties(4, $({{}}));
             if (pngData && pngData.length > 0) {{
-                pngData.writeToFileAtomically("{escaped_path}", true);
-                "IMAGE_OK";
+                if (pngData.writeToFileAtomically("{escaped_path}", true)) {{
+                    "IMAGE_OK";
+                }} else {{ "NOTHING"; }}
             }} else {{ "NOTHING"; }}
         }} else {{ "NOTHING"; }}
     }} else {{ "NOTHING"; }}
@@ -874,78 +1086,182 @@ if (paths.length > 0) {{
             output = ''
         return self._finish_clipboard_probe(output, tmp_path)
 
-    def _queue_clipboard_probe(self, script, path, token, callback):
+    def _ensure_paste_queue(self):
         from collections import deque
         if not hasattr(self, '_native_paste_queue'):
             self._native_paste_queue = deque()
             self._native_paste_process = None
+
+    def _insert_paste_request(self, request):
+        self._ensure_paste_queue()
+        if getattr(self, '_native_paste_dispatching', False):
+            position = getattr(self, '_native_paste_insertions', 0)
+            self._native_paste_queue.insert(position, request)
+            self._native_paste_insertions = position + 1
+        else:
+            self._native_paste_queue.append(request)
+
+    def _queue_terminal_action(self, callback):
+        # 路径等数据已经捕获，不需要再次依赖剪贴板内容，只检查终端会话。
+        self._insert_paste_request((None, None, None, self._backend, callback, None))
+
+    def _queue_clipboard_probe(self, script, path, token, callback):
         generation = getattr(self, '_clipboard_generation', 0)
-        self._native_paste_queue.append((script, path, token, self._backend, callback, generation))
+        request = (script, path, token, self._backend, callback, generation)
+        self._insert_paste_request(request)
         if self._native_paste_process is None:
             self._start_next_clipboard_probe()
 
+    def _defer_native_paste_input(self, callback):
+        """按用户操作顺序排队；设备查询应答仍走 _write_to_backend 立即发送。"""
+        if getattr(self, '_native_paste_dispatching', False):
+            return False
+        queue = getattr(self, '_native_paste_queue', None)
+        if getattr(self, '_native_paste_process', None) is None and not queue:
+            return False
+        token = self._clipboard_change_token()
+        generation = getattr(self, '_clipboard_generation', 0)
+        queue.append((None, None, token, self._backend, callback, generation))
+        return True
+
+    def _defer_native_paste_key(self, event):
+        if (getattr(self, '_native_paste_dispatching', False)
+                or (getattr(self, '_native_paste_process', None) is None
+                    and not getattr(self, '_native_paste_queue', None))):
+            return False
+        copied = QKeyEvent(event.type(), event.key(), event.modifiers(), event.text(),
+                           event.isAutoRepeat(), event.count())
+        if self._defer_native_paste_input(lambda: self.keyPressEvent(copied)):
+            event.accept()
+            return True
+        return False
+
     @staticmethod
     def _remove_clipboard_temp(path):
+        if path is None:
+            return
         try:
             os.unlink(path)
         except OSError:
             pass
 
     def _start_next_clipboard_probe(self):
+        if (getattr(self, '_native_paste_draining', False)
+                or getattr(self, '_native_paste_dispatching', False)):
+            return
+        self._native_paste_draining = True
+        try:
+            self._drain_clipboard_probes()
+        finally:
+            self._native_paste_draining = False
+
+    def _drain_clipboard_probes(self):
         """一次只启动一个异步脚本，保持连续 Cmd+V 的投递顺序。"""
-        from PyQt6.QtCore import QProcess, QTimer
         queue = self._native_paste_queue
-        while queue:
+        while queue and self._native_paste_process is None:
             script, path, token, backend, callback, generation = queue[0]
             current_token = self._clipboard_change_token()
-            if (self._cleaned_up or self._backend is not backend
-                    or generation != getattr(self, '_clipboard_generation', 0)
-                    or (token is not None and current_token is not None
-                        and current_token != token)):
+            valid = (not self._cleaned_up and self._backend is backend
+                     and (generation is None or generation == getattr(self, '_clipboard_generation', 0))
+                     and (token is None or current_token is None or current_token == token))
+            if isinstance(script, (_RemotePasteRequest, _ImageSaveRequest)):
+                is_image = isinstance(script, _ImageSaveRequest)
+                current = (self._image_save_is_current(script) if is_image
+                           else self._remote_paste_is_current(script))
+                if valid and current and not script.ready:
+                    return
+                if valid and current:
+                    script = None
+                else:
+                    queue.popleft()
+                    pending = self._pending_image_saves if is_image else self._pending_remote_pastes
+                    pending.pop(script, None)
+                    script.cancelled = True
+                    if script.future is not None:
+                        future, script.future = script.future, None
+                        future.cancel()
+                    continue
+            if script is None:
+                queue.popleft()
+                if valid:
+                    self._native_paste_dispatching = True
+                    self._native_paste_insertions = 0
+                    try:
+                        callback()
+                    except Exception:
+                        logger.exception('Deferred terminal input failed')
+                    finally:
+                        self._native_paste_dispatching = False
+                        self._native_paste_insertions = 0
+                continue
+            if not valid:
                 queue.popleft()
                 self._remove_clipboard_temp(path)
                 continue
-            process = QProcess(self)
-            self._native_paste_process = process
-            timer = QTimer(process)
-            timer.setSingleShot(True)
-            timer.timeout.connect(process.kill)
-            completed = False
+            self._launch_clipboard_probe(queue[0])
+            if self._native_paste_process is not None:
+                return
+            # FailedToStart 也可能在 start() 内同步触发；继续处理剩余输入。
 
-            def finish(*args):
-                nonlocal completed
-                if completed:
-                    return
-                completed = True
-                timer.stop()
-                output = bytes(process.readAllStandardOutput()).decode('utf-8', 'replace').strip()
-                current = self._clipboard_change_token()
-                valid = (not self._cleaned_up and self._backend is backend
-                         and generation == getattr(self, '_clipboard_generation', 0)
-                         and (token is None or current is None or current == token))
-                # cleanup 可能已经清空队列；晚到的 finished 不能移除新请求。
-                if queue and queue[0][1] == path:
-                    queue.popleft()
-                try:
-                    if valid:
-                        callback(self._finish_clipboard_probe(output, path))
-                    else:
-                        self._remove_clipboard_temp(path)
-                except Exception:
-                    logger.exception('Clipboard paste completion failed')
-                finally:
-                    self._native_paste_process = None
-                    process.deleteLater()
-                    self._start_next_clipboard_probe()
+    def _launch_clipboard_probe(self, request):
+        # 每个进程有独立的闭包，避免同步启动失败后旧回调引用下一次循环的变量。
+        from PyQt6.QtCore import QProcess, QTimer
+        script, path, token, backend, callback, generation = request
+        queue = self._native_paste_queue
+        process = QProcess(self)
+        self._native_paste_process = process
+        timer = QTimer(process)
+        timer.setSingleShot(True)
+        timer.timeout.connect(process.kill)
+        completed = False
+        epoch = getattr(self, '_native_paste_epoch', 0)
 
-            process.finished.connect(finish)
-            process.errorOccurred.connect(
-                lambda error: finish() if error == QProcess.ProcessError.FailedToStart else None)
-            timer.start(10_000)
-            process.start('osascript', ['-l', 'JavaScript', '-e', script])
-            return
+        def finish(*args):
+            nonlocal completed
+            if completed:
+                return
+            completed = True
+            timer.stop()
+            output = bytes(process.readAllStandardOutput()).decode('utf-8', 'replace').strip()
+            current = self._clipboard_change_token()
+            valid = (not self._cleaned_up and self._backend is backend
+                     and epoch == getattr(self, '_native_paste_epoch', 0)
+                     and generation == getattr(self, '_clipboard_generation', 0)
+                     and (token is None or current is None or current == token))
+            if queue and queue[0][1] == path:
+                queue.popleft()
+            try:
+                if valid:
+                    self._native_paste_dispatching = True
+                    self._native_paste_insertions = 0
+                    callback(self._finish_clipboard_probe(output, path, defer_image=True))
+                else:
+                    self._remove_clipboard_temp(path)
+            except Exception:
+                logger.exception('Clipboard paste completion failed')
+            finally:
+                self._native_paste_dispatching = False
+                self._native_paste_insertions = 0
+                self._native_paste_process = None
+                process.deleteLater()
+                self._start_next_clipboard_probe()
+
+        process.finished.connect(finish)
+        process.errorOccurred.connect(
+            lambda error: finish() if error == QProcess.ProcessError.FailedToStart else None)
+        timer.start(10_000)
+        process.start('osascript', ['-l', 'JavaScript', '-e', script])
 
     def _cancel_clipboard_probes(self):
+        self._native_paste_epoch = getattr(self, '_native_paste_epoch', 0) + 1
+        requests = list(self._pending_remote_pastes) + list(self._pending_image_saves)
+        self._pending_remote_pastes.clear()
+        self._pending_image_saves.clear()
+        for request in requests:
+            request.cancelled = True
+            if request.future is not None:
+                future, request.future = request.future, None
+                future.cancel()
         process = getattr(self, '_native_paste_process', None)
         if process is not None:
             process.kill()
@@ -955,12 +1271,16 @@ if (paths.length > 0) {{
         if queue:
             queue.clear()
 
-    def _finish_clipboard_probe(self, output, tmp_path):
+    def _finish_clipboard_probe(self, output, tmp_path, *, defer_image=False):
         import shutil
         from datetime import datetime
 
         try:
             if output == "IMAGE_OK" and os.path.isfile(tmp_path):
+                if defer_image:
+                    self._queue_image_save(source=tmp_path)
+                    tmp_path = None  # 文件的所有权已转交保存线程
+                    return True
                 # 确认是图片了，才解析/创建存图目录并把临时文件移过去
                 timestamp = datetime.now().strftime("%Y%m%d_%H%M%S_%f")
                 save_path = str(self._image_save_dir() / f"paste_{timestamp}.png")
@@ -1017,17 +1337,8 @@ if (paths.length > 0) {{
             except Exception:
                 image = None
             if image is not None and not image.isNull():
-                from datetime import datetime
-
-                timestamp = datetime.now().strftime("%Y%m%d_%H%M%S_%f")
-                # 目录解析统一走 _image_save_dir：终端真实 cwd + 失败兜底
-                image_path = self._image_save_dir() / f"paste_{timestamp}.png"
-
-                if image.save(str(image_path), "PNG"):
-                    # 发送原始路径；若 Bracketed Paste 启用则由 _write_paste
-                    # 自动包裹 ESC[200~/ESC[201~，Claude Code 等应用据此将路径
-                    # 识别为图片并展示为 [Image #N]。
-                    self._deliver_media_path(str(image_path), prefix='', suffix='')
+                from PyQt6.QtGui import QImage
+                self._queue_image_save(image=QImage(image))
                 return
 
         # 处理文本粘贴
@@ -1035,6 +1346,4 @@ if (paths.length > 0) {{
         if not text:
             return
 
-        data = self._prepare_paste_text(text)
-        if self._write_paste(data):
-            self.input_buffer += text
+        self._paste_text_value(text)

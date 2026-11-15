@@ -27,7 +27,7 @@ class _PasteProbeRelay(QObject):
     （在没有事件循环的线程里永远不触发）和 invokeMethod（混入类里的槽注册
     不可靠）都稳。
     """
-    done = pyqtSignal(object, object, str)   # (term, ssh 命令行或 None, local_path)
+    done = pyqtSignal(object, object, str, object)  # term, ssh 命令行, local_path, request
 
 
 class RemotePanelMixin:
@@ -412,12 +412,12 @@ class RemotePanelMixin:
                 logger.debug("_on_upload_session_failed: statusbar unavailable",
                              exc_info=True)
 
-    def _upload_pasted_media_for_terminal(self, term, local_path: str) -> bool:
+    def _upload_pasted_media_for_terminal(self, term, local_path: str, request=None) -> bool:
         """把本地粘贴的文件传到 term 所连的远端。
 
         返回 True 表示已接手：结果一律经 term.remote_upload_done 回到 GUI 线程
         （成功敲远端路径；不在 ssh 里、传不了、用户不想连 → 远端路径为空，
-        终端退回敲本地路径）。只有文件不存在才同步返回 False。
+        终端退回敲本地路径）。文件检查和 ssh 探测都在后台执行。
 
         先在工作线程里做 ssh 探测（要起一次 ps，机器忙时能等上几秒，不能卡
         GUI），回到 GUI 线程再对主机、找会话、排上传：目录取 Remote 面板当前
@@ -425,24 +425,29 @@ class RemotePanelMixin:
         以外的文件要多点一次授权）。面板没连着这台机器也没有主连接可复用时，
         问用户一句要不要连上再传（见 _offer_connect_for_paste）。
         """
-        if not os.path.isfile(local_path):
-            return False
         backend = getattr(term, '_backend', None)
         shell_pid = getattr(backend, '_child_pid', None)
         relay = self._paste_probe_relay()
 
         def _probe():
+            if request is not None and request.cancelled:
+                return
             try:
-                args = self._ssh_args_under(shell_pid)
+                # 网络挂载点上的 stat 也可能阻塞，不能在 GUI 线程先检查文件。
+                args = self._ssh_args_under(shell_pid) if os.path.isfile(local_path) else None
             except Exception:
                 logger.debug("[RemotePaste] ssh probe failed", exc_info=True)
                 args = None
+            if request is not None and request.cancelled:
+                return
             try:
-                relay.done.emit(term, args, local_path)
+                relay.done.emit(term, args, local_path, request)
             except RuntimeError:
                 pass  # 窗口已销毁：没人等这个结果了
 
-        self._paste_probe_pool().submit(_probe)
+        future = self._paste_probe_pool().submit(_probe)
+        if request is not None:
+            request.future = future
         return True
 
     def _paste_probe_relay(self):
@@ -460,32 +465,44 @@ class RemotePanelMixin:
         return pool
 
     @staticmethod
-    def _paste_fallback(term, local_path: str):
-        """传不了：让终端敲本地路径（远端路径给空串）。"""
+    def _paste_result(term, local_path: str, remote_path: str, request=None):
         try:
-            term.remote_upload_done.emit(local_path, "")
+            if request is None:
+                term.remote_upload_done.emit(local_path, remote_path)
+            else:
+                term._remote_paste_finished.emit(request, remote_path)
         except RuntimeError:
-            pass  # 终端已销毁
+            pass
 
-    def _on_paste_probe_done(self, term, args, local_path: str):
-        """ssh 探测回到 GUI 线程：对主机 → 找会话 → 排上传 / 引导连接 / 回退。"""
+    @staticmethod
+    def _paste_request_valid(term, request):
         try:
             if sip.isdeleted(term):
-                return
+                return False
         except TypeError:
-            pass  # 非 QObject 的替身
+            pass
+        return request is None or term._remote_paste_is_current(request)
+
+    def _paste_fallback(self, term, local_path: str, request=None):
+        """传不了：让终端敲本地路径（远端路径给空串）。"""
+        self._paste_result(term, local_path, '', request)
+
+    def _on_paste_probe_done(self, term, args, local_path: str, request=None):
+        """ssh 探测回到 GUI 线程：对主机 → 找会话 → 排上传 / 引导连接 / 回退。"""
+        if not self._paste_request_valid(term, request):
+            return
         host = None
         if args:
             preferred = getattr(term, '_ssh_host_config', None)
             host = self._match_host_for_ssh_args(args, self._known_remote_hosts(), preferred)
         if host is None:
-            self._paste_fallback(term, local_path)   # 不在 ssh 里（本地 shell）：照常敲本地路径
+            self._paste_fallback(term, local_path, request)
             return
         sess = self._remote_session_for_host(host)
         if sess is None:
-            self._offer_connect_for_paste(term, host, local_path)
+            self._offer_connect_for_paste(term, host, local_path, request)
             return
-        self._start_paste_upload(term, host, sess, local_path)
+        self._start_paste_upload(term, host, sess, local_path, request)
 
     def _ask_connect_for_paste(self, host) -> bool:
         """没有可用会话：问一句「连接 {host} 并上传？」。True = 连。"""
@@ -503,7 +520,7 @@ class RemotePanelMixin:
 
     _PASTE_CONNECT_TIMEOUT_MS = 60_000
 
-    def _offer_connect_for_paste(self, term, host, local_path: str):
+    def _offer_connect_for_paste(self, term, host, local_path: str, request=None):
         """终端在 ssh 里、但面板没连着这台机器也没有主连接可复用。
 
         以前只在状态栏提示一句就退回本地路径，用户得自己去 Remote 面板连上
@@ -516,7 +533,9 @@ class RemotePanelMixin:
                     t("status.remote_paste_no_session", host=host.alias), 8000)
             except Exception:
                 logger.debug("_offer_connect_for_paste: statusbar unavailable", exc_info=True)
-            self._paste_fallback(term, local_path)
+            self._paste_fallback(term, local_path, request)
+            return
+        if not self._paste_request_valid(term, request):
             return
         panel = self._ensure_remote_panel()
         if not getattr(self, 'remote_panel_visible', False):
@@ -531,6 +550,7 @@ class RemotePanelMixin:
                 return
             state['done'] = True
             timer.stop()
+            timer.deleteLater()
             for sig, slot in conns:
                 try:
                     sig.disconnect(slot)
@@ -538,17 +558,14 @@ class RemotePanelMixin:
                     pass
             if not ok:
                 self._skip_auto_ssh_tab_once = False   # 没连上：别把下次真正的连接也压掉
-            try:
-                if sip.isdeleted(term):
-                    return
-            except TypeError:
-                pass
+            if not self._paste_request_valid(term, request):
+                return
             if ok:
                 sess = self._remote_session_for_host(host)
                 if sess is not None:
-                    self._start_paste_upload(term, host, sess, local_path)
+                    self._start_paste_upload(term, host, sess, local_path, request)
                     return
-            self._paste_fallback(term, local_path)
+            self._paste_fallback(term, local_path, request)
 
         def _on_connected(cfg):
             if getattr(cfg, 'alias', None) == host.alias:
@@ -575,8 +592,10 @@ class RemotePanelMixin:
             # 状态可等，立刻回退（不必干等 60s 超时）
             _finish(False)
 
-    def _start_paste_upload(self, term, host, sess, local_path: str):
+    def _start_paste_upload(self, term, host, sess, local_path: str, request=None):
         """会话已就绪：把上传排到它的工作线程，结束后经 term.remote_upload_done 回 GUI。"""
+        if not self._paste_request_valid(term, request):
+            return
         panel = getattr(self, 'remote_panel', None)
         panel_sess = getattr(panel, '_session', None) if panel is not None else None
         base = None
@@ -589,6 +608,8 @@ class RemotePanelMixin:
             t("status.remote_paste_uploading", host=host.alias), 10000)
 
         def _job():
+            if request is not None and request.cancelled:
+                return ''
             alive = getattr(sess, 'is_alive', None)
             if callable(alive) and not alive():
                 # 面板的 paramiko 会话：合盖/换网后 transport 闲置掉线、sftp 句柄
@@ -605,7 +626,10 @@ class RemotePanelMixin:
             rdir = remote_dir
             if not posixpath.isabs(rdir):
                 rdir = posixpath.join(sess.home() or "/", rdir)
-            rpath = posixpath.join(rdir, os.path.basename(local_path))
+            # 同名文件可能来自不同本地目录；每次粘贴使用独立远端文件，
+            # 防止覆盖此前已交给 CLI 的图片。
+            name = request.upload_name if request is not None else os.path.basename(local_path)
+            rpath = posixpath.join(rdir, name)
             try:
                 sess.mkdir(rdir)
             except Exception:
@@ -618,17 +642,18 @@ class RemotePanelMixin:
             return rpath
 
         fut = sess.submit(_job)
+        if request is not None:
+            request.future = fut
 
         def _done(f):
+            if request is not None and request.cancelled:
+                return
             try:
                 result = f.result()
             except Exception as e:
                 logger.warning(f"[RemotePaste] upload failed: {e}")
                 result = ""
-            try:
-                term.remote_upload_done.emit(local_path, result)
-            except RuntimeError:
-                pass  # 终端已销毁
+            self._paste_result(term, local_path, result, request)
         fut.add_done_callback(_done)
 
     def _open_ssh_terminal_tab(self, host_config, remote_cd_path):

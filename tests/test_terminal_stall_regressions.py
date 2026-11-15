@@ -312,6 +312,31 @@ def test_reflow_completion_retries_without_waiting_for_new_output(app):
         widget.deleteLater()
 
 
+def test_url_hover_does_not_wait_for_background_screen_lock(app):
+    from PyQt6.QtCore import QEvent, QPointF, Qt
+    from PyQt6.QtGui import QMouseEvent
+
+    widget = TerminalWidget()
+    widget.resize(800, 480)
+    widget._update_terminal_size()
+    widget.stream.feed('https://example.com/path')
+    pos = QPointF(widget.PADDING + widget.char_width,
+                  widget.PADDING + widget._header_h + widget.char_height / 2)
+    event = QMouseEvent(QEvent.Type.MouseMove, pos, Qt.MouseButton.NoButton,
+                        Qt.MouseButton.NoButton, Qt.KeyboardModifier.AltModifier)
+    try:
+        with busy_screen(widget):
+            start = time.monotonic()
+            widget.mouseMoveEvent(event)
+            assert time.monotonic() - start < .2
+            assert not widget._hover_cursor_on
+        widget.mouseMoveEvent(event)
+        assert widget._hover_cursor_on
+    finally:
+        widget.cleanup()
+        widget.deleteLater()
+
+
 @pytest.mark.parametrize('error', [BlockingIOError(), InterruptedError()])
 def test_coalescing_delivers_prefix_after_transient_read_error(error):
     def read_more():

@@ -384,10 +384,13 @@ class TerminalMouseMixin:
             return
         # 悬停反馈：未按下按钮且按住 Cmd/Alt 悬停在 URL 上时显示手型光标
         if not event.buttons():
-            hovering_url = bool(
-                (event.modifiers() & self._URL_CLICK_MODIFIERS)
-                and self._get_url_at_pos(self._pos_to_cell(event.pos()))
-            )
+            hovering_url = False
+            if ((event.modifiers() & self._URL_CLICK_MODIFIERS)
+                    and self._screen_lock.acquire(blocking=False)):
+                try:
+                    hovering_url = bool(self._get_url_at_pos(self._pos_to_cell(event.pos())))
+                finally:
+                    self._screen_lock.release()
             if hovering_url != self._hover_cursor_on:
                 self._hover_cursor_on = hovering_url
                 self.setCursor(

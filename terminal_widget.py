@@ -390,6 +390,8 @@ class TerminalWidget(TerminalInputMixin, TerminalMouseMixin,
     # SSH 标签里粘贴的图片先上传到远端，传完再把远端路径敲进终端：
     # (本地路径, 远端路径；失败为空串)。工作线程发出，槽在 GUI 线程跑
     remote_upload_done = pyqtSignal(str, str)
+    _remote_paste_finished = pyqtSignal(object, str)
+    _image_save_finished = pyqtSignal(object, object)
     raw_output_received = pyqtSignal(str)  # 原始输出信号（用于 OpenAI API 服务器）
     close_tab_requested = pyqtSignal()  # 请求关闭当前标签页 (Cmd+W)
     new_tab_requested = pyqtSignal()  # 请求新建标签页 (Cmd+T)
@@ -806,7 +808,10 @@ class TerminalWidget(TerminalInputMixin, TerminalMouseMixin,
 
         # SSH 标签：粘贴的图片在上传远端期间挂起的 (本地路径 → 前缀/后缀)
         self._pending_remote_pastes = {}
+        self._pending_image_saves = {}
         self.remote_upload_done.connect(self._on_remote_upload_done)
+        self._remote_paste_finished.connect(self._on_remote_paste_finished)
+        self._image_save_finished.connect(self._on_image_save_finished)
 
         # API 服务器输出监听（只有启用时才发射 raw_output_received 信号）
         self._api_output_enabled = False
@@ -2067,6 +2072,7 @@ class TerminalWidget(TerminalInputMixin, TerminalMouseMixin,
     def stop_process(self):
         """停止进程并清理资源"""
         self._output_cancelled.set()
+        self._cancel_clipboard_probes()
         # 先断开信号连接，防止在清理过程中触发回调
         if self._signal_bridge:
             try:
@@ -2676,6 +2682,9 @@ class TerminalWidget(TerminalInputMixin, TerminalMouseMixin,
         """执行多个命令（依次执行）"""
         if not commands:
             return
+        commands = list(commands)
+        if self._defer_native_paste_input(lambda: self._execute_commands(commands)):
+            return
         if self._backend is None or not self._backend.is_running:
             # 终端未运行，先启动终端再执行命令
             self._start_and_execute(commands)
@@ -2696,12 +2705,9 @@ class TerminalWidget(TerminalInputMixin, TerminalMouseMixin,
         # 启动默认 shell
         shell = self._get_default_shell()
         self.start_process([shell], cwd=cwd)
+        backend = self._backend
         # 延迟执行命令，等待终端启动完成
         def delayed_execute():
-            if self._backend and self._backend.is_running:
-                for cmd in commands:
-                    data = (cmd + '\r').encode('utf-8')
-                    if self._write_to_backend(data):
-                        if cmd.strip():
-                            self.input_recorded.emit(cmd)
+            if backend is not None and self._backend is backend and backend.is_running:
+                self._execute_commands(commands)
         QTimer.singleShot(300, delayed_execute)

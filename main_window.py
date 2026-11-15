@@ -2654,6 +2654,9 @@ class MainWindow(ThemeMixin, ToolbarMixin, ConfigMixin, ExplorerPanelMixin,
         """
         old = getattr(terminal, '_owner_window', None)
         if old is not None and old is not self:
+            # 上传探测/连接引导归旧窗口所有，转移后不能继续等它的回调，
+            # 也不能把已排队的回车送到新的交互上下文。
+            terminal._cancel_clipboard_probes()
             if getattr(old, '_recording_terminal', None) is terminal:
                 old._stop_terminal_recording()
             try:

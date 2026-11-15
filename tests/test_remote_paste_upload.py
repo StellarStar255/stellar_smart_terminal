@@ -120,9 +120,11 @@ class TestRemotePasteUpload(unittest.TestCase):
         self._wait(lambda: typed)
 
         self.assertEqual(len(typed), 1)
-        self.assertEqual(shlex.split(typed[0].decode()), ['/data/proj/.images/shot one.png'])
+        remote_path = shlex.split(typed[0].decode())[0]
+        self.assertTrue(remote_path.startswith('/data/proj/.images/'))
+        self.assertTrue(remote_path.endswith('.png'))
         self.assertIn(('mkdir', '/data/proj/.images'), sess.calls)
-        self.assertIn(('upload', self.local, '/data/proj/.images/shot one.png'), sess.calls)
+        self.assertIn(('upload', self.local, remote_path), sess.calls)
         self.assertEqual(pasted, [self.local])       # 画廊仍用本地缩略图
         self.assertEqual(term._pending_remote_pastes, {})
 
@@ -131,7 +133,9 @@ class TestRemotePasteUpload(unittest.TestCase):
         self.win.remote_panel = _FakePanel(_FakeSession('gpu13'), '/data/proj')
         term._deliver_media_path(self.local, prefix='@', suffix=' ')
         self._wait(lambda: typed)
-        self.assertEqual(typed, [b'@/data/proj/.images/shot one.png '])
+        self.assertEqual(len(typed), 1)
+        self.assertTrue(typed[0].startswith(b'@/data/proj/.images/'))
+        self.assertTrue(typed[0].endswith(b'.png '))
 
     def test_panel_on_other_host_falls_back_to_local_path(self):
         term, typed, pasted = self._terminal()
@@ -170,7 +174,9 @@ class TestRemotePasteUpload(unittest.TestCase):
         term._deliver_media_path(self.local, prefix='', suffix='')
         self._wait(lambda: typed)
         self.assertEqual(len(typed), 1)
-        self.assertEqual(shlex.split(typed[0].decode()), ['/data/proj/.images/shot one.png'])
+        remote_path = shlex.split(typed[0].decode())[0]
+        self.assertTrue(remote_path.startswith('/data/proj/.images/'))
+        self.assertTrue(remote_path.endswith('.png'))
         self.assertTrue(seen, "没做 ssh 探测")
         self.assertNotIn(threading.get_ident(), seen, "ps 探测在 GUI 线程里跑了")
 
