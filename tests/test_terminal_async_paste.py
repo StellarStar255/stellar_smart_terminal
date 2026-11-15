@@ -219,8 +219,10 @@ def test_preset_command_waits_for_pending_paste(terminal):
     assert written == [b'prefix ', b'next\r']
 
 
-def test_synchronous_probe_start_failure_cannot_strand_later_input(terminal):
+def test_synchronous_probe_start_failure_cannot_strand_later_input(terminal, monkeypatch):
     widget, written = terminal
+    # 每步都让出事件循环，覆盖排队输入分批回放的情况。
+    monkeypatch.setattr(widget, '_PASTE_DRAIN_BUDGET_S', 0)
     real_start = QProcess.start
     starts = []
 
@@ -235,7 +237,9 @@ def test_synchronous_probe_start_failure_cannot_strand_later_input(terminal):
         widget._paste_from_clipboard_macos(SimpleNamespace(text=lambda: 'unused'))
         widget._paste_from_clipboard_macos(SimpleNamespace(text=lambda: 'second'))
         press(widget, Qt.Key.Key_Return, '\r')
-        pump_until(lambda: widget._native_paste_process is None)
+        pump_until(lambda: widget._native_paste_process is None
+                   and not widget._native_paste_queue
+                   and not getattr(widget, '_paste_drain_scheduled', False))
     assert written == [b'/tmp/first.txt ', b'second', b'\r']
     assert not widget._native_paste_queue
 

@@ -592,6 +592,8 @@ class TerminalWidget(TerminalInputMixin, TerminalMouseMixin,
         # 挪到读取线程时，这把锁即提供真正的互斥。
         self._screen_lock = threading.RLock()
         self._output_cancelled = threading.Event()
+        self._pending_process_start = None
+        self._process_start_token = None
         # 显示路径用的历史行数缓存：异步 reflow worker 持锁期间滚动条/滚轮
         # 不必在锁上等（见 _get_history_count）
         self._history_count_cached = 0
@@ -1327,6 +1329,8 @@ class TerminalWidget(TerminalInputMixin, TerminalMouseMixin,
             command: 要执行的命令
             cwd: 工作目录，如果为None则使用当前进程的工作目录
         """
+        if self._cleaned_up:
+            return
         if self._backend is not None:
             if self._backend.is_running:
                 return
@@ -1334,6 +1338,24 @@ class TerminalWidget(TerminalInputMixin, TerminalMouseMixin,
             # "退出 → 再启动"都泄漏一个 fd（旧实例从未被清理）
             self.stop_process()
 
+        request = (list(command), cwd)
+        self._process_start_token = request
+        self._pending_process_start = request
+        self._try_start_process(request)
+
+    def _try_start_process(self, request):
+        """等 reflow 释放屏幕后启动；重试不阻塞 GUI，并可被关闭/新请求作废。"""
+        if self._cleaned_up or self._pending_process_start is not request:
+            return
+        if not self._screen_lock.acquire(blocking=False):
+            QTimer.singleShot(20, lambda: self._try_start_process(request))
+            return
+        try:
+            self._reset_process_screen()
+        finally:
+            self._screen_lock.release()
+        self._pending_process_start = None
+        command, cwd = request
         self._utf8_decoder.reset()
         self._output_cancelled = threading.Event()
         self._sequence_buffer = TerminalSequenceBuffer()
@@ -1386,6 +1408,30 @@ class TerminalWidget(TerminalInputMixin, TerminalMouseMixin,
             logger.error("[Terminal] Failed to start process")
             self._backend = None
             self._signal_bridge = None
+
+    def _reset_process_screen(self):
+        """新进程使用默认协议状态，保留前一个会话的主屏内容和历史。"""
+        previous = self.screen
+        if previous._in_alt_screen:
+            previous.reset_mode(1049, private=True)
+        screen = CompatibleHistoryScreen(previous.columns, previous.lines,
+                                         history=previous.history.size)
+        screen.set_mode(pyte.modes.LNM)
+        screen.buffer = previous.buffer
+        screen.history = previous.history
+        screen._total_history_lines = previous._total_history_lines
+        screen.cursor.x = min(previous.cursor.x, screen.columns - 1)
+        screen.cursor.y = min(previous.cursor.y, screen.lines - 1)
+        screen.process_input_writer = self._forward_process_input
+        self.screen = screen
+        self.stream = pyte.Stream(screen)
+        self.stream.use_utf8 = False
+        self._tracked_mode_gen_seen = screen._tracked_mode_gen
+        self._mouse_mode = self._mouse_mode_click = self._focus_report_mode = False
+        self.input_buffer = ''
+        self._history_count_cached = self._history_count_locked()
+        self._clear_selection()
+        self._invalidate_render_cache()
 
     def _on_output(self, data: bytes):
         """处理输出数据（读取线程或 GUI 线程，取决于 PARSE_ON_READER_THREAD）"""
@@ -2092,6 +2138,8 @@ class TerminalWidget(TerminalInputMixin, TerminalMouseMixin,
 
     def stop_process(self):
         """停止进程并清理资源"""
+        self._pending_process_start = None
+        self._process_start_token = None
         self._output_cancelled.set()
         self._cancel_clipboard_probes()
         # 先断开信号连接，防止在清理过程中触发回调
@@ -2256,12 +2304,15 @@ class TerminalWidget(TerminalInputMixin, TerminalMouseMixin,
         """检查是否有进程在运行"""
         return self._backend is not None and self._backend.is_running
 
+    def is_starting(self) -> bool:
+        return self._pending_process_start is not None
+
     def has_started(self) -> bool:
         """该终端是否曾经真正启动过 shell（backend 已创建）。
 
         新建但未启动的空白终端返回 False，可被复用（如远程 SSH 复用空闲终端）。
         """
-        return self._backend is not None
+        return self._backend is not None or self.is_starting()
 
     def pause_timers(self):
         """暂停/降速定时器（用于窗口失活时减少开销）"""

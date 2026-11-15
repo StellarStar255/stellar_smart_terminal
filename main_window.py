@@ -2958,11 +2958,17 @@ class MainWindow(ThemeMixin, ToolbarMixin, ConfigMixin, ExplorerPanelMixin,
 
     def _send_commands_to_terminal(self, terminal, commands):
         """向指定终端发送命令（使用闭包绑定终端引用）"""
-        if not terminal or not commands or not terminal.is_running():
+        if not terminal or not commands:
             return
+        session_token = terminal._process_start_token
 
         def send_next():
-            if not commands or not terminal.is_running():
+            if not commands or terminal._process_start_token is not session_token:
+                return
+            if terminal.is_starting():
+                QTimer.singleShot(50, send_next)
+                return
+            if not terminal.is_running():
                 return
             cmd = commands.pop(0)
             terminal.send_text(cmd + '\r')

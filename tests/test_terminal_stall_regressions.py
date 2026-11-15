@@ -408,6 +408,123 @@ def test_queued_old_backend_signals_cannot_modify_replacement_session(app):
         widget.deleteLater()
 
 
+def test_restarted_session_has_default_modes_and_keeps_main_output(app):
+    from PyQt6.QtCore import QEvent, Qt
+    from PyQt6.QtGui import QKeyEvent
+
+    class Backend:
+        is_running = False
+
+        def __init__(self):
+            self.writes = []
+
+        def start(self, *args):
+            self.is_running = True
+            return True
+
+        def stop(self):
+            self.is_running = False
+
+        def write(self, data):
+            self.writes.append(bytes(data))
+            return True
+
+        def resize(self, *args):
+            pass
+
+    widget = TerminalWidget()
+    old, new = Backend(), Backend()
+    try:
+        with patch('terminal_widget.create_backend', side_effect=[old, new]):
+            widget.start_process(['old'])
+            widget._process_output_text('MAIN_OUTPUT\r\n' * 50)
+            history = list(widget.screen.history.top)
+            widget._process_output_text('\x1b[?1049h\x1b[?1;1000;1006;2004h'
+                                        '\x1b[?25l\x1b[31mOLD_TUI')
+            old.is_running = False
+            widget._on_process_finished(0)
+            assert 'OLD_TUI' in '\n'.join(widget.screen.display)
+            widget.start_process(['new'])
+            widget._write_paste(b'plain paste')
+            widget.keyPressEvent(QKeyEvent(QEvent.Type.KeyPress, Qt.Key.Key_Up,
+                                          Qt.KeyboardModifier.NoModifier))
+            assert new.writes == [b'plain paste', b'\x1b[A']
+            assert not widget._mouse_mode
+            assert not widget.screen._in_alt_screen
+            assert not widget.screen.cursor.hidden
+            assert widget.screen.cursor.attrs.fg == 'default'
+            assert 'MAIN_OUTPUT' in '\n'.join(widget.screen.display)
+            assert list(widget.screen.history.top) == history
+            widget._process_output_text('NEW_OUTPUT')
+            assert 'NEW_OUTPUT' in '\n'.join(widget.screen.display)
+    finally:
+        widget.cleanup()
+        widget.deleteLater()
+
+
+@pytest.mark.parametrize('action', ['resume', 'stop', 'cleanup', 'replace'])
+def test_start_during_reflow_is_nonblocking_and_cancelable(app, action):
+    widget = TerminalWidget()
+    backend = Mock(is_running=True)
+    backend.start.return_value = True
+    try:
+        with patch('terminal_widget.create_backend', return_value=backend) as create:
+            with busy_screen(widget):
+                start = time.monotonic()
+                widget.start_process(['first'])
+                assert time.monotonic() - start < .2
+                create.assert_not_called()
+                if action == 'stop':
+                    widget.stop_process()
+                elif action == 'cleanup':
+                    widget.cleanup()
+                elif action == 'replace':
+                    widget.start_process(['latest'])
+            deadline = time.monotonic() + .15
+            while time.monotonic() < deadline:
+                app.processEvents()
+                time.sleep(.005)
+            if action in ('stop', 'cleanup'):
+                create.assert_not_called()
+                assert widget._backend is None
+            else:
+                create.assert_called_once()
+                assert backend.start.call_args.args[0] == (
+                    ['latest'] if action == 'replace' else ['first'])
+                assert widget.is_running()
+    finally:
+        if not widget._cleaned_up:
+            widget.cleanup()
+        widget.deleteLater()
+
+
+@pytest.mark.parametrize('completion', ['ready', 'stopped', 'replaced'])
+def test_preset_commands_wait_for_start_and_stay_with_their_session(app, completion):
+    from main_window import MainWindow
+
+    state = {'starting': True}
+    terminal = SimpleNamespace(
+        _process_start_token=object(),
+        is_starting=lambda: state['starting'],
+        is_running=lambda: not state['starting'], send_text=Mock())
+    callbacks = []
+    with patch('main_window.QTimer.singleShot', side_effect=lambda delay, cb: callbacks.append(cb)):
+        MainWindow._send_commands_to_terminal(None, terminal, ['preset command'])
+        callbacks.pop(0)()
+        terminal.send_text.assert_not_called()
+        assert len(callbacks) == 1
+        state['starting'] = False
+        if completion == 'stopped':
+            terminal._process_start_token = None
+        elif completion == 'replaced':
+            terminal._process_start_token = object()
+        callbacks.pop(0)()
+    if completion == 'ready':
+        terminal.send_text.assert_called_once_with('preset command\r')
+    else:
+        terminal.send_text.assert_not_called()
+
+
 @pytest.mark.parametrize('error', [BlockingIOError(), InterruptedError()])
 def test_coalescing_delivers_prefix_after_transient_read_error(error):
     def read_more():
