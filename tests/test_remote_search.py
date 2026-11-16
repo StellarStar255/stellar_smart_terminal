@@ -1,5 +1,6 @@
 """Remote search: real server script, channel lifecycle, and incremental Qt UI."""
 import json
+import os
 from pathlib import Path
 import shlex
 import subprocess
@@ -26,6 +27,7 @@ class TestServerScan(unittest.TestCase):
         self.assertTrue(messages[-1]['done'])
         return [e for m in messages for e in m.get('entries', [])], messages[-1]
 
+    @unittest.skipIf(os.name == 'nt', 'POSIX filenames and symlinks require a POSIX filesystem')
     def test_literals_unicode_hidden_symlinks_and_metadata(self):
         with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp)
@@ -159,7 +161,9 @@ class TestSearchChannel(unittest.TestCase):
     def test_actual_server_script_scans_many_directories_in_one_channel(self):
         channel = Channel()
         def execute(command):
-            result = subprocess.run(shlex.split(command), capture_output=True,
+            args = shlex.split(command)
+            args[0] = sys.executable  # Simulate the server's Python, including on Windows.
+            result = subprocess.run(args, capture_output=True,
                                     check=True, timeout=5)
             channel.chunks = [result.stdout]
         channel.exec_command = execute

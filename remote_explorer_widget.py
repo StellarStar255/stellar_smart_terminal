@@ -31,7 +31,7 @@ from PyQt6.QtWidgets import (
     QAbstractItemView, QDialog, QComboBox, QCheckBox,
 )
 from PyQt6.QtCore import (Qt, pyqtSignal, QTimer, QMimeData, QUrl, QSize, QEvent,
-                          QRectF)
+                          QRectF, QItemSelectionModel)
 from PyQt6.QtGui import (QAction, QActionGroup, QCursor, QDrag, QShortcut,
                          QKeySequence, QDesktopServices, QIcon, QPainter,
                          QPen, QPixmap, QColor)
@@ -1867,7 +1867,7 @@ class RemoteExplorerPanel(QWidget, explorer_common.TransferJobHost):
         self._idle_timer.setInterval(60_000)
         self._idle_timer.timeout.connect(self._check_idle_timeout)
 
-        self._refresh_root_signal.connect(self._populate_tree_root)
+        self._refresh_root_signal.connect(self._refresh_current_view)
         self._refresh_subtree_signal.connect(self._reload_subtree)
         self._password_prompt_signal.connect(self._on_password_prompt)
         self._interactive_prompt_signal.connect(self._on_interactive_prompt)
@@ -2078,18 +2078,21 @@ class RemoteExplorerPanel(QWidget, explorer_common.TransferJobHost):
         # 搜索结果列表（扁平展示命中项；默认隐藏，搜索时替换 _tree）
         self._search_results = QListWidget()
         self._search_results.setUniformItemSizes(True)
+        self._search_results.setSelectionMode(QAbstractItemView.SelectionMode.ExtendedSelection)
+        self._search_results.setContextMenuPolicy(Qt.ContextMenuPolicy.CustomContextMenu)
+        self._search_results.customContextMenuRequested.connect(self._on_search_context_menu)
         self._search_results.setVisible(False)
         self._search_results.itemDoubleClicked.connect(self._open_search_result)
         tp_layout.addWidget(self._search_results, 1)
 
-        # Cmd+C / Cmd+V — 当 tree 或其子项有焦点时触发
-        copy_sc = QShortcut(QKeySequence.StandardKey.Copy, self._tree)
-        copy_sc.setContext(Qt.ShortcutContext.WidgetWithChildrenShortcut)
-        copy_sc.activated.connect(lambda: self._clipboard_copy_selection(None))
-
-        paste_sc = QShortcut(QKeySequence.StandardKey.Paste, self._tree)
-        paste_sc.setContext(Qt.ShortcutContext.WidgetWithChildrenShortcut)
-        paste_sc.activated.connect(self._paste_via_shortcut)
+        # Keep the search input's native text clipboard shortcuts independent.
+        for view in (self._tree, self._search_results):
+            copy_sc = QShortcut(QKeySequence.StandardKey.Copy, view)
+            copy_sc.setContext(Qt.ShortcutContext.WidgetWithChildrenShortcut)
+            copy_sc.activated.connect(lambda: self._clipboard_copy_selection(None))
+            paste_sc = QShortcut(QKeySequence.StandardKey.Paste, view)
+            paste_sc.setContext(Qt.ShortcutContext.WidgetWithChildrenShortcut)
+            paste_sc.activated.connect(self._paste_via_shortcut)
 
         self._stack.addWidget(self._tree_page)
 
@@ -3689,8 +3692,16 @@ class RemoteExplorerPanel(QWidget, explorer_common.TransferJobHost):
     def _on_refresh(self):
         # 用户点刷新 → 绕过缓存，重新拉
         if self._session is not None:
-            self._session.invalidate_cache(self._current_path)
-        self._populate_tree_root()
+            self._session.invalidate_cache(
+                None if not self._search_results.isHidden() else self._current_path)
+        self._refresh_current_view()
+
+    def _refresh_current_view(self):
+        """After file operations, retain the query and coalesce search refreshes."""
+        if not self._search_results.isHidden() and self._search_edit.text().strip():
+            self._on_search_text_changed(self._search_edit.text())
+        else:
+            self._populate_tree_root()
 
     # ---------- 自动刷新（轮询）----------
 
@@ -4213,6 +4224,8 @@ class RemoteExplorerPanel(QWidget, explorer_common.TransferJobHost):
             return  # 过期结果
         selected = self._search_results.currentItem()
         selected_entry = selected.data(Qt.ItemDataRole.UserRole) if selected else None
+        selected_paths = {e.path for e, _ in self._selected_file_entries()}
+        scroll = self._search_results.verticalScrollBar().value()
         self._search_results.clear()
         if not results and not searching and not truncated:
             empty = QListWidgetItem(t("search.no_results"))
@@ -4228,15 +4241,19 @@ class RemoteExplorerPanel(QWidget, explorer_common.TransferJobHost):
             item.setToolTip(e.path)
             self._search_results.addItem(item)
             if selected_entry and selected_entry.path == e.path:
-                self._search_results.setCurrentItem(item)
+                self._search_results.setCurrentRow(
+                    self._search_results.row(item), QItemSelectionModel.SelectionFlag.NoUpdate)
+            item.setSelected(e.path in selected_paths)
         if searching:
             note = QListWidgetItem(t('search.searching'))
             note.setFlags(Qt.ItemFlag.NoItemFlags)
             self._search_results.addItem(note)
+
         if truncated:
             note = QListWidgetItem(t("search.incomplete", count=len(results)))
             note.setFlags(Qt.ItemFlag.NoItemFlags)
             self._search_results.addItem(note)
+        self._search_results.verticalScrollBar().setValue(scroll)
 
     def _open_search_result(self, item: QListWidgetItem):
         """双击搜索结果：文件 → 打开；文件夹 → 进入该目录并退出搜索。"""
@@ -4390,19 +4407,33 @@ class RemoteExplorerPanel(QWidget, explorer_common.TransferJobHost):
             return
         item = self._tree.itemAt(pos)
         entry: Optional[RemoteEntry] = item.data(0, _ROLE_ENTRY) if item is not None else None
+        self._show_file_context_menu(entry, item)
 
+    def _on_search_context_menu(self, pos):
+        if self._session is None:
+            return
+        item = self._search_results.itemAt(pos)
+        entry = item.data(Qt.ItemDataRole.UserRole) if item else None
+        if entry is not None and not item.isSelected():
+            self._search_results.clearSelection()
+            self._search_results.setCurrentItem(item)
+        # Search items are flat and can be replaced by a streaming update.
+        # Pass entries by value; tree-only refresh/edit helpers receive None.
+        self._show_file_context_menu(entry, None, search=True)
+
+    def _show_file_context_menu(self, entry, item, search=False):
         menu = self._make_menu()
 
         if entry is None:
             # 空白区域：新建 / 上传 / 终端 / 路径 / 粘贴 / 刷新（都作用在当前 path）
             cwd = self._current_path
-            act_new_file = QAction(t("remote.new_file"), self)
-            act_new_file.triggered.connect(lambda: self._new_file_at(cwd, None))
-            menu.addAction(act_new_file)
-
-            act_new_dir = QAction(t("remote.new_folder"), self)
-            act_new_dir.triggered.connect(lambda: self._new_folder_at(cwd, None))
-            menu.addAction(act_new_dir)
+            if not search:
+                act_new_file = QAction(t("remote.new_file"), self)
+                act_new_file.triggered.connect(lambda: self._new_file_at(cwd, None))
+                menu.addAction(act_new_file)
+                act_new_dir = QAction(t("remote.new_folder"), self)
+                act_new_dir.triggered.connect(lambda: self._new_folder_at(cwd, None))
+                menu.addAction(act_new_dir)
 
             act_upload = QAction(t("remote.upload"), self)
             act_upload.triggered.connect(lambda: self._upload_at(cwd, None))
@@ -4446,9 +4477,19 @@ class RemoteExplorerPanel(QWidget, explorer_common.TransferJobHost):
             menu.addSeparator()
 
         if entry.is_dir:
+            if search:
+                act_open = QAction(t('remote.open_directory'), self)
+                act_open.triggered.connect(lambda: self._navigate_to_path(entry.path))
+                menu.addAction(act_open)
             act_term = QAction(t("remote.open_terminal_here"), self)
             act_term.triggered.connect(lambda: self._open_terminal_here(entry))
             menu.addAction(act_term)
+
+        if search:
+            act_reveal = QAction(t('remote.open_containing_folder'), self)
+            act_reveal.triggered.connect(lambda: self._navigate_to_path(
+                posixpath.dirname(entry.path.rstrip('/')) or '/'))
+            menu.addAction(act_reveal)
 
         # 与本地 Explorer 一致：目录内新建，文件旁新建。
         # 文件的 parent() 为 None 表示顶层；嵌套文件则刷新对应父节点，
@@ -4456,15 +4497,16 @@ class RemoteExplorerPanel(QWidget, explorer_common.TransferJobHost):
         target_dir = entry.path if entry.is_dir else (
             posixpath.dirname(entry.path.rstrip("/")) or "/"
         )
-        target_item = item if entry.is_dir else item.parent()
-        act_new_file = QAction(t("remote.new_file"), self)
-        act_new_file.triggered.connect(
-            lambda: self._new_file_at(target_dir, target_item))
-        menu.addAction(act_new_file)
-        act_new_dir = QAction(t("remote.new_folder"), self)
-        act_new_dir.triggered.connect(
-            lambda: self._new_folder_at(target_dir, target_item))
-        menu.addAction(act_new_dir)
+        if not search:
+            target_item = item if entry.is_dir else item.parent()
+            act_new_file = QAction(t("remote.new_file"), self)
+            act_new_file.triggered.connect(
+                lambda: self._new_file_at(target_dir, target_item))
+            menu.addAction(act_new_file)
+            act_new_dir = QAction(t("remote.new_folder"), self)
+            act_new_dir.triggered.connect(
+                lambda: self._new_folder_at(target_dir, target_item))
+            menu.addAction(act_new_dir)
 
         if entry.is_dir:
             act_upload = QAction(t("remote.upload"), self)
@@ -4506,10 +4548,10 @@ class RemoteExplorerPanel(QWidget, explorer_common.TransferJobHost):
         # 下载到本地：右键项在选中里 → 批量保存到一个目录；否则单文件另存为
         download_targets = self._selection_entries_including(entry, item)
         # 当 anchor 在选中里时是整批；否则只有 anchor 自己
-        if len(download_targets) > 1:
+        if len(download_targets) > 1 or entry.is_dir:
             act_download = QAction(t("remote.download"), self)
             act_download.triggered.connect(
-                lambda targets=download_targets: self._download_entries_to_local(targets)
+                lambda checked=False, targets=download_targets: self._download_entries_to_local(targets)
             )
             menu.addAction(act_download)
         elif not entry.is_dir:
@@ -4522,19 +4564,33 @@ class RemoteExplorerPanel(QWidget, explorer_common.TransferJobHost):
         act_copy_path.triggered.connect(lambda: QApplication.clipboard().setText(entry.path))
         menu.addAction(act_copy_path)
 
+        if search:
+            act_refresh = QAction(t('remote.refresh'), self)
+            act_refresh.triggered.connect(self._on_refresh)
+            menu.addAction(act_refresh)
+
         menu.exec(QCursor.pos())
 
     # ---------- 跨面板复制 / 粘贴 ----------
+
+    def _selected_file_entries(self):
+        """Read only the active view; status rows never represent files.
+
+        The optional item is always a tree item, usable by subtree refreshes.
+        Search rows use None because streaming updates can destroy them.
+        """
+        if not self._search_results.isHidden():
+            return [(entry, None) for item in self._search_results.selectedItems()
+                    if (entry := item.data(Qt.ItemDataRole.UserRole)) is not None]
+        return [(entry, item) for item in self._tree.selectedItems()
+                if (entry := item.data(0, _ROLE_ENTRY)) is not None]
 
     def _paste_via_shortcut(self):
         """Cmd+V：粘贴到当前选中目录（或当前路径）"""
         if self._session is None:
             return
         target = None
-        for it in self._tree.selectedItems():
-            e: RemoteEntry = it.data(0, _ROLE_ENTRY)
-            if e is None:
-                continue
+        for e, _ in self._selected_file_entries():
             target = e.path if e.is_dir else (
                 posixpath.dirname(e.path.rstrip("/")) or "/"
             )
@@ -4555,13 +4611,10 @@ class RemoteExplorerPanel(QWidget, explorer_common.TransferJobHost):
             return
         sess = self._session
         host_alias = sess.host_config.alias
-        selected_entries: list[RemoteEntry] = []
-        for it in self._tree.selectedItems():
-            e: RemoteEntry = it.data(0, _ROLE_ENTRY)
-            if e is not None:
-                selected_entries.append(e)
+        selected_entries = [e for e, _ in self._selected_file_entries()]
 
-        if fallback_entry is not None and fallback_entry not in selected_entries:
+        if fallback_entry is not None and all(
+                e.path != fallback_entry.path for e in selected_entries):
             entries = [fallback_entry]
         else:
             entries = selected_entries
@@ -4888,8 +4941,10 @@ class RemoteExplorerPanel(QWidget, explorer_common.TransferJobHost):
         # （单条目粘贴）或映射不上的错误仍照旧弹出来
         if errors and not failures:
             QMessageBox.warning(self, t("remote.op_failed_title"), "\n".join(errors))
-        # 刷新当前树根（target_dir 通常就是 _current_path 或它的子目录）
-        if target_dir == self._current_path:
+        # Keep search results active even when pasting into a nested match.
+        if not self._search_results.isHidden():
+            self._refresh_current_view()
+        elif target_dir == self._current_path:
             self._populate_tree_root()
         else:
             # 找到对应的树节点刷新；找不到就重刷整棵树
@@ -5343,15 +5398,19 @@ class RemoteExplorerPanel(QWidget, explorer_common.TransferJobHost):
     def _new_folder_under(self, parent_entry: RemoteEntry, parent_item: QTreeWidgetItem):
         self._new_folder_at(parent_entry.path, parent_item)
 
-    def _rename_entry(self, entry: RemoteEntry, item: QTreeWidgetItem):
-        """从右键菜单触发：在文件树中原地编辑（不弹窗）"""
+    def _rename_entry(self, entry: RemoteEntry, item: Optional[QTreeWidgetItem]):
+        """Tree items edit inline; flat search results rename via a name dialog."""
         if item is None:
+            name, accepted = QInputDialog.getText(
+                self, t('remote.rename'), t('remote.prompt_rename_to'), text=entry.name)
+            if accepted:
+                self._do_inline_rename(entry, None, name)
             return
         self._tree.setCurrentItem(item)
         self._tree.scrollToItem(item)
         self._tree.editItem(item, 0)
 
-    def _do_inline_rename(self, entry: RemoteEntry, item: QTreeWidgetItem, new_name: str):
+    def _do_inline_rename(self, entry: RemoteEntry, item: Optional[QTreeWidgetItem], new_name: str):
         """delegate 提交时调用：校验新名字并异步走 SFTP rename。"""
         new_name = (new_name or "").strip()
         if not new_name or new_name == entry.name:
@@ -5366,18 +5425,17 @@ class RemoteExplorerPanel(QWidget, explorer_common.TransferJobHost):
         if sess is None:
             return
         fut = sess.submit(sess.rename, entry.path, new_path)
-        self._refresh_after(fut, item.parent(), parent_path)
+        self._refresh_after(fut, item.parent() if item is not None else None, parent_path)
 
     def _selection_entries_including(self, anchor_entry: RemoteEntry,
-                                       anchor_item: QTreeWidgetItem) -> list[tuple]:
+                                       anchor_item: Optional[QTreeWidgetItem]) -> list[tuple]:
         """右键菜单使用：若 anchor 在当前选中里，返回 [(entry, item), ...] 整批；
         否则只返回 [(anchor_entry, anchor_item)]。"""
         out: list[tuple] = []
         seen = set()
         anchor_in = False
-        for it in self._tree.selectedItems():
-            e: RemoteEntry = it.data(0, _ROLE_ENTRY)
-            if e is None or e.path in seen:
+        for e, it in self._selected_file_entries():
+            if e.path in seen:
                 continue
             seen.add(e.path)
             out.append((e, it))
@@ -5423,7 +5481,7 @@ class RemoteExplorerPanel(QWidget, explorer_common.TransferJobHost):
                 else:
                     fut = sess.submit(sess.remove, entry.path)
                 parent_path = posixpath.dirname(entry.path.rstrip("/")) or "/"
-                self._refresh_after(fut, item.parent(), parent_path)
+                self._refresh_after(fut, item.parent() if item is not None else None, parent_path)
             except Exception as e:
                 self._error_signal.emit(f"{entry.path}: {e}")
 
@@ -5732,7 +5790,9 @@ class RemoteExplorerPanel(QWidget, explorer_common.TransferJobHost):
                                target_dir: str):
         """上传收尾：刷新目标目录（panel/item 已销毁时安全跳过）。"""
         try:
-            if target_item is not None and not sip.isdeleted(target_item):
+            if not self._search_results.isHidden():
+                self._refresh_current_view()
+            elif target_item is not None and not sip.isdeleted(target_item):
                 entry: RemoteEntry = target_item.data(0, _ROLE_ENTRY)
                 if entry and entry.is_dir:
                     self._reload_subtree(target_item, target_dir)

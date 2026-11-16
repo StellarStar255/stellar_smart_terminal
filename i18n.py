@@ -1060,6 +1060,8 @@ TRANSLATIONS = {
     "remote.new_file": {"zh": "新建文件", "en": "New File"},
     "remote.new_folder": {"zh": "新建文件夹", "en": "New Folder"},
     "remote.rename": {"zh": "重命名", "en": "Rename"},
+    "remote.open_directory": {"zh": "打开目录", "en": "Open Directory"},
+    "remote.open_containing_folder": {"zh": "打开所在目录", "en": "Open Containing Folder"},
     "remote.delete": {"zh": "删除", "en": "Delete"},
     "remote.download": {"zh": "下载到本地…", "en": "Download to local…"},
     "remote.download_to_folder": {"zh": "选择下载目录（{count} 项）", "en": "Choose download folder ({count} items)"},
