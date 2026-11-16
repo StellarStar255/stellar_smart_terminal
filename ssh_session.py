@@ -12,6 +12,7 @@ Design notes:
 """
 import functools
 import getpass
+import json
 import os
 import posixpath
 import re
@@ -75,6 +76,69 @@ def _worth_compressing(items) -> bool:
     if plain + compressed == 0:
         return True          # 目录/空批次：按可压处理
     return plain >= compressed
+
+
+# Runs on the server, so directory traversal costs no per-directory SSH round trips.
+# JSON lines preserve newlines/unicode in filenames; only matching entries cross SSH.
+_REMOTE_SEARCH_SCRIPT = r'''
+import collections, json, os, sys, time
+root, tokens, hidden, max_results, max_dirs, max_depth, seconds = json.loads(sys.argv[1])
+def send(value):
+    print(json.dumps(value, ensure_ascii=True), flush=True)
+send({'ready': True})
+queue = collections.deque([(root, 0)])
+count = dirs = 0
+batch = []
+truncated = False
+started = last = time.monotonic()
+while queue:
+    if dirs >= max_dirs or time.monotonic() - started >= seconds:
+        truncated = True
+        break
+    path, depth = queue.popleft()
+    dirs += 1
+    try:
+        with os.scandir(path) as entries:
+            for e in entries:
+                if time.monotonic() - started >= seconds:
+                    truncated = True
+                    break
+                if not hidden and e.name.startswith('.'):
+                    continue
+                try:
+                    is_dir = e.is_dir(follow_symlinks=False)
+                    is_link = e.is_symlink()
+                    if all(token in e.name.lower() for token in tokens):
+                        s = e.stat(follow_symlinks=False)
+                        batch.append(dict(name=e.name, path=e.path, is_dir=is_dir,
+                                          is_link=is_link, size=s.st_size,
+                                          mtime=s.st_mtime, mode=s.st_mode))
+                        count += 1
+                    if is_dir and not is_link:
+                        if depth < max_depth and dirs + len(queue) < max_dirs:
+                            queue.append((e.path, depth + 1))
+                        else:
+                            truncated = True
+                except OSError:
+                    truncated = True
+                    continue
+                now = time.monotonic()
+                if batch and (count == 1 or len(batch) >= 50 or now - last >= .15):
+                    send({'entries': batch})
+                    batch = []
+                    last = now
+                if count >= max_results:
+                    truncated = True
+                    break
+    except OSError:
+        if dirs == 1:
+            raise
+        truncated = True
+    if count >= max_results or time.monotonic() - started >= seconds:
+        truncated = True
+        break
+send({'entries': batch, 'done': True, 'truncated': truncated})
+'''
 
 
 class _CountingReader:
@@ -752,7 +816,7 @@ class _NoStdinTransport(paramiko.Transport):
 class SSHSession(QObject):
     """单台主机的 SSH/SFTP 会话
 
-    线程模型：一个后台线程跑所有 paramiko 调用，UI 线程通过 submit() 派发，
+    SFTP 通过 submit() 串行派发；搜索在独立 worker/channel 上运行，
     通过 Qt 信号回到 UI 线程。
     """
 
@@ -1658,6 +1722,90 @@ class SSHSession(QObject):
             return fn(*args, **kwargs)
 
     # --- SFTP operations (run on background thread) ---
+
+    def search_names(self, root, tokens, show_hidden, max_results, max_dirs,
+                     max_depth, on_batch, should_stop, seconds=15.0):
+        """Stream a server-side scan on its own exec channel (no shared SFTP/lock).
+
+        Call from a separate worker, never via submit(): transfers and navigation
+        must remain usable during a search. NotImplementedError requests the
+        SFTP fallback when python3/exec is unavailable. Closing this channel on
+        cancellation leaves the SSH transport and SFTP channel untouched.
+        """
+        client = self._client
+        transport = client.get_transport() if client is not None else None
+        if transport is None or not transport.is_active():
+            raise NotImplementedError('remote search transport unavailable')
+        if should_stop():
+            return
+        args = json.dumps([root, tokens, show_hidden, max_results, max_dirs,
+                           max_depth, seconds], ensure_ascii=True)
+        command = 'python3 -u -c {} {}'.format(
+            shlex.quote(_REMOTE_SEARCH_SCRIPT), shlex.quote(args))
+        channel = None
+        ready = False
+        pending = b''
+        deadline = time.monotonic() + seconds + 5
+        finished = threading.Event()
+        try:
+            channel = transport.open_session(timeout=3)
+            channel.settimeout(3)
+            if should_stop():
+                return
+            # Paramiko exec_command waits for a request reply without honoring
+            # settimeout. A guard also cancels a server that never acknowledges it.
+            def guard():
+                while not finished.wait(.05):
+                    if should_stop() or time.monotonic() >= deadline:
+                        channel.close()
+                        return
+            threading.Thread(target=guard, name='ssh-search-guard', daemon=True).start()
+            channel.exec_command(command)
+            while not should_stop():
+                if time.monotonic() >= deadline:
+                    if not ready:
+                        raise NotImplementedError('remote search startup timed out')
+                    on_batch([], True, True)
+                    return
+                # Drain stderr without retaining unbounded diagnostics.
+                if channel.recv_stderr_ready():
+                    channel.recv_stderr(65536)
+                if channel.recv_ready():
+                    pending += channel.recv(65536)
+                    if len(pending) > 1024 * 1024:
+                        raise ValueError('remote search record too large')
+                    while b'\n' in pending:
+                        line, pending = pending.split(b'\n', 1)
+                        message = json.loads(line)
+                        if message.get('ready'):
+                            ready = True
+                            continue
+                        if not ready:
+                            raise NotImplementedError('unsupported remote search output')
+                        entries = [RemoteEntry(**entry) for entry in message.get('entries', [])]
+                        done = bool(message.get('done'))
+                        on_batch(entries, bool(message.get('truncated')), done)
+                        if done:
+                            return
+                elif channel.exit_status_ready() or channel.closed:
+                    if not ready:
+                        raise NotImplementedError('remote python3 search unavailable')
+                    raise RuntimeError('remote search ended before completion')
+                else:
+                    time.sleep(.02)
+        except Exception as exc:
+            if should_stop():
+                return
+            if ready and time.monotonic() >= deadline:
+                on_batch([], True, True)
+                return
+            if not ready:
+                raise NotImplementedError('remote python3 search unavailable') from exc
+            raise
+        finally:
+            finished.set()
+            if channel is not None:
+                channel.close()
 
     def home(self) -> str:
         return self._home or "/"

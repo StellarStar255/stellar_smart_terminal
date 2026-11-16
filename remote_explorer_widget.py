@@ -1760,15 +1760,15 @@ class RemoteExplorerPanel(QWidget, explorer_common.TransferJobHost):
     _refresh_root_signal = pyqtSignal()
     _refresh_subtree_signal = pyqtSignal(object, str)  # (item, path)
     _auto_refresh_result = pyqtSignal(str, object)    # (path, entries or None on error)
-    _search_result_signal = pyqtSignal(int, list, bool)  # (generation, items, truncated)
+    _search_result_signal = pyqtSignal(int, list, bool, bool)  # gen, items, truncated, searching
+    _search_fallback_signal = pyqtSignal(int, object)
     # 剪贴板预下载（worker → UI）：进度变化 / 全部完成。必须用信号跨线程，
     # 不能用 QTimer.singleShot —— 后者在无事件循环的 worker 线程里不会触发。
     _clipboard_stage_tick = pyqtSignal()
     _clipboard_stage_finalize = pyqtSignal()
 
     # 远程递归搜索上限：命中数 / 已扫描目录数 / 最大深度。
-    # SFTP 是单工作线程串行的，每个目录一次网络往返，所以上限取得保守，
-    # 避免一次搜索把会话占用太久（命中/目录/深度任一触顶即停并提示已截断）。
+    # 两条搜索路径使用相同范围；达到范围或时间上限时明确提示未扫描完整。
     _SEARCH_MAX_RESULTS = 500
     _SEARCH_MAX_DIRS = 600
     _SEARCH_MAX_DEPTH = 6
@@ -1872,6 +1872,7 @@ class RemoteExplorerPanel(QWidget, explorer_common.TransferJobHost):
         self._password_prompt_signal.connect(self._on_password_prompt)
         self._interactive_prompt_signal.connect(self._on_interactive_prompt)
         self._search_result_signal.connect(self._on_search_results)
+        self._search_fallback_signal.connect(self._search_step, Qt.ConnectionType.QueuedConnection)
 
         # 搜索输入防抖：停止输入 300ms 后才发起递归搜索
         self._search_timer = QTimer(self)
@@ -3274,8 +3275,7 @@ class RemoteExplorerPanel(QWidget, explorer_common.TransferJobHost):
         self._session = None
 
     def _disconnect(self):
-        # 先作废在途搜索并停掉防抖：递归搜索独占 SSH 单工作线程，
-        # 否则 disconnect() 的 .result(timeout=5) 会排在搜索后面，最长卡 UI 5 秒。
+        # 取消独立搜索通道及 SFTP 回退链，并停止防抖。
         self._search_gen += 1
         self._search_timer.stop()
         self._exit_search()
@@ -3310,6 +3310,8 @@ class RemoteExplorerPanel(QWidget, explorer_common.TransferJobHost):
         在 closeEvent 里阻塞会让窗口关闭看起来卡死。这里把 session 引用先摘下
         来交给一个 daemon 线程异步关闭。
         """
+        self._search_gen += 1
+        self._search_timer.stop()
         self._cancel_pending_prompts()
         if self._session is not None:
             sess = self._session
@@ -4067,16 +4069,7 @@ class RemoteExplorerPanel(QWidget, explorer_common.TransferJobHost):
         self._tree.setVisible(True)
 
     def _start_search(self):
-        """防抖结束 → 在 SSH 工作线程上递归扫描当前目录（逐目录链式 submit）。
-
-        不再用一个大任务跑完整棵子树（那样会独占单工作线程，把导航/自动刷新/
-        下载等其它 SFTP 操作全堵在后面）。改为每次只提交「一个目录」的 listdir，
-        在它的回调里再提交下一个目录 —— 这样其它操作可以插在两次目录列举之间
-        执行，搜索不再独占会话。
-
-        注意：SSH 会话本身是单工作线程 + 全局锁，无法真正并发 SFTP 请求，所以
-        任何时刻只保持一个在途 listdir；这里要的是"让位"（interleave）而非"并发"。
-        """
+        """Prefer a streaming server scan; fall back to interleaved SFTP listing."""
         if self._session is None:
             return
         query = self._search_edit.text().strip()
@@ -4107,26 +4100,59 @@ class RemoteExplorerPanel(QWidget, explorer_common.TransferJobHost):
             'tokens': tokens,
             'show_hidden': self._show_hidden,
             'sess': sess,
+            'started': time.monotonic(),
+            'published': 0,
+            'last_publish': 0.0,
+            'truncated': False,
         }
-        self._search_step(gen, state)
+        def run():
+            def on_batch(entries, truncated, done):
+                if gen != self._search_gen:
+                    return
+                state['results'].extend(entries)
+                self._search_result_signal.emit(
+                    gen, list(state['results']), truncated, not done)
+            try:
+                sess.search_names(
+                    root, tokens, state['show_hidden'], self._SEARCH_MAX_RESULTS,
+                    self._SEARCH_MAX_DIRS, self._SEARCH_MAX_DEPTH, on_batch,
+                    lambda: gen != self._search_gen)
+            except (NotImplementedError, AttributeError):
+                if gen == self._search_gen:
+                    state['started'] = time.monotonic()
+                    self._search_fallback_signal.emit(gen, state)
+            except Exception as exc:
+                if gen == self._search_gen:
+                    self._search_finalize(gen, state, True)
+                    self._error_signal.emit(str(exc))
+        threading.Thread(target=run, name='ssh-search', daemon=True).start()
 
     def _search_step(self, gen, state):
         """提交队列里下一个目录的 listdir；队列空则收尾。
 
-        可在 UI 线程（首次）或工作线程（回调里）调用 —— submit 会把任务排到单
-        工作线程队列尾部，因此期间排进来的导航/刷新任务会被先执行（让位）。"""
+        经 queued signal 回到 UI 线程推进；submit 排到会话队尾，
+        让导航/刷新有机会在两次目录读取之间执行。"""
         if gen != self._search_gen:
             return  # 已被新搜索 / 导航 / 断开取消
         queue = state['queue']
         if not queue:
-            self._search_finalize(gen, state, False)
+            self._search_finalize(gen, state, state['truncated'])
+            return
+        if time.monotonic() - state['started'] >= 15:
+            self._search_finalize(gen, state, True)
             return
         path, depth = queue.popleft()
         sess = state['sess']
         try:
-            fut = sess.submit(sess.listdir, path)
+            # A cancelled request may have spent minutes queued behind a transfer.
+            def list_if_current():
+                if gen != self._search_gen:
+                    return []
+                return sess.listdir(path)
+            fut = sess.submit(list_if_current)
         except Exception:
-            return  # 会话已关闭 / executor 已 shutdown → 直接停
+            self._search_finalize(gen, state, True)
+            return
         fut.add_done_callback(
             lambda f: self._on_dir_listed(f, gen, depth, state))
 
@@ -4141,6 +4167,7 @@ class RemoteExplorerPanel(QWidget, explorer_common.TransferJobHost):
             entries = fut.result()
         except Exception:
             entries = []
+            state['truncated'] = True
         state['dirs'] += 1
         results = state['results']
         queue = state['queue']
@@ -4155,42 +4182,59 @@ class RemoteExplorerPanel(QWidget, explorer_common.TransferJobHost):
                 if len(results) >= self._SEARCH_MAX_RESULTS:
                     truncated = True
                     break
-            if e.is_dir and not e.is_link and depth < self._SEARCH_MAX_DEPTH:
-                queue.append((e.path, depth + 1))
+            if e.is_dir and not e.is_link:
+                if (depth < self._SEARCH_MAX_DEPTH and
+                        state['dirs'] + len(queue) < self._SEARCH_MAX_DIRS):
+                    queue.append((e.path, depth + 1))
+                else:
+                    state['truncated'] = True
         if not truncated and state['dirs'] >= self._SEARCH_MAX_DIRS:
             truncated = True
         if truncated:
             self._search_finalize(gen, state, True)
         else:
-            self._search_step(gen, state)
+            now = time.monotonic()
+            if len(results) > state['published'] and (
+                    not state['published'] or now - state['last_publish'] >= .15):
+                state['published'] = len(results)
+                state['last_publish'] = now
+                self._search_result_signal.emit(gen, list(results), False, True)
+            self._search_fallback_signal.emit(gen, state)
 
     def _search_finalize(self, gen, state, truncated):
         """收尾：把结果发回 UI 线程（仅当仍是当前搜索）。每条链恰好调用一次。"""
         if gen != self._search_gen:
             return
-        self._search_result_signal.emit(gen, state['results'], truncated)
+        self._search_result_signal.emit(gen, list(state['results']), truncated, False)
 
-    def _on_search_results(self, gen: int, results: list, truncated: bool):
+    def _on_search_results(self, gen: int, results: list, truncated: bool, searching: bool = False):
         """回到 UI 线程：把命中项填进结果列表。"""
         if gen != self._search_gen:
             return  # 过期结果
+        selected = self._search_results.currentItem()
+        selected_entry = selected.data(Qt.ItemDataRole.UserRole) if selected else None
         self._search_results.clear()
-        if not results:
+        if not results and not searching and not truncated:
             empty = QListWidgetItem(t("search.no_results"))
             empty.setFlags(Qt.ItemFlag.NoItemFlags)
             self._search_results.addItem(empty)
             return
         root = self._current_path or "/"
-        results.sort(key=lambda e: (not e.is_dir, e.path.lower()))
-        for e in results:
+        for e in sorted(results, key=lambda e: (not e.is_dir, e.path.lower())):
             icon = "📁  " if e.is_dir else "📄  "
             rel = e.path[len(root):].lstrip("/") if e.path.startswith(root) else e.path
             item = QListWidgetItem(icon + (rel or e.name))
             item.setData(Qt.ItemDataRole.UserRole, e)
             item.setToolTip(e.path)
             self._search_results.addItem(item)
+            if selected_entry and selected_entry.path == e.path:
+                self._search_results.setCurrentItem(item)
+        if searching:
+            note = QListWidgetItem(t('search.searching'))
+            note.setFlags(Qt.ItemFlag.NoItemFlags)
+            self._search_results.addItem(note)
         if truncated:
-            note = QListWidgetItem(t("search.truncated", count=len(results)))
+            note = QListWidgetItem(t("search.incomplete", count=len(results)))
             note.setFlags(Qt.ItemFlag.NoItemFlags)
             self._search_results.addItem(note)
 
