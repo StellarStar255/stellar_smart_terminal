@@ -6,8 +6,10 @@ import hashlib
 import json
 import os
 import re
+import shutil
 import tempfile
 import time
+import uuid
 from pathlib import Path
 
 from file_persistence import atomic_writer, file_sha256
@@ -26,6 +28,7 @@ from PyQt6.QtWidgets import (
 )
 from PyQt6.QtCore import (
     Qt, pyqtSignal, QRect, QSize, QFileSystemWatcher, QTimer, QEvent, QUrl,
+    QBuffer, QIODevice,
 )
 from PyQt6.QtGui import (
     QFont, QFontMetrics, QColor, QTextCharFormat,
@@ -460,6 +463,12 @@ class CodeEditor(QPlainTextEdit):
         引发与 Shift+Return 相同的按块高亮/行号错位问题（见 keyPressEvent
         的回车注释），且保存后 shell/python 不认它是换行。
         """
+        if self.isReadOnly():
+            return
+        pane = self._markdown_paste_pane()
+        if pane is not None and self._has_markdown_image(source):
+            pane._paste_markdown_images(source)
+            return
         if source is not None and source.hasText():
             text = source.text()
             if ('\u2028' in text or '\u2029' in text or '\r' in text):
@@ -468,6 +477,35 @@ class CodeEditor(QPlainTextEdit):
                 self.textCursor().insertText(text)
                 return
         super().insertFromMimeData(source)
+
+    def _markdown_paste_pane(self):
+        pane = self._find_pane()
+        if (pane is not None and pane._current_file and
+                Path(pane._current_file).suffix.lower() in ('.md', '.markdown')):
+            return pane
+        return None
+
+    @staticmethod
+    def _markdown_image_files(source):
+        """Only consume file URLs when the entire selection consists of images."""
+        urls = source.urls() if source is not None and source.hasUrls() else []
+        if urls and all(url.isLocalFile() and
+                        Path(url.toLocalFile()).suffix.lower() in _IMAGE_EXTENSIONS
+                        for url in urls):
+            return [url.toLocalFile() for url in urls]
+        return []
+
+    @classmethod
+    def _has_markdown_image(cls, source):
+        return source is not None and (source.hasImage() or bool(cls._markdown_image_files(source)))
+
+    def canInsertFromMimeData(self, source):
+        # QPlainTextEdit otherwise disables Paste for image-only clipboards,
+        # preventing both the shortcut and its standard context menu action.
+        if (not self.isReadOnly() and self._markdown_paste_pane() is not None and
+                self._has_markdown_image(source)):
+            return True
+        return super().canInsertFromMimeData(source)
 
     def line_number_area_paint_event(self, event):
         painter = QPainter(self._line_number_area)
@@ -3632,6 +3670,52 @@ class FileEditorWidget(QWidget):
         with atomic_writer(path, binary=True, preserve_mode=True,
                            follow_symlinks=True) as stream:
             stream.write(data)
+
+    def _paste_markdown_images(self, source):
+        """Persist assets before inserting one undoable relative Markdown edit."""
+        if not self._current_file or self.editor.isReadOnly():
+            return
+        assets = Path(os.path.abspath(self._current_file)).parent / 'assets'
+        created = []
+        links = []
+        try:
+            assets.mkdir(exist_ok=True)
+            files = CodeEditor._markdown_image_files(source)
+            if files:
+                # Copy original bytes to preserve GIF animation, SVG and JPEG
+                # quality, and leave the clipboard's source files untouched.
+                for original in files:
+                    suffix = Path(original).suffix.lower()
+                    destination = assets / f'image_{uuid.uuid4().hex}{suffix}'
+                    with open(original, 'rb') as src, atomic_writer(destination, binary=True) as dst:
+                        shutil.copyfileobj(src, dst)
+                    created.append(destination)
+            else:
+                data = source.imageData()
+                image = data.toImage() if isinstance(data, QPixmap) else QImage(data)
+                if image.isNull():
+                    raise ValueError(t('editor.clipboard_image_invalid'))
+                buffer = QBuffer()
+                if not buffer.open(QIODevice.OpenModeFlag.WriteOnly) or not image.save(buffer, 'PNG'):
+                    raise OSError(t('editor.clipboard_image_invalid'))
+                destination = assets / f'image_{uuid.uuid4().hex}.png'
+                with atomic_writer(destination, binary=True) as stream:
+                    stream.write(bytes(buffer.data()))
+                created.append(destination)
+            for destination in created:
+                links.append(f'![image](assets/{destination.name})')
+            self.editor.insertPlainText('\n'.join(links) + '\n')
+        except Exception as exc:
+            # A failed multi-image paste must not leave a partial text edit or
+            # orphan assets from the successfully copied portion of the batch.
+            for destination in created:
+                try:
+                    destination.unlink()
+                except OSError:
+                    logger.warning('Could not remove failed paste asset %s', destination,
+                                   exc_info=True)
+            QMessageBox.warning(self, t('editor.paste_image'),
+                                t('editor.paste_image_failed', error=str(exc)))
 
     def save_file(self, silent: bool = False) -> bool:
         """保存文件。

@@ -6,7 +6,7 @@ English | [简体中文](README.zh-CN.md)
 
 A PyQt6-based smart terminal with file explorer, Git GUI, LLM proxy, and VS Code extension browser.
 
-Latest release: [v1.35.47](docs/releases/v1.35.47.md) speeds up Remote Explorer search with streaming results and adds context menus, multiple selection, and copy/paste in search results.
+Latest release: [v1.35.48](docs/releases/v1.35.48.md) lets you paste screenshots and copied image files into Markdown, saving images in a sibling assets folder and inserting relative image references.
 
 <img src="assets/smart_terminal.png" width="300" />
 
