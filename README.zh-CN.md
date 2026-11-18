@@ -6,7 +6,7 @@
 
 基于 PyQt6 的智能终端，集成文件管理、Git GUI、LLM 代理和 VS Code 扩展浏览。
 
-最新版本：[v1.35.48](docs/releases/v1.35.48.md)，Markdown 支持直接粘贴截图或图片文件，自动保存到文档旁的 assets 文件夹并插入相对路径图片引用。
+最新版本：[v1.35.49](docs/releases/v1.35.49.md)，新增法语界面支持，在语言菜单选择 Français 即可即时切换，重启后保留选择。
 
 A PyQt6-based smart terminal with file explorer, Git GUI, LLM proxy, and VS Code extension browser.
 

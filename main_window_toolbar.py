@@ -13,7 +13,7 @@ from PyQt6.QtWidgets import (
 )
 from command_palette import CommandPalette
 from flow_layout import FlowLayout
-from i18n import get_language, t
+from i18n import SUPPORTED_LANGUAGES, get_language, t
 from toolbar_manager import ToolbarManagerDialog
 from widgets import (
     CenteredComboBox, MultiKeywordCompleter, QuietPopupComboBox,
@@ -506,12 +506,12 @@ class ToolbarMixin:
         # --- 语言选择 ---
         # 用 CenteredComboBox 让显示文本在 edit-field 居中（不依赖 editable hack）
         self.lang_combo = CenteredComboBox()
-        self.lang_combo.setFixedWidth(94)
-        self.lang_combo.setMinimumPopupWidth(100)
+        self.lang_combo.setFixedWidth(112)
+        self.lang_combo.setMinimumPopupWidth(120)
         self.lang_combo.setSizeAdjustPolicy(QComboBox.SizeAdjustPolicy.AdjustToMinimumContentsLengthWithIcon)
         self.lang_combo.setMinimumContentsLength(7)
-        self.lang_combo.addItem("中文", "zh")
-        self.lang_combo.addItem("English", "en")
+        for code, label in SUPPORTED_LANGUAGES.items():
+            self.lang_combo.addItem(label, code)
         # 让下拉列表里的选项也居中
         for i in range(self.lang_combo.count()):
             self.lang_combo.setItemData(

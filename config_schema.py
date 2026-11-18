@@ -6,6 +6,8 @@ coercion; error messages identify fields but never include secret values.
 import math
 import re
 
+from i18n import SUPPORTED_LANGUAGES
+
 # 可移植键白名单。新增设置项时：跨机器通用的加进来，机器相关的别加。
 PORTABLE_KEYS = (
     # 预设与 LLM
@@ -123,7 +125,8 @@ def validate_settings(settings):
         elif key in ('theme', 'notify_sound', 'git_proxy'):
             _require(isinstance(value, str), key, 'string')
         elif key == 'language':
-            _require(value in ('zh', 'en'), key, 'zh or en')
+            _require(isinstance(value, str) and value in SUPPORTED_LANGUAGES,
+                     key, 'zh, en or fr')
         elif key == 'gui_font_size':
             _require(type(value) is int and (value == 0 or 8 <= value <= 32),
                      key, '0 (auto) or integer in [8, 32]')

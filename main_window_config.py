@@ -13,7 +13,7 @@ from PyQt6 import sip
 from PyQt6.QtWidgets import QMessageBox
 from datetime import datetime
 from dialogs import get_default_shell
-from i18n import get_language, set_language, t
+from i18n import SUPPORTED_LANGUAGES, get_language, set_language, t
 from pathlib import Path
 from terminal_widget import TerminalWidget
 from utils import atomic_write_json
@@ -198,7 +198,7 @@ class ConfigMixin:
                     }
                 # 加载语言设置
                 saved_lang = config.get('language', 'zh')
-                if saved_lang in ('zh', 'en'):
+                if saved_lang in SUPPORTED_LANGUAGES:
                     set_language(saved_lang)
                 # 加载窗口几何与面板可见性
                 self._saved_window_geometry = config.get('window_geometry', None)

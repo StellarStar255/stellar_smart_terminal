@@ -156,6 +156,28 @@ class DirectoryNewWindowTest(unittest.TestCase):
         finally:
             i18n.set_language(language)
 
+    def test_french_selection_persists_and_restores(self):
+        import app_config
+        import i18n
+        language = i18n.get_language()
+        try:
+            index = self.win.lang_combo.findData('fr')
+            self.assertGreaterEqual(index, 0)
+            self.assertEqual(self.win.lang_combo.itemText(index), 'Français')
+            self.win.lang_combo.setCurrentIndex(index)
+            self.assertEqual(self.win.start_btn.text(), 'Démarrer')
+            self.assertEqual(self.win.open_dir_window_btn.text(),
+                             'Ouvrir dans une nouvelle fenêtre')
+            self.assertEqual(app_config.read_config()['language'], 'fr')
+            i18n.set_language('en')
+            restored = self.MW()
+            self.win.detached_windows.append(restored)
+            self.assertEqual(i18n.get_language(), 'fr')
+            self.assertEqual(restored.lang_combo.currentData(), 'fr')
+            self.assertEqual(restored.start_btn.text(), 'Démarrer')
+        finally:
+            i18n.set_language(language)
+
     def test_back_walks_directories_and_updates_explorer_and_terminal(self):
         original = self.win._window_cwd
         self.assertFalse(self.win.dir_back_btn.isEnabled())

@@ -8,6 +8,7 @@
 
 import sys
 import unittest
+from string import Formatter
 from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
@@ -33,6 +34,15 @@ class TestTranslate(I18nBase):
     def test_en_lookup(self):
         set_language("en")
         self.assertEqual(t("toolbar.start"), "Start")
+
+    def test_french_lookup_and_formatting(self):
+        set_language("fr")
+        self.assertEqual(get_language(), "fr")
+        self.assertEqual(t("toolbar.start"), "Démarrer")
+        self.assertEqual(t("toolbar.lang_label"), "Langue :")
+        self.assertEqual(t("pasted_images.count", n=3), "3 image(s)")
+        self.assertEqual(t("explorer.open_in_editor_failed", editor="VS Code", error="boom"),
+                         "Impossible d’ouvrir dans VS Code : boom")
 
     def test_missing_key_returns_key_itself(self):
         set_language("zh")
@@ -79,7 +89,7 @@ class TestSetLanguage(I18nBase):
 
     def test_invalid_language_ignored(self):
         set_language("zh")
-        set_language("fr")  # 不支持 → 保持原语言
+        set_language("de")  # 不支持 → 保持原语言
         self.assertEqual(get_language(), "zh")
         set_language("")  # 空串同样被忽略
         self.assertEqual(get_language(), "zh")
@@ -93,6 +103,18 @@ class TestSetLanguage(I18nBase):
 
 
 class TestTranslationTableShape(I18nBase):
+    def test_all_supported_languages_have_text_and_matching_placeholders(self):
+        def fields(text):
+            return sorted((field, spec, conversion)
+                          for _, field, spec, conversion in Formatter().parse(text)
+                          if field is not None)
+
+        for key, entry in i18n.TRANSLATIONS.items():
+            for language in i18n.SUPPORTED_LANGUAGES:
+                with self.subTest(key=key, language=language):
+                    self.assertTrue(entry.get(language, "").strip())
+                    self.assertEqual(fields(entry[language]), fields(entry["en"]))
+
     def test_every_entry_has_zh_and_en(self):
         # 表完整性：每个键都同时提供 zh/en（防止热切换后出现混杂语言）
         missing = [
