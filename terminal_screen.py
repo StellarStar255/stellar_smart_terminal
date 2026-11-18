@@ -10,9 +10,13 @@ pyte 的扩展与纯函数 reflow 逻辑，不含任何 Qt 依赖：
 terminal_widget 对外再导出上述符号，既有 import 路径不变。
 """
 import bisect
+from collections import namedtuple
 
 import pyte
-from pyte.screens import StaticDefaultDict, wcwidth
+from pyte.screens import Char, StaticDefaultDict, wcwidth
+
+# 只给 OSC 8 覆盖的单元格附加地址。滚动和重排沿用原有的字符对象。
+LinkedChar = namedtuple("LinkedChar", (*Char._fields, "hyperlink"))
 
 
 # pyte 0.8 未实现 REP (CSI Pn b) —— 把前一个图形字符重复 N 次。
@@ -32,7 +36,8 @@ def _cell_is_blank(ch) -> bool:
     """
     data = ch.data
     return ((data == ' ' or data == '') and ch.bg == 'default'
-            and not ch.reverse and not ch.underscore and not ch.strikethrough)
+            and not ch.reverse and not ch.underscore and not ch.strikethrough
+            and not getattr(ch, 'hyperlink', None))
 
 
 def reflow_rows(rows, soft_flags, new_columns, old_columns=None):
@@ -477,6 +482,7 @@ class CompatibleHistoryScreen(pyte.HistoryScreen):
         if save_cursor:
             self._saved_main_cursor = copy.copy(self.cursor)
         self._in_alt_screen = True
+        self.hyperlink = ''
         # 清空当前缓冲区作为备用屏幕
         for row in range(self.lines):
             self.buffer[row].clear()
@@ -501,6 +507,7 @@ class CompatibleHistoryScreen(pyte.HistoryScreen):
         # Screen 原生实现）；这里再兜底清空，确保 TUI 内容绝不并进主屏 reflow。
         self.history.bottom.clear()
         self._in_alt_screen = False
+        self.hyperlink = ''
 
     def resize(self, lines=None, columns=None):
         """重写 resize：完整 reflow（重排），对齐 iTerm2 行为。
@@ -625,13 +632,17 @@ class CompatibleHistoryScreen(pyte.HistoryScreen):
 
     def draw(self, *chars):
         self._in_draw = True
+        attrs = self.cursor.attrs
         try:
+            if self.hyperlink:
+                self.cursor.attrs = LinkedChar(*attrs, self.hyperlink)
             super().draw(*chars)
             # 记录最后绘制的字符，供 REP (CSI Pn b) 使用
             for piece in chars:
                 if piece:
                     self._last_drawn_char = piece[-1] if isinstance(piece, str) else piece
         finally:
+            self.cursor.attrs = attrs
             self._in_draw = False
 
     def repeat(self, count=1, *args, **kwargs):
@@ -693,6 +704,7 @@ class CompatibleHistoryScreen(pyte.HistoryScreen):
 
     def reset(self):
         # reset() 可能在 __init__ 中被 super().__init__() 调用
+        self.hyperlink = ''
         self._decckm = False
         self._bracketed_paste = False
         if hasattr(self, '_in_draw'):

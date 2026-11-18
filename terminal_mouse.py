@@ -307,6 +307,10 @@ class TerminalMouseMixin:
         force_local_selection = (event.modifiers() & Qt.KeyboardModifier.ShiftModifier) or self.scroll_offset > 0
 
         if event.button() == Qt.MouseButton.LeftButton:
+            self._pressed_url = None
+            url = self._link_at_pointer(event.pos(), event.modifiers())
+            if url:
+                self._pressed_url = (event.pos(), url)
             self._refresh_tui_selection()
             if not (event.modifiers() & Qt.KeyboardModifier.ShiftModifier
                     and self._has_selection()):
@@ -329,13 +333,6 @@ class TerminalMouseMixin:
 
             self._last_click_time = current_time
             self._last_click_pos = cell
-
-            # Cmd/Alt+点击检测URL并打开
-            if event.modifiers() & self._URL_CLICK_MODIFIERS:
-                url = self._get_url_at_pos(cell)
-                if url:
-                    self._open_url(url)
-                    return
 
             if self._click_count == 2:
                 # 双击：选「宽」词——整条路径/URL（只在空格处截断）
@@ -382,15 +379,12 @@ class TerminalMouseMixin:
         """鼠标移动 - 更新选择区域（使用绝对坐标），支持拖动时自动滚动"""
         if self._cleaned_up:
             return
-        # 悬停反馈：未按下按钮且按住 Cmd/Alt 悬停在 URL 上时显示手型光标
+        if (self._pressed_url
+                and (event.pos() - self._pressed_url[0]).manhattanLength() >= QApplication.startDragDistance()):
+            self._pressed_url = None
+        # 显式链接直接显示手型；纯文本 URL 仍需修饰键。
         if not event.buttons():
-            hovering_url = False
-            if ((event.modifiers() & self._URL_CLICK_MODIFIERS)
-                    and self._screen_lock.acquire(blocking=False)):
-                try:
-                    hovering_url = bool(self._get_url_at_pos(self._pos_to_cell(event.pos())))
-                finally:
-                    self._screen_lock.release()
+            hovering_url = bool(self._link_at_pointer(event.pos(), event.modifiers()))
             if hovering_url != self._hover_cursor_on:
                 self._hover_cursor_on = hovering_url
                 self.setCursor(
@@ -457,6 +451,19 @@ class TerminalMouseMixin:
         self._auto_scroll_timer.stop()
         self._auto_scroll_direction = 0
         self._auto_scroll_pull = 0
+
+        if event.button() == Qt.MouseButton.LeftButton:
+            pressed, self._pressed_url = self._pressed_url, None
+            if pressed:
+                start, url = pressed
+                if ((event.pos() - start).manhattanLength() < QApplication.startDragDistance()
+                        and self._link_at_pointer(event.pos(), event.modifiers()) == url):
+                    self._clear_selection()
+                    self._mouse_mode_click = False
+                    self._click_count = 0
+                    self._open_url(url)
+                    event.accept()
+                    return
 
         # Shift 键或回滚历史时强制使用本地选择模式
         force_local_selection = (event.modifiers() & Qt.KeyboardModifier.ShiftModifier) or self.scroll_offset > 0
@@ -1131,6 +1138,7 @@ class TerminalMouseMixin:
 
     def _clear_selection(self):
         """清除选择"""
+        self._pressed_url = None
         self._tui_selection = None
         self._is_selecting = False
         self._auto_scroll_direction = 0
@@ -1397,8 +1405,24 @@ class TerminalMouseMixin:
 
     # ==================== URL检测和打开 ====================
 
-    @_history_gesture
-    def _get_url_at_pos(self, cell: tuple) -> str:
+    def _link_at_pointer(self, pos: QPoint, modifiers) -> str:
+        if modifiers & Qt.KeyboardModifier.ShiftModifier:
+            return ""
+        x = pos.x() - self.PADDING
+        y = pos.y() - self.PADDING - self._header_h
+        if not (0 <= x < self.term_cols * self.char_width
+                and 0 <= y < self.term_rows * self.char_height):
+            return ""
+        # 后台回流可能暂时持锁，悬停或按下时不阻塞界面。
+        if not self._screen_lock.acquire(blocking=False):
+            return ""
+        try:
+            return self._get_url_at_pos(self._pos_to_cell(pos),
+                                        include_plain=bool(modifiers & self._URL_CLICK_MODIFIERS))
+        finally:
+            self._screen_lock.release()
+
+    def _get_url_at_pos(self, cell: tuple, *, include_plain=True) -> str:
         """获取指定位置的URL
 
         Args:
@@ -1406,15 +1430,23 @@ class TerminalMouseMixin:
         """
         display_row, col = cell
 
-        # 将显示行号转换为绝对行号
-        history_count = self._get_history_count()
-        total_lines = history_count + self.term_rows
-        display_start = max(0, total_lines - self.term_rows - self.scroll_offset)
-        abs_row = display_start + display_row
-
-        line_text = self._get_line_text(abs_row)
-        if not line_text:
-            return ""
+        with self._screen_lock:
+            history_count = self._history_count_locked()
+            abs_row = max(0, history_count - self.scroll_offset) + display_row
+            if abs_row < history_count:
+                line = self.screen.history.top[abs_row]
+            else:
+                line = self.screen.buffer.get(abs_row - history_count, {})
+            char = line.get(col)
+            target = getattr(char, 'hyperlink', '')
+            if target:
+                # 宽字符右半格可能在左半格已被覆盖后残留。
+                if not char.data and getattr(line.get(col - 1), 'hyperlink', '') != target:
+                    return ""
+                return target if self._browser_url(target) else ""
+            if not include_plain:
+                return ""
+            line_text = self._get_line_text(abs_row)
 
         for match in self._url_pattern.finditer(line_text):
             start, end = match.span()
@@ -1425,10 +1457,18 @@ class TerminalMouseMixin:
                 return url
         return ""
 
+    @staticmethod
+    def _browser_url(url: str):
+        target = QUrl(url, QUrl.ParsingMode.StrictMode)
+        if target.isValid() and target.scheme() in ('http', 'https') and target.host():
+            return target
+        return None
+
     def _open_url(self, url: str):
         """在浏览器中打开URL"""
-        if url:
-            QDesktopServices.openUrl(QUrl(url))
+        target = self._browser_url(url)
+        if target is not None:
+            QDesktopServices.openUrl(target)
 
     # ==================== 拖拽文件 ====================
 

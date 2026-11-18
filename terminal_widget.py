@@ -523,12 +523,11 @@ class TerminalWidget(TerminalInputMixin, TerminalMouseMixin,
     # 把 \x1b[>4;2m 当成 SGR 4;2、把 \x1b[>c 当成主 DA 查询。
     _RE_TERMINAL_QUERY = re.compile(r'\x1b\[>[\d;]*[cmuq]')
     _RE_CURSOR_STYLE = re.compile(r'\x1b\[\d* q')  # DECSCUSR: CSI Ps SP q
-    _RE_OSC_HYPERLINK = re.compile(r'\x1b\]8;[^;\x07\x1b]*;[^\x07\x1b]*(?:\x07|\x1b\\)')
-    _RE_OSC_HYPERLINK_END = re.compile(r'\x1b\]8;;(?:\x07|\x1b\\)')
+    _RE_OSC_HYPERLINK = re.compile(r'\x1b\]8;[^;\x07\x1b]*;([^\x07\x1b]*)(?:\x07|\x1b\\)')
     _RE_OSC_TITLE = re.compile(r'\x1b\][012];[^\x07\x1b]*(?:\x07|\x1b\\)')
     # 捕获所有其他未处理的 OSC 序列 (OSC 7=CWD, 133=shell integration 等)
     # 防止 Linux 上 shell 发送的 OSC 序列中的数字泄漏到显示缓冲区
-    _RE_OSC_OTHER = re.compile(r'\x1b\]\d+;[^\x07\x1b]*(?:\x07|\x1b\\)')
+    _RE_OSC_OTHER = re.compile(r'\x1b\](?!8;)\d+;[^\x07\x1b]*(?:\x07|\x1b\\)')
     _RE_DA2_QUERY = re.compile(r'\x1b\[>0?c')        # Secondary DA 查询
     # OSC 10/11/12 颜色查询（\x1b]11;?\x07 或 ST 结尾）：TUI 借此探测终端是
     # 深色还是浅色底（Claude Code、neovim、delta 等按 OSC 11 自动选配色）
@@ -865,6 +864,7 @@ class TerminalWidget(TerminalInputMixin, TerminalMouseMixin,
         # 启用鼠标跟踪，使按住修饰键悬停在 URL 上时能显示手型光标
         self.setMouseTracking(True)
         self._hover_cursor_on = False  # 当前是否处于 URL 手型悬停状态
+        self._pressed_url = None
         # 打开 URL 的修饰键：macOS 上 ControlModifier 对应 ⌘(Cmd)，再额外支持 Alt/Option
         self._URL_CLICK_MODIFIERS = (
             Qt.KeyboardModifier.ControlModifier | Qt.KeyboardModifier.AltModifier
@@ -1515,17 +1515,8 @@ class TerminalWidget(TerminalInputMixin, TerminalMouseMixin,
             text = self._RE_CURSOR_STYLE.sub('', text)     # 光标样式
 
             # OSC序列（使用预编译正则）
-            text = self._RE_OSC_HYPERLINK.sub('', text)     # OSC 8 超链接开始
-            text = self._RE_OSC_HYPERLINK_END.sub('', text) # OSC 8 超链接结束
             text = self._RE_OSC_TITLE.sub('', text)         # OSC 0,1,2 标题
             text = self._RE_OSC_OTHER.sub('', text)         # 其他 OSC 序列 (7, 133 等)
-
-        # 终端响铃（BEL）：Claude Code / CLI 完成一轮或需要注意时常会响铃。
-        # 此时 OSC 序列里作为终止符的 BEL 已被上面剥掉，残留的 \x07 即真正的响铃。
-        # 响铃视为"需要用户操作"→ 发 interaction_requested，即使是正在看的
-        # 活动终端也点亮导航绿点（用户要求：需要指令时必提示，避免错过）。
-        if '\x07' in text:
-            self.interaction_requested.emit()
 
         if '\x1b' in text:
             # pyte 不支持的字符串序列（内容会泄漏到显示缓冲区）
@@ -1538,6 +1529,14 @@ class TerminalWidget(TerminalInputMixin, TerminalMouseMixin,
         # claude code 这类用 BMP 符号做行首/状态标记的工具会丢失关键信息。
         if '\uFFFD' in text:
             text = text.replace('\uFFFD', '')  # � (替换字符)
+
+        # OSC 8 只传给屏幕，不把目标地址写进终端日志或输出提醒。
+        parts = self._RE_OSC_HYPERLINK.split(text) if '\x1b]8;' in text else [text]
+        if len(parts) > 1:
+            text = ''.join(parts[::2])
+        # 此时 OSC 的 BEL 终止符已剥掉，只把真正响铃当成需要交互。
+        if '\x07' in text:
+            self.interaction_requested.emit()
 
         # 输出规则提醒：命中 Traceback/FAILED 等模式 → 标签橙点+导航提醒
         if text and self.ALERT_RULES_ENABLED and self._ALERT_COMPILED:
@@ -1561,15 +1560,13 @@ class TerminalWidget(TerminalInputMixin, TerminalMouseMixin,
         # 插在片间修正了 _total_history_lines 不会被算进来——与整块原子时
         # "只计本次 feed 新增"的语义一致。
         lines_added = 0
-        step = self._FEED_SLICE_CHARS
-        n = len(text)
-        pos = 0
         screen = self.screen
         lock = self._screen_lock
-        while True:
+        batches = self._output_batches(parts)
+        current = next(batches, None)
+        while current is not None:
             if cancelled.is_set():
                 return
-            piece = text if n <= step else text[pos:pos + step]
             # 关闭时读取线程可能正等后台 reflow 的锁。可取消的等待避免
             # GUI 在 backend.stop().join() 上为每个终端再停顿两秒。
             if not lock.acquire(timeout=.02):
@@ -1577,17 +1574,20 @@ class TerminalWidget(TerminalInputMixin, TerminalMouseMixin,
             try:
                 if cancelled.is_set():
                     return
-                pos += step
-                last = pos >= n
                 old_total = screen._total_history_lines
-                self._feed_locked(piece)
+                for target, piece in current:
+                    if target is not None:
+                        screen.hyperlink = target
+                    if piece:
+                        self._feed_locked(piece)
                 lines_added += screen._total_history_lines - old_total
-                if last:
+                current = next(batches, None)
+                if current is None:
                     # 顺手刷新显示用的历史行数缓存（len() 一次，几乎免费）
                     self._history_count_cached = self._history_count_locked()
             finally:
                 lock.release()
-            if last:
+            if current is None:
                 break
             # 片间真让出：RLock 不公平，释放后立刻重进锁，GUI 线程即使已在等
             # 也抢不到（macOS 上 sleep(0) 不换线程），短睡才能把锁让出去
@@ -1620,6 +1620,30 @@ class TerminalWidget(TerminalInputMixin, TerminalMouseMixin,
         # 同线程发射时是直连(等价于原地调用)，无额外延迟。
         if text:
             self._output_activity.emit(len(text))
+
+    def _output_batches(self, parts):
+        """每批按原顺序应用链接和文本，限制持锁期间处理的字符及链接数。"""
+        step = self._FEED_SLICE_CHARS
+        batch = []
+        remaining = step
+        for index in range(0, len(parts), 2):
+            if index:
+                batch.append((parts[index - 1], ''))
+                remaining -= 1
+            chunk = parts[index]
+            start = 0
+            while len(chunk) - start >= remaining:
+                if remaining:
+                    batch.append((None, chunk[start:start + remaining]))
+                    start += remaining
+                yield batch
+                batch = []
+                remaining = step
+            if start < len(chunk):
+                batch.append((None, chunk[start:]))
+                remaining -= len(chunk) - start
+        if batch:
+            yield batch
 
     def _feed_locked(self, text: str):
         """把一片文本送入 pyte（调用方须持 _screen_lock），带逐字符错误恢复。"""
