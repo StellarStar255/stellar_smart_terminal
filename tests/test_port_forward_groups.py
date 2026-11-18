@@ -5,8 +5,8 @@ from unittest.mock import Mock, patch
 os.environ.setdefault('QT_QPA_PLATFORM', 'offscreen')
 
 import pytest
-from PyQt6.QtCore import QEvent, QModelIndex, Qt
-from PyQt6.QtWidgets import QApplication, QAbstractItemView
+from PyQt6.QtCore import QEvent, QModelIndex, QTimer, Qt
+from PyQt6.QtWidgets import QApplication, QAbstractItemView, QDialogButtonBox
 import app_config
 from remote_explorer_widget import _ForwardsDialog, RemoteExplorerPanel
 
@@ -80,6 +80,86 @@ def test_group_start_stop_skips_active_and_leaves_other_ports_alone(dialogs):
     assert d.active_keys() == {key(specs[2])}
     d._apply_checked(True)
     assert d._cancel_cb.call_count == 2
+
+
+def test_same_listener_alternatives_are_saved_and_switched_independently(dialogs):
+    first = rule(7001)
+    alternative = dict(first, dest_port='7002')
+    d = dialogs(rules=[first])
+    d._add_form.bind_port.setText('07001')
+    d._add_form.dest_port.setText('7002')
+    d._on_add()
+    assert d._list.count() == 2
+    second = d.rules()[1]
+    assert d.rule_key(alternative) == d.rule_key(second)
+    d._apply_cb.assert_not_called()
+
+    d._add_form.bind_port.setText('7001')
+    d._add_form.dest_port.setText('7002')
+    with patch('remote_explorer_widget.QMessageBox.warning') as warning:
+        d._on_add()
+        warning.assert_called_once()
+    assert d._list.count() == 2
+
+    d._check_all(True)
+    with patch('remote_explorer_widget.QMessageBox.warning') as warning:
+        d._apply_checked(False)
+        warning.assert_called_once()
+    d._apply_cb.assert_called_once_with(first)
+    d._apply_statuses(['running', 'unknown'])
+    assert d.active_keys() == {d.rule_key(first)}
+    assert d._states[d.rule_key(second)] == 'stopped'
+    assert d._apply_selected(True)  # 停止备选规则不碰正在运行的第一条。
+    d._cancel_cb.assert_not_called()
+    d._list.setCurrentRow(0)
+    assert d._apply_selected(True)
+    d._cancel_cb.assert_called_once_with(first)
+    d._list.setCurrentRow(1)
+    assert d._apply_selected(False)
+    assert d.active_keys() == {d.rule_key(second)}
+
+
+def test_context_menu_edits_clicked_rule_and_migrates_legacy_group(dialogs):
+    first = rule(6006)
+    second = dict(rule(7001), auto=True)
+    d = dialogs(rules=[first, second], groups={'Models': ['L|127.0.0.1|7001']},
+                selected_group='Models')
+    d.show()
+    _APP.processEvents()
+    item = d._list.item(1)
+    assert item.checkState() == Qt.CheckState.Checked
+    assert d._list.currentRow() == 0
+
+    def edit_dialog():
+        editor = _APP.activeModalWidget()
+        form = editor.layout().itemAt(0).layout()
+        assert form.bind_port.text() == '7001'
+        form.dest_port.setText('7002')
+        editor.findChild(QDialogButtonBox).button(QDialogButtonBox.StandardButton.Save).click()
+
+    def choose_edit(menu, _pos):
+        QTimer.singleShot(0, edit_dialog)
+        return menu.actions()[0]
+
+    with patch('remote_explorer_widget.QMenu.exec', new=choose_edit):
+        d._show_rule_menu(d._list.visualItemRect(item).center())
+    edited = dict(second, dest_port='7002')
+    assert d.rules() == [first, edited]
+    assert d.groups() == {'Models': [d.rule_key(edited)]}
+    assert item.checkState() == Qt.CheckState.Checked
+    d._apply_cb.assert_not_called()
+    d._cancel_cb.assert_not_called()
+
+
+def test_edit_running_port_keeps_existing_rule_and_connection(dialogs):
+    spec = rule(7001)
+    d = dialogs(rules=[spec], active={_ForwardsDialog.rule_key(spec)})
+    with patch('remote_explorer_widget.QMessageBox.information') as info:
+        assert not d._replace_rule(d._list.item(0), dict(spec, dest_port='7002'), d)
+        info.assert_called_once()
+    assert d.rules() == [spec]
+    assert d.active_keys() == {d.rule_key(spec)}
+    d._cancel_cb.assert_not_called()
 
 
 def test_partial_failure_preserves_truth_and_processes_remaining_rules(dialogs):

@@ -28,7 +28,7 @@ from PyQt6.QtWidgets import (
     QListWidget, QListWidgetItem, QTreeWidget, QTreeWidgetItem, QMenu,
     QInputDialog, QMessageBox, QStackedWidget, QFileDialog, QLineEdit,
     QApplication, QSizePolicy, QProgressDialog, QStyledItemDelegate,
-    QAbstractItemView, QDialog, QComboBox, QCheckBox,
+    QAbstractItemView, QDialog, QComboBox, QCheckBox, QDialogButtonBox,
 )
 from PyQt6.QtCore import (Qt, pyqtSignal, QTimer, QMimeData, QUrl, QSize, QEvent,
                           QRectF, QItemSelectionModel)
@@ -448,6 +448,50 @@ class _ForwardRuleDelegate(QStyledItemDelegate):
         return size
 
 
+class _ForwardRuleForm(QHBoxLayout):
+    """新增和编辑共用相同的端口字段。"""
+
+    def __init__(self, spec=None):
+        super().__init__()
+        spec = spec or {}
+        self.setSpacing(6)
+        self.kind = QComboBox()
+        suppress_popup_flash(self.kind)
+        for kind, key in (("L", "local"), ("R", "remote"), ("D", "socks")):
+            self.kind.addItem(t("remote.fwd_type_" + key), kind)
+        index = self.kind.findData(str(spec.get("type") or "L").upper())
+        self.kind.setCurrentIndex(max(0, index))
+        self.addWidget(self.kind)
+        self.bind_host = QLineEdit(str(spec.get("bind_host") or "127.0.0.1"))
+        self.bind_port = QLineEdit(str(spec.get("bind_port") or ""))
+        self.dest_host = QLineEdit(str(spec.get("dest_host") or "127.0.0.1"))
+        self.dest_port = QLineEdit(str(spec.get("dest_port") or ""))
+        self.arrow = QLabel("→")
+        self.arrow.setObjectName("field")
+        for widget, width in ((self.bind_host, 110), (self.bind_port, 70),
+                              (self.arrow, None), (self.dest_host, 110), (self.dest_port, 70)):
+            if width:
+                widget.setFixedWidth(width)
+            self.addWidget(widget)
+        for field in (self.bind_port, self.dest_port):
+            field.setPlaceholderText(t("remote.fwd_port"))
+        self.kind.currentIndexChanged.connect(self._sync_destination)
+        self._sync_destination()
+
+    def _sync_destination(self):
+        for field in (self.dest_host, self.dest_port, self.arrow):
+            field.setEnabled(self.kind.currentData() != "D")
+
+    def spec(self, previous=None):
+        return {**(previous or {}),
+                "type": self.kind.currentData(),
+                "bind_host": self.bind_host.text().strip() or "127.0.0.1",
+                "bind_port": self.bind_port.text().strip(),
+                "dest_host": self.dest_host.text().strip() or "127.0.0.1",
+                "dest_port": self.dest_port.text().strip(),
+                "auto": bool(previous and previous.get("auto"))}
+
+
 class _ForwardsDialog(QDialog):
     """端口转发管理（一台主机多条规则）。
 
@@ -468,7 +512,11 @@ class _ForwardsDialog(QDialog):
         self._cancel_cb = cancel_cb
         self._force_cb = force_cb          # (spec) -> None：端口被 ssh 占着时强制释放再挂
         self._probe_cb = probe_cb
-        self._active = set(active or ())   # 已生效规则的 key
+        rules = rules or []
+        legacy_keys = {}
+        for rule in rules:
+            legacy_keys.setdefault(self._legacy_rule_key(rule), self.rule_key(rule))
+        self._active = {legacy_keys.get(key, key) for key in active or ()}
         self._status_cb = status_cb
         self._status_runner = status_runner or (lambda fn: fn())
         self._status_executor = None
@@ -487,7 +535,7 @@ class _ForwardsDialog(QDialog):
         self._uncertain = set()
         self._errors = {}
         groups = groups if isinstance(groups, dict) else {}
-        self._groups = {name: list(dict.fromkeys(keys))
+        self._groups = {name: list(dict.fromkeys(legacy_keys.get(key, key) for key in keys))
                         for name, keys in groups.items()
                         if isinstance(name, str) and name.strip() and isinstance(keys, list)
                         and all(isinstance(key, str) for key in keys)}
@@ -569,13 +617,15 @@ class _ForwardsDialog(QDialog):
         self._list.setDropIndicatorShown(True)
         self._list.setDragDropOverwriteMode(False)
         self._list.setToolTip(t("remote.fwd_reorder_hint"))
+        self._list.setContextMenuPolicy(Qt.ContextMenuPolicy.CustomContextMenu)
+        self._list.customContextMenuRequested.connect(self._show_rule_menu)
         self._list.setIconSize(QSize(10, 10))
         # uniformItemSizes 只保证行之间等高；缓存失效后整表仍可能一起变高。
         # delegate 明确行高，避免 Start/Stop 触发样式重算时行间距跳动。
         self._list.setItemDelegate(_ForwardRuleDelegate(self._list))
         self._list.setUniformItemSizes(True)
         layout.addWidget(self._list, 1)
-        for r in rules or []:
+        for r in rules:
             self._add_item(dict(r))
 
         self._group_status = QLabel()
@@ -597,33 +647,7 @@ class _ForwardsDialog(QDialog):
         self._reload_groups(selected_group)
 
         # —— 新增一条 ——
-        form = QHBoxLayout()
-        form.setSpacing(6)
-        self._type = QComboBox()
-        suppress_popup_flash(self._type)
-        for key, label_key in (("L", "remote.fwd_type_local"),
-                               ("R", "remote.fwd_type_remote"),
-                               ("D", "remote.fwd_type_socks")):
-            self._type.addItem(t(label_key), key)
-        self._type.currentIndexChanged.connect(self._sync_dest_enabled)
-        form.addWidget(self._type)
-        self._bind_host = QLineEdit("127.0.0.1")
-        self._bind_host.setFixedWidth(110)
-        form.addWidget(self._bind_host)
-        self._bind_port = QLineEdit()
-        self._bind_port.setPlaceholderText(t("remote.fwd_port"))
-        self._bind_port.setFixedWidth(70)
-        form.addWidget(self._bind_port)
-        self._arrow = QLabel("→")
-        self._arrow.setObjectName("field")
-        form.addWidget(self._arrow)
-        self._dest_host = QLineEdit("127.0.0.1")
-        self._dest_host.setFixedWidth(110)
-        form.addWidget(self._dest_host)
-        self._dest_port = QLineEdit()
-        self._dest_port.setPlaceholderText(t("remote.fwd_port"))
-        self._dest_port.setFixedWidth(70)
-        form.addWidget(self._dest_port)
+        self._add_form = form = _ForwardRuleForm()
         add_btn = QPushButton(t("remote.fwd_add"))
         add_btn.clicked.connect(self._on_add)
         form.addWidget(add_btn)
@@ -668,7 +692,6 @@ class _ForwardsDialog(QDialog):
         layout.addLayout(row)
 
         self._list.currentItemChanged.connect(self._sync_auto_check)
-        self._sync_dest_enabled()
         if self._list.count():
             self._list.setCurrentRow(0)
         if self._status_cb is not None:
@@ -679,9 +702,38 @@ class _ForwardsDialog(QDialog):
 
     @staticmethod
     def rule_key(spec: dict) -> str:
-        """一条规则的身份：类型 + 监听端。撤销/去重都按它。"""
+        """完整 SSH 规则身份，监听相同而目标不同的规则仍各自独立。"""
+        try:
+            return '|'.join(ssh_control.forward_args(spec))
+        except ValueError:
+            return (f'invalid|{_ForwardsDialog._legacy_rule_key(spec)}|'
+                    f'{spec.get("dest_host")!r}|{spec.get("dest_port")!r}')
+
+    @staticmethod
+    def _legacy_rule_key(spec: dict) -> str:
+        """兼容旧版按监听端保存的分组。"""
         return (f'{str(spec.get("type") or "L").upper()}|'
                 f'{spec.get("bind_host") or "127.0.0.1"}|{spec.get("bind_port")}')
+
+    @staticmethod
+    def _listener_key(spec):
+        try:
+            kind, endpoints = ssh_control.forward_args(spec)
+        except ValueError:
+            return None
+        host, port, *_ = endpoints.split(':')
+        return kind == '-R', host.lower(), port
+
+    def _has_active_alternative(self, spec):
+        key = self.rule_key(spec)
+        listener = self._listener_key(spec)
+        if not listener:
+            return False
+        for other in self.rules():
+            other_key = self.rule_key(other)
+            if other_key != key and other_key in self._active and self._listener_key(other) == listener:
+                return True
+        return False
 
     def _add_item(self, spec: dict) -> QListWidgetItem:
         item = QListWidgetItem()
@@ -765,6 +817,8 @@ class _ForwardsDialog(QDialog):
         if (len(states) != self._list.count() or any(
                 state not in ('running', 'stopped', 'unknown', 'invalid') for state in states)):
             raise RuntimeError(t('remote.fwd_status_invalid'))
+        running_listeners = {self._listener_key(spec) for spec, state in zip(self.rules(), states)
+                             if state == 'running'}
         for i, state in enumerate(states):
             item = self._list.item(i)
             spec = item.data(_ROLE_ENTRY)
@@ -772,6 +826,8 @@ class _ForwardsDialog(QDialog):
             error = ssh_control.forward_rule_error(spec)
             if error:
                 state = 'invalid'
+            elif state == 'unknown' and self._listener_key(spec) in running_listeners:
+                state = 'stopped'
             self._states[key] = state
             self._errors.pop(key, None)
             if error:
@@ -861,11 +917,6 @@ class _ForwardsDialog(QDialog):
         self._restart_btn.setEnabled(enabled)
         self._probe_btn.setEnabled(enabled and self._probe_cb is not None)
 
-    def _sync_dest_enabled(self):
-        is_socks = self._type.currentData() == "D"
-        for w in (self._dest_host, self._dest_port, self._arrow):
-            w.setEnabled(not is_socks)
-
     def _sync_auto_check(self, item=None, _prev=None):
         item = item or self._list.currentItem()
         self._auto_check.blockSignals(True)
@@ -886,29 +937,82 @@ class _ForwardsDialog(QDialog):
         self._refresh_item(item)
 
     def _on_add(self):
-        spec = {
-            "type": self._type.currentData(),
-            "bind_host": self._bind_host.text().strip() or "127.0.0.1",
-            "bind_port": self._bind_port.text().strip(),
-            "dest_host": self._dest_host.text().strip() or "127.0.0.1",
-            "dest_port": self._dest_port.text().strip(),
-            "auto": False,
-        }
-        try:
-            ssh_control.forward_args(spec)      # 先校验，别把废规则存进去
-        except ValueError as e:
-            QMessageBox.warning(self, t("remote.fwd_title", host=self._alias), str(e))
+        spec = self._add_form.spec()
+        if not self._validate_rule(spec, self):
             return
-        key = self.rule_key(spec)
-        for i in range(self._list.count()):
-            if self.rule_key(self._list.item(i).data(_ROLE_ENTRY)) == key:
-                QMessageBox.warning(self, t("remote.fwd_title", host=self._alias),
-                                    t("remote.fwd_duplicate"))
-                return
         self._status_revision += 1
         self._list.setCurrentItem(self._add_item(spec))
-        self._bind_port.clear()
-        self._dest_port.clear()
+        self._add_form.bind_port.clear()
+        self._add_form.dest_port.clear()
+
+    def _validate_rule(self, spec, parent, excluded_item=None):
+        error = ssh_control.forward_rule_error(spec)
+        if not error:
+            key = self.rule_key(spec)
+            for index in range(self._list.count()):
+                item = self._list.item(index)
+                if item is not excluded_item and self.rule_key(item.data(_ROLE_ENTRY)) == key:
+                    error = t("remote.fwd_duplicate")
+                    break
+        if error:
+            QMessageBox.warning(parent, t("remote.fwd_title", host=self._alias), error)
+        return not error
+
+    def _show_rule_menu(self, pos):
+        if self._batch_running or self._operation_running:
+            return
+        item = self._list.itemAt(pos)
+        if item is None:
+            return
+        self._list.setCurrentItem(item)
+        menu = QMenu(self)
+        edit = menu.addAction(t("remote.fwd_edit"))
+        if menu.exec(self._list.viewport().mapToGlobal(pos)) == edit:
+            self._edit_rule(item)
+        menu.deleteLater()
+
+    def _edit_rule(self, item):
+        editor = QDialog(self)
+        editor.setWindowTitle(t("remote.fwd_edit"))
+        layout = QVBoxLayout(editor)
+        previous = item.data(_ROLE_ENTRY)
+        form = _ForwardRuleForm(previous)
+        layout.addLayout(form)
+        buttons = QDialogButtonBox(QDialogButtonBox.StandardButton.Save |
+                                   QDialogButtonBox.StandardButton.Cancel)
+        layout.addWidget(buttons)
+
+        def save():
+            if self._replace_rule(item, form.spec(previous), editor):
+                editor.accept()
+
+        buttons.accepted.connect(save)
+        buttons.rejected.connect(editor.reject)
+        form.bind_port.setFocus()
+        editor.exec()
+        editor.deleteLater()
+
+    def _replace_rule(self, item, spec, parent):
+        if not self._validate_rule(spec, parent, item):
+            return False
+        previous = item.data(_ROLE_ENTRY)
+        old_key, new_key = self.rule_key(previous), self.rule_key(spec)
+        if new_key != old_key:
+            if (old_key in self._active or (old_key in self._uncertain
+                                           and not self._has_active_alternative(previous))):
+                QMessageBox.information(parent, t("remote.fwd_edit"), t("remote.fwd_edit_stop_first"))
+                return False
+            for name, members in self._groups.items():
+                self._groups[name] = list(dict.fromkeys(
+                    new_key if member == old_key else member for member in members))
+            self._states.pop(old_key, None)
+            self._errors.pop(old_key, None)
+            self._uncertain.discard(old_key)
+        self._status_revision += 1
+        item.setData(_ROLE_ENTRY, spec)
+        self._refresh_item(item)
+        self._sync_auto_check()
+        return True
 
     def _on_delete(self):
         if self._batch_running or self._operation_running:
@@ -1007,7 +1111,20 @@ class _ForwardsDialog(QDialog):
         self._operation_running = True
         self.setEnabled(False)
         try:
-            key = self.rule_key(item.data(_ROLE_ENTRY))
+            spec = item.data(_ROLE_ENTRY)
+            key = self.rule_key(spec)
+            if key not in self._active and self._has_active_alternative(spec):
+                self._uncertain.discard(key)
+                if cancel:
+                    self._set_rule_state(item, 'stopped')
+                    return True
+                error = t("remote.fwd_listener_in_use")
+                self._set_rule_state(item, 'failed', error)
+                if errors is not None:
+                    errors.append(f"{ssh_control.forward_label(spec)}: {error}")
+                else:
+                    QMessageBox.warning(self, t("remote.fwd_title", host=self._alias), error)
+                return False
             if restart and (key in self._active or key in self._uncertain):
                 if not self._apply_item_impl(item, True, errors):
                     return False

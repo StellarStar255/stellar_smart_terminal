@@ -1064,9 +1064,9 @@ class TestForwardsDialog(unittest.TestCase):
 
     def test_add_rule_from_the_form(self):
         d = self._dlg()
-        d._bind_port.setText('8888')
-        d._dest_port.setText('80')
-        d._dest_host.setText('10.0.0.9')
+        d._add_form.bind_port.setText('8888')
+        d._add_form.dest_port.setText('80')
+        d._add_form.dest_host.setText('10.0.0.9')
         d._on_add()
         self.assertEqual(len(d.rules()), 1)
         self.assertEqual(d.rules()[0]['dest_host'], '10.0.0.9')
@@ -1075,18 +1075,18 @@ class TestForwardsDialog(unittest.TestCase):
     def test_invalid_rule_is_refused(self):
         from remote_explorer_widget import QMessageBox
         d = self._dlg()
-        d._bind_port.setText('70000')
+        d._add_form.bind_port.setText('70000')
         with mock.patch.object(QMessageBox, 'warning'):
             d._on_add()
         self.assertEqual(d.rules(), [])
         d.deleteLater()
 
-    def test_duplicate_listen_endpoint_is_refused(self):
+    def test_identical_forward_is_refused(self):
         from remote_explorer_widget import QMessageBox
         d = self._dlg([{'type': 'L', 'bind_host': '127.0.0.1', 'bind_port': '8888',
                         'dest_host': '127.0.0.1', 'dest_port': '80'}])
-        d._bind_port.setText('8888')
-        d._dest_port.setText('99')
+        d._add_form.bind_port.setText('8888')
+        d._add_form.dest_port.setText('80')
         with mock.patch.object(QMessageBox, 'warning') as warn:
             d._on_add()
         warn.assert_called_once()
@@ -1162,9 +1162,9 @@ class TestForwardsDialog(unittest.TestCase):
 
     def test_socks_rule_hides_the_destination_fields(self):
         d = self._dlg()
-        d._type.setCurrentIndex(2)          # SOCKS -D
-        self.assertFalse(d._dest_port.isEnabled())
-        d._bind_port.setText('1080')
+        d._add_form.kind.setCurrentIndex(2)          # SOCKS -D
+        self.assertFalse(d._add_form.dest_port.isEnabled())
+        d._add_form.bind_port.setText('1080')
         d._on_add()
         self.assertEqual(d.rules()[0]['type'], 'D')
         d.deleteLater()
