@@ -6,7 +6,7 @@ English | [简体中文](README.zh-CN.md)
 
 A PyQt6-based smart terminal with file explorer, Git GUI, LLM proxy, and VS Code extension browser.
 
-Latest release: [v1.35.49](docs/releases/v1.35.49.md) adds French interface support: select Français in the language menu, switch instantly, and keep your choice after restart.
+Latest release: [v1.35.50](docs/releases/v1.35.50.md) keeps long quick command names on one line and makes the last item easy to select in global and local command lists.
 
 <img src="assets/smart_terminal.png" width="300" />
 

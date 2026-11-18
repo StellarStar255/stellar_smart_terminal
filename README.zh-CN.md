@@ -6,7 +6,7 @@
 
 基于 PyQt6 的智能终端，集成文件管理、Git GUI、LLM 代理和 VS Code 扩展浏览。
 
-最新版本：[v1.35.49](docs/releases/v1.35.49.md)，新增法语界面支持，在语言菜单选择 Français 即可即时切换，重启后保留选择。
+最新版本：[v1.35.50](docs/releases/v1.35.50.md)，修复全局和本地快捷命令管理列表中长名称换行、最后一条难以选中的问题。
 
 A PyQt6-based smart terminal with file explorer, Git GUI, LLM proxy, and VS Code extension browser.
 

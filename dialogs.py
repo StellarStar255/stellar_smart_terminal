@@ -11,7 +11,7 @@ from pathlib import Path
 from PyQt6.QtWidgets import (
     QApplication, QAbstractItemView, QDialog, QDialogButtonBox, QFileDialog,
     QFormLayout, QGridLayout, QHBoxLayout, QLabel, QLineEdit, QListWidget,
-    QListWidgetItem, QMessageBox, QPlainTextEdit, QPushButton, QTreeWidget,
+    QListWidgetItem, QMessageBox, QPlainTextEdit, QPushButton, QStyledItemDelegate, QTreeWidget,
     QTreeWidgetItem, QVBoxLayout, QWidget
 )
 from PyQt6.QtCore import Qt, QTimer, pyqtSignal
@@ -156,6 +156,15 @@ class _IndentingPlainTextEdit(QPlainTextEdit):
         self._reselect(first, last)
 
 
+class _PresetNameDelegate(QStyledItemDelegate):
+    def sizeHint(self, option, index):
+        size = super().sizeHint(option, index)
+        # 隐藏横向滚动条还不够：Qt 仍可能按全文宽度布局，导致省略号不生效。
+        # 宽度交给列表视口，保留字体和主题决定的行高。
+        size.setWidth(0)
+        return size
+
+
 class PresetDialog(QDialog):
     """预设命令管理对话框"""
 
@@ -167,6 +176,7 @@ class PresetDialog(QDialog):
         self._auto_add = auto_add
         self.setWindowTitle(title or t("preset.manage_title"))
         self.setMinimumSize(600, 450)
+        self.resize(820, 600)
 
         # 使用唯一 ID 来稳定关联 item 和 preset（避免拖拽时数据丢失）
         self._preset_id_counter = 0
@@ -207,6 +217,14 @@ class PresetDialog(QDialog):
         left_layout.addWidget(QLabel(t("preset.list_label")))
 
         self.preset_list = QListWidget()
+        self.preset_list.setItemDelegate(_PresetNameDelegate(self.preset_list))
+        # 长名称不撑出横向滚动条，避免它遮住底部条目；完整名称由提示和编辑框展示。
+        self.preset_list.setWordWrap(False)
+        self.preset_list.setTextElideMode(Qt.TextElideMode.ElideRight)
+        self.preset_list.setHorizontalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAlwaysOff)
+        self.preset_list.setVerticalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAlwaysOn)
+        self.preset_list.setVerticalScrollMode(QAbstractItemView.ScrollMode.ScrollPerPixel)
+        self.preset_list.setUniformItemSizes(True)
         self.preset_list.currentRowChanged.connect(self._on_selection_changed)
         # 启用拖拽排序
         self.preset_list.setDragDropMode(QListWidget.DragDropMode.InternalMove)
@@ -314,6 +332,28 @@ class PresetDialog(QDialog):
                 background-color: {c['accent']};
                 color: #ffffff;
             }}
+            QListWidget::item {{
+                padding: 6px 8px;
+            }}
+            QListWidget QScrollBar:vertical {{
+                background: {c['bg_medium']};
+                width: 14px;
+                margin: 0;
+            }}
+            QListWidget QScrollBar::handle:vertical {{
+                background: {c['text_dim']};
+                min-height: 28px;
+                border: 3px solid {c['bg_medium']};
+                border-radius: 6px;
+            }}
+            QListWidget QScrollBar::add-line:vertical,
+            QListWidget QScrollBar::sub-line:vertical {{
+                height: 0;
+            }}
+            QListWidget QScrollBar::add-page:vertical,
+            QListWidget QScrollBar::sub-page:vertical {{
+                background: transparent;
+            }}
             QPushButton {{
                 background-color: {c['bg_lighter']};
                 border: none;
@@ -326,10 +366,17 @@ class PresetDialog(QDialog):
             }}
         """)
 
+    @staticmethod
+    def _set_preset_item_name(item, name):
+        # 名称中的换行也只影响显示，不修改保存或导出的原始名称。
+        item.setText(' '.join(name.splitlines()))
+        item.setToolTip(name)
+
     def _populate_list(self):
         self.preset_list.clear()
         for preset in self.presets:
-            item = QListWidgetItem(preset.get('name', t("preset.unnamed")))
+            item = QListWidgetItem()
+            self._set_preset_item_name(item, preset.get('name', t("preset.unnamed")))
             item.setData(Qt.ItemDataRole.UserRole, preset.get('_id'))  # 只存储 ID（避免拖拽时数据丢失）
             self.preset_list.addItem(item)
         if self.presets:
@@ -367,7 +414,7 @@ class PresetDialog(QDialog):
         preset = self._get_preset_by_id(pid) if pid else None
         if preset:
             preset['name'] = text
-            item.setText(text)
+            self._set_preset_item_name(item, text)
 
     def _on_commands_changed(self):
         if self._closing:
@@ -390,7 +437,8 @@ class PresetDialog(QDialog):
         }
         self.presets.append(new_preset)
         self._preset_map[pid] = new_preset
-        item = QListWidgetItem(new_preset['name'])
+        item = QListWidgetItem()
+        self._set_preset_item_name(item, new_preset['name'])
         item.setData(Qt.ItemDataRole.UserRole, pid)  # 只存储 ID
         self.preset_list.addItem(item)
         self.preset_list.setCurrentRow(len(self.presets) - 1)
@@ -419,7 +467,7 @@ class PresetDialog(QDialog):
             commands = [line for line in text.split('\n') if line.strip()]
             preset['commands'] = commands
             # 更新列表显示
-            item.setText(preset['name'])
+            self._set_preset_item_name(item, preset['name'])
         else:
             QMessageBox.warning(self, t("preset.cannot_save"), t("preset.select_first"))
 
