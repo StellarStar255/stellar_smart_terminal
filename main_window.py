@@ -73,7 +73,7 @@ from main_window_remote import RemotePanelMixin  # 远程 SSH/SFTP 侧面板（�
 from main_window_tabs import TabSplitMixin  # 标签页与分屏（从 main_window 拆出）
 from main_window_menus import MenusMixin  # 原生菜单栏（从 main_window 拆出）
 import themes  # 主题配色表（纯数据，从 main_window 拆出）
-from i18n import t, set_language
+from i18n import get_language, set_language, t
 from utils import (get_config_path, list_notify_sounds, play_notify_sound,
                    rect_visible_on_any_screen)
 import app_config
@@ -1205,7 +1205,8 @@ class MainWindow(ThemeMixin, ToolbarMixin, ConfigMixin, ExplorerPanelMixin,
         self.status_indicator.setStyleSheet("color: #666; font-size: 16px;")
         info_layout.addWidget(self.status_indicator)
 
-        self.session_label = QLabel(t("status.not_started"))
+        self._session_status_key = "status.not_started"
+        self.session_label = QLabel(t(self._session_status_key))
         info_layout.addWidget(self.session_label)
 
         info_layout.addStretch()
@@ -3100,17 +3101,21 @@ class MainWindow(ThemeMixin, ToolbarMixin, ConfigMixin, ExplorerPanelMixin,
 
         if running:
             self.status_indicator.setStyleSheet("color: #4ade80; font-size: 16px;")
-            if self.current_session:
-                self.session_label.setText(t("status.running_session", session_id=self.current_session.session_id))
-            else:
-                self.session_label.setText(t("status.running"))
+            self._session_status_key = "status.running"
         else:
             self.status_indicator.setStyleSheet("color: #ef4444; font-size: 16px;")  # 红色表示已停止
-            self.session_label.setText(t("status.stopped"))
+            self._session_status_key = "status.stopped"
             self.entries_label.setText(t("status.entries", n=0))
             self.files_label.setText(t("status.files", n=0))
             self.statusbar.showMessage(t("status.session_stopped"))
             self.current_session = None
+        self._translate_session_status()
+
+    def _translate_session_status(self):
+        if self._session_status_key == "status.running" and self.current_session:
+            self.session_label.setText(t("status.running_session", session_id=self.current_session.session_id))
+        else:
+            self.session_label.setText(t(self._session_status_key))
 
     def _on_input(self, text: str, terminal=None):
         """输入回调"""
@@ -4920,16 +4925,22 @@ class MainWindow(ThemeMixin, ToolbarMixin, ConfigMixin, ExplorerPanelMixin,
             display_name = t(f"theme.{theme_key}")
             self.statusbar.showMessage(t("theme.switched", name=display_name), 3000)
 
-    def _on_language_changed(self, index: int):
-        """语言变更处理"""
+    def _on_language_changed(self, _index: int):
+        """切换进程级语言，刷新现有窗口并保存一次。"""
         lang_code = self.lang_combo.currentData()
-        if lang_code:
-            set_language(lang_code)
-            self._apply_language()
-            self._save_config()
+        if not lang_code:
+            return
+        set_language(lang_code)
+        for window in QApplication.topLevelWidgets():
+            if isinstance(window, MainWindow) and not window._closing_in_progress:
+                window._apply_language()
+            elif isinstance(window, WindowNavigatorPanel):
+                window.apply_language()
+        self._save_config()
 
     def _apply_language(self):
         """更新所有 UI 文本以反映当前语言"""
+        self._select_combo_value(self.lang_combo, get_language())
         # 原生菜单栏：整条重建（复用的快捷键动作只改文本）
         try:
             self._rebuild_menus()
@@ -4987,6 +4998,9 @@ class MainWindow(ThemeMixin, ToolbarMixin, ConfigMixin, ExplorerPanelMixin,
             self.explorer_toggle_btn.setToolTip(t("toolbar.explorer_tooltip") + "  (⌘1)")
         if hasattr(self, 'git_toggle_btn'):
             self.git_toggle_btn.setText(t("toolbar.git"))
+        if hasattr(self, 'remote_toggle_btn'):
+            self.remote_toggle_btn.setText(t("remote.title"))
+            self.remote_toggle_btn.setToolTip(t("remote.title") + "  (⌘3)")
         if hasattr(self, 'vscode_open_btn'):
             self.vscode_open_btn.setText(t("toolbar.vscode"))
             self.vscode_open_btn.setToolTip(t("toolbar.vscode_tooltip"))
@@ -5016,11 +5030,10 @@ class MainWindow(ThemeMixin, ToolbarMixin, ConfigMixin, ExplorerPanelMixin,
             self.icon_tint_checkbox.setText(t("toolbar.icon_tint"))
             self.icon_tint_checkbox.setToolTip(t("toolbar.icon_tint_tooltip"))
 
-        # 语言组（lang_combo 直接作为独立 widget，无 label）
-
         # LLM 配置
         if hasattr(self, 'llm_config_btn'):
             self.llm_config_btn.setToolTip(t("toolbar.llm_config_tooltip"))
+        self.toolbar_settings_btn.setToolTip(t("toolbar.settings_tooltip"))
 
         # GUI 字体大小
         if hasattr(self, 'gui_font_label'):
@@ -5051,9 +5064,12 @@ class MainWindow(ThemeMixin, ToolbarMixin, ConfigMixin, ExplorerPanelMixin,
             self.clear_log_btn.setText(t("log.clear"))
 
         # 底部状态栏
-        if hasattr(self, 'session_label'):
-            # 保持当前状态文本不变（可能是运行中/已停止等）
-            pass
+        self._translate_session_status()
+        if self.current_session:
+            self._update_stats()
+        else:
+            self.entries_label.setText(t("status.entries", n=0))
+            self.files_label.setText(t("status.files", n=0))
         self.statusbar.showMessage(t("status.ready"), 3000)
 
         # 目录工具栏
@@ -5076,6 +5092,10 @@ class MainWindow(ThemeMixin, ToolbarMixin, ConfigMixin, ExplorerPanelMixin,
         # 新建标签页按钮
         if hasattr(self, 'new_tab_btn'):
             self.new_tab_btn.setToolTip(t("toolbar.new_tab_tooltip"))
+        self.quick_launch_btn.setToolTip(t("toolbar.quick_launch_tooltip"))
+        if hasattr(self, '_ql_search'):
+            self._ql_search.setPlaceholderText(t("quick_launch.placeholder"))
+            self._ql_update_list(self._ql_search.text())
         if hasattr(self, 'color_btn'):
             self.color_btn.setToolTip(t("toolbar.color_tooltip"))
         if hasattr(self, 'dir_dropdown_btn'):
@@ -5099,7 +5119,15 @@ class MainWindow(ThemeMixin, ToolbarMixin, ConfigMixin, ExplorerPanelMixin,
 
         # Git 面板标题
         if hasattr(self, '_git_title'):
-            self._git_title.setText(t("git.source_control"))
+            self._git_title.setText(t("toolbar.git"))
+
+        self.nav_panel.apply_language()
+        self.sidebar_sync_checkbox.setText(t("sidebar.sync_heights"))
+        self.sidebar_sync_checkbox.setToolTip(t("sidebar.sync_heights_tooltip"))
+        self.command_palette.set_placeholder(t("palette.placeholder"))
+        self.command_palette.set_empty_text(t("palette.no_results"))
+        self._register_palette_commands()
+        QTimer.singleShot(0, self._update_flow_toolbar_height)
 
         # 子组件 apply_language
         if hasattr(self, 'explorer_panel'):

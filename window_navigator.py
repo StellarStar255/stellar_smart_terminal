@@ -420,6 +420,22 @@ class WindowNavigatorPanel(QWidget):
         self.drag_hint_label.setVisible(False)
         layout.addWidget(self.drag_hint_label)
 
+    def apply_language(self):
+        """更新导航文字，保留窗口列表、搜索和勾选状态。"""
+        if not self._embedded:
+            self.setWindowTitle(t("window.navigator_title"))
+        self.title_label.setText(t("window.navigator_list_title"))
+        self.group_move_grip.setToolTip(t("window.group_move_tooltip"))
+        self.search_input.setPlaceholderText(t("window.search_placeholder"))
+        self.compact_checkbox.setText(t("window.compact_display"))
+        self.compact_checkbox.setToolTip(t("window.compact_tooltip"))
+        self.quick_close_checkbox.setText(t("window.quick_close"))
+        self.quick_close_checkbox.setToolTip(t("window.quick_close_tooltip"))
+        self.embed_checkbox.setText(t("window.embed_checkbox"))
+        self.embed_checkbox.setToolTip(t("window.embed_checkbox_tooltip"))
+        self.settings_btn.setToolTip(t("window.settings_tooltip"))
+        self.drag_hint_label.setText(t("window.drag_hint"))
+
     def _group_move_windows(self):
         """整组拖动的对象：当前列表里列出的全部窗口（内嵌面板即本屏窗口）；
         浮动面板自己也跟着走。"""

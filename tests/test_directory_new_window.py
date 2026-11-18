@@ -178,6 +178,52 @@ class DirectoryNewWindowTest(unittest.TestCase):
         finally:
             i18n.set_language(language)
 
+    def test_language_selection_updates_all_existing_windows_and_navigators(self):
+        import app_config
+        from i18n import get_language, set_language, t
+        from window_navigator import WindowNavigatorPanel
+
+        original_language = get_language()
+        other = self.MW()  # 隐藏窗口也应更新，重新显示时不能保留旧语言。
+        self.win.detached_windows.append(other)
+        floating_nav = WindowNavigatorPanel()
+        self.addCleanup(floating_nav.deleteLater)
+        other.nav_panel.search_input.setText("project")
+        other._ensure_quick_launch_popup()
+        page = other.tab_widget.currentWidget()
+        tab_title = "Custom tab"
+        other.tab_widget.setTabText(0, tab_title)
+        other._update_running_state(False)
+
+        try:
+            for source, language in [(self.win, 'fr'), (other, 'en'), (self.win, 'zh')]:
+                with patch.object(source, '_save_config', wraps=source._save_config) as save:
+                    source.lang_combo.setCurrentIndex(source.lang_combo.findData(language))
+                    save.assert_called_once_with()
+                self.assertEqual(get_language(), language)
+                self.assertEqual(app_config.read_config()['language'], language)
+                for window in (self.win, other):
+                    self.assertEqual(window.lang_combo.currentData(), language)
+                    self.assertEqual(window.start_btn.text(), t("toolbar.start"))
+                    self.assertEqual(window.menuBar().actions()[0].text(), t("menu.file"))
+                    self.assertEqual(window.open_dir_window_btn.text(), t("dir.open_new_window"))
+                    self.assertEqual(window.command_palette.line_edit.placeholderText(),
+                                     t("palette.placeholder"))
+                    self.assertIn(t("toolbar.start"),
+                                  [command.title for command in window.command_palette._commands])
+                    self.assertEqual(window.nav_panel.title_label.text(),
+                                     t("window.navigator_list_title"))
+                    self.assertEqual(window.nav_panel.search_input.placeholderText(),
+                                     t("window.search_placeholder"))
+                self.assertEqual(floating_nav.windowTitle(), t("window.navigator_title"))
+                self.assertEqual(other.nav_panel.search_input.text(), "project")
+                self.assertEqual(other._ql_search.placeholderText(), t("quick_launch.placeholder"))
+                self.assertEqual(other.session_label.text(), t("status.stopped"))
+                self.assertIs(other.tab_widget.currentWidget(), page)
+                self.assertEqual(other.tab_widget.tabText(0), tab_title)
+        finally:
+            set_language(original_language)
+
     def test_back_walks_directories_and_updates_explorer_and_terminal(self):
         original = self.win._window_cwd
         self.assertFalse(self.win.dir_back_btn.isEnabled())

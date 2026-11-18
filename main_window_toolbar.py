@@ -409,9 +409,9 @@ class ToolbarMixin:
         """)
         self.git_toggle_btn.clicked.connect(self._toggle_git_panel)
 
-        self.remote_toggle_btn = QPushButton("Remote")
+        self.remote_toggle_btn = QPushButton(t("remote.title"))
         self.remote_toggle_btn.setObjectName("remoteToggleBtn")
-        self.remote_toggle_btn.setToolTip("Remote  (⌘3)")
+        self.remote_toggle_btn.setToolTip(t("remote.title") + "  (⌘3)")
         self.remote_toggle_btn.setCheckable(True)
         self.remote_toggle_btn.setStyleSheet("""
             QPushButton {

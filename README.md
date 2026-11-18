@@ -6,7 +6,7 @@ English | [简体中文](README.zh-CN.md)
 
 A PyQt6-based smart terminal with file explorer, Git GUI, LLM proxy, and VS Code extension browser.
 
-Latest release: [v1.35.50](docs/releases/v1.35.50.md) keeps long quick command names on one line and makes the last item easy to select in global and local command lists.
+Latest release: [v1.35.51](docs/releases/v1.35.51.md) synchronizes interface language changes across all open windows.
 
 <img src="assets/smart_terminal.png" width="300" />
 
