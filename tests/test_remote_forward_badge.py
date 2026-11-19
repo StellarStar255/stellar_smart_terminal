@@ -73,19 +73,70 @@ class RemoteForwardBadgeTest(unittest.TestCase):
         self.assertNotIn("🔀", self._texts(panel)["alpha"].text())
         self.assertNotIn("alpha", panel._active_forwards)   # 陈旧登记被清掉
 
-    def test_registry_shared_across_panels(self):
+    def test_start_and_stop_in_open_dialog_update_other_panel_in_place(self):
         a = self._panel()
         b = self._panel()
-        a._active_forwards["alpha"] = {self.rew._ForwardsDialog.rule_key(_RULE)}
-        with mock.patch.object(ssh_control, 'master_socket_exists', return_value=True):
-            b._populate_hosts_list()
-        self.assertIn("🔀 1", self._texts(b)["alpha"].text())
+        c = self._panel()
+        for panel in (a, b, c):
+            panel._populate_hosts_list()
+        b_items = self._texts(b)
+        b._hosts_list.setCurrentItem(b_items["zebra"])
+        # 新增但尚未保存的规则仍能在其他窗口显示准确的监听和目标。
+        spec = dict(_RULE, dest_port="8768")
+        host = self.hosts[0]
+
+        def exercise_open_dialog(dialog):
+            dialog._list.setCurrentItem(dialog._add_item(spec))
+            self.assertTrue(dialog._apply_selected(False))
+            for panel in (a, b, c):
+                alpha = self._texts(panel)["alpha"]
+                self.assertIn("🔀 1", alpha.text())
+                self.assertIn("8768", alpha.toolTip())
+                self.assertNotIn("🔀", self._texts(panel)["zebra"].text())
+            self.assertIs(self._texts(b)["alpha"], b_items["alpha"])
+            self.assertIs(b._hosts_list.currentItem(), b_items["zebra"])
+            self.assertTrue(dialog._apply_selected(True))
+            for panel in (a, b, c):
+                alpha = self._texts(panel)["alpha"]
+                self.assertNotIn("🔀", alpha.text())
+                self.assertEqual(alpha.toolTip(), "")
+
+        with mock.patch.object(ssh_control, 'master_socket_exists', return_value=True), \
+             mock.patch.object(ssh_control, 'is_supported', return_value=True), \
+             mock.patch.object(ssh_control, 'forward_statuses', return_value=['stopped']), \
+             mock.patch.object(ssh_control, 'forward_apply') as apply, \
+             mock.patch.object(a, '_ensure_master_interactive', return_value=True), \
+             mock.patch.object(a, '_run_blocking', side_effect=lambda fn, _label: fn()), \
+             mock.patch.object(a, '_save_forwards'), \
+             mock.patch.object(self.rew._ForwardsDialog, 'exec', new=exercise_open_dialog):
+            a._show_forwards_dialog(host)
+        self.assertEqual(apply.call_args_list, [mock.call(host, spec, cancel=False),
+                                                mock.call(host, spec, cancel=True)])
+
+    def test_automatic_start_and_master_drop_update_other_panel(self):
+        a = self._panel()
+        b = self._panel()
+        b._populate_hosts_list()
+        host = self.hosts[0]
+        with mock.patch.object(ssh_control, 'is_supported', return_value=True), \
+             mock.patch.object(ssh_control, 'master_socket_exists', return_value=True), \
+             mock.patch.object(ssh_control, 'forward_statuses', return_value=['stopped']), \
+             mock.patch.object(ssh_control, 'forward_apply'), \
+             mock.patch.object(ssh_control, 'master_exit', return_value=True), \
+             mock.patch.object(a, '_refresh_pre_qos_master'), \
+             mock.patch.object(a, '_load_forwards', return_value=[dict(_RULE, auto=True)]), \
+             mock.patch.object(a, '_run_blocking', side_effect=lambda fn, _label: fn()):
+            a._auto_apply_forwards(host)
+            self.assertIn("🔀 1", self._texts(b)["alpha"].text())
+            a._drop_master(host)
+            self.assertNotIn("🔀", self._texts(b)["alpha"].text())
 
     def test_forget_on_master_drop(self):
         panel = self._panel()
         panel._active_forwards["alpha"] = {self.rew._ForwardsDialog.rule_key(_RULE)}
         with mock.patch.object(ssh_control, 'master_exit', return_value=True), \
              mock.patch.object(ssh_control, 'master_socket_exists', return_value=True):
+            panel._populate_hosts_list()
             panel._drop_master(self.hosts[0])
         self.assertNotIn("alpha", panel._active_forwards)
         self.assertNotIn("🔀", self._texts(panel)["alpha"].text())

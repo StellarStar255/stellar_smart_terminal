@@ -19,6 +19,7 @@ import shutil
 import tempfile
 import threading
 import time
+import weakref
 from collections import deque
 from concurrent.futures import ThreadPoolExecutor
 from typing import Optional
@@ -89,6 +90,7 @@ _ROLE_LOADED = Qt.ItemDataRole.UserRole + 1
 # 目录展开请求的递增 generation：响应回来时 gen 失配 → 该节点其间被
 # 刷新/重新请求过，旧结果直接丢弃（防竞态串台）
 _ROLE_REQ_GEN = Qt.ItemDataRole.UserRole + 2
+_ROLE_HOST_BASE_LABEL = Qt.ItemDataRole.UserRole + 3
 
 # 传输进度条按字节推进时的刻度（千分比）：总字节已知时用它做 QProgressDialog
 # 的最大值，条子才会随字节平滑推进；否则刻度只能是「完成的任务数」，
@@ -436,6 +438,7 @@ class _MfaLoginDialog(QDialog):
 # 进程内共享的「已生效端口转发」登记：alias -> 规则 key 集合（见
 # RemoteExplorerPanel._active_forwards 的说明）
 _ACTIVE_FORWARDS: dict[str, set] = {}
+_FORWARD_PANELS = weakref.WeakSet()
 
 
 class _ForwardRuleDelegate(QStyledItemDelegate):
@@ -505,7 +508,8 @@ class _ForwardsDialog(QDialog):
     def __init__(self, parent=None, *, alias: str, rules: list,
                  apply_cb=None, cancel_cb=None, active: Optional[set] = None,
                  force_cb=None, groups=None, selected_group="", save_cb=None,
-                 status_cb=None, status_runner=None, probe_cb=None):
+                 status_cb=None, status_runner=None, probe_cb=None,
+                 active_changed=None):
         super().__init__(parent)
         self._alias = alias
         self._apply_cb = apply_cb          # (spec) -> None，抛异常表示失败
@@ -517,6 +521,7 @@ class _ForwardsDialog(QDialog):
         for rule in rules:
             legacy_keys.setdefault(self._legacy_rule_key(rule), self.rule_key(rule))
         self._active = {legacy_keys.get(key, key) for key in active or ()}
+        self._active_changed = active_changed
         self._status_cb = status_cb
         self._status_runner = status_runner or (lambda fn: fn())
         self._status_executor = None
@@ -817,6 +822,7 @@ class _ForwardsDialog(QDialog):
         if (len(states) != self._list.count() or any(
                 state not in ('running', 'stopped', 'unknown', 'invalid') for state in states)):
             raise RuntimeError(t('remote.fwd_status_invalid'))
+        before = self._active.copy()
         running_listeners = {self._listener_key(spec) for spec, state in zip(self.rules(), states)
                              if state == 'running'}
         for i, state in enumerate(states):
@@ -836,6 +842,11 @@ class _ForwardsDialog(QDialog):
             self._active.add(key) if state == 'running' else self._active.discard(key)
             self._refresh_item(item)
         self._sync_action_buttons()
+        self._publish_active_delta(before)
+
+    def _publish_active_delta(self, before):
+        if self._active_changed is not None and before != self._active:
+            self._active_changed(self._active - before, before - self._active)
 
     def _apply_status_error(self, error):
         self._apply_statuses(['unknown'] * self._list.count())
@@ -1108,6 +1119,7 @@ class _ForwardsDialog(QDialog):
         if self._operation_running or item is None:
             return False
         self._status_revision += 1
+        before = self._active.copy()
         self._operation_running = True
         self.setEnabled(False)
         try:
@@ -1133,6 +1145,7 @@ class _ForwardsDialog(QDialog):
             self._operation_running = False
             self.setEnabled(not self._batch_running)
             self._sync_action_buttons()
+            self._publish_active_delta(before)
 
     def _set_rule_state(self, item, state, error=''):
         key = self.rule_key(item.data(_ROLE_ENTRY))
@@ -1949,6 +1962,7 @@ class RemoteExplorerPanel(QWidget, explorer_common.TransferJobHost):
         self._setup_ui()
         self._apply_theme()
         self._reload_hosts()
+        _FORWARD_PANELS.add(self)
 
         # 内部跨线程信号 → UI 线程槽（QueuedConnection 自动应用）
         self._top_level_ready.connect(self._apply_top_level)
@@ -2387,16 +2401,10 @@ class RemoteExplorerPanel(QWidget, explorer_common.TransferJobHost):
                 target = f"{h.user + '@' if h.user else ''}{h.hostname}:{h.port}"
                 icon = "🔑" if h.alias in mfa_hosts else "🖥"
                 text = f"{icon}  {h.alias}    {target}"
-                active = self._active_forward_specs(h)
-                if active:
-                    # 🔀 N：这台主机上正挂着 N 条端口转发（与右键菜单的图标一致）
-                    text += f"    🔀 {len(active)}"
                 item = QListWidgetItem(text)
                 item.setData(_ROLE_ENTRY, h)
-                if active:
-                    item.setToolTip(
-                        t("remote.fwd_active_tip", n=len(active)) + "\n"
-                        + "\n".join(ssh_control.forward_label(s) for s in active))
+                item.setData(_ROLE_HOST_BASE_LABEL, text)
+                self._set_forward_badge(item, self._active_forward_specs(h))
                 # 允许 Enter/F2 原地重命名（编辑框由 _HostAliasDelegate 只显示 alias）
                 item.setFlags(item.flags() | Qt.ItemFlag.ItemIsEditable)
                 self._hosts_list.addItem(item)
@@ -2414,20 +2422,55 @@ class RemoteExplorerPanel(QWidget, explorer_common.TransferJobHost):
         if not keys:
             return []
         if not ssh_control.master_socket_exists(host):
-            self._active_forwards.pop(host.alias, None)
+            self._forget_forwards(host.alias)
             return []
         rule_key = _ForwardsDialog.rule_key
         specs = [s for s in self._load_forwards(host.alias) if rule_key(s) in keys]
-        # 规则文件里已删但登记还在（不该发生）：按 key 兜底显示
+        # 对话框还没关闭时，新规则可能尚未写盘；完整身份里已有全部端点。
         known = {rule_key(s) for s in specs}
-        specs += [{"type": k.split("|")[0], "bind_host": k.split("|")[1],
-                   "bind_port": k.split("|")[2]} for k in keys if k not in known]
+        for key in sorted(keys - known):
+            kind, sep, endpoints = key.partition('|')
+            fields = endpoints.split(':')
+            if not sep or kind not in ('-L', '-R', '-D') or len(fields) != (2 if kind == '-D' else 4):
+                continue
+            spec = dict(type=kind[1:], bind_host=fields[0], bind_port=fields[1])
+            if kind != '-D':
+                spec.update(dest_host=fields[2], dest_port=fields[3])
+            specs.append(spec)
         return specs
+
+    @staticmethod
+    def _set_forward_badge(item, specs):
+        base = item.data(_ROLE_HOST_BASE_LABEL)
+        item.setText(f"{base}    🔀 {len(specs)}" if specs else base)
+        item.setToolTip(t("remote.fwd_active_tip", n=len(specs)) + "\n"
+                        + "\n".join(ssh_control.forward_label(spec) for spec in specs)
+                        if specs else "")
+
+    def _update_active_forwards(self, host, added, removed=()):
+        before = self._active_forwards.get(host.alias, set())
+        after = (before - set(removed)).union(added)
+        if before == after:
+            return
+        if after:
+            self._active_forwards[host.alias] = after
+        else:
+            self._active_forwards.pop(host.alias, None)
+        self._broadcast_forward_badge(host.alias, self._active_forward_specs(host))
+
+    def _broadcast_forward_badge(self, alias, specs):
+        for panel in tuple(_FORWARD_PANELS):
+            if sip.isdeleted(panel) or panel._active_forwards is not self._active_forwards:
+                continue
+            for index in range(panel._hosts_list.count()):
+                item = panel._hosts_list.item(index)
+                if item.data(_ROLE_ENTRY).alias == alias:
+                    panel._set_forward_badge(item, specs)
 
     def _forget_forwards(self, alias: str):
         """主连接被关掉 → 它上面的转发全没了，清登记并刷新列表标记。"""
         if self._active_forwards.pop(alias, None) is not None:
-            self._populate_hosts_list()
+            self._broadcast_forward_badge(alias, [])
 
     def _on_add_host_clicked(self):
         dlg = _AddHostDialog(self, with_alias=True)
@@ -3072,7 +3115,7 @@ class RemoteExplorerPanel(QWidget, explorer_common.TransferJobHost):
                         host.alias, e)
             return False
         # 老主连接上挂的转发随它一起没了：清登记，让用户/自动挂载重新挂
-        self._active_forwards.pop(host.alias, None)
+        self._forget_forwards(host.alias)
         return True
 
     def _show_forwards_dialog(self, host: HostConfig):
@@ -3102,6 +3145,7 @@ class RemoteExplorerPanel(QWidget, explorer_common.TransferJobHost):
                 host, spec, mfa=self._is_mfa_host(host.alias),
                 password=self.get_cached_password(host.alias) or "")),
             active=active,
+            active_changed=lambda added, removed: self._update_active_forwards(host, added, removed),
             status_cb=lambda specs: ssh_control.forward_statuses(host, specs),
             status_runner=lambda fn: self._run_blocking(fn, t('remote.fwd_checking')),
             probe_cb=lambda spec, target: self._run_blocking(
@@ -3110,8 +3154,6 @@ class RemoteExplorerPanel(QWidget, explorer_common.TransferJobHost):
         )
         dlg.exec()
         self._save_forwards(host.alias, dlg.rules(), dlg.groups(), dlg.selected_group())
-        self._active_forwards[host.alias] = dlg.active_keys()
-        self._populate_hosts_list()   # 🔀 标记立刻反映到列表上
 
     def _auto_apply_forwards(self, host: HostConfig):
         """连上之后自动挂勾了「自动」的转发；失败只提示，不影响连接。"""
@@ -3120,22 +3162,22 @@ class RemoteExplorerPanel(QWidget, explorer_common.TransferJobHost):
         if not ssh_control.master_socket_exists(host):
             # 主连接不在 → 之前登记的转发（上次会话留下的）必然已失效，
             # 不能拿它当「已挂」跳过自动挂载
-            self._active_forwards.pop(host.alias, None)
+            self._forget_forwards(host.alias)
 
         def _pending():
             applied = set(self._active_forwards.get(host.alias, ()))
-            return applied, [
+            return [
                 spec for spec in self._load_forwards(host.alias)
                 if spec.get("auto") and _ForwardsDialog.rule_key(spec) not in applied]
 
-        applied, pending = _pending()
+        pending = _pending()
         if not pending:
             return
         if ssh_control.master_socket_exists(host):
             # 老主连接换新的（非 MFA）——只在真有转发要挂时才做：重建会掐断
             # 搭在主连接上的终端标签，没转发可挂就别碰它
             self._refresh_pre_qos_master(host)
-            applied, pending = _pending()   # 重建会清登记，原先已挂的也要重挂
+            pending = _pending()   # 重建会清登记，原先已挂的也要重挂
         # 普通（非 MFA）主机连上时还没有主连接：用刚才连接用的密钥/密码悄悄
         # 建一条，建不起来就提示、不影响这次连接
         if (not ssh_control.master_socket_exists(host)
@@ -3166,12 +3208,10 @@ class RemoteExplorerPanel(QWidget, explorer_common.TransferJobHost):
             return ok, failed
 
         ok, failed = self._run_blocking(_apply_all, t("remote.fwd_applying"))
-        applied.update(ok)
+        self._update_active_forwards(host, ok)
         for spec, err in failed:
             self.error_occurred.emit(t(
                 "remote.fwd_failed", rule=ssh_control.forward_label(spec), error=err))
-        self._active_forwards[host.alias] = applied
-        self._populate_hosts_list()   # 🔀 标记立刻反映到列表上
 
     # ---- 主连接空闲保持 ----
 
