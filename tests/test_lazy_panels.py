@@ -160,8 +160,10 @@ class TestLazyPanels(unittest.TestCase):
             self.assertIs(panel._session, session)
             self.assertEqual(panel._current_path, '/work/repo')
             toggle = win.shortcut_actions['toggle_remote']
-            self.assertEqual(toggle.shortcut(), QKeySequence('Ctrl+Alt+3'))
-            press(panel._tree, Qt.KeyboardModifier.ControlModifier | Qt.KeyboardModifier.AltModifier)
+            self.assertEqual(toggle.shortcut(), QKeySequence('Ctrl+Shift+3'))
+            self.assertIn(toggle.shortcut().toString(QKeySequence.SequenceFormat.NativeText),
+                          win.remote_toggle_btn.toolTip())
+            press(panel._tree, Qt.KeyboardModifier.ControlModifier | Qt.KeyboardModifier.ShiftModifier)
             self.assertFalse(win.remote_panel_visible)
             press(win.terminal)
             self.assertTrue(win.remote_panel_visible)

@@ -1574,7 +1574,7 @@ class MainWindow(ThemeMixin, ToolbarMixin, ConfigMixin, ExplorerPanelMixin,
         ("toggle_explorer", "Ctrl+1",         "shortcuts.act.toggle_explorer", "_toggle_explorer_panel"),
         ("toggle_git",      "Ctrl+2",         "shortcuts.act.toggle_git",      "_toggle_git_panel"),
         ("switch_remote_view", "Ctrl+3",      "shortcuts.act.switch_remote_view", "_switch_remote_view"),
-        ("toggle_remote",   "Ctrl+Alt+3",     "shortcuts.act.toggle_remote",   "_toggle_remote_panel"),
+        ("toggle_remote",   "Ctrl+Shift+3",   "shortcuts.act.toggle_remote",   "_toggle_remote_panel"),
         # Ctrl+R 在 macOS 上由 Qt 自动映射为 Cmd+R，等价于资源管理器头部的 ↻ 刷新按钮
         ("refresh",         "Ctrl+R",         "shortcuts.act.refresh",         "_refresh_explorer_panel"),
         ("zoom_in",         "Ctrl+=",         "shortcuts.act.zoom_in",         "_global_zoom_in"),
