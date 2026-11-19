@@ -6,7 +6,7 @@ English | [简体中文](README.zh-CN.md)
 
 A PyQt6-based smart terminal with file explorer, Git GUI, LLM proxy, and VS Code extension browser.
 
-Latest release: [v1.35.55](docs/releases/v1.35.55.md) adds a single shortcut to open Remote and switch between the remote file tree and host list.
+Latest release: [v1.35.56](docs/releases/v1.35.56.md) synchronizes port forwarding badges across windows and moves the Remote panel shortcut to Shift+3 with the platform modifier.
 
 <img src="assets/smart_terminal.png" width="300" />
 
