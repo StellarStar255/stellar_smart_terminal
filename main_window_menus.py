@@ -157,6 +157,7 @@ class MenusMixin:
         menu = menubar.addMenu(t("menu.view"))
         self._shortcut_menu_action(menu, "toggle_explorer", "shortcuts.act.toggle_explorer")
         self._shortcut_menu_action(menu, "toggle_git", "shortcuts.act.toggle_git")
+        self._shortcut_menu_action(menu, "switch_remote_view", "shortcuts.act.switch_remote_view")
         self._shortcut_menu_action(menu, "toggle_remote", "shortcuts.act.toggle_remote")
         self._own_action(menu, "menu.show_log", self._toggle_log_panel)
         nav = self._own_action(menu, "toolbar.window_nav",

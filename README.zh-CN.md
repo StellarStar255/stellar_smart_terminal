@@ -6,7 +6,7 @@
 
 基于 PyQt6 的智能终端，集成文件管理、Git GUI、LLM 代理和 VS Code 扩展浏览。
 
-最新版本：[v1.35.54](docs/releases/v1.35.54.md)，让全局和本地快捷命令重命名时的鼠标指针和文字光标更清楚。
+最新版本：[v1.35.55](docs/releases/v1.35.55.md)，用同一个快捷键打开 Remote，并在远程文件树和连接列表之间来回切换。
 
 A PyQt6-based smart terminal with file explorer, Git GUI, LLM proxy, and VS Code extension browser.
 

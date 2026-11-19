@@ -2346,6 +2346,7 @@ class RemoteExplorerPanel(QWidget, explorer_common.TransferJobHost):
         self._title_label.setText(t("remote.title"))
         self._reload_btn.setToolTip(t("remote.refresh_hosts"))
         self._add_btn.setToolTip(t("remote.add_host"))
+        self._sync_view_tooltip()
         self._disconnect_btn.setToolTip(t("remote.disconnect"))
         self._up_btn.setToolTip(t("remote.up"))
         self._home_btn.setToolTip(t("remote.go_home"))
@@ -2482,6 +2483,26 @@ class RemoteExplorerPanel(QWidget, explorer_common.TransferJobHost):
             self._show_tree_view()
             return
         self._connect_to(host)
+
+    def set_view_action(self, action):
+        self._view_action = action
+        action.changed.connect(self._sync_view_tooltip)
+        self._sync_view_tooltip()
+
+    def _sync_view_tooltip(self):
+        action = getattr(self, '_view_action', None)
+        shortcut = action.shortcut().toString(QKeySequence.SequenceFormat.NativeText) if action else ""
+        label = t("shortcuts.act.switch_remote_view")
+        self._hosts_btn.setToolTip(f"{label} ({shortcut})" if shortcut else label)
+
+    def focus_current_view(self):
+        if self._stack.currentWidget() is self._hosts_page:
+            view = self._hosts_list
+        elif self._search_results.isVisibleTo(self._tree_page):
+            view = self._search_results
+        else:
+            view = self._tree
+        view.setFocus(Qt.FocusReason.ShortcutFocusReason)
 
     def _toggle_hosts_view(self):
         """连接状态下，在「文件树」与「主机列表」间切换。

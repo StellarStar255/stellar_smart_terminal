@@ -1573,7 +1573,8 @@ class MainWindow(ThemeMixin, ToolbarMixin, ConfigMixin, ExplorerPanelMixin,
         ("close_split",     "Ctrl+Shift+X",   "shortcuts.act.close_split",     "_close_current_split"),
         ("toggle_explorer", "Ctrl+1",         "shortcuts.act.toggle_explorer", "_toggle_explorer_panel"),
         ("toggle_git",      "Ctrl+2",         "shortcuts.act.toggle_git",      "_toggle_git_panel"),
-        ("toggle_remote",   "Ctrl+3",         "shortcuts.act.toggle_remote",   "_toggle_remote_panel"),
+        ("switch_remote_view", "Ctrl+3",      "shortcuts.act.switch_remote_view", "_switch_remote_view"),
+        ("toggle_remote",   "Ctrl+Alt+3",     "shortcuts.act.toggle_remote",   "_toggle_remote_panel"),
         # Ctrl+R 在 macOS 上由 Qt 自动映射为 Cmd+R，等价于资源管理器头部的 ↻ 刷新按钮
         ("refresh",         "Ctrl+R",         "shortcuts.act.refresh",         "_refresh_explorer_panel"),
         ("zoom_in",         "Ctrl+=",         "shortcuts.act.zoom_in",         "_global_zoom_in"),
@@ -1599,6 +1600,9 @@ class MainWindow(ThemeMixin, ToolbarMixin, ConfigMixin, ExplorerPanelMixin,
             action.triggered.connect(getattr(self, slot_name))
             self.addAction(action)
             self.shortcut_actions[action_id] = action
+
+        self.shortcut_actions["toggle_remote"].changed.connect(self._sync_remote_toggle_tooltip)
+        self._sync_remote_toggle_tooltip()
 
         # 放大只保留 Cmd+=（不再注册 Cmd 加号别名），把 Cmd 加号这个物理键让给分屏。
         # 分屏的实际触发在终端 keyPressEvent 里（terminal_widget.event() 的
@@ -5000,7 +5004,7 @@ class MainWindow(ThemeMixin, ToolbarMixin, ConfigMixin, ExplorerPanelMixin,
             self.git_toggle_btn.setText(t("toolbar.git"))
         if hasattr(self, 'remote_toggle_btn'):
             self.remote_toggle_btn.setText(t("remote.title"))
-            self.remote_toggle_btn.setToolTip(t("remote.title") + "  (⌘3)")
+            self._sync_remote_toggle_tooltip()
         if hasattr(self, 'vscode_open_btn'):
             self.vscode_open_btn.setText(t("toolbar.vscode"))
             self.vscode_open_btn.setToolTip(t("toolbar.vscode_tooltip"))

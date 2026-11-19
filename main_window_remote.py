@@ -9,6 +9,7 @@ import posixpath
 from concurrent.futures import ThreadPoolExecutor
 from PyQt6 import sip
 from PyQt6.QtCore import QTimer, Qt, QObject, pyqtSignal
+from PyQt6.QtGui import QKeySequence
 from i18n import t
 from app_logging import get_logger
 # RemoteExplorerPanel 在 _ensure_remote_panel 里按需 import：它的 import 链
@@ -130,7 +131,23 @@ class RemotePanelMixin:
         panel.open_terminal_at.connect(self._open_ssh_terminal_tab)
         # 右键 "在新窗口中连接" → 新开一个独立窗口并 SSH 进该主机
         panel.open_in_new_window.connect(self._open_ssh_in_new_window)
+        action = self.shortcut_actions["switch_remote_view"]
+        panel.set_view_action(action)
         return panel
+
+    def _switch_remote_view(self):
+        """从键盘进入 Remote，或在当前文件树与主机列表间切换。"""
+        if not self.remote_panel_visible:
+            self._toggle_remote_panel()
+        else:
+            self.remote_panel._toggle_hosts_view()
+        self.remote_panel.focus_current_view()
+
+    def _sync_remote_toggle_tooltip(self):
+        action = self.shortcut_actions["toggle_remote"]
+        shortcut = action.shortcut().toString(QKeySequence.SequenceFormat.NativeText)
+        label = t("shortcuts.act.toggle_remote")
+        self.remote_toggle_btn.setToolTip(f"{label} ({shortcut})" if shortcut else label)
 
     def _toggle_remote_panel(self):
         """切换 Remote Explorer 面板显示（与 Explorer / Git 互斥）"""

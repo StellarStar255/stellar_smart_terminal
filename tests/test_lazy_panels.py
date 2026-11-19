@@ -118,6 +118,62 @@ class TestLazyPanels(unittest.TestCase):
         self.assertEqual(
             win.remote_panel.receivers(win.remote_panel.open_terminal_at), 1)
 
+    def test_remote_view_shortcut_works_from_terminal_and_preserves_session(self):
+        from unittest.mock import Mock
+        from PyQt6.QtCore import Qt
+        from PyQt6.QtGui import QKeySequence
+        from PyQt6.QtTest import QTest
+        from PyQt6.QtWidgets import QTreeWidgetItem
+
+        win = self._new_window()
+        win.show()
+        win.activateWindow()
+        self.app.processEvents()
+        action = win.shortcut_actions['switch_remote_view']
+        self.assertEqual(action.shortcut(), QKeySequence('Ctrl+3'))
+        self.assertIn(action, win.menuBar().actions()[1].menu().actions())
+
+        def press(widget, modifiers=Qt.KeyboardModifier.ControlModifier):
+            widget.setFocus()
+            QTest.keyClick(widget, Qt.Key.Key_3, modifiers)
+            self.app.processEvents()
+
+        press(win.terminal)
+        self.assertTrue(win.remote_panel_visible)
+        panel = win.remote_panel
+        self.assertIs(panel._stack.currentWidget(), panel._hosts_page)
+        press(panel._hosts_list)
+        self.assertIs(panel._stack.currentWidget(), panel._hosts_page)
+        session = Mock()
+        panel._session = session
+        try:
+            panel._show_tree_view()
+            panel._current_path = '/work/repo'
+            item = QTreeWidgetItem(panel._tree, ['example.py'])
+            panel._tree.setCurrentItem(item)
+            press(win.terminal)
+            self.assertIs(panel._stack.currentWidget(), panel._hosts_page)
+            self.assertTrue(panel._hosts_list.hasFocus())
+            press(panel._hosts_list)
+            self.assertIs(panel._stack.currentWidget(), panel._tree_page)
+            self.assertIs(panel._tree.currentItem(), item)
+            self.assertIs(panel._session, session)
+            self.assertEqual(panel._current_path, '/work/repo')
+            toggle = win.shortcut_actions['toggle_remote']
+            self.assertEqual(toggle.shortcut(), QKeySequence('Ctrl+Alt+3'))
+            press(panel._tree, Qt.KeyboardModifier.ControlModifier | Qt.KeyboardModifier.AltModifier)
+            self.assertFalse(win.remote_panel_visible)
+            press(win.terminal)
+            self.assertTrue(win.remote_panel_visible)
+            self.assertIs(panel._stack.currentWidget(), panel._tree_page)
+            self.assertIs(panel._session, session)
+            action.setShortcut(QKeySequence('Ctrl+Alt+4'))
+            self.assertIn(action.shortcut().toString(QKeySequence.SequenceFormat.NativeText),
+                          panel._hosts_btn.toolTip())
+            session.assert_not_called()
+        finally:
+            panel._session = None
+
     def test_ensure_is_idempotent(self):
         win = self._new_window()
         a = win._ensure_git_panel()
