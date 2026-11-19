@@ -6,7 +6,7 @@ English | [简体中文](README.zh-CN.md)
 
 A PyQt6-based smart terminal with file explorer, Git GUI, LLM proxy, and VS Code extension browser.
 
-Latest release: [v1.35.53](docs/releases/v1.35.53.md) lets you save alternative port forwarding rules for the same listener and edit rules from the context menu.
+Latest release: [v1.35.54](docs/releases/v1.35.54.md) makes the pointer and text caret easier to see when renaming quick commands.
 
 <img src="assets/smart_terminal.png" width="300" />
 

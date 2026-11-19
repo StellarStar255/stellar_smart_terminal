@@ -11,11 +11,11 @@ from pathlib import Path
 from PyQt6.QtWidgets import (
     QApplication, QAbstractItemView, QDialog, QDialogButtonBox, QFileDialog,
     QFormLayout, QGridLayout, QHBoxLayout, QLabel, QLineEdit, QListWidget,
-    QListWidgetItem, QMessageBox, QPlainTextEdit, QPushButton, QStyledItemDelegate, QTreeWidget,
-    QTreeWidgetItem, QVBoxLayout, QWidget
+    QListWidgetItem, QMessageBox, QPlainTextEdit, QProxyStyle, QPushButton, QStyle,
+    QStyledItemDelegate, QTreeWidget, QTreeWidgetItem, QVBoxLayout, QWidget
 )
-from PyQt6.QtCore import Qt, QTimer, pyqtSignal
-from PyQt6.QtGui import QFont, QKeySequence, QTextCursor
+from PyQt6.QtCore import QLineF, Qt, QTimer, pyqtSignal
+from PyQt6.QtGui import QColor, QCursor, QFont, QKeySequence, QPainter, QPen, QPixmap, QTextCursor
 
 from i18n import t
 import themes
@@ -156,6 +156,28 @@ class _IndentingPlainTextEdit(QPlainTextEdit):
         self._reselect(first, last)
 
 
+class _PresetNameStyle(QProxyStyle):
+    def pixelMetric(self, metric, option=None, widget=None):
+        value = super().pixelMetric(metric, option, widget)
+        if metric == QStyle.PixelMetric.PM_TextCursorWidth:
+            return max(2, value)
+        return value
+
+
+def _preset_name_pointer():
+    """双描边工字指针在输入背景和选区上都有对比度。"""
+    pixmap = QPixmap(32, 32)
+    pixmap.setDevicePixelRatio(2)
+    pixmap.fill(Qt.GlobalColor.transparent)
+    strokes = [QLineF(8, 2, 8, 14), QLineF(4, 2, 12, 2), QLineF(4, 14, 12, 14)]
+    painter = QPainter(pixmap)
+    for color, width in (("#202020", 3), ("#ffffff", 1)):
+        painter.setPen(QPen(QColor(color), width))
+        painter.drawLines(strokes)
+    painter.end()
+    return QCursor(pixmap, 8, 8)
+
+
 class _PresetNameDelegate(QStyledItemDelegate):
     def sizeHint(self, option, index):
         size = super().sizeHint(option, index)
@@ -255,6 +277,10 @@ class PresetDialog(QDialog):
         name_layout = QHBoxLayout()
         name_layout.addWidget(QLabel(t("preset.name_label")))
         self.name_edit = QLineEdit()
+        name_style = _PresetNameStyle()
+        name_style.setParent(self.name_edit)
+        self.name_edit.setStyle(name_style)
+        self.name_edit.setCursor(_preset_name_pointer())
         self.name_edit.textChanged.connect(self._on_name_changed)
         name_layout.addWidget(self.name_edit)
         right_layout.addLayout(name_layout)
