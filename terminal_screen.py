@@ -1,7 +1,7 @@
 """
 终端屏幕层（从 terminal_widget.py 拆出，行为不变）
 
-pyte 的扩展与纯函数 reflow 逻辑，不含任何 Qt 依赖：
+pyte 的扩展与纯函数 reflow 逻辑：
 - CompatibleHistoryScreen：pyte.HistoryScreen 兼容层 + 备用屏幕(1049/47/1047)
   + DECCKM/Bracketed Paste 追踪 + REP + resize 完整 reflow + 软换行追踪
 - reflow_rows / map_reflow_position / _cell_is_blank：按新宽度重排的纯函数
@@ -14,6 +14,8 @@ from collections import namedtuple
 
 import pyte
 from pyte.screens import Char, StaticDefaultDict, wcwidth
+
+from terminal_graphics import TerminalGraphics
 
 # 只给 OSC 8 覆盖的单元格附加地址。滚动和重排沿用原有的字符对象。
 LinkedChar = namedtuple("LinkedChar", (*Char._fields, "hyperlink"))
@@ -340,6 +342,7 @@ class CompatibleHistoryScreen(pyte.HistoryScreen):
     _ALT_SCREEN_MODES = frozenset({47, 1047, 1049})
 
     def __init__(self, *args, **kwargs):
+        self.graphics = TerminalGraphics()
         super().__init__(*args, **kwargs)
         # 累计推入历史的总行数（用于滚动位置稳定化）
         self._total_history_lines = 0
@@ -459,6 +462,7 @@ class CompatibleHistoryScreen(pyte.HistoryScreen):
 
     def _enter_alt_screen(self, save_cursor=True):
         """进入备用屏幕：保存主缓冲区，创建空的备用缓冲区"""
+        self.graphics.clear()
         import copy
         # 保存主屏幕的缓冲区和光标。
         # pyte 的 Char 是 immutable namedtuple，行级浅拷贝即可完全隔离，
@@ -491,6 +495,7 @@ class CompatibleHistoryScreen(pyte.HistoryScreen):
 
     def _leave_alt_screen(self, restore_cursor=True):
         """退出备用屏幕：恢复主缓冲区"""
+        self.graphics.clear()
         if self._saved_main_buffer is not None:
             # 备用屏幕行对象连同其软换行标记一起废弃
             self.buffer = self._saved_main_buffer
@@ -526,6 +531,7 @@ class CompatibleHistoryScreen(pyte.HistoryScreen):
         new_columns = columns if columns is not None else self.columns
         if new_lines == self.lines and new_columns == self.columns:
             return
+        self.graphics.clear_placements()
 
         if self._in_alt_screen:
             if self._saved_main_buffer is not None:
@@ -704,6 +710,7 @@ class CompatibleHistoryScreen(pyte.HistoryScreen):
 
     def reset(self):
         # reset() 可能在 __init__ 中被 super().__init__() 调用
+        self.graphics.clear()
         self.hyperlink = ''
         self._decckm = False
         self._bracketed_paste = False

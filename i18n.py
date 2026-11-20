@@ -1160,7 +1160,7 @@ TRANSLATIONS = {
     "status.process_exited": {"zh": "进程已退出 - 会话已保存: {session_id}", "en": "Process exited - Session saved: {session_id}", "fr": "Processus terminé - Session enregistrée : {session_id}"},
     "status.pasted_video": {"zh": "已粘贴视频: {path}", "en": "Pasted video: {path}", "fr": "Vidéo collée : {path}"},
     "status.pasted_audio": {"zh": "已粘贴音频: {path}", "en": "Pasted audio: {path}", "fr": "Audio collé : {path}"},
-    "status.pasted_image": {"zh": "已粘贴图片: {path}", "en": "Pasted image: {path}", "fr": "Image collée : {path}"},
+    "status.pasted_image": {"zh": "已粘贴图片路径: {path}", "en": "Pasted image path: {path}", "fr": "Chemin de l’image collé : {path}"},
     "status.remote_paste_uploading": {"zh": "正在把图片上传到 {host}…", "en": "Uploading image to {host}…", "fr": "Téléversement de l’image vers {host}…"},
     "remote_paste.connect_title": {"zh": "上传到远端", "en": "Upload to remote", "fr": "Téléverser vers l’hôte distant"},
     "remote_paste.connect_msg": {"zh": "终端正连着 {host}，但 Remote 面板没有连到这台机器，图片没法上传。\n\n现在连接 {host} 并上传这张图片？", "en": "This terminal is connected to {host}, but the Remote panel is not, so the image cannot be uploaded.\n\nConnect to {host} now and upload the image?", "fr": "Ce terminal est connecté à {host}, mais le panneau Distant ne l’est pas ; l’image ne peut donc pas être téléversée.\n\nSe connecter à {host} et téléverser l’image maintenant ?"},

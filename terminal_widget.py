@@ -523,7 +523,9 @@ class TerminalWidget(TerminalInputMixin, TerminalMouseMixin,
     # 把 \x1b[>4;2m 当成 SGR 4;2、把 \x1b[>c 当成主 DA 查询。
     _RE_TERMINAL_QUERY = re.compile(r'\x1b\[>[\d;]*[cmuq]')
     _RE_CURSOR_STYLE = re.compile(r'\x1b\[\d* q')  # DECSCUSR: CSI Ps SP q
-    _RE_OSC_HYPERLINK = re.compile(r'\x1b\]8;[^;\x07\x1b]*;([^\x07\x1b]*)(?:\x07|\x1b\\)')
+    _RE_OUTPUT_EVENT = re.compile(
+        r'\x1b\]8;[^;\x07\x1b]*;(?P<link>[^\x07\x1b]*)(?:\x07|\x1b\\)'
+        r'|\x1b_G(?P<graphics>[^\x07\x1b]*)(?:\x07|\x1b\\)')
     _RE_OSC_TITLE = re.compile(r'\x1b\][012];[^\x07\x1b]*(?:\x07|\x1b\\)')
     # 捕获所有其他未处理的 OSC 序列 (OSC 7=CWD, 133=shell integration 等)
     # 防止 Linux 上 shell 发送的 OSC 序列中的数字泄漏到显示缓冲区
@@ -538,7 +540,7 @@ class TerminalWidget(TerminalInputMixin, TerminalMouseMixin,
     # PM (Privacy Message): \x1b^ ... ST
     # ST = \x07 或 \x1b\\
     _RE_DCS = re.compile(r'\x1bP[^\x1b]*(?:\x1b\x5c|\x07)')
-    _RE_APC = re.compile(r'\x1b_[^\x1b]*(?:\x1b\x5c|\x07)')
+    _RE_APC = re.compile(r'\x1b_(?!G)[^\x1b]*(?:\x1b\x5c|\x07)')
     _RE_PM = re.compile(r'\x1b\^[^\x1b]*(?:\x1b\x5c|\x07)')
 
     # 终端内容边距（像素），左右各 PADDING，上下各 PADDING
@@ -1530,10 +1532,12 @@ class TerminalWidget(TerminalInputMixin, TerminalMouseMixin,
         if '\uFFFD' in text:
             text = text.replace('\uFFFD', '')  # � (替换字符)
 
-        # OSC 8 只传给屏幕，不把目标地址写进终端日志或输出提醒。
-        parts = self._RE_OSC_HYPERLINK.split(text) if '\x1b]8;' in text else [text]
+        # Apply links and images at their original cursor positions. Only text
+        # reaches pyte, output alerts and the session recording.
+        parts = (self._RE_OUTPUT_EVENT.split(text)
+                 if '\x1b]8;' in text or '\x1b_G' in text else [text])
         if len(parts) > 1:
-            text = ''.join(parts[::2])
+            text = ''.join(parts[::3])
         # 此时 OSC 的 BEL 终止符已剥掉，只把真正响铃当成需要交互。
         if '\x07' in text:
             self.interaction_requested.emit()
@@ -1575,10 +1579,12 @@ class TerminalWidget(TerminalInputMixin, TerminalMouseMixin,
                 if cancelled.is_set():
                     return
                 old_total = screen._total_history_lines
-                for target, piece in current:
-                    if target is not None:
-                        screen.hyperlink = target
-                    if piece:
+                for kind, piece in current:
+                    if kind == 'link':
+                        screen.hyperlink = piece
+                    elif kind == 'graphics':
+                        screen.graphics.handle(piece, screen.cursor.x, screen.cursor.y)
+                    else:
                         self._feed_locked(piece)
                 lines_added += screen._total_history_lines - old_total
                 current = next(batches, None)
@@ -1626,9 +1632,10 @@ class TerminalWidget(TerminalInputMixin, TerminalMouseMixin,
         step = self._FEED_SLICE_CHARS
         batch = []
         remaining = step
-        for index in range(0, len(parts), 2):
+        for index in range(0, len(parts), 3):
             if index:
-                batch.append((parts[index - 1], ''))
+                link, graphics = parts[index - 2:index]
+                batch.append(('link', link) if graphics is None else ('graphics', graphics))
                 remaining -= 1
             chunk = parts[index]
             start = 0

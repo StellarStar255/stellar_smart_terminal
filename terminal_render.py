@@ -17,7 +17,7 @@ TerminalWidget 的绘制/缓存/字符度量方法集合，纯方法搬迁：
 
 import unicodedata
 
-from PyQt6.QtCore import QTimer
+from PyQt6.QtCore import QRect, QTimer
 from PyQt6.QtGui import (
     QColor, QFontMetrics, QFontMetricsF, QPainter, QPaintEvent, QPixmap
 )
@@ -201,6 +201,21 @@ class TerminalRenderMixin:
             painter.drawPixmap(0, 0, self._cache_pixmap)
         painter.setCompositionMode(QPainter.CompositionMode.CompositionMode_SourceOver)
 
+    def _draw_terminal_graphics(self, painter):
+        graphics = self.screen.graphics
+        if not graphics.placements:
+            return
+        painter.save()
+        x, width = self._col_tile(0, self.screen.columns)
+        y, height = self._row_tile(0, self.screen.lines)
+        painter.setClipRect(QRect(x, y, width, height))
+        painter.setRenderHint(QPainter.RenderHint.SmoothPixmapTransform)
+        for image_id, placement in graphics.placements.items():
+            x, width = self._col_tile(placement.column, placement.columns)
+            y, height = self._row_tile(placement.row, placement.rows)
+            painter.drawImage(QRect(x, y, width, height), graphics.images[image_id])
+        painter.restore()
+
     def _paint_screen(self, event: QPaintEvent):
         """绘制终端 - 使用双缓冲提高性能"""
         # 防止在 widget 尺寸为 0 时绘制（如拖拽分离 tab 过渡期间），避免 segfault
@@ -242,6 +257,9 @@ class TerminalRenderMixin:
                 self._rebuild_cache()
 
         self._draw_cached_frame(painter)
+
+        if self.scroll_offset == 0:
+            self._draw_terminal_graphics(painter)
 
         # 滚动指示器（右上角）。画在缓存外：回看滚动时缓存可整体平移复用，
         # 不必为了指示器重绘顶部行

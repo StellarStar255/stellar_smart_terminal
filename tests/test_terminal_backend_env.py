@@ -63,6 +63,11 @@ class TestChildEnvInjection(unittest.TestCase):
         text = self._spawn_env_output()
         self.assertIn('CLAUDE_CODE_DISABLE_ALTERNATE_SCREEN=1', text)
 
+    def test_child_advertises_kitty_graphics_without_changing_terminfo(self):
+        text = self._spawn_env_output()
+        self.assertIn('TERM_PROGRAM=StellarSmartTerminal-kitty', text.splitlines())
+        self.assertIn('TERM=xterm-256color', text.splitlines())
+
     def test_external_value_wins(self):
         # 用户在外部环境显式设置的值优先（setdefault 不覆盖）
         old = os.environ.get('CLAUDE_CODE_DISABLE_ALTERNATE_SCREEN')
