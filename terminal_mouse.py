@@ -22,12 +22,42 @@ import sys
 import time
 from difflib import SequenceMatcher
 
-from PyQt6.QtCore import QPoint, QUrl, Qt
+from PyQt6.QtCore import QPoint, QSize, QUrl, Qt
 from PyQt6.QtGui import (
     QAction, QActionGroup, QDesktopServices, QDragEnterEvent, QDropEvent, QKeySequence, QMouseEvent
 )
-from PyQt6.QtWidgets import QApplication, QMenu
+from PyQt6.QtWidgets import (
+    QAbstractItemView, QApplication, QListWidget, QListWidgetItem, QMenu, QWidgetAction,
+)
 from i18n import t
+
+
+class _QuickCommandList(QListWidget):
+    def keyPressEvent(self, event):
+        # Let the enclosing menu handle submenu navigation and dismissal.
+        if event.key() in (Qt.Key.Key_Left, Qt.Key.Key_Right, Qt.Key.Key_Escape):
+            event.ignore()
+            return
+        if event.key() in (Qt.Key.Key_Return, Qt.Key.Key_Enter):
+            item = self.currentItem()
+            if item is not None:
+                self.itemActivated.emit(item)
+            event.accept()
+            return
+        super().keyPressEvent(event)
+
+
+class _QuickCommandMenu(QMenu):
+    command_list = None
+
+    def keyPressEvent(self, event):
+        if self.command_list is not None and event.key() not in (
+            Qt.Key.Key_Left, Qt.Key.Key_Right, Qt.Key.Key_Escape,
+        ):
+            # A submenu opened by hovering may receive keys before its list has focus.
+            self.command_list.keyPressEvent(event)
+            return
+        super().keyPressEvent(event)
 
 
 def _history_gesture(method):
@@ -686,50 +716,41 @@ class TerminalMouseMixin:
         if self.quick_commands_provider:
             presets = self.quick_commands_provider()
             if presets:
-                quick_cmd_menu = QMenu(t("ctx.quick_commands"), menu)
+                quick_cmd_menu = _QuickCommandMenu(t("ctx.quick_commands"), menu)
                 quick_cmd_menu.setStyleSheet(menu.styleSheet())
 
-                for preset in presets:
-                    preset_name = preset.get('name', t("common.unnamed"))
-                    commands = preset.get('commands', [])
-                    if commands:
-                        # 点击预设名称直接执行全部命令
-                        preset_action = QAction(preset_name, self)
-                        preset_action.triggered.connect(
-                            lambda checked, cmds=commands: self._execute_commands(cmds)
-                        )
-                        quick_cmd_menu.addAction(preset_action)
-
-                quick_cmd_menu.addSeparator()
+                self._populate_quick_command_presets(quick_cmd_menu, presets)
 
                 # 添加"添加命令..."选项
-                add_cmd_action = QAction(t("ctx.add_command"), self)
+                add_cmd_action = QAction(t("ctx.add_command"), quick_cmd_menu)
                 add_cmd_action.triggered.connect(self.add_command_requested.emit)
                 quick_cmd_menu.addAction(add_cmd_action)
 
                 # 添加"管理预设..."选项
-                manage_action = QAction(t("ctx.manage_presets"), self)
+                manage_action = QAction(t("ctx.manage_presets"), quick_cmd_menu)
                 manage_action.triggered.connect(self.manage_presets_requested.emit)
                 quick_cmd_menu.addAction(manage_action)
 
+                self._fit_quick_command_menu(quick_cmd_menu, event.globalPos())
                 menu.addMenu(quick_cmd_menu)
 
         # 本地快速命令子菜单
-        local_cmd_menu = QMenu(t("ctx.local_quick_commands"), menu)
+        local_cmd_menu = _QuickCommandMenu(t("ctx.local_quick_commands"), menu)
         local_cmd_menu.setStyleSheet(menu.styleSheet())
 
         self._populate_local_commands_menu(local_cmd_menu)
 
         # 添加"添加命令..."选项
-        add_local_cmd_action = QAction(t("ctx.add_command"), self)
+        add_local_cmd_action = QAction(t("ctx.add_command"), local_cmd_menu)
         add_local_cmd_action.triggered.connect(self.add_local_command_requested.emit)
         local_cmd_menu.addAction(add_local_cmd_action)
 
         # 添加"管理本地预设..."选项
-        manage_local_action = QAction(t("ctx.manage_local_presets"), self)
+        manage_local_action = QAction(t("ctx.manage_local_presets"), local_cmd_menu)
         manage_local_action.triggered.connect(self.manage_local_presets_requested.emit)
         local_cmd_menu.addAction(manage_local_action)
 
+        self._fit_quick_command_menu(local_cmd_menu, event.globalPos())
         menu.addMenu(local_cmd_menu)
         menu.addSeparator()
 
@@ -808,20 +829,97 @@ class TerminalMouseMixin:
         menu.addAction(move_up_action)
 
         menu.exec(event.globalPos())
+        menu.deleteLater()
 
     def _populate_local_commands_menu(self, menu):
         """只列出用户配置的本地命令。Shell 由新建终端流程启动。"""
         presets = (self.local_quick_commands_provider()
                    if self.local_quick_commands_provider else [])
-        if presets:
-            for preset in presets:
-                commands = preset.get('commands', [])
-                if commands:
-                    action = menu.addAction(preset.get('name', t("common.unnamed")))
-                    action.triggered.connect(
-                        lambda checked=False, cmds=commands: self._execute_commands(cmds))
+        self._populate_quick_command_presets(menu, presets)
+
+    def _populate_quick_command_presets(self, menu, presets):
+        for preset in presets or ():
+            commands = preset.get('commands', [])
+            if commands:
+                action = menu.addAction(preset.get('name', t("common.unnamed")))
+                action.triggered.connect(
+                    lambda checked=False, cmds=commands: self._execute_commands(cmds))
         if menu.actions():
             menu.addSeparator()
+
+    def _fit_quick_command_menu(self, menu, popup_pos):
+        screen = QApplication.screenAt(popup_pos) or self.window().screen()
+        available = screen.availableGeometry()
+        font = menu.fontMetrics()
+        row_height = font.height() + 12
+        height_limit = min(16 * row_height, available.height() // 2)
+        width_limit = min(460, available.width() // 2)
+        actions = menu.actions()
+        if len(actions) * row_height <= height_limit and menu.sizeHint().width() <= width_limit:
+            return
+
+        # Keep scrolling inside the list instead of using QMenu's edge arrows.
+        commands = _QuickCommandList(menu)
+        commands.setAccessibleName(menu.title())
+        commands.setVerticalScrollMode(QAbstractItemView.ScrollMode.ScrollPerPixel)
+        commands.setHorizontalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAlwaysOff)
+        commands.setTextElideMode(Qt.TextElideMode.ElideRight)
+        commands.setWordWrap(False)
+        commands.setStyleSheet("""
+            QListWidget {
+                background: #2d2d44;
+                color: #eaeaea;
+                border: none;
+                outline: none;
+            }
+            QListWidget::item { padding: 6px 12px; border-radius: 3px; }
+            QListWidget::item:selected, QListWidget::item:hover {
+                background: #667eea;
+                color: #ffffff;
+            }
+            QScrollBar:vertical { width: 12px; background: #383850; }
+            QScrollBar::handle:vertical {
+                background: #8b8ba3;
+                min-height: 24px;
+                border: 2px solid #383850;
+                border-radius: 5px;
+            }
+            QScrollBar::add-line:vertical, QScrollBar::sub-line:vertical { height: 0; }
+            QScrollBar::add-page:vertical, QScrollBar::sub-page:vertical { background: none; }
+        """)
+        widest = font.horizontalAdvance(menu.title())
+        for action in actions:
+            menu.removeAction(action)
+            item = QListWidgetItem(" ".join(action.text().splitlines()))
+            if action.isSeparator():
+                item.setFlags(Qt.ItemFlag.NoItemFlags)
+                item.setSizeHint(QSize(0, 8))
+            else:
+                text_width = font.horizontalAdvance(item.text())
+                widest = max(widest, text_width)
+                if text_width + 48 > width_limit:
+                    item.setToolTip(item.text())
+            commands.addItem(item)
+
+        width = min(width_limit, max(240, widest + 48))
+        height = min(height_limit, sum(commands.sizeHintForRow(row)
+                                       for row in range(commands.count())))
+        commands.setFixedSize(width, height)
+        commands.setCurrentRow(0)
+        scroll_action = QWidgetAction(menu)
+        scroll_action.setDefaultWidget(commands)
+        menu.addAction(scroll_action)
+        menu.command_list = commands
+
+        def activate(item):
+            action = actions[commands.row(item)]
+            if menu.isVisible() and action.isEnabled() and not action.isSeparator():
+                menu.close()
+                menu.parentWidget().close()
+                action.trigger()
+
+        commands.itemClicked.connect(activate)
+        commands.itemActivated.connect(activate)
 
     def _has_selection(self) -> bool:
         """检查是否有选中的内容"""

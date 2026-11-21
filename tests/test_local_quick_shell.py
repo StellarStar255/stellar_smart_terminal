@@ -5,7 +5,10 @@ from unittest.mock import Mock, patch
 
 os.environ.setdefault('QT_QPA_PLATFORM', 'offscreen')
 
+from PyQt6.QtCore import QPoint, Qt
+from PyQt6.QtTest import QTest
 from PyQt6.QtWidgets import QApplication, QMenu
+from terminal_mouse import _QuickCommandMenu
 from terminal_widget import TerminalWidget
 
 
@@ -72,3 +75,42 @@ class TestLocalQuickShell(unittest.TestCase):
         self.menu.actions()[0].trigger()
         self.w._write_to_backend.assert_called_once_with(b'powershell.exe\r')
         self.w._backend = None
+
+    def test_long_submenu_scrolls_inside_popup_and_runs_last_preset(self):
+        long_name = 'Long command 中文 & ' * 20
+        presets = [{'name': f'Command {i}', 'commands': [f'echo {i}']} for i in range(40)]
+        presets[-1]['name'] = long_name.strip()
+        self.w.local_quick_commands_provider = lambda: presets
+        submenu = _QuickCommandMenu('Local commands', self.menu)
+        self.menu.addMenu(submenu)
+        self.w._populate_local_commands_menu(submenu)
+        manage = Mock()
+        submenu.addAction('Manage', manage)
+        pos = QPoint(30, 30)
+        self.w._fit_quick_command_menu(submenu, pos)
+
+        self.menu.popup(pos)
+        submenu.popup(pos + QPoint(self.menu.width(), 0))
+        self.app.processEvents()
+        try:
+            listing = submenu.command_list
+            scrollbar = listing.verticalScrollBar()
+            self.assertGreater(scrollbar.maximum(), 0)
+            geometry = submenu.geometry()
+            scrollbar.setValue(scrollbar.maximum())
+            self.app.processEvents()
+            self.assertTrue(submenu.isVisible())
+            self.assertEqual(submenu.geometry(), geometry)
+
+            last_command = listing.item(len(presets) - 1)
+            self.assertEqual(last_command.toolTip(), presets[-1]['name'])
+            visible_row = listing.visualItemRect(last_command).intersected(listing.viewport().rect())
+            self.assertFalse(visible_row.isEmpty())
+            QTest.mouseClick(listing.viewport(), Qt.MouseButton.LeftButton, pos=visible_row.center())
+            self.w._execute_commands.assert_called_once_with(['echo 39'])
+            manage.assert_not_called()
+            self.assertFalse(self.menu.isVisible())
+            self.assertFalse(submenu.isVisible())
+        finally:
+            submenu.close()
+            self.menu.close()
