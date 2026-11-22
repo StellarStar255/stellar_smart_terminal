@@ -9,7 +9,7 @@ import shutil
 from pathlib import Path
 
 from PyQt6.QtWidgets import (
-    QApplication, QAbstractItemView, QDialog, QDialogButtonBox, QFileDialog,
+    QApplication, QAbstractItemView, QCheckBox, QDialog, QDialogButtonBox, QFileDialog,
     QFormLayout, QGridLayout, QHBoxLayout, QLabel, QLineEdit, QListWidget,
     QListWidgetItem, QMessageBox, QPlainTextEdit, QProxyStyle, QPushButton, QStyle,
     QStyledItemDelegate, QTreeWidget, QTreeWidgetItem, QVBoxLayout, QWidget
@@ -284,6 +284,10 @@ class PresetDialog(QDialog):
         self.name_edit.textChanged.connect(self._on_name_changed)
         name_layout.addWidget(self.name_edit)
         right_layout.addLayout(name_layout)
+        self.pin_checkbox = QCheckBox(t("preset.pin_quick_command"))
+        self.pin_checkbox.setEnabled(False)
+        self.pin_checkbox.clicked.connect(self._on_pin_changed)
+        right_layout.addWidget(self.pin_checkbox)
 
         # 命令（多行）
         right_layout.addWidget(QLabel(t("preset.commands_label")))
@@ -335,7 +339,7 @@ class PresetDialog(QDialog):
                 background-color: {c['bg_dark']};
                 color: {c['text']};
             }}
-            QLabel {{
+            QLabel, QCheckBox {{
                 color: {c['text_dim']};
             }}
             QLineEdit, QPlainTextEdit {{
@@ -393,16 +397,18 @@ class PresetDialog(QDialog):
         """)
 
     @staticmethod
-    def _set_preset_item_name(item, name):
+    def _set_preset_item_name(item, preset):
+        name = preset.get('name', t("preset.unnamed"))
         # 名称中的换行也只影响显示，不修改保存或导出的原始名称。
-        item.setText(' '.join(name.splitlines()))
+        prefix = '★  ' if preset.get('pinned') is True else ''
+        item.setText(prefix + ' '.join(name.splitlines()))
         item.setToolTip(name)
 
     def _populate_list(self):
         self.preset_list.clear()
         for preset in self.presets:
             item = QListWidgetItem()
-            self._set_preset_item_name(item, preset.get('name', t("preset.unnamed")))
+            self._set_preset_item_name(item, preset)
             item.setData(Qt.ItemDataRole.UserRole, preset.get('_id'))  # 只存储 ID（避免拖拽时数据丢失）
             self.preset_list.addItem(item)
         if self.presets:
@@ -420,6 +426,8 @@ class PresetDialog(QDialog):
                 self.commands_edit.blockSignals(True)
                 self.name_edit.setText(preset.get('name', ''))
                 self.commands_edit.setPlainText('\n'.join(preset.get('commands', [])))
+                self.pin_checkbox.setChecked(preset.get('pinned') is True)
+                self.pin_checkbox.setEnabled(True)
                 self.name_edit.blockSignals(False)
                 self.commands_edit.blockSignals(False)
                 return
@@ -428,6 +436,8 @@ class PresetDialog(QDialog):
         self.commands_edit.blockSignals(True)
         self.name_edit.clear()
         self.commands_edit.clear()
+        self.pin_checkbox.setChecked(False)
+        self.pin_checkbox.setEnabled(False)
         self.name_edit.blockSignals(False)
         self.commands_edit.blockSignals(False)
 
@@ -440,7 +450,18 @@ class PresetDialog(QDialog):
         preset = self._get_preset_by_id(pid) if pid else None
         if preset:
             preset['name'] = text
-            self._set_preset_item_name(item, text)
+            self._set_preset_item_name(item, preset)
+
+    def _on_pin_changed(self, checked):
+        item = self.preset_list.currentItem()
+        preset = self._get_preset_by_id(item.data(Qt.ItemDataRole.UserRole)) if item else None
+        if preset is None:
+            return
+        if checked:
+            preset['pinned'] = True
+        else:
+            preset.pop('pinned', None)
+        self._set_preset_item_name(item, preset)
 
     def _on_commands_changed(self):
         if self._closing:
@@ -464,7 +485,7 @@ class PresetDialog(QDialog):
         self.presets.append(new_preset)
         self._preset_map[pid] = new_preset
         item = QListWidgetItem()
-        self._set_preset_item_name(item, new_preset['name'])
+        self._set_preset_item_name(item, new_preset)
         item.setData(Qt.ItemDataRole.UserRole, pid)  # 只存储 ID
         self.preset_list.addItem(item)
         self.preset_list.setCurrentRow(len(self.presets) - 1)
@@ -493,7 +514,7 @@ class PresetDialog(QDialog):
             commands = [line for line in text.split('\n') if line.strip()]
             preset['commands'] = commands
             # 更新列表显示
-            self._set_preset_item_name(item, preset['name'])
+            self._set_preset_item_name(item, preset)
         else:
             QMessageBox.warning(self, t("preset.cannot_save"), t("preset.select_first"))
 

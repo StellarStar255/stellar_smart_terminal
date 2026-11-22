@@ -66,6 +66,17 @@ class PresetJsonTransferTest(unittest.TestCase):
             self.assertEqual(PresetDialog._parse_presets_json(json.dumps(payload)), self.source)
         self.assertEqual(PresetDialog._parse_presets_json('[]'), [])
 
+    def test_pin_persists_with_preset_and_can_be_removed(self):
+        self.manager.pin_checkbox.click()
+        self.assertTrue(self.manager.preset_list.item(0).text().startswith('★'))
+        saved = self.manager.get_presets()
+        self.assertEqual(saved, [{**self.source[0], 'pinned': True}])
+        reloaded = PresetDialog(saved)
+        self.addCleanup(reloaded.deleteLater)
+        self.assertTrue(reloaded.pin_checkbox.isChecked())
+        reloaded.pin_checkbox.click()
+        self.assertEqual(reloaded.get_presets(), self.source)
+
     def test_import_regenerates_ids_and_cancel_leaves_original_untouched(self):
         popup = QDialog(self.manager)
         self.manager._apply_json_import(json.dumps([

@@ -22,7 +22,7 @@ import sys
 import time
 from difflib import SequenceMatcher
 
-from PyQt6.QtCore import QPoint, QSize, QUrl, Qt
+from PyQt6.QtCore import QPoint, QUrl, Qt
 from PyQt6.QtGui import (
     QAction, QActionGroup, QDesktopServices, QDragEnterEvent, QDropEvent, QKeySequence, QMouseEvent
 )
@@ -35,10 +35,12 @@ from i18n import t
 class _QuickCommandList(QListWidget):
     def keyPressEvent(self, event):
         # Let the enclosing menu handle submenu navigation and dismissal.
-        if event.key() in (Qt.Key.Key_Left, Qt.Key.Key_Right, Qt.Key.Key_Escape):
+        key = event.key()
+        if (key in (Qt.Key.Key_Left, Qt.Key.Key_Right, Qt.Key.Key_Escape)
+                or (key == Qt.Key.Key_Down and self.currentRow() == self.count() - 1)):
             event.ignore()
             return
-        if event.key() in (Qt.Key.Key_Return, Qt.Key.Key_Enter):
+        if key in (Qt.Key.Key_Return, Qt.Key.Key_Enter):
             item = self.currentItem()
             if item is not None:
                 self.itemActivated.emit(item)
@@ -49,14 +51,19 @@ class _QuickCommandList(QListWidget):
 
 class _QuickCommandMenu(QMenu):
     command_list = None
+    command_list_action = None
 
     def keyPressEvent(self, event):
-        if self.command_list is not None and event.key() not in (
-            Qt.Key.Key_Left, Qt.Key.Key_Right, Qt.Key.Key_Escape,
-        ):
+        if (self.command_list is not None
+                and self.activeAction() in (None, self.command_list_action)
+                and event.key() not in (Qt.Key.Key_Left, Qt.Key.Key_Right, Qt.Key.Key_Escape)):
             # A submenu opened by hovering may receive keys before its list has focus.
             self.command_list.keyPressEvent(event)
-            return
+            if event.isAccepted():
+                return
+            # Down from the last command enters the fixed footer.
+            if self.activeAction() is None and event.key() == Qt.Key.Key_Down:
+                self.setActiveAction(self.command_list_action)
         super().keyPressEvent(event)
 
 
@@ -838,10 +845,14 @@ class TerminalMouseMixin:
         self._populate_quick_command_presets(menu, presets)
 
     def _populate_quick_command_presets(self, menu, presets):
-        for preset in presets or ():
+        ordered = sorted(presets or (), key=lambda preset: preset.get('pinned') is not True)
+        for preset in ordered:
             commands = preset.get('commands', [])
             if commands:
-                action = menu.addAction(preset.get('name', t("common.unnamed")))
+                name = preset.get('name', t("common.unnamed"))
+                if preset.get('pinned') is True:
+                    name = f"★  {name}"
+                action = menu.addAction(name)
                 action.triggered.connect(
                     lambda checked=False, cmds=commands: self._execute_commands(cmds))
         if menu.actions():
@@ -855,9 +866,11 @@ class TerminalMouseMixin:
         standard_height_limit = min(16 * row_height, available.height() // 2)
         width_limit = min(460, available.width() // 2)
         actions = menu.actions()
-        if (len(actions) * row_height <= standard_height_limit
+        separator = next((action for action in actions if action.isSeparator()), None)
+        if separator is None or (len(actions) * row_height <= standard_height_limit
                 and menu.sizeHint().width() <= width_limit):
             return
+        preset_actions = actions[:actions.index(separator)]
 
         # Keep scrolling inside the list instead of using QMenu's edge arrows.
         commands = _QuickCommandList(menu)
@@ -889,34 +902,31 @@ class TerminalMouseMixin:
             QScrollBar::add-page:vertical, QScrollBar::sub-page:vertical { background: none; }
         """)
         widest = font.horizontalAdvance(menu.title())
-        for action in actions:
+        for action in preset_actions:
             menu.removeAction(action)
             item = QListWidgetItem(" ".join(action.text().splitlines()))
-            if action.isSeparator():
-                item.setFlags(Qt.ItemFlag.NoItemFlags)
-                item.setSizeHint(QSize(0, 8))
-            else:
-                text_width = font.horizontalAdvance(item.text())
-                widest = max(widest, text_width)
-                if text_width + 48 > width_limit:
-                    item.setToolTip(item.text())
+            text_width = font.horizontalAdvance(item.text())
+            widest = max(widest, text_width)
+            if text_width + 48 > width_limit:
+                item.setToolTip(item.text())
             commands.addItem(item)
 
         width = min(width_limit, max(240, widest + 48))
-        # Leave room for the popup frame and screen-edge positioning.
-        height_limit = available.height() * 85 // 100
+        # Budget for the whole popup, including the native footer and frame.
+        height_limit = max(row_height, available.height() * 85 // 100 - menu.sizeHint().height())
         height = min(height_limit, sum(commands.sizeHintForRow(row)
                                        for row in range(commands.count())))
         commands.setFixedSize(width, height)
         commands.setCurrentRow(0)
         scroll_action = QWidgetAction(menu)
         scroll_action.setDefaultWidget(commands)
-        menu.addAction(scroll_action)
+        menu.insertAction(separator, scroll_action)
         menu.command_list = commands
+        menu.command_list_action = scroll_action
 
         def activate(item):
-            action = actions[commands.row(item)]
-            if menu.isVisible() and action.isEnabled() and not action.isSeparator():
+            action = preset_actions[commands.row(item)]
+            if menu.isVisible() and action.isEnabled():
                 menu.close()
                 menu.parentWidget().close()
                 action.trigger()

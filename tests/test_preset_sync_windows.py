@@ -69,6 +69,42 @@ class PresetSyncAcrossWindowsTest(unittest.TestCase):
         # B 窗口原先选着 Claude，同步后仍选 Claude
         self.assertEqual(b.preset_combo.currentText(), 'Claude')
 
+    def test_palette_finds_quick_commands_in_current_project_and_active_terminal(self):
+        from PyQt6.QtCore import Qt
+        from PyQt6.QtTest import QTest
+        from i18n import t
+
+        window, other = self.windows
+        window.active_terminal = window.terminal
+        window.presets = [{'name': 'Attach globally', 'commands': ['tmux attach -t global']}]
+        window.local_presets = [{'name': 'Training', 'commands': ['tmux attach -t project_one']}]
+        palette = window.command_palette
+        results = palette._rank('tmux attach')
+        self.assertEqual({entry.group for entry in results},
+                         {t('palette.quick_commands_global'), t('ctx.local_quick_commands')})
+        stale, = palette._rank('project_one')
+        window._window_cwd = '/tmp/second-project'
+        window.local_presets = [{'name': 'Training', 'commands': ['tmux attach -t project_two']}]
+
+        with patch.object(window.terminal, '_execute_commands') as execute, \
+                patch.object(other.terminal, '_execute_commands') as other_execute:
+            stale.run()
+            execute.assert_not_called()
+            self.assertEqual(palette._rank('project_one'), [])
+            window.activateWindow()
+            window.terminal.setFocus()
+            self.app.processEvents()
+            if sys.platform == 'darwin':
+                QTest.keyClick(window.terminal, Qt.Key.Key_K, Qt.KeyboardModifier.ControlModifier)
+                self.assertTrue(palette.line_edit.hasFocus())
+            else:
+                palette.focus_search()
+            palette.line_edit.setText('project_two')
+            self.assertEqual(palette.list_widget.count(), 1)
+            QTest.keyClick(palette.line_edit, Qt.Key.Key_Return)
+            execute.assert_called_once_with(['tmux attach -t project_two'])
+            other_execute.assert_not_called()
+
     def test_selection_falls_back_when_current_preset_deleted(self):
         a, b = self.windows
         a._apply_edited_presets([_preset('zsh')])

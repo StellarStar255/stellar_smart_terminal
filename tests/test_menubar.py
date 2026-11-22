@@ -178,7 +178,7 @@ class TestMenuBar(unittest.TestCase):
 
 
 class TestTerminalMenuReservedKeys(unittest.TestCase):
-    """macOS 上 Cmd+N / Cmd+O 放给菜单栏；物理 Ctrl+N/O 仍归 shell。"""
+    """macOS 的应用快捷键让给 Qt，物理 Ctrl 仍归 shell。"""
 
     @classmethod
     def setUpClass(cls):
@@ -201,6 +201,10 @@ class TestTerminalMenuReservedKeys(unittest.TestCase):
             self.assertTrue(self.term._is_menu_reserved_combo(Qt.Key.Key_O, cmd | Qt.KeyboardModifier.ShiftModifier))
             self.assertFalse(self.term._is_menu_reserved_combo(Qt.Key.Key_N, ctrl))
             self.assertFalse(self.term._is_menu_reserved_combo(Qt.Key.Key_T, cmd))
+            self.assertTrue(self.term._is_menu_reserved_combo(Qt.Key.Key_K, cmd))
+            self.assertFalse(self.term._is_menu_reserved_combo(Qt.Key.Key_K, ctrl))
+            self.assertFalse(self.term._is_menu_reserved_combo(
+                Qt.Key.Key_K, cmd | Qt.KeyboardModifier.ShiftModifier))
         with mock.patch('terminal_input.sys.platform', 'win32'):
             self.assertFalse(self.term._is_menu_reserved_combo(Qt.Key.Key_N, cmd))
 

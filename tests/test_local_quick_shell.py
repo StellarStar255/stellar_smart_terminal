@@ -80,12 +80,15 @@ class TestLocalQuickShell(unittest.TestCase):
         long_name = 'Long command 中文 & ' * 20
         presets = [{'name': f'Command {i}', 'commands': [f'echo {i}']} for i in range(100)]
         presets[-1]['name'] = long_name.strip()
+        presets[3]['pinned'] = True
+        presets[9]['pinned'] = True
         self.w.local_quick_commands_provider = lambda: presets
         submenu = _QuickCommandMenu('Local commands', self.menu)
         self.menu.addMenu(submenu)
         self.w._populate_local_commands_menu(submenu)
         manage = Mock()
-        submenu.addAction('Manage', manage)
+        add_action = submenu.addAction('Add')
+        manage_action = submenu.addAction('Manage', manage)
         pos = QPoint(30, 30)
         self.w._fit_quick_command_menu(submenu, pos)
 
@@ -95,14 +98,22 @@ class TestLocalQuickShell(unittest.TestCase):
         try:
             listing = submenu.command_list
             screen = self.app.screenAt(pos) or self.w.window().screen()
-            self.assertEqual(listing.height(), screen.availableGeometry().height() * 85 // 100)
+            budget = screen.availableGeometry().height() * 85 // 100
+            self.assertAlmostEqual(submenu.height(), budget, delta=submenu.fontMetrics().height())
+            self.assertEqual([listing.item(i).text() for i in range(4)],
+                             ['★  Command 3', '★  Command 9', 'Command 0', 'Command 1'])
+            self.assertEqual(listing.count(), len(presets))
             scrollbar = listing.verticalScrollBar()
             self.assertGreater(scrollbar.maximum(), 0)
             geometry = submenu.geometry()
+            controls = [submenu.actionGeometry(action) for action in (add_action, manage_action)]
+            self.assertTrue(all(submenu.rect().contains(rect) for rect in controls))
             scrollbar.setValue(scrollbar.maximum())
             self.app.processEvents()
             self.assertTrue(submenu.isVisible())
             self.assertEqual(submenu.geometry(), geometry)
+            self.assertEqual(controls, [submenu.actionGeometry(action)
+                                        for action in (add_action, manage_action)])
 
             last_command = listing.item(len(presets) - 1)
             self.assertEqual(last_command.toolTip(), presets[-1]['name'])

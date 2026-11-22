@@ -519,13 +519,15 @@ class TerminalInputMixin:
         else:
             self._cancel_clipboard_probes()
 
-    # macOS 上 Cmd+字母默认全被终端抢走（当 Ctrl 发给 shell）。这几个留给菜单栏：
-    # Cmd+N 新终端、Cmd+Shift+N 新窗口、Cmd+O 打开文件夹（Cmd+Shift+O 打开文件）。物理 Ctrl+N/O
-    # （MetaModifier）照旧发给 shell，不受影响。
+    # 给 macOS 的菜单栏和命令面板保留应用快捷键，物理 Ctrl 仍交给 shell。
     _MENU_RESERVED_KEYS = (Qt.Key.Key_N, Qt.Key.Key_O)
 
     def _is_menu_reserved_combo(self, key, modifiers) -> bool:
-        if sys.platform != 'darwin' or key not in self._MENU_RESERVED_KEYS:
+        if sys.platform != 'darwin':
+            return False
+        if key == Qt.Key.Key_K:
+            return modifiers == Qt.KeyboardModifier.ControlModifier
+        if key not in self._MENU_RESERVED_KEYS:
             return False
         is_cmd = bool(modifiers & Qt.KeyboardModifier.ControlModifier)
         is_physical_ctrl = bool(modifiers & Qt.KeyboardModifier.MetaModifier)

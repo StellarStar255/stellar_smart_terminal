@@ -1266,6 +1266,7 @@ class MainWindow(ThemeMixin, ToolbarMixin, ConfigMixin, ExplorerPanelMixin,
         """把工具栏可点击的控件注册成可搜索命令。"""
         palette = self.command_palette
         palette.clear()
+        palette.set_context_commands(self._quick_command_palette_entries)
 
         def _label_for(w, fallback: str = '') -> str:
             """按钮显示文本：纯符号/emoji 时退回 tooltip，避免命令列里出现裸图标。"""
@@ -1298,6 +1299,46 @@ class MainWindow(ThemeMixin, ToolbarMixin, ConfigMixin, ExplorerPanelMixin,
                 label = _label_for(w, fallback=btn_name)
                 tooltip = (w.toolTip() if hasattr(w, 'toolTip') else '') or None
                 palette.register(label, w.click, group=group_name, tooltip=tooltip)
+
+    def _quick_command_palette_entries(self):
+        from command_palette import Command
+
+        terminal = self._quick_command_terminal()
+        if terminal is None:
+            return
+        for presets, group, cwd in (
+            (self.presets, t("palette.quick_commands_global"), None),
+            (self.local_presets, t("ctx.local_quick_commands"), self._window_cwd),
+        ):
+            for preset in presets:
+                if not isinstance(preset, dict):
+                    continue
+                commands = preset.get("commands")
+                if (not isinstance(commands, list) or not commands
+                        or not all(isinstance(command, str) for command in commands)):
+                    continue
+                yield Command(
+                    title=str(preset.get("name") or t("common.unnamed")),
+                    run=lambda preset=preset, cwd=cwd: self._run_palette_preset(
+                        terminal, preset, cwd),
+                    group=group,
+                    search_text="\n".join(commands),
+                )
+
+    def _run_palette_preset(self, terminal, preset, cwd):
+        if terminal is not self._quick_command_terminal():
+            return
+        if cwd is not None and cwd != self._window_cwd:
+            return
+        presets = self.presets if cwd is None else self.local_presets
+        if any(current is preset for current in presets):
+            terminal.setFocus()
+            terminal._execute_commands(preset["commands"])
+
+    def _quick_command_terminal(self):
+        terminals = self.tab_terminals.get(self.tab_widget.currentIndex(), [])
+        terminal = self._target_terminal_in_tab(terminals, fallback_first=len(terminals) == 1)
+        return terminal if self._owns_terminal(terminal) else None
 
     # 下拉框最多显示多少条历史目录。完整历史不受影响（仍存盘、仍可在
     # 「History」对话框里管理）——只是限制弹窗里的条目数，避免历史越攒越多

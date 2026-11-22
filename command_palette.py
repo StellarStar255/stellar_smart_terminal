@@ -8,7 +8,7 @@ Command Palette
 设计原则：完全独立，不依赖具体业务；只依赖 PyQt6。
 """
 from dataclasses import dataclass
-from typing import Callable, List, Optional
+from typing import Callable, Iterable, List, Optional
 
 from PyQt6.QtCore import Qt, QEvent, QPoint, QRect, QObject, QTimer
 from PyQt6.QtGui import QKeyEvent
@@ -28,6 +28,7 @@ class Command:
     run: Callable[[], None]
     group: Optional[str] = None
     tooltip: Optional[str] = None
+    search_text: str = ""
 
     def haystack(self) -> str:
         bits = [self.title]
@@ -35,6 +36,8 @@ class Command:
             bits.append(self.group)
         if self.tooltip:
             bits.append(self.tooltip)
+        if self.search_text:
+            bits.append(self.search_text)
         return " · ".join(bits).lower()
 
 
@@ -53,7 +56,7 @@ def _fuzzy_score(query: str, hay: str) -> int:
     if idx >= 0:
         # 词起始位置（前一个字符是非字母数字）给额外加分
         bonus = 100 if (idx == 0 or not h[idx - 1].isalnum()) else 0
-        return 1000 - idx + bonus
+        return 1000 - min(idx, 750) + bonus
     # query 太短，不做分散匹配
     if len(q) < 3:
         return -1
@@ -107,6 +110,7 @@ class CommandPalette(QWidget):
     def __init__(self, placeholder: str = "Search commands…", parent=None):
         super().__init__(parent)
         self._commands: List[Command] = []
+        self._context_commands: Callable[[], Iterable[Command]] = tuple
         # 弹层可见期间挂在 app 上的独立过滤器（点外部/Esc 关闭）；独立对象避免双重触发
         self._app_filter_on = False
         self._global_filter = _OutsideClickFilter(self)
@@ -235,6 +239,10 @@ class CommandPalette(QWidget):
 
     def clear(self):
         self._commands.clear()
+
+    def set_context_commands(self, provider: Callable[[], Iterable[Command]]):
+        """Read commands for the current project and terminal when ranking results."""
+        self._context_commands = provider
 
     def focus_search(self):
         """Cmd+K 入口：聚焦并选中已有文本。"""
@@ -386,12 +394,13 @@ class CommandPalette(QWidget):
 
     def _rank(self, query: str, limit: int = 12) -> List[Command]:
         query = query.strip().lower()
+        commands = [*self._commands, *self._context_commands()]
         if not query:
             # 空 query 显示全部，按 group/title 排序
-            items = sorted(self._commands, key=lambda c: ((c.group or '').lower(), c.title.lower()))
+            items = sorted(commands, key=lambda c: ((c.group or '').lower(), c.title.lower()))
             return items[:limit]
         scored = []
-        for c in self._commands:
+        for c in commands:
             s = _fuzzy_score(query, c.haystack())
             if s >= 0:
                 scored.append((s, c))
