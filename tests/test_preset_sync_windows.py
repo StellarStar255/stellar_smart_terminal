@@ -137,6 +137,7 @@ class PresetSyncAcrossWindowsTest(unittest.TestCase):
 
     def test_palette_shows_tab_pane_and_foreground_ssh(self):
         from PyQt6.QtCore import QThreadPool
+        from PyQt6.QtTest import QTest
         from ssh_session import HostConfig
 
         window = self.windows[0]
@@ -163,7 +164,10 @@ class PresetSyncAcrossWindowsTest(unittest.TestCase):
             self.assertIn('SSH training', palette.target_label.text())
             find.assert_called_once_with(21, foreground_group=42)
             group.return_value = 63
-            palette.refresh_current_details()
+            for _ in range(20):
+                if 'SSH training' not in palette.target_label.text():
+                    break
+                QTest.qWait(40)
             self.assertNotIn('SSH training', palette.target_label.text())
             palette._clear_and_hide()
 

@@ -1453,6 +1453,23 @@ class MainWindow(ThemeMixin, ToolbarMixin, ConfigMixin, ExplorerPanelMixin,
                 and foreground == self._quick_command_foreground_group(backend)):
             self._quick_command_host = (terminal, backend, foreground, host)
             self.command_palette.refresh_current_details()
+            timer = getattr(self, "_quick_command_host_timer", None)
+            if timer is None:
+                timer = self._quick_command_host_timer = QTimer(self)
+                timer.setInterval(300)
+                timer.timeout.connect(self._refresh_quick_command_host)
+            timer.start()
+
+    def _refresh_quick_command_host(self):
+        host = self._quick_command_host
+        if self.command_palette.popup.isVisible() and host is not None:
+            terminal, backend, foreground, _ = host
+            if (terminal is self._quick_command_terminal() and terminal._backend is backend
+                    and foreground == self._quick_command_foreground_group(backend)):
+                return
+            self._quick_command_host = None
+            self.command_palette.refresh_current_details()
+        self._quick_command_host_timer.stop()
 
     # 下拉框最多显示多少条历史目录。完整历史不受影响（仍存盘、仍可在
     # 「History」对话框里管理）——只是限制弹窗里的条目数，避免历史越攒越多
