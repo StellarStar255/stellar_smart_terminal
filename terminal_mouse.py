@@ -852,10 +852,11 @@ class TerminalMouseMixin:
         available = screen.availableGeometry()
         font = menu.fontMetrics()
         row_height = font.height() + 12
-        height_limit = min(16 * row_height, available.height() // 2)
+        standard_height_limit = min(16 * row_height, available.height() // 2)
         width_limit = min(460, available.width() // 2)
         actions = menu.actions()
-        if len(actions) * row_height <= height_limit and menu.sizeHint().width() <= width_limit:
+        if (len(actions) * row_height <= standard_height_limit
+                and menu.sizeHint().width() <= width_limit):
             return
 
         # Keep scrolling inside the list instead of using QMenu's edge arrows.
@@ -902,6 +903,8 @@ class TerminalMouseMixin:
             commands.addItem(item)
 
         width = min(width_limit, max(240, widest + 48))
+        # Leave room for the popup frame and screen-edge positioning.
+        height_limit = available.height() * 85 // 100
         height = min(height_limit, sum(commands.sizeHintForRow(row)
                                        for row in range(commands.count())))
         commands.setFixedSize(width, height)

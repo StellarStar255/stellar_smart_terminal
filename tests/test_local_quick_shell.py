@@ -78,7 +78,7 @@ class TestLocalQuickShell(unittest.TestCase):
 
     def test_long_submenu_scrolls_inside_popup_and_runs_last_preset(self):
         long_name = 'Long command 中文 & ' * 20
-        presets = [{'name': f'Command {i}', 'commands': [f'echo {i}']} for i in range(40)]
+        presets = [{'name': f'Command {i}', 'commands': [f'echo {i}']} for i in range(100)]
         presets[-1]['name'] = long_name.strip()
         self.w.local_quick_commands_provider = lambda: presets
         submenu = _QuickCommandMenu('Local commands', self.menu)
@@ -94,6 +94,8 @@ class TestLocalQuickShell(unittest.TestCase):
         self.app.processEvents()
         try:
             listing = submenu.command_list
+            screen = self.app.screenAt(pos) or self.w.window().screen()
+            self.assertEqual(listing.height(), screen.availableGeometry().height() * 85 // 100)
             scrollbar = listing.verticalScrollBar()
             self.assertGreater(scrollbar.maximum(), 0)
             geometry = submenu.geometry()
@@ -107,7 +109,7 @@ class TestLocalQuickShell(unittest.TestCase):
             visible_row = listing.visualItemRect(last_command).intersected(listing.viewport().rect())
             self.assertFalse(visible_row.isEmpty())
             QTest.mouseClick(listing.viewport(), Qt.MouseButton.LeftButton, pos=visible_row.center())
-            self.w._execute_commands.assert_called_once_with(['echo 39'])
+            self.w._execute_commands.assert_called_once_with(['echo 99'])
             manage.assert_not_called()
             self.assertFalse(self.menu.isVisible())
             self.assertFalse(submenu.isVisible())
