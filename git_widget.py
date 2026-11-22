@@ -730,6 +730,12 @@ class _CommitMessageWorker(QThread):
 
     def run(self):
         try:
+            self._generate()
+        except Exception as exc:
+            self._fail(str(exc), type(exc).__name__)
+
+    def _generate(self):
+        try:
             import requests
         except Exception as e:  # pragma: no cover - requests 是已有依赖
             self.failed.emit(str(e))
@@ -791,13 +797,20 @@ class _CommitMessageWorker(QThread):
             self._fail(str(e), type(e).__name__)
             return
 
+        try:
+            data = resp.json()
+        except ValueError:
+            data = None
+        error = self._provider_error(data)
         if resp.status_code != 200:
-            snippet = (resp.text or '')[:300]
+            snippet = error or (resp.text or '')[:300]
             self._fail(f"HTTP {resp.status_code}: {snippet}", f'HTTP {resp.status_code}')
+            return
+        if error:
+            self._fail(error, 'provider error')
             return
 
         try:
-            data = resp.json()
             choice = data['choices'][0]
             message = choice['message']
             content = message.get('content')
@@ -813,6 +826,24 @@ class _CommitMessageWorker(QThread):
             self._fail(t("git.generate_empty_response"), 'empty response')
         else:
             self.succeeded.emit(cleaned)
+
+    @staticmethod
+    def _provider_error(data):
+        if not isinstance(data, dict):
+            return ''
+        failure = data.get('error')
+        if isinstance(failure, dict):
+            code = failure.get('code') or failure.get('type')
+            message = failure.get('message')
+        elif isinstance(failure, str):
+            code, message = None, failure
+        else:
+            response = data.get('base_resp')
+            if not isinstance(response, dict) or response.get('status_code') in (None, 0, '0'):
+                return ''
+            code, message = response['status_code'], response.get('status_msg')
+        return ': '.join(str(part) for part in (code, message)
+                         if isinstance(part, (int, str)) and part)[:300]
 
     def _fail(self, message, reason):
         # Keep provider payloads, repository changes and credentials out of the log.
@@ -3790,9 +3821,10 @@ class GitPanel(QWidget):
         self.commit_widget.set_generating(True)
         self._run_git_async(
             lambda: self._collect_diff_for_message(repo_path), 'collect_diff',
-            lambda result, _k: self._on_diff_collected(request, revision, config, lang, result))
+            lambda result, _k: self._on_diff_collected(
+                request, revision, repo_path, config, lang, result))
 
-    def _on_diff_collected(self, request, revision, config, lang, result):
+    def _on_diff_collected(self, request, revision, repo_path, config, lang, result):
         if self._message_generation is not request:
             return
         if self.commit_widget.message_input.document().revision() != revision:
@@ -3813,10 +3845,11 @@ class GitPanel(QWidget):
                 t("git.generate_no_changes_msg")
             )
             return
-        worker = _CommitMessageWorker(config, diff, lang, self)
-        worker.succeeded.connect(lambda message: self._on_generate_done(request, revision, message))
+        prompt_diff = diff[:16000] + ("\n...[truncated]..." if len(diff) > 16000 else "")
+        worker = _CommitMessageWorker(config, prompt_diff, lang, self)
+        worker.succeeded.connect(lambda message: self._verify_generated_context(
+            request, revision, repo_path, diff, message))
         worker.failed.connect(lambda error: self._on_generate_failed(request, error))
-        worker.finished.connect(lambda: self._finish_message_generation(request))
         self._register_worker(worker)
         worker.start()
 
@@ -3827,12 +3860,32 @@ class GitPanel(QWidget):
         self.commit_widget.set_generating(False)
         return True
 
-    def _on_generate_done(self, request, revision, message: str):
+    def _verify_generated_context(self, request, revision, repo_path, diff, message):
+        if self._message_generation is not request:
+            return
+        if self.commit_widget.message_input.document().revision() != revision:
+            self._finish_message_generation(request)
+            self._notify_generation_attention()
+            return
+        self._run_git_async(
+            lambda: self._collect_diff_for_message(repo_path), 'verify_generation_diff',
+            lambda result, _k: self._on_generate_done(request, revision, diff, message, result))
+
+    def _on_generate_done(self, request, revision, diff, message, result):
         if not self._finish_message_generation(request):
             return
-        if message and self.commit_widget.message_input.document().revision() == revision:
-            self.commit_widget.set_message(message)
         self._notify_generation_attention()
+        if self.commit_widget.message_input.document().revision() != revision:
+            return
+        if result is None or result[1]:
+            error = result[1] if result is not None else t("git.generate_diff_unknown")
+            QMessageBox.warning(
+                self, t("git.generate_failed_title"), t("git.generate_diff_failed_msg", error=error))
+        elif result[0] != diff:
+            QMessageBox.information(
+                self, t("git.generate_changes_updated_title"), t("git.generate_changes_updated_msg"))
+        else:
+            self.commit_widget.set_message(message)
 
     def _notify_generation_attention(self):
         """生成提交信息完成（成功或失败）：窗口不在前台时点亮导航绿点，
@@ -3851,10 +3904,10 @@ class GitPanel(QWidget):
             t("git.generate_failed_msg", error=error)
         )
 
-    def _collect_diff_for_message(self, repo_path, max_chars: int = 16000) -> tuple[str, str]:
+    def _collect_diff_for_message(self, repo_path) -> tuple[str, str]:
         """Summarize staged changes only, falling back to the working tree if unstaged."""
         gm = self._git_manager
-        diff_options = ('--no-ext-diff', '--no-textconv', '--no-color', '--patch-with-stat')
+        diff_options = ('--no-ext-diff', '--no-textconv', '--no-color', '--full-index', '--patch-with-stat')
         ok, staged = gm._run_git('diff', '--cached', *diff_options, repo_path=repo_path)
         if not ok:
             return '', staged or t("git.generate_diff_unknown")
@@ -3873,8 +3926,6 @@ class GitPanel(QWidget):
             if body.strip():
                 sections.append("# Working tree diff\n" + body)
             text = "\n\n".join(sections)
-        if len(text) > max_chars:
-            text = text[:max_chars] + "\n...[truncated]..."
         return text, ''
 
     def _find_main_window(self):

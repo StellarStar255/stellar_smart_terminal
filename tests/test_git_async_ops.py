@@ -158,6 +158,68 @@ class TestGitAsyncOps(unittest.TestCase):
             self.assertNotIn('max_tokens', payload)
             self.assertIn('+ready', payload['messages'][1]['content'])
 
+    def test_generate_shows_provider_errors_returned_with_http_200(self):
+        Path(self.repo, 'a.txt').write_text('ready\n', encoding='utf-8')
+        _git(self.repo, 'add', 'a.txt')
+        host = SimpleNamespace(get_git_llm_config=lambda: {
+            'api_base': 'https://api.minimax.io/v1', 'model': 'MiniMax-M3'})
+        widget = self.panel.commit_widget
+        widget.message_input.setPlainText('existing draft')
+        response = Mock(status_code=200)
+        with (patch.object(self.panel, '_find_main_window', return_value=host),
+              patch('git_widget.QMessageBox.warning') as warning,
+              patch('requests.post', return_value=response)):
+            for body, code in (
+                ({'base_resp': {'status_code': 1002, 'status_msg': 'rate limit'}}, '1002'),
+                ({'error': {'code': 'insufficient_quota', 'message': 'quota exhausted'}},
+                 'insufficient_quota'),
+            ):
+                response.json.return_value = body
+                widget.generate_btn.click()
+                self._wait_workers()
+                self.assertIn(code, warning.call_args.args[2])
+                self.assertEqual(widget.message_input.toPlainText(), 'existing draft')
+                self.assertTrue(widget.generate_btn.isEnabled())
+            self.assertEqual(warning.call_count, 2)
+
+    def test_generate_checks_staged_content_again_before_filling(self):
+        from i18n import t
+
+        path = Path(self.repo, 'a.txt')
+        path.write_text('first index version\n', encoding='utf-8')
+        _git(self.repo, 'add', 'a.txt')
+        host = SimpleNamespace(get_git_llm_config=lambda: {
+            'api_base': 'https://example.test/v1', 'model': 'test'})
+        widget = self.panel.commit_widget
+        widget.message_input.setPlainText('existing draft')
+
+        def post(*args, **kwargs):
+            prompt = kwargs['json']['messages'][1]['content']
+            if 'first index version' in prompt:
+                path.write_text('new index version\n', encoding='utf-8')
+                _git(self.repo, 'add', 'a.txt')
+                message = 'fix: old result'
+            else:
+                path.write_text('working tree only\n', encoding='utf-8')
+                message = 'fix: current index'
+            response = Mock(status_code=200)
+            response.json.return_value = {'choices': [{'message': {'content': message}}]}
+            return response
+
+        with (patch.object(self.panel, '_find_main_window', return_value=host),
+              patch('git_widget.QMessageBox.information') as info,
+              patch('requests.post', side_effect=post) as request):
+            widget.generate_btn.click()
+            self._wait_workers()
+            self.assertEqual(info.call_args.args[1], t('git.generate_changes_updated_title'))
+            self.assertEqual(widget.message_input.toPlainText(), 'existing draft')
+            self.assertTrue(widget.generate_btn.isEnabled())
+            widget.generate_btn.click()
+            self._wait_workers()
+            self.assertIn('new index version', request.call_args.kwargs['json']['messages'][1]['content'])
+            self.assertEqual(info.call_count, 1)
+            self.assertEqual(widget.message_input.toPlainText(), 'fix: current index')
+
     def test_generate_reads_only_staged_changes_and_uses_worktree_if_empty(self):
         root = Path(self.repo)
         (root / 'a.txt').write_text('staged edit\n', encoding='utf-8')

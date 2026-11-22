@@ -629,6 +629,8 @@ TRANSLATIONS = {
     "git.generate_failed_msg": {"zh": "调用大模型失败: {error}", "en": "LLM request failed: {error}", "fr": "Échec de la requête LLM : {error}"},
     "git.generate_diff_failed_msg": {"zh": "读取 Git 改动失败：{error}", "en": "Could not read Git changes: {error}", "fr": "Impossible de lire les modifications Git : {error}"},
     "git.generate_diff_unknown": {"zh": "Git 未返回错误详情。", "en": "Git returned no error details.", "fr": "Git n’a fourni aucun détail sur l’erreur."},
+    "git.generate_changes_updated_title": {"zh": "Git 改动已更新", "en": "Git changes updated", "fr": "Modifications Git mises à jour"},
+    "git.generate_changes_updated_msg": {"zh": "生成期间 Git 改动已变化。请重新生成提交信息。", "en": "Git changes were updated during generation. Generate the commit message again.", "fr": "Les modifications Git ont changé pendant la génération. Générez à nouveau le message de commit."},
     "git.generate_timeout": {"zh": "模型请求超时（{seconds} 秒）。", "en": "The model request timed out ({seconds} seconds).", "fr": "La requête au modèle a expiré ({seconds} secondes)."},
     "git.generate_invalid_response": {"zh": "模型返回了无法识别的响应。", "en": "The model returned an unrecognized response.", "fr": "Le modèle a renvoyé une réponse non reconnue."},
     "git.generate_output_limit": {"zh": "模型达到输出上限，未生成完整的提交信息。", "en": "The model reached its output limit before finishing the commit message.", "fr": "Le modèle a atteint sa limite de sortie avant de terminer le message de commit."},
