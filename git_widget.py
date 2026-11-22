@@ -820,8 +820,12 @@ class _CommitMessageWorker(QThread):
             return
 
         cleaned = self._clean(content)
-        if finish_reason == 'length':
+        if finish_reason == 'content_filter' or message.get('refusal'):
+            self._fail(t("git.generate_filtered_response"), 'filtered or refused response')
+        elif finish_reason == 'length':
             self._fail(t("git.generate_output_limit"), 'output limit')
+        elif finish_reason in ('tool_calls', 'function_call'):
+            self._fail(t("git.generate_unexpected_tool"), 'unexpected tool request')
         elif not cleaned:
             self._fail(t("git.generate_empty_response"), 'empty response')
         else:
@@ -3907,6 +3911,13 @@ class GitPanel(QWidget):
     def _collect_diff_for_message(self, repo_path) -> tuple[str, str]:
         """Summarize staged changes only, falling back to the working tree if unstaged."""
         gm = self._git_manager
+        ok, conflicts = gm._run_git('diff', '--name-only', '--diff-filter=U',
+                                    '--no-ext-diff', '--no-color', repo_path=repo_path)
+        if not ok:
+            return '', conflicts or t("git.generate_diff_unknown")
+        unresolved = sum(bool(path.strip()) for path in conflicts.splitlines())
+        if unresolved:
+            return '', t("git.generate_unresolved_conflicts", n=unresolved)
         diff_options = ('--no-ext-diff', '--no-textconv', '--no-color', '--full-index', '--patch-with-stat')
         ok, staged = gm._run_git('diff', '--cached', *diff_options, repo_path=repo_path)
         if not ok:

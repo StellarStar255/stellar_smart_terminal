@@ -182,6 +182,82 @@ class TestGitAsyncOps(unittest.TestCase):
                 self.assertTrue(widget.generate_btn.isEnabled())
             self.assertEqual(warning.call_count, 2)
 
+    def test_generate_rejects_filtered_and_nonfinal_model_responses(self):
+        Path(self.repo, 'a.txt').write_text('ready\n', encoding='utf-8')
+        _git(self.repo, 'add', 'a.txt')
+        host = SimpleNamespace(get_git_llm_config=lambda: {
+            'api_base': 'https://example.test/v1', 'model': 'test'})
+        widget = self.panel.commit_widget
+        response = Mock(status_code=200)
+        with (patch.object(self.panel, '_find_main_window', return_value=host),
+              patch('git_widget.QMessageBox.warning') as warning,
+              patch('requests.post', return_value=response)):
+            for count, (reason, fields) in enumerate((
+                ('content_filter', {}),
+                ('stop', {'refusal': 'I cannot provide the rest'}),
+                ('tool_calls', {}),
+                ('function_call', {}),
+            ), 1):
+                widget.message_input.setPlainText('keep the draft')
+                response.json.return_value = {'choices': [{
+                    'finish_reason': reason,
+                    'message': {'content': 'fix: partial text', **fields},
+                }]}
+                widget.generate_btn.click()
+                self._wait_workers()
+                self.assertEqual(warning.call_count, count)
+                self.assertEqual(widget.message_input.toPlainText(), 'keep the draft')
+                self.assertTrue(widget.generate_btn.isEnabled())
+
+    def test_generate_waits_for_merge_conflicts_to_be_resolved(self):
+        from i18n import t
+
+        path = Path(self.repo, 'a.txt')
+        _git(self.repo, 'checkout', '-b', 'other')
+        path.write_text('other branch\n', encoding='utf-8')
+        _git(self.repo, 'add', 'a.txt')
+        _git(self.repo, 'commit', '-m', 'other branch')
+        _git(self.repo, 'checkout', 'main')
+        path.write_text('main branch\n', encoding='utf-8')
+        _git(self.repo, 'add', 'a.txt')
+        _git(self.repo, 'commit', '-m', 'main branch')
+        with self.assertRaises(subprocess.CalledProcessError):
+            _git(self.repo, '-c', 'rerere.enabled=false', 'merge', '--no-edit', 'other')
+        self.assertEqual(_git(self.repo, 'diff', '--name-only', '--diff-filter=U'), 'a.txt')
+
+        host = SimpleNamespace(get_git_llm_config=lambda: {
+            'api_base': 'https://example.test/v1', 'model': 'test'})
+        widget = self.panel.commit_widget
+        widget.message_input.setPlainText('keep the merge draft')
+        response = Mock(status_code=200)
+        response.json.return_value = {'choices': [{'message': {'content': 'fix: resolve conflict'}}]}
+        with (patch.object(self.panel, '_find_main_window', return_value=host),
+              patch('git_widget.QMessageBox.warning') as warning,
+              patch('requests.post', return_value=response) as post):
+            widget.generate_btn.click()
+            self._wait_workers()
+            post.assert_not_called()
+            self.assertIn(t('git.generate_unresolved_conflicts', n=1), warning.call_args.args[2])
+            self.assertEqual(widget.message_input.toPlainText(), 'keep the merge draft')
+            path.write_text('resolved change\n', encoding='utf-8')
+            _git(self.repo, 'add', 'a.txt')
+            widget.generate_btn.click()
+            self._wait_workers()
+            post.assert_called_once()
+            self.assertIn('+resolved change', post.call_args.kwargs['json']['messages'][1]['content'])
+            self.assertEqual(widget.message_input.toPlainText(), 'fix: resolve conflict')
+
+    def test_generate_handles_empty_repo_and_first_staged_commit(self):
+        fresh = Path(self.repo, 'fresh')
+        fresh.mkdir()
+        _git(str(fresh), 'init', '-b', 'main')
+        self.assertEqual(self.panel._collect_diff_for_message(str(fresh)), ('', ''))
+        (fresh / 'first.txt').write_text('first commit\n', encoding='utf-8')
+        _git(str(fresh), 'add', 'first.txt')
+        diff, error = self.panel._collect_diff_for_message(str(fresh))
+        self.assertEqual(error, '')
+        self.assertIn('+first commit', diff)
+
     def test_generate_checks_staged_content_again_before_filling(self):
         from i18n import t
 
