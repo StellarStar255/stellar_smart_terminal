@@ -73,14 +73,23 @@ def test_enter_waits_until_remote_path_is_inserted(remote):
 
 def test_multiple_files_and_text_keep_original_order(remote):
     widget, written, uploads = remote
+
+    def wait_for(predicate):
+        deadline = time.monotonic() + 2
+        while not predicate() and time.monotonic() < deadline:
+            _APP.processEvents()
+            time.sleep(.005)
+
     widget._paste_file_paths(['/tmp/a.png', '/tmp/note.txt', '/tmp/b.png'])
     widget.send_text('\r')
     assert written == []
     assert len(uploads) == 1
     complete(widget, uploads[0], '/remote/a.png')
+    wait_for(lambda: len(uploads) >= 2)
     assert written == [b'/remote/a.png ', b'/tmp/note.txt ']
     assert len(uploads) == 2
     complete(widget, uploads[1], '/remote/b.png')
+    wait_for(lambda: len(written) >= 4)
     assert written == [b'/remote/a.png ', b'/tmp/note.txt ', b'/remote/b.png ', b'\r']
 
 

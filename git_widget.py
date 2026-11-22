@@ -925,14 +925,30 @@ class _CommitMessageWorker(QThread):
         import re
         if not isinstance(text, str):
             return ''
-        # 1) 去掉成对的推理块（DeepSeek/Qwen 等推理模型会内联在 content 里）
-        text = re.sub(r'(?is)<think(?:ing)?>.*?</think(?:ing)?>', '', text)
-        # 2) 有时只回传了闭合标签（推理在前、答案在后）→ 取最后一个闭合标签之后的内容
-        text = re.split(r'(?i)</think(?:ing)?>', text)[-1]
-        # 3) 未闭合的推理块可能已被截断，丢弃标签之后的推理文字。
-        text = re.split(r'(?i)<think(?:ing)?>', text, maxsplit=1)[0]
         text = text.strip()
-        # 4) 去掉 ``` 代码围栏
+        # Only strip reasoning before the answer, where these tags act as delimiters.
+        opening = re.compile(r'<think(?:ing)?>', re.IGNORECASE)
+        closing = re.compile(r'</think(?:ing)?>', re.IGNORECASE)
+        while opening.match(text):
+            end = closing.search(text)
+            if end is None:
+                return ''
+            text = text[end.end():].lstrip()
+        text = re.sub(r'(?i)^(?:</think(?:ing)?>\s*)+', '', text)
+
+        # Some providers omit the opening marker. A closing tag followed by a
+        # commit subject can delimit the answer if the response starts with prose.
+        subject = re.compile(r'(?i)[a-z][a-z0-9_-]*(?:\([^\r\n()]+\))?!?:[ \t]+')
+        if not subject.match(text) and not text.startswith('```'):
+            if re.search(r'(?im)^[ \t]*</think(?:ing)?>[ \t]*\Z', text):
+                return ''
+            for end in re.finditer(r'(?i)</think(?:ing)?>[ \t]*\r?\n', text):
+                answer = text[end.end():].lstrip()
+                if subject.match(answer) or answer.startswith('```'):
+                    text = answer
+                    break
+
+        # Drop an outer Markdown fence.
         if text.startswith('```'):
             lines = text.splitlines()
             if lines and lines[0].startswith('```'):

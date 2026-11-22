@@ -158,6 +158,54 @@ class TestGitAsyncOps(unittest.TestCase):
             self.assertNotIn('max_tokens', payload)
             self.assertIn('+ready', payload['messages'][1]['content'])
 
+    def test_generate_preserves_literal_thinking_tags_in_commit_messages(self):
+        from git_widget import _CommitMessageWorker
+
+        subject = 'fix(parser): preserve <think> and </think> literals'
+        body = 'docs: show the reasoning tags\n\nThe literal <thinking> markup stays in the output.'
+        examples = (
+            (subject, subject),
+            ('  <THINK>private analysis</THINK>\n<thinking>more</thinking>\n' + subject, subject),
+            ('analysis without opening marker\n</think>\n' + subject, subject),
+            (body, body),
+            ('<thinking>only partial reasoning', ''),
+            ('<think>only reasoning</think>', ''),
+            ('analysis without answer\n</think>', ''),
+        )
+        for raw, expected in examples:
+            with self.subTest(raw=raw):
+                self.assertEqual(_CommitMessageWorker._clean(raw), expected)
+
+    def test_generate_bounds_large_diff_and_detects_change_beyond_prompt(self):
+        path = Path(self.repo, 'a.txt')
+        prefix = ''.join(f'第 {i:04d} 行文本\n' for i in range(2300))
+        path.write_text(prefix + 'original tail\n', encoding='utf-8')
+        _git(self.repo, 'add', 'a.txt')
+        host = SimpleNamespace(get_git_llm_config=lambda: {
+            'api_base': 'https://example.test/v1', 'model': 'test'})
+        widget = self.panel.commit_widget
+        widget.message_input.setPlainText('keep existing draft')
+        response = Mock(status_code=200)
+        response.json.return_value = {'choices': [{'message': {'content': 'fix: old result'}}]}
+
+        def respond(*_args, **_kwargs):
+            path.write_text(prefix + 'updated tail\n', encoding='utf-8')
+            _git(self.repo, 'add', 'a.txt')
+            return response
+
+        with (patch.object(self.panel, '_find_main_window', return_value=host),
+              patch('git_widget.QMessageBox.information') as info,
+              patch('requests.post', side_effect=respond) as post):
+            widget.generate_btn.click()
+            self._wait_workers()
+            text = post.call_args.kwargs['json']['messages'][1]['content'].split('\n\n', 1)[1]
+            trimmed, marker = text.rsplit('\n', 1)
+            self.assertEqual(len(trimmed), 16000)
+            self.assertEqual(marker, '...[truncated]...')
+            self.assertNotIn('original tail', trimmed)
+            info.assert_called_once()
+            self.assertEqual(widget.message_input.toPlainText(), 'keep existing draft')
+
     def test_generate_shows_provider_errors_returned_with_http_200(self):
         Path(self.repo, 'a.txt').write_text('ready\n', encoding='utf-8')
         _git(self.repo, 'add', 'a.txt')
