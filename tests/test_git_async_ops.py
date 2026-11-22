@@ -11,6 +11,8 @@ import subprocess
 import sys
 import time
 import unittest
+from pathlib import Path
+from threading import Event
 from types import SimpleNamespace
 from unittest.mock import Mock, patch
 
@@ -86,6 +88,7 @@ class TestGitAsyncOps(unittest.TestCase):
         while time.monotonic() < deadline:
             self.app.processEvents()
             busy = (self.panel._commit_running or self.panel._checkout_running
+                    or self.panel._message_generation is not None
                     or any(w.isRunning() for w in self.panel._active_workers))
             if not busy:
                 # 再抽一次事件队列，确保排队中的 done 回调执行完
@@ -115,8 +118,6 @@ class TestGitAsyncOps(unittest.TestCase):
         self.assertEqual(self.panel.commit_widget.commit_btn.text(), 'Commit')
 
     def test_generate_rejects_reasoning_only_then_fills_commit_message(self):
-        from pathlib import Path
-
         Path(self.repo, 'a.txt').write_text('ready\n', encoding='utf-8')
         _git(self.repo, 'add', 'a.txt')
         config = {'api_base': 'https://api.minimax.io/v1/chat/completions',
@@ -156,6 +157,130 @@ class TestGitAsyncOps(unittest.TestCase):
             self.assertEqual(payload['max_completion_tokens'], 1024)
             self.assertNotIn('max_tokens', payload)
             self.assertIn('+ready', payload['messages'][1]['content'])
+
+    def test_generate_reads_only_staged_changes_and_uses_worktree_if_empty(self):
+        root = Path(self.repo)
+        (root / 'a.txt').write_text('staged edit\n', encoding='utf-8')
+        _git(self.repo, 'add', 'a.txt')
+        (root / 'a.txt').write_text('worktree edit\n', encoding='utf-8')
+        (root / 'untracked-note.txt').write_text('untracked text\n', encoding='utf-8')
+        diff, error = self.panel._collect_diff_for_message(self.repo)
+        self.assertEqual(error, '')
+        self.assertIn('staged edit', diff)
+        self.assertNotIn('worktree edit', diff)
+        self.assertNotIn('untracked-note.txt', diff)
+
+        _git(self.repo, 'reset', 'HEAD', '--', 'a.txt')
+        diff, error = self.panel._collect_diff_for_message(self.repo)
+        self.assertEqual(error, '')
+        self.assertIn('worktree edit', diff)
+        self.assertIn('untracked-note.txt', diff)
+
+    def test_generate_distinguishes_git_read_error_from_no_changes(self):
+        from i18n import t
+
+        missing = str(Path(self.repo, 'missing'))
+        host = SimpleNamespace(get_git_llm_config=lambda: {
+            'api_base': 'https://example.test/v1', 'model': 'test'})
+        collect = self.panel._collect_diff_for_message
+        with (patch.object(self.panel, '_find_main_window', return_value=host),
+              patch.object(self.panel, '_collect_diff_for_message',
+                           side_effect=lambda _: collect(missing)),
+              patch('git_widget.QMessageBox.warning') as warning,
+              patch('git_widget.QMessageBox.information') as info,
+              patch('requests.post') as post):
+            self.panel.commit_widget.generate_btn.click()
+            self._wait_workers()
+            warning.assert_called_once()
+            self.assertIn(t('git_mgr.repo_path_missing', path=missing), warning.call_args.args[2])
+            info.assert_not_called()
+            post.assert_not_called()
+            self.assertTrue(self.panel.commit_widget.generate_btn.isEnabled())
+
+    def test_generate_preserves_draft_edited_while_request_is_running(self):
+        Path(self.repo, 'a.txt').write_text('staged edit\n', encoding='utf-8')
+        _git(self.repo, 'add', 'a.txt')
+        host = SimpleNamespace(get_git_llm_config=lambda: {
+            'api_base': 'https://example.test/v1', 'model': 'test'})
+        widget = self.panel.commit_widget
+        started = Event()
+        release = Event()
+        response = Mock(status_code=200)
+        response.json.return_value = {
+            'choices': [{'message': {'content': 'fix: generated'}}]}
+
+        def post(*args, **kwargs):
+            started.set()
+            release.wait(5)
+            return response
+
+        with (patch.object(self.panel, '_find_main_window', return_value=host),
+              patch('requests.post', side_effect=post)):
+            widget.generate_btn.click()
+            deadline = time.monotonic() + 4
+            try:
+                while not started.is_set() and time.monotonic() < deadline:
+                    self.app.processEvents()
+                    time.sleep(.01)
+                self.assertTrue(started.is_set())
+                widget.message_input.setPlainText('my edited draft')
+            finally:
+                release.set()
+            self._wait_workers()
+        self.assertTrue(widget.generate_btn.isEnabled())
+        self.assertEqual(widget.message_input.toPlainText(), 'my edited draft')
+
+    def test_generate_discards_result_after_switching_repositories(self):
+        Path(self.repo, 'a.txt').write_text('repo a changes\n', encoding='utf-8')
+        _git(self.repo, 'add', 'a.txt')
+        repo_b = Path(self.repo, 'nested-repo')
+        repo_b.mkdir()
+        _git(str(repo_b), 'init', '-b', 'main')
+        Path(repo_b, 'b.txt').write_text('repo b changes\n', encoding='utf-8')
+        _git(str(repo_b), 'add', 'b.txt')
+        host = SimpleNamespace(get_git_llm_config=lambda: {
+            'api_base': 'https://example.test/v1', 'model': 'test'})
+        widget = self.panel.commit_widget
+        started = Event()
+        release = Event()
+        prompts = []
+
+        def post(*args, **kwargs):
+            prompt = kwargs['json']['messages'][1]['content']
+            prompts.append(prompt)
+            if 'repo a changes' in prompt:
+                started.set()
+                release.wait(5)
+                message = 'fix: old repository'
+            else:
+                message = 'fix: active repository'
+            response = Mock(status_code=200)
+            response.json.return_value = {'choices': [{'message': {'content': message}}]}
+            return response
+
+        with (patch.object(self.panel, '_find_main_window', return_value=host),
+              patch('requests.post', side_effect=post)):
+            widget.generate_btn.click()
+            deadline = time.monotonic() + 4
+            try:
+                while not started.is_set() and time.monotonic() < deadline:
+                    self.app.processEvents()
+                    time.sleep(.01)
+                self.assertTrue(started.is_set())
+                self.panel.set_repository(str(repo_b))
+                self.assertTrue(widget.generate_btn.isEnabled())
+                widget.generate_btn.click()
+            finally:
+                release.set()
+            self._wait_workers()
+        self.assertEqual(len(prompts), 2)
+        self.assertIn('repo b changes', prompts[1])
+        self.assertNotIn('repo a changes', prompts[1])
+        self.assertEqual(widget.message_input.toPlainText(), 'fix: active repository')
+        diff, error = self.panel._collect_diff_for_message(self.repo)
+        self.assertEqual(error, '')
+        self.assertIn('repo a changes', diff)
+        self.assertNotIn('repo b changes', diff)
 
     def test_failed_commit_keeps_message(self):
         # 无暂存改动 → git commit 失败

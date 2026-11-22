@@ -379,7 +379,7 @@ class GitManager(QObject):
         """发出状态变更信号"""
         self.status_changed.emit()
 
-    def _spawn_git(self, args: list, stdin=None):
+    def _spawn_git(self, args: list, stdin=None, *, repo_path=None):
         """启动一个 git 子进程并登记到 _active_procs。
 
         使用 start_new_session=True 让 git 及其子进程（ssh / credential helper）
@@ -411,7 +411,7 @@ class GitManager(QObject):
             # status/diff/log 输出里会变成 "\345\256\211..." 八进制转义，
             # 面板上就显示不出中文名。关掉后按 UTF-8 原样输出。
             ['git', '-c', 'core.quotepath=false'] + list(args),
-            cwd=self._repo_path,
+            cwd=repo_path if repo_path is not None else self._repo_path,
             stdin=stdin,
             stdout=subprocess.PIPE,
             stderr=subprocess.PIPE,
@@ -460,7 +460,7 @@ class GitManager(QObject):
                     logger.debug("cancel_running: suppressed exception", exc_info=True)
 
     def _run_git(self, *args, check: bool = True, timeout: int = 30,
-                 input_text: str = None) -> Tuple[bool, str]:
+                 input_text: str = None, repo_path=None) -> Tuple[bool, str]:
         """执行 git 命令
 
         Args:
@@ -468,6 +468,7 @@ class GitManager(QObject):
             check: 是否检查返回码
             timeout: 超时秒数（push/pull 等网络操作需要更长）
             input_text: 通过 stdin 喂给 git 的文本（如 `git apply -` 的 patch）
+            repo_path: 固定本次任务的仓库，防止多条命令之间切换仓库
 
         Returns:
             (成功与否, 输出内容)
@@ -476,7 +477,7 @@ class GitManager(QObject):
         按 _LOCK_RETRY_DELAYS 退避重试：git 拿不到锁即刻放弃且未做任何
         修改，重跑同一命令是安全的。
         """
-        if not self._repo_path:
+        if not (repo_path or self._repo_path):
             return False, t("git_mgr.no_repo_path")
 
         # GUI 线程上撞锁最多立即重试一次、绝不 sleep（累计 3s 的梯子会把
@@ -484,7 +485,8 @@ class GitManager(QObject):
         delays = _lock_retry_delays()
         attempts = len(delays) + 1 if delays else 2
         for attempt in range(attempts):
-            ok, output = self._run_git_once(list(args), check, timeout, input_text)
+            ok, output = self._run_git_once(list(args), check, timeout, input_text,
+                                            repo_path=repo_path)
             if ok or not check or not _is_lock_contention(output):
                 return ok, output
             if attempt < len(delays):
@@ -545,13 +547,14 @@ class GitManager(QObject):
             raise
 
     def _run_git_once(self, args: list, check: bool, timeout: int,
-                      input_text: str) -> Tuple[bool, str]:
+                      input_text: str, *, repo_path=None) -> Tuple[bool, str]:
         """单次执行 git 命令（无重试），供 _run_git 调用。"""
         proc = None
         try:
             proc = self._spawn_git(
                 args,
                 stdin=subprocess.PIPE if input_text is not None else None,
+                repo_path=repo_path,
             )
             bounded_output = bool(args) and input_text is None and (
                 args[0] == 'diff' and '--name-only' not in args
@@ -575,8 +578,11 @@ class GitManager(QObject):
             if check and proc.returncode != 0:
                 return False, (stderr or '').strip() or (stdout or '').strip()
             return True, stdout
-        except FileNotFoundError:
-            return False, t("git_mgr.git_not_found")
+        except (FileNotFoundError, NotADirectoryError) as exc:
+            cwd = repo_path if repo_path is not None else self._repo_path
+            if cwd and (exc.filename == cwd or not os.path.isdir(cwd)):
+                return False, t("git_mgr.repo_path_missing", path=cwd)
+            return False, t("git_mgr.git_not_found") if isinstance(exc, FileNotFoundError) else str(exc)
         except Exception as e:
             return False, str(e)
         finally:

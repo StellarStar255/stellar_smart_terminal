@@ -193,7 +193,7 @@ def test_git_patch_pipes_are_drained_with_bounded_memory(app, monkeypatch, tmp_p
     manager = GitManager()
     manager._repo_path = str(tmp_path)
     procs = []
-    def spawn(args, stdin=None):
+    def spawn(args, stdin=None, *, repo_path=None):
         proc = subprocess.Popen([sys.executable, '-c',
             "import sys\nsys.stdout.reconfigure(encoding='utf-8')\nsys.stderr.reconfigure(encoding='utf-8')\nfor i in range(128):\n sys.stdout.write('行' * 65536)\n sys.stderr.write('错' * 65536)\n"],
             stdout=subprocess.PIPE, stderr=subprocess.PIPE, stdin=subprocess.DEVNULL,

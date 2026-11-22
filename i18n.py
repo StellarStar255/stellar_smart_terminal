@@ -627,6 +627,8 @@ TRANSLATIONS = {
     "git.generate_no_changes_msg": {"zh": "当前没有检测到代码改动（diff 为空）。", "en": "No code changes detected (the diff is empty).", "fr": "Aucune modification de code détectée (diff vide)."},
     "git.generate_failed_title": {"zh": "生成失败", "en": "Generation Failed", "fr": "Échec de la génération"},
     "git.generate_failed_msg": {"zh": "调用大模型失败: {error}", "en": "LLM request failed: {error}", "fr": "Échec de la requête LLM : {error}"},
+    "git.generate_diff_failed_msg": {"zh": "读取 Git 改动失败：{error}", "en": "Could not read Git changes: {error}", "fr": "Impossible de lire les modifications Git : {error}"},
+    "git.generate_diff_unknown": {"zh": "Git 未返回错误详情。", "en": "Git returned no error details.", "fr": "Git n’a fourni aucun détail sur l’erreur."},
     "git.generate_timeout": {"zh": "模型请求超时（{seconds} 秒）。", "en": "The model request timed out ({seconds} seconds).", "fr": "La requête au modèle a expiré ({seconds} secondes)."},
     "git.generate_invalid_response": {"zh": "模型返回了无法识别的响应。", "en": "The model returned an unrecognized response.", "fr": "Le modèle a renvoyé une réponse non reconnue."},
     "git.generate_output_limit": {"zh": "模型达到输出上限，未生成完整的提交信息。", "en": "The model reached its output limit before finishing the commit message.", "fr": "Le modèle a atteint sa limite de sortie avant de terminer le message de commit."},
@@ -696,6 +698,7 @@ TRANSLATIONS = {
 
     # ===== Git Manager 错误消息 =====
     "git_mgr.no_repo_path": {"zh": "未设置仓库路径", "en": "Repository path not set", "fr": "Chemin du dépôt non défini"},
+    "git_mgr.repo_path_missing": {"zh": "仓库目录不存在：{path}", "en": "Repository directory does not exist: {path}", "fr": "Le dossier du dépôt n’existe pas : {path}"},
     "git_mgr.timeout": {"zh": "Git 命令超时", "en": "Git command timed out", "fr": "Délai de la commande Git dépassé"},
     "git_mgr.status_failed": {"zh": "获取状态失败: {error}", "en": "Failed to get status: {error}", "fr": "Impossible d’obtenir l’état : {error}"},
     "git_mgr.stage_failed": {"zh": "暂存失败: {error}", "en": "Stage failed: {error}", "fr": "Échec de l’indexation : {error}"},

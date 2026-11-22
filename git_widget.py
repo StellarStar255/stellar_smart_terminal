@@ -2644,6 +2644,7 @@ class GitPanel(QWidget):
         self._active_workers = set()  # 在跑的后台线程，关闭时统一等待，避免被销毁时 abort
         self._fetch_running = False
         self._commit_running = False
+        self._message_generation = None
         self._checkout_running = False
         self._stash_running = False
         # 最近一次刷新拿到的 HEAD 引用 (kind, name)：分支删除 / 引用切换的
@@ -2904,6 +2905,7 @@ class GitPanel(QWidget):
         is_repo = self._git_manager.set_repository(path)
         if self._git_manager._repo_path != prev_repo:
             self._head_ref = ('unknown', '')   # 换仓库：旧 HEAD 缓存作废，等刷新
+            self._finish_message_generation(self._message_generation)
 
         if is_repo:
             self.no_repo_label.hide()
@@ -3607,6 +3609,7 @@ class GitPanel(QWidget):
         worker 一直阻塞在 subprocess.communicate()，QThread.terminate() 对
         阻塞在 C 库里的 Python 线程不可靠，会导致整个程序无法退出。
         """
+        self._finish_message_generation(self._message_generation)
         try:
             self._fetch_timer.stop()
         except RuntimeError:  # Qt 对象已销毁（窗口/面板已关）
@@ -3650,6 +3653,7 @@ class GitPanel(QWidget):
             self._refresh_all_async()
             return
         self._checkout_running = True
+        self._finish_message_generation(self._message_generation)
         worker = _GitOpWorker(
             lambda: self._git_manager.checkout_ref(kind, name), 'checkout', self)
         worker.done.connect(self._on_checkout_done)
@@ -3715,6 +3719,7 @@ class GitPanel(QWidget):
         if self._commit_running:
             return
         self._commit_running = True
+        self._finish_message_generation(self._message_generation)
         self.commit_widget.set_busy('commit', True)
         worker = _GitOpWorker(
             lambda: self._git_manager.commit(message), 'commit', self)
@@ -3759,9 +3764,11 @@ class GitPanel(QWidget):
     def _on_generate_message(self):
         """根据当前改动调用大模型生成提交信息，填进输入框。
 
-        先校验模型配置（不碰 git），再到后台线程收集 diff（三次 git 调用，
-        大仓库秒级），拿到后才启动生成线程。
+        先校验模型配置，再在后台从点击时的仓库读取改动。
         """
+        repo_path = self._git_manager._repo_path
+        if not repo_path or self._message_generation is not None or self._checkout_running or self._commit_running:
+            return
         main_window = self._find_main_window()
         # 优先用「设为 Git 模型」指派的配置，否则回退默认配置
         config = None
@@ -3777,32 +3784,55 @@ class GitPanel(QWidget):
             )
             return
 
+        request = self._message_generation = object()
+        revision = self.commit_widget.message_input.document().revision()
+        lang = get_language()
         self.commit_widget.set_generating(True)
         self._run_git_async(
-            self._collect_diff_for_message, 'collect_diff',
-            lambda diff, _k: self._on_diff_collected(config, diff or ''))
+            lambda: self._collect_diff_for_message(repo_path), 'collect_diff',
+            lambda result, _k: self._on_diff_collected(request, revision, config, lang, result))
 
-    def _on_diff_collected(self, config: dict, diff: str):
-        if not diff.strip():
-            self.commit_widget.set_generating(False)
+    def _on_diff_collected(self, request, revision, config, lang, result):
+        if self._message_generation is not request:
+            return
+        if self.commit_widget.message_input.document().revision() != revision:
+            self._finish_message_generation(request)
+            return
+        diff, error = result if result is not None else ('', t("git.generate_diff_unknown"))
+        if error:
+            self._finish_message_generation(request)
+            QMessageBox.warning(
+                self, t("git.generate_failed_title"),
+                t("git.generate_diff_failed_msg", error=error)
+            )
+            return
+        if not diff:
+            self._finish_message_generation(request)
             QMessageBox.information(
                 self, t("git.generate_no_changes_title"),
                 t("git.generate_no_changes_msg")
             )
             return
-        worker = _CommitMessageWorker(config, diff, get_language(), self)
-        worker.succeeded.connect(self._on_generate_done)
-        worker.failed.connect(self._on_generate_failed)
-        worker.finished.connect(
-            lambda: (self.commit_widget.set_generating(False),
-                     self._notify_generation_attention())
-        )
+        worker = _CommitMessageWorker(config, diff, lang, self)
+        worker.succeeded.connect(lambda message: self._on_generate_done(request, revision, message))
+        worker.failed.connect(lambda error: self._on_generate_failed(request, error))
+        worker.finished.connect(lambda: self._finish_message_generation(request))
         self._register_worker(worker)
         worker.start()
 
-    def _on_generate_done(self, message: str):
-        if message:
+    def _finish_message_generation(self, request):
+        if request is None or self._message_generation is not request:
+            return False
+        self._message_generation = None
+        self.commit_widget.set_generating(False)
+        return True
+
+    def _on_generate_done(self, request, revision, message: str):
+        if not self._finish_message_generation(request):
+            return
+        if message and self.commit_widget.message_input.document().revision() == revision:
             self.commit_widget.set_message(message)
+        self._notify_generation_attention()
 
     def _notify_generation_attention(self):
         """生成提交信息完成（成功或失败）：窗口不在前台时点亮导航绿点，
@@ -3812,35 +3842,40 @@ class GitPanel(QWidget):
                 and hasattr(win, 'isActiveWindow') and not win.isActiveWindow()):
             win._request_nav_attention()
 
-    def _on_generate_failed(self, error: str):
+    def _on_generate_failed(self, request, error: str):
+        if not self._finish_message_generation(request):
+            return
+        self._notify_generation_attention()
         QMessageBox.warning(
             self, t("git.generate_failed_title"),
             t("git.generate_failed_msg", error=error)
         )
 
-    def _collect_diff_for_message(self, max_chars: int = 16000) -> str:
-        """收集要喂给模型的改动：优先暂存区 diff，没有就用工作区 diff，
-        并附上 `git status --short` 摘要（这样新增/未跟踪文件也能体现）。"""
+    def _collect_diff_for_message(self, repo_path, max_chars: int = 16000) -> tuple[str, str]:
+        """Summarize staged changes only, falling back to the working tree if unstaged."""
         gm = self._git_manager
-        ok, staged = gm._run_git('diff', '--cached')
-        body = staged if (ok and staged.strip()) else ''
-        if not body.strip():
-            ok2, unstaged = gm._run_git('diff')
-            if ok2 and unstaged.strip():
-                body = unstaged
-
-        ok3, status = gm._run_git('status', '--short')
-        status = status.strip() if ok3 else ''
-
-        sections = []
-        if status:
-            sections.append("# Changed files (git status --short)\n" + status)
-        if body.strip():
-            sections.append("# Diff\n" + body)
-        text = "\n\n".join(sections)
+        diff_options = ('--no-ext-diff', '--no-textconv', '--no-color', '--patch-with-stat')
+        ok, staged = gm._run_git('diff', '--cached', *diff_options, repo_path=repo_path)
+        if not ok:
+            return '', staged or t("git.generate_diff_unknown")
+        if staged.strip():
+            text = "# Staged changes\n" + staged
+        else:
+            ok, body = gm._run_git('diff', *diff_options, repo_path=repo_path)
+            if not ok:
+                return '', body or t("git.generate_diff_unknown")
+            ok, status = gm._run_git('status', '--short', repo_path=repo_path)
+            if not ok:
+                return '', status or t("git.generate_diff_unknown")
+            sections = []
+            if status.strip():
+                sections.append("# Changed files (git status --short)\n" + status.strip())
+            if body.strip():
+                sections.append("# Working tree diff\n" + body)
+            text = "\n\n".join(sections)
         if len(text) > max_chars:
             text = text[:max_chars] + "\n...[truncated]..."
-        return text
+        return text, ''
 
     def _find_main_window(self):
         """向上找到持有 LLM 配置的主窗口（get_llm_config）。"""

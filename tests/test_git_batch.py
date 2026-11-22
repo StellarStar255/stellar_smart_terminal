@@ -102,7 +102,7 @@ class TestLockRetryThreadAware(_AppBase):
         self.gm._repo_path = tempfile.gettempdir()
         self.once_calls = 0
 
-        def fake_once(args, check, timeout, input_text):
+        def fake_once(args, check, timeout, input_text, *, repo_path=None):
             self.once_calls += 1
             return False, _LOCK_MSG
         self.gm._run_git_once = fake_once
