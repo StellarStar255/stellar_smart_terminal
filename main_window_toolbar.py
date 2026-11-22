@@ -185,6 +185,7 @@ class ToolbarMixin:
         # 分组按钮里（默认排在 Stop 之后），位置可在工具栏布局管理器里调整
         self.command_palette = CommandPalette(t("palette.placeholder"))
         self.command_palette.set_empty_text(t("palette.no_results"))
+        self.command_palette.opened.connect(self._probe_quick_command_host)
         # 两倍宽，保证占位文字 "Search commands… (⌘K)" 完整可见、不被截断。
         # 注意：必须用 set_box_width（写进 sizeHint），普通 setMinimumWidth 在 pin 后的
         # FlowLayout 工具栏里不生效——FlowLayout 只读 sizeHint/minimumSizeHint。

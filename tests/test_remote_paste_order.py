@@ -46,6 +46,21 @@ def complete(widget, upload, result):
         widget._remote_paste_finished.emit(request, result)
 
 
+def test_ssh_target_discovery_skips_background_jobs():
+    processes = [
+        (10, 1, 'zsh'),
+        (11, 10, 'ssh -N forwarding-host'),
+        (12, 10, 'ssh training-host'),
+    ]
+    with patch('main_window_remote.os.getpgid', side_effect=lambda pid: pid, create=True):
+        assert RemotePanelMixin._ssh_args_under(10, processes) == 'ssh -N forwarding-host'
+        assert RemotePanelMixin._ssh_args_under(
+            10, processes, foreground_group=12) == 'ssh training-host'
+        assert RemotePanelMixin._ssh_args_under(10, processes, foreground_group=10) is None
+        assert RemotePanelMixin._ssh_args_under(
+            10, [(10, 1, 'ssh exec-host')], foreground_group=10) == 'ssh exec-host'
+
+
 def test_enter_waits_until_remote_path_is_inserted(remote):
     widget, written, uploads = remote
     widget._deliver_media_path('/tmp/a.png')

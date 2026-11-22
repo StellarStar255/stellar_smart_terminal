@@ -52,8 +52,8 @@ from PyQt6.QtWidgets import (
 )
 import copy
 from PyQt6 import sip  # 用于检查 C++ 对象是否已被删除
-from PyQt6.QtCore import (Qt, QTimer, QEvent, QPoint, QRect, QObject,
-                          QVariantAnimation, QEasingCurve, QAbstractAnimation)
+from PyQt6.QtCore import (Qt, QTimer, QEvent, QPoint, QRect, QObject, QThreadPool,
+                          QVariantAnimation, QEasingCurve, QAbstractAnimation, pyqtSignal)
 from PyQt6.QtGui import QAction, QIcon, QColor, QPixmap, QPainter, QKeySequence
 
 from terminal_widget import TerminalWidget
@@ -150,6 +150,8 @@ class MainWindow(ThemeMixin, ToolbarMixin, ConfigMixin, ExplorerPanelMixin,
                  GitPanelMixin, RemotePanelMixin, TabSplitMixin, UpdateMixin,
                  MenusMixin, QMainWindow):
     """主窗口"""
+
+    _quick_command_host_ready = pyqtSignal(object, object, object)
 
     # 配置文件路径（源码运行=项目目录；打包运行=平台用户数据目录，见 utils.get_data_dir）
     CONFIG_FILE = get_config_path()
@@ -266,6 +268,7 @@ class MainWindow(ThemeMixin, ToolbarMixin, ConfigMixin, ExplorerPanelMixin,
             window_title: 自定义窗口标题
         """
         super().__init__()
+        self._quick_command_host_ready.connect(self._apply_quick_command_host)
 
         # macOS: 确保窗口是独立的原生窗口，能被 Mission Control 识别
         self.setAttribute(Qt.WidgetAttribute.WA_NativeWindow, True)
@@ -1267,6 +1270,7 @@ class MainWindow(ThemeMixin, ToolbarMixin, ConfigMixin, ExplorerPanelMixin,
         palette = self.command_palette
         palette.clear()
         palette.set_context_commands(self._quick_command_palette_entries)
+        palette.set_quick_command_labels(t("palette.insert_command"), t("palette.edit_preset"))
 
         def _label_for(w, fallback: str = '') -> str:
             """按钮显示文本：纯符号/emoji 时退回 tooltip，避免命令列里出现裸图标。"""
@@ -1323,22 +1327,132 @@ class MainWindow(ThemeMixin, ToolbarMixin, ConfigMixin, ExplorerPanelMixin,
                         terminal, preset, cwd),
                     group=group,
                     search_text="\n".join(commands),
+                    insert=lambda preset=preset, cwd=cwd: self._insert_palette_preset(
+                        terminal, preset, cwd),
+                    edit=lambda preset=preset, cwd=cwd: self._edit_palette_preset(preset, cwd),
+                    target=lambda: self._quick_command_target_label(terminal),
                 )
+
+    def _palette_preset_row(self, preset, cwd):
+        if cwd is not None and cwd != self._window_cwd:
+            return None
+        presets = self.presets if cwd is None else self.local_presets
+        return next((row for row, current in enumerate(presets) if current is preset), None)
 
     def _run_palette_preset(self, terminal, preset, cwd):
         if terminal is not self._quick_command_terminal():
             return
-        if cwd is not None and cwd != self._window_cwd:
-            return
-        presets = self.presets if cwd is None else self.local_presets
-        if any(current is preset for current in presets):
+        if self._palette_preset_row(preset, cwd) is not None:
             terminal.setFocus()
             terminal._execute_commands(preset["commands"])
+
+    def _insert_palette_preset(self, terminal, preset, cwd):
+        if (terminal is not self._quick_command_terminal()
+                or self._palette_preset_row(preset, cwd) is None):
+            return
+        if not terminal.is_running():
+            self.statusbar.showMessage(t("palette.insert_needs_terminal"), 4000)
+            return
+
+        # A plain PTY can interpret every newline as Enter. Choose a single line
+        # from a multi-command preset so insertion behaves consistently in any shell.
+        lines = [line for command in preset["commands"]
+                 for line in command.replace("\r\n", "\n").replace("\r", "\n").split("\n")
+                 if line.strip()]
+        if not lines:
+            return
+        line = lines[0]
+        if len(lines) > 1:
+            backend = terminal._backend
+            line, accepted = QInputDialog.getItem(
+                self, t("palette.insert_command"), t("palette.choose_command_line"), lines, 0, False)
+            if (not accepted or terminal is not self._quick_command_terminal()
+                    or terminal._backend is not backend or self._palette_preset_row(preset, cwd) is None):
+                return
+        terminal.setFocus()
+        if not terminal.insert_command_line(line):
+            self.statusbar.showMessage(t("palette.insert_failed"), 4000)
+
+    def _edit_palette_preset(self, preset, cwd):
+        row = self._palette_preset_row(preset, cwd)
+        if row is not None:
+            self._edit_presets_dialog(local=cwd is not None, selected_row=row)
 
     def _quick_command_terminal(self):
         terminals = self.tab_terminals.get(self.tab_widget.currentIndex(), [])
         terminal = self._target_terminal_in_tab(terminals, fallback_first=len(terminals) == 1)
         return terminal if self._owns_terminal(terminal) else None
+
+    def _quick_command_target_label(self, terminal):
+        idx = self.tab_widget.currentIndex()
+        terminals = self.tab_terminals.get(idx, [])
+        if terminal not in terminals or not self._owns_terminal(terminal):
+            return ""
+        number = terminals.index(terminal) + 1
+        name = terminal.get_split_label()
+        pane = f"{number} ({name})" if name else str(number)
+        label = t("palette.execution_target", tab=self.tab_widget.tabText(idx), pane=pane)
+        host = getattr(self, "_quick_command_host", None)
+        if (host is not None and host[0] is terminal and host[1] is terminal._backend
+                and host[2] == self._quick_command_foreground_group(terminal._backend)):
+            label += f" · SSH {host[3]}"
+        return label
+
+    @staticmethod
+    def _quick_command_foreground_group(backend):
+        fd = getattr(backend, "_master_fd", None)
+        if fd is not None and hasattr(os, "tcgetpgrp"):
+            try:
+                group = os.tcgetpgrp(fd)
+                return group if group > 0 else None
+            except OSError:
+                pass
+        return None
+
+    def _probe_quick_command_host(self):
+        self._quick_command_host = None
+        request = self._quick_command_host_request = object()
+        self.command_palette.refresh_current_details()
+        terminal = self._quick_command_terminal()
+        backend = getattr(terminal, "_backend", None)
+        pid = getattr(backend, "_child_pid", None)
+        foreground = self._quick_command_foreground_group(backend)
+        if not pid or foreground is None:
+            return
+
+        hosts = self._known_remote_hosts()
+        preferred = getattr(terminal, "_ssh_host_config", None)
+        find_ssh = self._ssh_args_under
+        match_host = self._match_host_for_ssh_args
+        report = self._quick_command_host_ready
+
+        def probe():
+            try:
+                args = find_ssh(pid, foreground_group=foreground)
+                if not args:
+                    return
+                host = match_host(args, hosts, preferred)
+                if host is None and not hosts:
+                    from ssh_session import parse_ssh_config
+                    host = match_host(args, parse_ssh_config())
+            except Exception:
+                logger.debug("Could not identify the command palette SSH target", exc_info=True)
+                return
+            if host is not None:
+                try:
+                    report.emit(request, (terminal, backend, foreground), host.alias or host.hostname)
+                except RuntimeError:
+                    pass  # Window closed while the process snapshot was being read.
+
+        QThreadPool.globalInstance().start(probe)
+
+    def _apply_quick_command_host(self, request, target, host):
+        terminal, backend, foreground = target
+        if (request is self._quick_command_host_request and self.command_palette.popup.isVisible()
+                and terminal is self._quick_command_terminal() and terminal._backend is backend
+                and foreground == self._quick_command_foreground_group(backend)):
+            self._quick_command_host = (terminal, backend, foreground, host)
+            self.command_palette.refresh_current_details()
 
     # 下拉框最多显示多少条历史目录。完整历史不受影响（仍存盘、仍可在
     # 「History」对话框里管理）——只是限制弹窗里的条目数，避免历史越攒越多
@@ -5757,15 +5871,35 @@ class MainWindow(ThemeMixin, ToolbarMixin, ConfigMixin, ExplorerPanelMixin,
 
     def _manage_presets(self):
         """打开预设管理对话框"""
-        dialog = PresetDialog(self.presets, self, theme=self.THEMES.get(self.current_theme, self.THEMES["午夜黑"]))
-        if dialog.exec() == QDialog.DialogCode.Accepted:
-            self._apply_edited_presets(dialog.get_presets())
+        self._edit_presets_dialog()
 
     def _add_new_preset(self):
         """打开预设管理对话框并自动添加新预设"""
-        dialog = PresetDialog(self.presets, self, auto_add=True, theme=self.THEMES.get(self.current_theme, self.THEMES["午夜黑"]))
-        if dialog.exec() == QDialog.DialogCode.Accepted:
-            self._apply_edited_presets(dialog.get_presets())
+        self._edit_presets_dialog(auto_add=True)
+
+    def _edit_presets_dialog(self, *, local=False, auto_add=False, selected_row=None):
+        cwd = self._window_cwd
+        presets = self.local_presets if local else self.presets
+        title = t("msg.manage_local_commands") if local else None
+        theme = self.THEMES.get(self.current_theme, self.THEMES["午夜黑"])
+        dialog = PresetDialog(presets, self, auto_add=auto_add, title=title, theme=theme,
+                              selected_row=selected_row)
+        try:
+            if dialog.exec() != QDialog.DialogCode.Accepted:
+                return
+            updated = dialog.get_presets()
+        finally:
+            dialog.deleteLater()
+
+        if not local:
+            self._apply_edited_presets(updated)
+        elif self._window_cwd == cwd:
+            self.local_presets = updated
+            if self._save_local_commands():
+                self.statusbar.showMessage(t("status.local_preset_saved"), 3000)
+                self._broadcast_local_commands_reload()
+            else:
+                self.local_presets = presets
 
     def _apply_edited_presets(self, presets: list):
         """预设管理框确认后：本窗口采用新列表、落盘，并同步到其它窗口。"""
@@ -5837,21 +5971,11 @@ class MainWindow(ThemeMixin, ToolbarMixin, ConfigMixin, ExplorerPanelMixin,
 
     def _manage_local_presets(self):
         """打开本地预设管理对话框"""
-        dialog = PresetDialog(self.local_presets, self, title=t("msg.manage_local_commands"), theme=self.THEMES.get(self.current_theme, self.THEMES["午夜黑"]))
-        if dialog.exec() == QDialog.DialogCode.Accepted:
-            self.local_presets = dialog.get_presets()
-            if self._save_local_commands():
-                self.statusbar.showMessage(t("status.local_preset_saved"), 3000)
-                self._broadcast_local_commands_reload()
+        self._edit_presets_dialog(local=True)
 
     def _add_new_local_preset(self):
         """添加新本地预设"""
-        dialog = PresetDialog(self.local_presets, self, auto_add=True, title=t("msg.manage_local_commands"), theme=self.THEMES.get(self.current_theme, self.THEMES["午夜黑"]))
-        if dialog.exec() == QDialog.DialogCode.Accepted:
-            self.local_presets = dialog.get_presets()
-            if self._save_local_commands():
-                self.statusbar.showMessage(t("status.local_preset_saved"), 3000)
-                self._broadcast_local_commands_reload()
+        self._edit_presets_dialog(local=True, auto_add=True)
 
     def _broadcast_local_commands_reload(self):
         """保存本地命令后，通知其它「当前工作目录相同」的窗口重新加载，避免它们用过期

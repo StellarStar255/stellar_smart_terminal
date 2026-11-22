@@ -191,7 +191,7 @@ class PresetDialog(QDialog):
     """预设命令管理对话框"""
 
     def __init__(self, presets: list, parent=None, auto_add: bool = False, title: str = None,
-                 theme: dict = None):
+                 theme: dict = None, *, selected_row: int | None = None):
         super().__init__(parent)
         self._theme = _theme_palette(theme)
         self.presets = [p.copy() for p in presets]  # 深拷贝
@@ -213,6 +213,9 @@ class PresetDialog(QDialog):
 
         self._setup_ui()
         self._apply_style()
+        if selected_row is not None and 0 <= selected_row < self.preset_list.count():
+            self.preset_list.setCurrentRow(selected_row)
+            self.preset_list.scrollToItem(self.preset_list.currentItem())
 
         # 如果是添加模式，自动创建新预设
         if self._auto_add:

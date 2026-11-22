@@ -10,11 +10,11 @@ Command Palette
 from dataclasses import dataclass
 from typing import Callable, Iterable, List, Optional
 
-from PyQt6.QtCore import Qt, QEvent, QPoint, QRect, QObject, QTimer
-from PyQt6.QtGui import QKeyEvent
+from PyQt6.QtCore import Qt, QEvent, QPoint, QRect, QObject, QTimer, pyqtSignal
+from PyQt6.QtGui import QKeyEvent, QKeySequence
 from PyQt6.QtWidgets import (
     QWidget, QLineEdit, QListWidget, QListWidgetItem, QVBoxLayout, QLabel,
-    QHBoxLayout, QFrame, QApplication
+    QHBoxLayout, QFrame, QApplication, QPushButton, QSizePolicy
 )
 
 from app_logging import get_logger
@@ -29,6 +29,9 @@ class Command:
     group: Optional[str] = None
     tooltip: Optional[str] = None
     search_text: str = ""
+    insert: Optional[Callable[[], None]] = None
+    edit: Optional[Callable[[], None]] = None
+    target: Optional[Callable[[], str]] = None
 
     def haystack(self) -> str:
         bits = [self.title]
@@ -106,6 +109,8 @@ class _OutsideClickFilter(QObject):
 
 class CommandPalette(QWidget):
     """搜索框 + 弹出命令列表组件。"""
+
+    opened = pyqtSignal()
 
     def __init__(self, placeholder: str = "Search commands…", parent=None):
         super().__init__(parent)
@@ -225,6 +230,31 @@ class CommandPalette(QWidget):
         self.empty_label.hide()
         pv.addWidget(self.empty_label)
 
+        self.details = QWidget(self.popup)
+        footer = QVBoxLayout(self.details)
+        footer.setContentsMargins(8, 4, 8, 4)
+        footer.setSpacing(4)
+        self.target_label = QLabel(self.details)
+        self.target_label.setTextFormat(Qt.TextFormat.PlainText)
+        self.target_label.setWordWrap(True)
+        self.target_label.setSizePolicy(QSizePolicy.Policy.Ignored, QSizePolicy.Policy.Preferred)
+        footer.addWidget(self.target_label)
+        actions = QHBoxLayout()
+        self.insert_button = QPushButton(self.details)
+        self.edit_button = QPushButton(self.details)
+        for button in (self.insert_button, self.edit_button):
+            button.setFocusPolicy(Qt.FocusPolicy.NoFocus)
+            actions.addWidget(button)
+        actions.addStretch()
+        footer.addLayout(actions)
+        pv.addWidget(self.details)
+        self.details.hide()
+        self.insert_button.clicked.connect(lambda: self._activate_item(
+            self.list_widget.currentItem(), 'insert'))
+        self.edit_button.clicked.connect(lambda: self._activate_item(
+            self.list_widget.currentItem(), 'edit'))
+        self.list_widget.currentItemChanged.connect(lambda *_: self.refresh_current_details())
+
         # 事件
         self.line_edit.textChanged.connect(self._refresh_popup)
         self.line_edit.installEventFilter(self)
@@ -255,6 +285,12 @@ class CommandPalette(QWidget):
 
     def set_empty_text(self, text: str):
         self.empty_label.setText(text)
+
+    def set_quick_command_labels(self, insert: str, edit: str):
+        native = QKeySequence.SequenceFormat.NativeText
+        insert_key = QKeySequence("Alt+Return").toString(native)
+        self.insert_button.setText(f"{insert} ({insert_key})")
+        self.edit_button.setText(f"{edit} (F2)")
 
     def apply_theme(self, t: dict):
         """应用主题配色。t 为主题颜色字典，需要的键：
@@ -298,6 +334,18 @@ class CommandPalette(QWidget):
             }}
         """)
         self.empty_label.setStyleSheet(f"color: {t['text_dim']}; padding: 10px;")
+        self.target_label.setStyleSheet(
+            f"color: {t['text_dim']}; background: transparent; border: none;")
+        self.details.setStyleSheet(f"""
+            QPushButton {{
+                background: {t['bg_medium']};
+                color: {t['text']};
+                border: 1px solid {t['border']};
+                border-radius: 3px;
+                padding: 3px 8px;
+            }}
+            QPushButton:hover {{ border-color: {t['accent']}; }}
+        """)
 
     # ---------- internals ----------
 
@@ -334,11 +382,27 @@ class CommandPalette(QWidget):
         # 定位弹层在输入框正下方
         self._position_popup()
         # 不抢焦点地显示，确保 line_edit 始终保留键盘焦点以便继续输入。
+        opening = not self.popup.isVisible()
         self.popup.show()
         self.popup.raise_()
         # 弹层是不抢焦点的 Tool 窗口，自身不会随外部点击/Esc 关闭；
         # 挂一个应用级过滤器来兜底（见 eventFilter 顶部分支）。
         self._install_global_filter()
+        if opening:
+            self.opened.emit()
+
+    def refresh_current_details(self):
+        item = self.list_widget.currentItem()
+        cmd = item.data(Qt.ItemDataRole.UserRole) if item is not None else None
+        self.details.setVisible(bool(cmd and (cmd.target or cmd.insert or cmd.edit)))
+        if cmd is None:
+            return
+        target = cmd.target() if cmd.target else ""
+        self.target_label.setText(target)
+        self.target_label.setToolTip(target)
+        self.target_label.setVisible(bool(target))
+        self.insert_button.setVisible(cmd.insert is not None)
+        self.edit_button.setVisible(cmd.edit is not None)
 
     def _install_global_filter(self):
         if not self._app_filter_on:
@@ -390,6 +454,12 @@ class CommandPalette(QWidget):
         bl = le.mapToGlobal(QPoint(0, le.height() + 2))
         width = max(le.width(), 360)
         height = 320
+        if not self.details.isHidden():
+            rows_height = sum(self.list_widget.sizeHintForRow(row)
+                              for row in range(self.list_widget.count()))
+            target_extra = max(0, self.target_label.heightForWidth(width - 20)
+                               - self.target_label.sizeHint().height())
+            height = min(height, rows_height + self.details.sizeHint().height() + target_extra + 8)
         self.popup.setGeometry(bl.x(), bl.y(), width, height)
 
     def _rank(self, query: str, limit: int = 12) -> List[Command]:
@@ -408,22 +478,22 @@ class CommandPalette(QWidget):
         return [c for _, c in scored[:limit]]
 
     def _on_item_activated(self, item: QListWidgetItem):
-        cmd: Command = item.data(Qt.ItemDataRole.UserRole)
-        if cmd is None:
+        self._activate_item(item, 'run')
+
+    def _activate_item(self, item, action):
+        if item is None or not self.popup.isVisible():
+            return
+        cmd = item.data(Qt.ItemDataRole.UserRole)
+        callback = getattr(cmd, action, None)
+        if callback is None:
             return
         # 顺序很关键：必须先把 textChanged 信号屏蔽，再 clear() ——
         # 否则 clear() 触发 _refresh_popup，而此刻 line_edit 仍然 hasFocus()，
         # 会把刚 hide 的 popup 立刻 show 回来，导致后续 cmd.run() 切焦点时
         # popup 进入"逻辑可见但视觉不可见"的死状态，下次再点输入框就没反应。
-        self.line_edit.blockSignals(True)
+        self._clear_and_hide()
         try:
-            self.line_edit.clear()
-        finally:
-            self.line_edit.blockSignals(False)
-        self.line_edit.clearFocus()
-        self._hide_popup()
-        try:
-            cmd.run()
+            callback()
         except Exception as e:
             # 失败信息打到控制台即可；UI 不弹窗以免干扰
             logger.warning(f"[CommandPalette] command failed: {cmd.title}: {e}")
@@ -478,8 +548,12 @@ class CommandPalette(QWidget):
                     return True
                 if key in (Qt.Key.Key_Return, Qt.Key.Key_Enter):
                     item = self.list_widget.currentItem()
-                    if item is not None:
-                        self._on_item_activated(item)
+                    mods = ke.modifiers() & ~Qt.KeyboardModifier.KeypadModifier
+                    action = 'insert' if mods == Qt.KeyboardModifier.AltModifier else 'run'
+                    self._activate_item(item, action)
+                    return True
+                if key == Qt.Key.Key_F2 and ke.modifiers() == Qt.KeyboardModifier.NoModifier:
+                    self._activate_item(self.list_widget.currentItem(), 'edit')
                     return True
                 if key == Qt.Key.Key_Escape:
                     self._clear_and_hide()

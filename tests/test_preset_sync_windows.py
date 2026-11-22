@@ -8,7 +8,9 @@
 import os
 import sys
 import unittest
-from unittest.mock import patch
+from tempfile import TemporaryDirectory
+from types import SimpleNamespace
+from unittest.mock import Mock, patch
 
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 os.environ.setdefault('QT_QPA_PLATFORM', 'offscreen')
@@ -104,6 +106,101 @@ class PresetSyncAcrossWindowsTest(unittest.TestCase):
             QTest.keyClick(palette.line_edit, Qt.Key.Key_Return)
             execute.assert_called_once_with(['tmux attach -t project_two'])
             other_execute.assert_not_called()
+
+    def test_palette_inserts_one_line_without_submitting(self):
+        from PyQt6.QtCore import Qt
+        from PyQt6.QtTest import QTest
+
+        window = self.windows[0]
+        term = window.terminal
+        term.input_buffer = ''
+        window.presets = [{'name': 'Prepare', 'commands': ['echo one', 'echo two']}]
+        palette = window.command_palette
+        backend = SimpleNamespace(is_running=True, write=Mock(return_value=True))
+        window.activateWindow()
+        term.setFocus()
+        self.app.processEvents()
+        with patch.object(term, '_backend', backend), \
+                patch.object(term, '_is_bracketed_paste_enabled', return_value=False), \
+                patch.object(term, '_execute_commands') as execute, \
+                patch('main_window.QInputDialog.getItem', return_value=('echo two', True)) as pick:
+            palette.focus_search()
+            palette.line_edit.setText('Prepare')
+            QTest.keyClick(palette.line_edit, Qt.Key.Key_Return, Qt.KeyboardModifier.AltModifier)
+            self.assertEqual(pick.call_args.args[3], ['echo one', 'echo two'])
+            backend.write.assert_called_once_with(b'echo two')
+            self.assertEqual(term.input_buffer, 'echo two')
+            for text in ('echo bad\n', 'echo bad\r', 'echo bad\x1b', 'echo bad\t'):
+                self.assertFalse(term.insert_command_line(text))
+            backend.write.assert_called_once()
+            execute.assert_not_called()
+
+    def test_palette_shows_tab_pane_and_foreground_ssh(self):
+        from PyQt6.QtCore import QThreadPool
+        from ssh_session import HostConfig
+
+        window = self.windows[0]
+        term = window.terminal
+        window.tab_widget.setTabText(window.tab_widget.currentIndex(), 'Experiments')
+        term.set_split_label('Training')
+        window.presets = [{'name': 'Status', 'commands': ['echo status']}]
+        host = HostConfig(alias='training', hostname='host.test', user='user')
+        palette = window.command_palette
+        window.activateWindow()
+        term.setFocus()
+        self.app.processEvents()
+        backend = SimpleNamespace(_child_pid=21)
+        with patch.object(term, '_backend', backend), \
+                patch.object(window, '_quick_command_foreground_group', return_value=42) as group, \
+                patch.object(window, '_known_remote_hosts', return_value=[host]), \
+                patch.object(window, '_ssh_args_under', return_value='ssh user@host.test') as find:
+            palette.focus_search()
+            palette.line_edit.setText('Status')
+            self.assertTrue(QThreadPool.globalInstance().waitForDone(1500))
+            self.app.processEvents()
+            self.assertIn('Experiments', palette.target_label.text())
+            self.assertIn('1 (Training)', palette.target_label.text())
+            self.assertIn('SSH training', palette.target_label.text())
+            find.assert_called_once_with(21, foreground_group=42)
+            group.return_value = 63
+            palette.refresh_current_details()
+            self.assertNotIn('SSH training', palette.target_label.text())
+            palette._clear_and_hide()
+
+    def test_palette_edit_selects_exact_local_preset_and_saves_it(self):
+        from PyQt6.QtWidgets import QDialog
+        from dialogs import PresetDialog
+
+        window = self.windows[0]
+        term = window.terminal
+        palette = window.command_palette
+        window.activateWindow()
+        term.setFocus()
+        self.app.processEvents()
+        window.local_presets = [
+            {'name': 'Port', 'commands': ['echo 6006']},
+            {'name': 'Port', 'commands': ['echo 7070'], 'pinned': True},
+        ]
+
+        def edit(dialog):
+            self.assertEqual(dialog.preset_list.currentRow(), 1)
+            self.assertEqual(dialog.commands_edit.toPlainText(), 'echo 7070')
+            dialog.commands_edit.setPlainText('echo 8120')
+            dialog.accept()
+            return QDialog.DialogCode.Accepted
+
+        with TemporaryDirectory() as project, patch.object(window, '_window_cwd', project), \
+                patch.object(PresetDialog, 'exec', edit), \
+                patch.object(term, '_execute_commands') as execute:
+            palette.focus_search()
+            palette.line_edit.setText('7070')
+            palette.edit_button.click()
+            execute.assert_not_called()
+            window._load_local_commands()
+            self.assertEqual(window.local_presets, [
+                {'name': 'Port', 'commands': ['echo 6006']},
+                {'name': 'Port', 'commands': ['echo 8120'], 'pinned': True},
+            ])
 
     def test_selection_falls_back_when_current_preset_deleted(self):
         a, b = self.windows

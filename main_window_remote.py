@@ -270,14 +270,30 @@ class RemotePanelMixin:
         return rows
 
     @classmethod
-    def _ssh_args_under(cls, shell_pid, processes=None):
-        """终端 shell 的子孙里正在跑的 ssh 命令行（第一条），没有返回 None。"""
+    def _ssh_args_under(cls, shell_pid, processes=None, *, foreground_group=None):
+        """Find an SSH process under the shell, optionally in the PTY foreground job."""
         if not shell_pid:
             return None
         rows = cls._list_processes() if processes is None else processes
         children = {}
+
+        def is_ssh(pid, args):
+            exe = args.split(None, 1)[0] if args else ""
+            if os.path.basename(exe) != 'ssh':
+                return False
+            if foreground_group is None:
+                return True
+            try:
+                return os.getpgid(pid) == foreground_group
+            except OSError:
+                return False  # The process exited after the snapshot.
+
         for pid, ppid, args in rows:
+            if foreground_group is not None and pid == shell_pid and is_ssh(pid, args):
+                return args  # The shell may have exec'd ssh directly.
             children.setdefault(ppid, []).append((pid, args))
+        if foreground_group == shell_pid:
+            return None  # The shell owns the prompt; descendants can be background jobs.
         stack = [shell_pid]
         seen = set()
         while stack:
@@ -286,8 +302,7 @@ class RemotePanelMixin:
                 continue
             seen.add(cur)
             for pid, args in children.get(cur, []):
-                exe = args.split(None, 1)[0] if args else ""
-                if os.path.basename(exe) == 'ssh':
+                if is_ssh(pid, args):
                     return args
                 stack.append(pid)
         return None

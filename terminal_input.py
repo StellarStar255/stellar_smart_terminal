@@ -806,9 +806,18 @@ class TerminalInputMixin:
 
     def _paste_text_value(self, text):
         if self._defer_native_paste_input(lambda: self._paste_text_value(text)):
-            return
+            return True
         if self._write_paste(self._prepare_paste_text(text)):
             self.input_buffer += text
+            return True
+        return False
+
+    def insert_command_line(self, text: str) -> bool:
+        """Paste editable text without sending a return or another control key."""
+        if (not self.is_running() or not text
+                or any(ord(char) < 32 or 127 <= ord(char) <= 159 for char in text)):
+            return False
+        return self._paste_text_value(text)
 
     # ---- 媒体路径投递：本地直接敲；SSH 标签先上传远端再敲远端路径 ----
 
