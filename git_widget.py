@@ -3,6 +3,7 @@ Git 面板 UI 组件
 提供类似 Cursor IDE 的 Git 管理界面
 """
 import math
+from urllib.parse import urlsplit, urlunsplit
 
 from PyQt6.QtWidgets import (
     QWidget, QVBoxLayout, QHBoxLayout, QFrame, QLabel,
@@ -742,8 +743,19 @@ class _CommitMessageWorker(QThread):
             return
 
         cfg = self._config
-        base = (cfg.get('api_base') or 'https://api.openai.com/v1').strip().rstrip('/')
-        url = base if base.endswith('/chat/completions') else base + '/chat/completions'
+        try:
+            endpoint = urlsplit((cfg.get('api_base') or 'https://api.openai.com/v1').strip())
+            host = endpoint.hostname
+        except ValueError:
+            self._fail(t("git.generate_invalid_url"), 'invalid API URL')
+            return
+        if endpoint.scheme not in ('http', 'https') or not host:
+            self._fail(t("git.generate_invalid_url"), 'invalid API URL')
+            return
+        path = endpoint.path.rstrip('/')
+        if not path.endswith('/chat/completions'):
+            path += '/chat/completions'
+        url = urlunsplit((endpoint.scheme, endpoint.netloc, path, endpoint.query, ''))
 
         headers = {'Content-Type': 'application/json'}
         key = (cfg.get('api_key') or '').strip()
@@ -767,7 +779,7 @@ class _CommitMessageWorker(QThread):
                 "for them:\n\n" + self._diff)
 
         payload = {
-            'model': cfg.get('model') or 'gpt-4',
+            'model': (cfg.get('model') or '').strip() or 'gpt-4',
             'messages': [
                 {'role': 'system', 'content': system},
                 {'role': 'user', 'content': user},
@@ -778,7 +790,7 @@ class _CommitMessageWorker(QThread):
         mt = cfg.get('max_tokens')
         if isinstance(mt, int) and mt > 0:
             payload['max_tokens'] = min(mt, 1024)  # 提交信息不需要太长
-        self._configure_minimax_request(url, payload, mt)
+        self._configure_minimax_request(host, payload, mt)
 
         proxies = None
         proxy = (cfg.get('proxy') or '').strip()
@@ -855,16 +867,10 @@ class _CommitMessageWorker(QThread):
         self.failed.emit(message)
 
     @staticmethod
-    def _configure_minimax_request(url, payload, max_tokens):
-        from urllib.parse import urlsplit
-
+    def _configure_minimax_request(host, payload, max_tokens):
         model = payload['model'].lower()
         if model not in ('minimax-m3', 'minimax-m3.1-flash'):
             return
-        try:
-            host = urlsplit(url).hostname
-        except ValueError:
-            return  # requests will report the invalid URL below.
         if host not in ('api.minimax.io', 'api.minimaxi.com'):
             return
         payload.pop('temperature', None)
@@ -1026,6 +1032,7 @@ class GitCommitWidget(QFrame):
         self._push_busy = False
         self._pull_busy = False
         self._commit_busy = False
+        self._generating = False
         self._setup_ui()
 
     def _setup_ui(self):
@@ -1165,6 +1172,7 @@ class GitCommitWidget(QFrame):
 
     def set_generating(self, generating: bool):
         """切换生成中状态：禁用按钮并改文案，避免重复点击。"""
+        self._generating = generating
         self.generate_btn.setEnabled(not generating)
         self.generate_btn.setText(t("git.generating") if generating else t("git.generate_msg"))
 
@@ -1325,7 +1333,7 @@ class GitCommitWidget(QFrame):
         self.message_input.setPlaceholderText(t("git.commit_placeholder"))
         self.pull_btn.setToolTip(t("git.pull_tooltip"))
         self.push_btn.setToolTip(t("git.push_tooltip"))
-        self.generate_btn.setText(t("git.generate_msg"))
+        self.set_generating(self._generating)
         self.generate_btn.setToolTip(t("git.generate_msg_tooltip"))
 
 
@@ -3812,7 +3820,10 @@ class GitPanel(QWidget):
                 config = main_window.get_git_llm_config()
             else:
                 config = main_window.get_llm_config()
-        if not config or not config.get('api_base') or not config.get('model'):
+        if not isinstance(config, dict) or not all(
+            isinstance(config.get(field), str) and config[field].strip()
+            for field in ('api_base', 'model')
+        ):
             QMessageBox.warning(
                 self, t("git.generate_no_config_title"),
                 t("git.generate_no_config_msg")

@@ -182,6 +182,62 @@ class TestGitAsyncOps(unittest.TestCase):
                 self.assertTrue(widget.generate_btn.isEnabled())
             self.assertEqual(warning.call_count, 2)
 
+    def test_generate_keeps_gateway_query_parameters_on_chat_endpoint(self):
+        from git_widget import _CommitMessageWorker
+
+        response = Mock(status_code=200)
+        response.json.return_value = {'choices': [{'message': {'content': 'fix: sample'}}]}
+        expected = 'https://example.test/gateway/v1/chat/completions?api-version=1&tenant=a%2Fb'
+        with patch('requests.post', return_value=response) as request:
+            for url in (
+                ' https://example.test/gateway/v1/?api-version=1&tenant=a%2Fb ',
+                expected,
+            ):
+                worker = _CommitMessageWorker({'api_base': url, 'model': ' chat-model '}, 'diff', 'en')
+                completed = Mock()
+                worker.succeeded.connect(completed)
+                worker.run()
+                self.assertEqual(request.call_args.args[0], expected)
+                self.assertEqual(request.call_args.kwargs['json']['model'], 'chat-model')
+                completed.assert_called_once_with('fix: sample')
+
+    def test_language_refresh_keeps_generate_button_busy(self):
+        from i18n import get_language, set_language, t
+
+        self.addCleanup(set_language, get_language())
+        widget = self.panel.commit_widget
+        widget.set_generating(True)
+        set_language('fr')
+        self.panel.apply_language()
+        self.assertFalse(widget.generate_btn.isEnabled())
+        self.assertEqual(widget.generate_btn.text(), t('git.generating'))
+        widget.set_generating(False)
+        self.assertEqual(widget.generate_btn.text(), t('git.generate_msg'))
+
+    def test_generate_reports_invalid_gateway_settings_without_request(self):
+        from i18n import t
+
+        Path(self.repo, 'a.txt').write_text('ready\n', encoding='utf-8')
+        _git(self.repo, 'add', 'a.txt')
+        profile = {'api_base': '   ', 'model': 'test'}
+        host = SimpleNamespace(get_git_llm_config=lambda: profile.copy())
+        widget = self.panel.commit_widget
+        with (patch.object(self.panel, '_find_main_window', return_value=host),
+              patch('git_widget.QMessageBox.warning') as warning,
+              patch('requests.post') as post):
+            widget.generate_btn.click()
+            self.assertEqual(warning.call_args.args[1], t('git.generate_no_config_title'))
+            profile['api_base'] = True
+            widget.generate_btn.click()
+            self.assertEqual(warning.call_args.args[1], t('git.generate_no_config_title'))
+            profile['api_base'] = 'example.test/v1'
+            widget.generate_btn.click()
+            self._wait_workers()
+            self.assertIn(t('git.generate_invalid_url'), warning.call_args.args[2])
+            self.assertEqual(warning.call_count, 3)
+            post.assert_not_called()
+            self.assertTrue(widget.generate_btn.isEnabled())
+
     def test_generate_rejects_filtered_and_nonfinal_model_responses(self):
         Path(self.repo, 'a.txt').write_text('ready\n', encoding='utf-8')
         _git(self.repo, 'add', 'a.txt')
