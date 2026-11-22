@@ -3,7 +3,7 @@ Git 面板 UI 组件
 提供类似 Cursor IDE 的 Git 管理界面
 """
 import math
-from urllib.parse import urlsplit, urlunsplit
+from urllib.parse import parse_qsl, quote, quote_plus, unquote, urlsplit, urlunsplit
 
 from PyQt6.QtWidgets import (
     QWidget, QVBoxLayout, QHBoxLayout, QFrame, QLabel,
@@ -805,8 +805,9 @@ class _CommitMessageWorker(QThread):
         except requests.exceptions.Timeout:
             self._fail(t("git.generate_timeout", seconds=timeout), 'timeout')
             return
-        except Exception as e:
-            self._fail(str(e), type(e).__name__)
+        except requests.exceptions.RequestException as exc:
+            kind = type(exc).__name__
+            self._fail(t("git.generate_connection_failed", kind=kind), kind)
             return
 
         try:
@@ -815,7 +816,7 @@ class _CommitMessageWorker(QThread):
             data = None
         error = self._provider_error(data)
         if resp.status_code != 200:
-            snippet = error or (resp.text or '')[:300]
+            snippet = error or resp.text or ''
             self._fail(f"HTTP {resp.status_code}: {snippet}", f'HTTP {resp.status_code}')
             return
         if error:
@@ -859,12 +860,46 @@ class _CommitMessageWorker(QThread):
                 return ''
             code, message = response['status_code'], response.get('status_msg')
         return ': '.join(str(part) for part in (code, message)
-                         if isinstance(part, (int, str)) and part)[:300]
+                         if isinstance(part, (int, str)) and part)
 
     def _fail(self, message, reason):
         # Keep provider payloads, repository changes and credentials out of the log.
         logger.warning("Git commit message generation failed: %s", reason)
-        self.failed.emit(message)
+        self.failed.emit(self._redact_error(message)[:320])
+
+    def _redact_error(self, message):
+        secrets = set()
+        api_key = self._config.get('api_key')
+        if isinstance(api_key, str):
+            secrets.add(api_key)
+        for field in ('api_base', 'proxy'):
+            value = self._config.get(field)
+            if not isinstance(value, str) or not value.strip():
+                continue
+            try:
+                url = urlsplit(value.strip())
+                secrets.add(url.password)
+                query = parse_qsl(url.query)
+            except ValueError:
+                continue
+            if url.query:
+                message = message.replace(f'?{url.query}', '?[redacted]')
+            for name, value in query:
+                key = name.lower().replace('-', '').replace('_', '')
+                if key in ('auth', 'sig') or key.endswith((
+                    'key', 'token', 'secret', 'password', 'signature', 'credential',
+                )):
+                    secrets.add(value)
+        variants = set()
+        for secret in secrets:
+            if isinstance(secret, str) and secret.strip():
+                value = secret.strip()
+                decoded = unquote(value)
+                variants.update((value, decoded, quote(decoded, safe='', errors='replace'),
+                                 quote_plus(decoded, errors='replace')))
+        for value in sorted(variants, key=len, reverse=True):
+            message = message.replace(value, '[redacted]')
+        return message
 
     @staticmethod
     def _configure_minimax_request(host, payload, max_tokens):

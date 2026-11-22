@@ -633,6 +633,7 @@ TRANSLATIONS = {
     "git.generate_changes_updated_title": {"zh": "Git 改动已更新", "en": "Git changes updated", "fr": "Modifications Git mises à jour"},
     "git.generate_changes_updated_msg": {"zh": "生成期间 Git 改动已变化。请重新生成提交信息。", "en": "Git changes were updated during generation. Generate the commit message again.", "fr": "Les modifications Git ont changé pendant la génération. Générez à nouveau le message de commit."},
     "git.generate_timeout": {"zh": "模型请求超时（{seconds} 秒）。", "en": "The model request timed out ({seconds} seconds).", "fr": "La requête au modèle a expiré ({seconds} secondes)."},
+    "git.generate_connection_failed": {"zh": "无法完成模型连接（{kind}）。", "en": "The model connection could not be completed ({kind}).", "fr": "La connexion au modèle a échoué ({kind})."},
     "git.generate_invalid_response": {"zh": "模型返回了无法识别的响应。", "en": "The model returned an unrecognized response.", "fr": "Le modèle a renvoyé une réponse non reconnue."},
     "git.generate_invalid_url": {"zh": "模型 API 地址无效，请检查设置中的 HTTP 或 HTTPS 地址。", "en": "The model API URL is invalid. Check the HTTP or HTTPS URL in settings.", "fr": "L’URL de l’API du modèle est invalide. Vérifiez l’adresse HTTP ou HTTPS dans les réglages."},
     "git.generate_filtered_response": {"zh": "模型拒绝了请求，或响应被服务商过滤。", "en": "The model refused the request or the provider filtered the response.", "fr": "Le modèle a refusé la requête ou le fournisseur a filtré la réponse."},

@@ -238,6 +238,85 @@ class TestGitAsyncOps(unittest.TestCase):
             post.assert_not_called()
             self.assertTrue(widget.generate_btn.isEnabled())
 
+    def test_generate_masks_credentials_in_http_and_connection_errors(self):
+        import requests
+        from git_widget import _CommitMessageWorker
+        from i18n import t
+
+        config = {
+            'api_base': 'https://gateway.test/v1?token=example-query%2Fsecret',
+            'api_key': 'example-private-api-key',
+            'model': 'test',
+            'proxy': 'http://user:example-proxy-secret@proxy.test:8080',
+            'timeout': 7,
+        }
+        response = Mock(status_code=429)
+        response.json.return_value = {'error': {'code': 'rate_limit',
+            'message': 'Rejected example-private-api-key and example-query/secret '
+                       'via http://user:example-proxy-secret@proxy.test:8080'}}
+        raw = Mock(status_code=401, text='x' * 290 + 'example-private-api-key')
+        raw.json.side_effect = ValueError
+        received = Mock()
+        worker = _CommitMessageWorker(config, 'diff', 'en')
+        worker.failed.connect(received)
+        with patch('requests.post', side_effect=(
+            response,
+            requests.exceptions.ProxyError('proxy rejected ' + config['api_base']),
+            requests.exceptions.ReadTimeout('timed out ' + config['api_base']),
+            raw,
+        )):
+            for _ in range(4):
+                worker.run()
+        errors = [call.args[0] for call in received.call_args_list]
+        self.assertIn('HTTP 429: rate_limit', errors[0])
+        self.assertIn('ProxyError', errors[1])
+        self.assertEqual(errors[2], t('git.generate_timeout', seconds=7))
+        self.assertTrue(errors[3].startswith('HTTP 401: '))
+        self.assertIn('[redacted]', errors[3])
+        for secret in ('example-private', 'example-proxy-secret',
+                       'example-query/secret', 'example-query%2Fsecret'):
+            self.assertNotIn(secret, "\n".join(errors))
+
+    def test_generate_discards_network_error_after_panel_shutdown(self):
+        import requests
+        from git_widget import _CommitMessageWorker
+
+        Path(self.repo, 'a.txt').write_text('ready\n', encoding='utf-8')
+        _git(self.repo, 'add', 'a.txt')
+        host = SimpleNamespace(get_git_llm_config=lambda: {
+            'api_base': 'https://example.test/v1', 'model': 'test'})
+        widget = self.panel.commit_widget
+        widget.message_input.setPlainText('keep this draft')
+        started = Event()
+        release = Event()
+
+        def post(*_args, **_kwargs):
+            started.set()
+            release.wait(5)
+            raise requests.exceptions.ConnectionError('connection lost after shutdown')
+
+        with (patch.object(self.panel, '_find_main_window', return_value=host),
+              patch.object(self.panel, '_SHUTDOWN_WAIT_MS', 20),
+              patch('git_widget.QMessageBox.warning') as warning,
+              patch('requests.post', side_effect=post)):
+            widget.generate_btn.click()
+            try:
+                deadline = time.monotonic() + 4
+                while not started.is_set() and time.monotonic() < deadline:
+                    self.app.processEvents()
+                    time.sleep(.01)
+                self.assertTrue(started.is_set())
+                worker = next(w for w in self.panel._active_workers
+                              if isinstance(w, _CommitMessageWorker))
+                self.panel.shutdown()
+                self.assertIsNone(worker.parent())
+            finally:
+                release.set()
+            self.assertTrue(worker.wait(5000))
+            self.app.processEvents()
+            warning.assert_not_called()
+            self.assertEqual(widget.message_input.toPlainText(), 'keep this draft')
+
     def test_generate_rejects_filtered_and_nonfinal_model_responses(self):
         Path(self.repo, 'a.txt').write_text('ready\n', encoding='utf-8')
         _git(self.repo, 'add', 'a.txt')
