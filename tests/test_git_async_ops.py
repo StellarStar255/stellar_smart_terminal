@@ -11,6 +11,8 @@ import subprocess
 import sys
 import time
 import unittest
+from types import SimpleNamespace
+from unittest.mock import Mock, patch
 
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
@@ -111,6 +113,49 @@ class TestGitAsyncOps(unittest.TestCase):
         self.assertEqual(self.panel.commit_widget.message_input.toPlainText(), '')
         self.assertTrue(self.panel.commit_widget.commit_btn.isEnabled())
         self.assertEqual(self.panel.commit_widget.commit_btn.text(), 'Commit')
+
+    def test_generate_rejects_reasoning_only_then_fills_commit_message(self):
+        from pathlib import Path
+
+        Path(self.repo, 'a.txt').write_text('ready\n', encoding='utf-8')
+        _git(self.repo, 'add', 'a.txt')
+        config = {'api_base': 'https://api.minimax.io/v1/chat/completions',
+                  'model': 'MiniMax-M3', 'max_tokens': 4096}
+        responses = []
+        for content, finish_reason in (
+            ('<think>unfinished reasoning', 'length'),
+            (None, 'stop'),
+            ('<think>analysis</think>\n\x60\x60\x60\nfix: update readiness\n\x60\x60\x60', 'stop'),
+        ):
+            response = Mock(status_code=200)
+            response.json.return_value = {'choices': [{
+                'message': {'content': content}, 'finish_reason': finish_reason,
+            }]}
+            responses.append(response)
+        widget = self.panel.commit_widget
+        widget.message_input.setPlainText('keep the draft')
+        with (patch.object(self.panel, '_find_main_window',
+                           return_value=SimpleNamespace(get_git_llm_config=lambda: config)),
+              patch('git_widget.QMessageBox.warning') as warning,
+              patch('requests.post', side_effect=responses) as post):
+            for count in (1, 2):
+                widget.generate_btn.click()
+                self._wait_workers()
+                self.assertEqual(warning.call_count, count)
+                self.assertEqual(widget.message_input.toPlainText(), 'keep the draft')
+                self.assertTrue(widget.generate_btn.isEnabled())
+            widget.generate_btn.click()
+            self._wait_workers()
+            self.assertEqual(warning.call_count, 2)
+            self.assertEqual(widget.message_input.toPlainText(), 'fix: update readiness')
+            self.assertTrue(widget.generate_btn.isEnabled())
+            self.assertEqual(post.call_args.args[0], config['api_base'])
+            payload = post.call_args.kwargs['json']
+            self.assertEqual(payload['thinking'], {'type': 'disabled'})
+            self.assertTrue(payload['reasoning_split'])
+            self.assertEqual(payload['max_completion_tokens'], 1024)
+            self.assertNotIn('max_tokens', payload)
+            self.assertIn('+ready', payload['messages'][1]['content'])
 
     def test_failed_commit_keeps_message(self):
         # 无暂存改动 → git commit 失败

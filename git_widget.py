@@ -736,16 +736,18 @@ class _CommitMessageWorker(QThread):
             return
 
         cfg = self._config
-        base = (cfg.get('api_base') or 'https://api.openai.com/v1').rstrip('/')
-        url = base + '/chat/completions'
+        base = (cfg.get('api_base') or 'https://api.openai.com/v1').strip().rstrip('/')
+        url = base if base.endswith('/chat/completions') else base + '/chat/completions'
 
         headers = {'Content-Type': 'application/json'}
         key = (cfg.get('api_key') or '').strip()
         if key:
             headers['Authorization'] = f'Bearer {key}'
 
-        lang_line = ('请用简体中文写提交信息。' if self._lang == 'zh'
-                     else 'Write the commit message in English.')
+        lang_line = {
+            'zh': '请用简体中文写提交信息。',
+            'fr': 'Rédige le message de commit en français.',
+        }.get(self._lang, 'Write the commit message in English.')
         system = (
             "You are an expert software engineer writing a git commit message. "
             "Follow the Conventional Commits style (feat:, fix:, refactor:, docs:, "
@@ -770,6 +772,7 @@ class _CommitMessageWorker(QThread):
         mt = cfg.get('max_tokens')
         if isinstance(mt, int) and mt > 0:
             payload['max_tokens'] = min(mt, 1024)  # 提交信息不需要太长
+        self._configure_minimax_request(url, payload, mt)
 
         proxies = None
         proxy = (cfg.get('proxy') or '').strip()
@@ -781,37 +784,77 @@ class _CommitMessageWorker(QThread):
         try:
             resp = requests.post(url, json=payload, headers=headers,
                                  timeout=timeout, proxies=proxies)
+        except requests.exceptions.Timeout:
+            self._fail(t("git.generate_timeout", seconds=timeout), 'timeout')
+            return
         except Exception as e:
-            self.failed.emit(str(e))
+            self._fail(str(e), type(e).__name__)
             return
 
         if resp.status_code != 200:
             snippet = (resp.text or '')[:300]
-            self.failed.emit(f"HTTP {resp.status_code}: {snippet}")
+            self._fail(f"HTTP {resp.status_code}: {snippet}", f'HTTP {resp.status_code}')
             return
 
         try:
             data = resp.json()
-            content = data['choices'][0]['message']['content']
-        except Exception as e:
-            self.failed.emit(f"unexpected response: {e}")
+            choice = data['choices'][0]
+            message = choice['message']
+            content = message.get('content')
+            finish_reason = choice.get('finish_reason')
+        except (ValueError, KeyError, IndexError, TypeError, AttributeError):
+            self._fail(t("git.generate_invalid_response"), 'invalid response')
             return
 
-        self.succeeded.emit(self._clean(content))
+        cleaned = self._clean(content)
+        if finish_reason == 'length':
+            self._fail(t("git.generate_output_limit"), 'output limit')
+        elif not cleaned:
+            self._fail(t("git.generate_empty_response"), 'empty response')
+        else:
+            self.succeeded.emit(cleaned)
+
+    def _fail(self, message, reason):
+        # Keep provider payloads, repository changes and credentials out of the log.
+        logger.warning("Git commit message generation failed: %s", reason)
+        self.failed.emit(message)
+
+    @staticmethod
+    def _configure_minimax_request(url, payload, max_tokens):
+        from urllib.parse import urlsplit
+
+        model = payload['model'].lower()
+        if model not in ('minimax-m3', 'minimax-m3.1-flash'):
+            return
+        try:
+            host = urlsplit(url).hostname
+        except ValueError:
+            return  # requests will report the invalid URL below.
+        if host not in ('api.minimax.io', 'api.minimaxi.com'):
+            return
+        payload.pop('temperature', None)
+        payload['reasoning_split'] = True
+        if model == 'minimax-m3':
+            payload['thinking'] = {'type': 'disabled'}
+            payload['max_completion_tokens'] = payload.pop('max_tokens', 1024)
+        else:
+            payload['reasoning_effort'] = 'low'
+            payload.pop('max_tokens', None)
+            payload['max_completion_tokens'] = (
+                min(max_tokens, 4096) if isinstance(max_tokens, int) and max_tokens > 0 else 4096)
 
     @staticmethod
     def _clean(text: str) -> str:
         """清洗模型输出：去掉推理模型的 <think>/<thinking> 块、``` 代码围栏和首尾空白。"""
         import re
-        text = text or ''
+        if not isinstance(text, str):
+            return ''
         # 1) 去掉成对的推理块（DeepSeek/Qwen 等推理模型会内联在 content 里）
         text = re.sub(r'(?is)<think(?:ing)?>.*?</think(?:ing)?>', '', text)
         # 2) 有时只回传了闭合标签（推理在前、答案在后）→ 取最后一个闭合标签之后的内容
-        for tag in ('</think>', '</thinking>'):
-            if tag in text:
-                text = text.rsplit(tag, 1)[-1]
-        # 3) 残留的未闭合开标签
-        text = re.sub(r'(?is)<think(?:ing)?>', '', text)
+        text = re.split(r'(?i)</think(?:ing)?>', text)[-1]
+        # 3) 未闭合的推理块可能已被截断，丢弃标签之后的推理文字。
+        text = re.split(r'(?i)<think(?:ing)?>', text, maxsplit=1)[0]
         text = text.strip()
         # 4) 去掉 ``` 代码围栏
         if text.startswith('```'):
