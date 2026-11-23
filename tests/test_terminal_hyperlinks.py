@@ -1,5 +1,6 @@
 """OSC 8 addresses follow terminal cells through writes, reflow and clicks."""
 import os
+from pathlib import Path
 from unittest.mock import Mock
 
 import pytest
@@ -96,7 +97,7 @@ def test_osc8_file_link_opens_in_editor(terminal, monkeypatch, tmp_path):
     for row, address in enumerate(addresses):
         terminal._on_output(f'\x1b]8;;{address}\x1b\\监控日志\x1b]8;;\x1b\\\r\n'.encode())
         QTest.mouseClick(terminal, Qt.MouseButton.LeftButton, pos=_point(terminal, row, 1))
-    assert [call.args[0] for call in opened.call_args_list] == [str(path), str(path)]
+    assert [Path(call.args[0]) for call in opened.call_args_list] == [path, path]
     external.assert_not_called()
 
 
