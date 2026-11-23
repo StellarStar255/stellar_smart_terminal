@@ -18,6 +18,7 @@ TerminalWidget 的鼠标事件/选区/文本提取/URL/拖放方法集合，纯�
 
 import unicodedata
 import functools
+import os
 import sys
 import time
 from difflib import SequenceMatcher
@@ -700,6 +701,12 @@ class TerminalMouseMixin:
                 lambda checked=False, f=factor: self.set_scroll_sensitivity(f))
             scroll_menu.addAction(act)
         menu.addMenu(scroll_menu)
+
+        if self._mouse_mode:
+            forward_clicks = menu.addAction(t("ctx.forward_tui_clicks"))
+            forward_clicks.setCheckable(True)
+            forward_clicks.setChecked(self._mouse_click_forward_enabled)
+            forward_clicks.toggled.connect(self.set_mouse_click_forward_enabled)
 
         menu.addSeparator()
 
@@ -1554,7 +1561,7 @@ class TerminalMouseMixin:
                 # 宽字符右半格可能在左半格已被覆盖后残留。
                 if not char.data and getattr(line.get(col - 1), 'hyperlink', '') != target:
                     return ""
-                return target if self._browser_url(target) else ""
+                return target if self._link_url(target) else ""
             if not include_plain:
                 return ""
             line_text = self._get_line_text(abs_row)
@@ -1569,16 +1576,30 @@ class TerminalMouseMixin:
         return ""
 
     @staticmethod
-    def _browser_url(url: str):
+    def _link_url(url: str):
         target = QUrl(url, QUrl.ParsingMode.StrictMode)
-        if target.isValid() and target.scheme() in ('http', 'https') and target.host():
-            return target
+        if not target.isValid():
+            return None
+        if target.scheme() in ('http', 'https'):
+            return target if target.host() else None
+        if (target.isLocalFile() and target.authority() in ('', 'localhost')
+                and not target.hasQuery() and not target.hasFragment()):
+            target.setHost('')
+            path = target.toLocalFile()
+            if (os.path.isabs(path) and not path.replace('\\', '/').startswith('//')
+                    and '\0' not in path):
+                return target
         return None
 
     def _open_url(self, url: str):
-        """在浏览器中打开URL"""
-        target = self._browser_url(url)
-        if target is not None:
+        target = self._link_url(url)
+        if target is None:
+            return
+        if target.isLocalFile():
+            path = target.toLocalFile()
+            if os.path.isfile(path):
+                self.file_link_requested.emit(path)
+        else:
             QDesktopServices.openUrl(target)
 
     # ==================== 拖拽文件 ====================

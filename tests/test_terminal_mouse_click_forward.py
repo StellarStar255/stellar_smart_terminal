@@ -72,6 +72,33 @@ class TestMouseClickForward(unittest.TestCase):
         self._click(w, abs_cell=(12, 5), rel_cell=(2, 5))
         self.assertEqual(w._writes, [], "鼠标模式下关掉转发就该一个字节都不发")
 
+    def test_context_menu_enables_forwarding_in_this_terminal(self):
+        from unittest.mock import patch
+        from PyQt6.QtCore import QPoint
+        from PyQt6.QtGui import QContextMenuEvent
+        from PyQt6.QtWidgets import QMenu
+        from i18n import t
+
+        w = self._widget()
+        other = self._widget()
+        for widget in (w, other):
+            widget.set_mouse_click_forward_enabled(False)
+            widget._process_output_text('\x1b[?1006h\x1b[?1003h')
+
+        def activate_forwarding(menu, _pos):
+            action = next(a for a in menu.actions() if a.text() == t('ctx.forward_tui_clicks'))
+            self.assertFalse(action.isChecked())
+            action.trigger()
+
+        pos = QPoint(9, 9)
+        with patch.object(QMenu, 'exec', activate_forwarding):
+            w.contextMenuEvent(QContextMenuEvent(QContextMenuEvent.Reason.Mouse, pos))
+
+        self._click(w)
+        self._click(other)
+        self.assertEqual(b''.join(w._writes), b'\x1b[<0;6;3M\x1b[<0;6;3m')
+        self.assertEqual(other._writes, [])
+
     def test_cursor_move_is_written_as_one_burst(self):
         """普通 shell 里点击定位光标：整串方向键一次写出，别让程序读到半截 ESC。"""
         w = self._widget()

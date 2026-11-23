@@ -387,6 +387,7 @@ class TerminalWidget(TerminalInputMixin, TerminalMouseMixin,
     output_recorded = pyqtSignal(str)
     session_ended = pyqtSignal()
     image_pasted = pyqtSignal(str)  # 图片粘贴信号，参数为图片路径
+    file_link_requested = pyqtSignal(str)
     # SSH 标签里粘贴的图片先上传到远端，传完再把远端路径敲进终端：
     # (本地路径, 远端路径；失败为空串)。工作线程发出，槽在 GUI 线程跑
     remote_upload_done = pyqtSignal(str, str)

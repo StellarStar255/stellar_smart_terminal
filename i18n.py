@@ -1090,6 +1090,7 @@ TRANSLATIONS = {
     # ===== 终端右键菜单 =====
     "ctx.scroll_sensitivity": {"zh": "滚动灵敏度", "en": "Scroll speed", "fr": "Vitesse de défilement"},
     "ctx.scroll_sensitivity_item": {"zh": "{factor}×", "en": "{factor}×", "fr": "{factor}×"},
+    "ctx.forward_tui_clicks": {"zh": "向此终端程序转发鼠标点击", "en": "Forward mouse clicks in this terminal", "fr": "Transmettre les clics dans ce terminal"},
     "ctx.copy": {"zh": "复制 (⌘C)", "en": "Copy (⌘C)", "fr": "Copier (⌘C)"},
     "ctx.copy_win": {"zh": "复制 (Ctrl+C)", "en": "Copy (Ctrl+C)", "fr": "Copier (Ctrl+C)"},
     "ctx.paste": {"zh": "粘贴 (⌘V)", "en": "Paste (⌘V)", "fr": "Coller (⌘V)"},

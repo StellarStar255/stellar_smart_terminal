@@ -81,6 +81,25 @@ def test_hyperlink_survives_scrollback_reflow_but_not_cell_overwrites(terminal):
     assert terminal._get_url_at_pos((0, 2), include_plain=False) == url
 
 
+def test_osc8_file_link_opens_in_editor(terminal, monkeypatch, tmp_path):
+    path = tmp_path / '监控 #1.log'
+    path.write_text('In Progress\n', encoding='utf-8')
+    opened = Mock()
+    terminal.file_link_requested.connect(opened)
+    external = Mock()
+    monkeypatch.setattr('terminal_mouse.QDesktopServices.openUrl', external)
+    local = path.as_uri()
+    addresses = [local, local.replace('file://', 'file://localhost', 1),
+                 local.replace('file://', 'file://example.com', 1),
+                 (tmp_path / 'missing.log').as_uri(), 'file:relative.log',
+                 'file:///%2Fserver/share.log', 'custom:///tmp/test.log']
+    for row, address in enumerate(addresses):
+        terminal._on_output(f'\x1b]8;;{address}\x1b\\监控日志\x1b]8;;\x1b\\\r\n'.encode())
+        QTest.mouseClick(terminal, Qt.MouseButton.LeftButton, pos=_point(terminal, row, 1))
+    assert [call.args[0] for call in opened.call_args_list] == [str(path), str(path)]
+    external.assert_not_called()
+
+
 def test_drag_select_and_unsafe_addresses_do_not_open(terminal, monkeypatch):
     opened = Mock()
     sent = Mock()
