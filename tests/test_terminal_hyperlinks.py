@@ -157,3 +157,18 @@ def test_file_click_reaches_editor_and_reports_missing_file(app, monkeypatch, tm
     finally:
         window.close()
         window.deleteLater()
+
+
+def test_link_replaced_between_press_and_release_consumes_click(terminal, monkeypatch):
+    terminal._mouse_mode = True
+    terminal.set_mouse_click_forward_enabled(True)
+    opened, sent = Mock(), Mock()
+    monkeypatch.setattr(terminal, '_open_url', opened)
+    monkeypatch.setattr(terminal, '_send_mouse_event', sent)
+    pos = _point(terminal, 0, 1)
+    terminal._process_output_text('\x1b]8;;https://example.com/one\a日志\x1b]8;;\a')
+    QTest.mousePress(terminal, Qt.MouseButton.LeftButton, pos=pos)
+    terminal._process_output_text('\r\x1b]8;;https://example.com/two\a日志\x1b]8;;\a')
+    QTest.mouseRelease(terminal, Qt.MouseButton.LeftButton, pos=pos)
+    opened.assert_not_called()
+    sent.assert_not_called()

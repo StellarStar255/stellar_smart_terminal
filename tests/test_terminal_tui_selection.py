@@ -199,6 +199,41 @@ class TestTuiSelection(unittest.TestCase):
         self.assertNotIn('Ask Codex', text)
         self.assertNotIn('Back to bottom', text)
 
+    def test_footer_resizes_during_drag_and_scroll_reversal(self):
+        rows = self.w.term_rows
+
+        def draw_footer(height):
+            self.draw()
+            self.w.stream.feed(f'\x1b[{rows - height + 1};1H\x1b[J'
+                               '• Waiting for background terminal\r\n└ gh run watch'
+                               '\r\n↓ Back to bottom · esc')
+
+        self.mouse(QEvent.Type.MouseButtonRelease, Qt.MouseButton.NoButton)
+        draw_footer(4)
+        self.pos = self.cell(3)
+        self.mouse(QEvent.Type.MouseButtonPress, Qt.MouseButton.LeftButton)
+        self.pos = self.cell(rows - 6, 1)
+        self.mouse(QEvent.Type.MouseMove, Qt.MouseButton.LeftButton)
+        self.assertFalse(self.w._auto_scroll_timer.isActive())
+        draw_footer(6)
+        self.w._rebuild_cache()
+        self.assertTrue(self.w._auto_scroll_timer.isActive())
+        draw_footer(4)
+        self.w._rebuild_cache()
+        self.assertFalse(self.w._auto_scroll_timer.isActive())
+        self.pos = self.cell(rows - 4, 1)
+        self.mouse(QEvent.Type.MouseMove, Qt.MouseButton.LeftButton)
+        for delta, height in [(3, 6), (3, 4), (-3, 5)]:
+            self.w._scroll_tui_selection(delta < 0, self.pos)
+            self.offset += delta
+            draw_footer(height)
+            self.w._refresh_tui_selection()
+            self.assertEqual(self.w._tui_selection['origin'], self.offset - 100)
+            self.assertEqual(self.w._tui_selection['footer'], rows - height)
+            expected = '\n'.join(f'row {i:04d} 中文 sample'
+                                 for i in range(103, self.offset + rows - height))
+            self.assertEqual(self.w._get_selected_text(), expected)
+
     def test_resize_cancels_pending_tui_selection(self):
         self.w._scroll_tui_selection(True, self.pos)
         self.w.term_cols += 1

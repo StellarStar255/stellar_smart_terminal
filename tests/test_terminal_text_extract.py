@@ -460,6 +460,15 @@ class TestCopyNormalizesNbsp(TerminalTextExtractBase):
         self.assertNotIn("\xa0", text)
         self.assertEqual(text, "\u23bf Added 3 lines")
 
+    def test_blank_selection_does_not_copy_unselected_output(self):
+        w = self.make_widget()
+        self.feed(w, "unselected output")
+        QApplication.clipboard().setText("previous clipboard")
+        w._selection_start = (1, 0)
+        w._selection_end = (1, 5)
+        w._copy_selection_to_clipboard()
+        self.assertEqual(QApplication.clipboard().text(), "previous clipboard")
+
     def test_visible_copy_replaces_nbsp(self):
         w = self.make_widget(cols=40, rows=10)
         self.feed(w, "a\xa0b\r\n")

@@ -131,10 +131,10 @@ class TerminalMouseMixin:
                 wheel_pos=QPoint(pos) if pos is not None else None,
                 size=(self.term_rows, self.term_cols))
 
-    def _refresh_tui_selection(self):
+    def _refresh_tui_selection(self, redraw=False):
         """将应用滚动前后的重叠行对齐，保留离屏选区，排除固定标题/输入栏。
 
-        只在选择手势发出滚轮后对齐，至少两条不同的非空行才认可位移；
+        滚轮或已识别的页脚高度变化时才对齐，至少两条不同的非空行才认可位移；
         普通输出、动画和重复空行不应被误认为翻页。
         """
         state = self._tui_selection
@@ -144,17 +144,27 @@ class TerminalMouseMixin:
                 or state['size'] != (self.term_rows, self.term_cols)):
             self._clear_selection()
             return
-        if not state['pending']:
+        old_footer = state['footer']
+        if not state['pending'] and not (redraw and old_footer is not None):
             return
         rows = self._snapshot_tui_rows()
-        old = [self._tui_row_key(r) for r in state['view']]
-        new = [self._tui_row_key(r) for r in rows]
+        # The old and new frame may have different transcript heights. Never
+        # match a command or status line in the footer against transcript text.
+        footer = old_footer
+        if old_footer is not None:
+            detected = self._codex_footer_start(rows)
+            if detected is not None:
+                footer = detected
+        if not state['pending'] and footer == old_footer:
+            return
+        old = [self._tui_row_key(r) for r in state['view'][:old_footer]]
+        new = [self._tui_row_key(r) for r in rows[:footer]]
         blocks = [b for b in SequenceMatcher(None, old, new, autojunk=False).get_matching_blocks()
-                  if b.size >= 2 and (b.a - b.b) * state['pending'] < 0
+                  if b.size >= 2 and (not state['pending'] or (b.a - b.b) * state['pending'] < 0)
                   and len({k for k in old[b.a:b.a + b.size] if k}) >= 2]
         if not blocks:
             lo, hi = state['bounds']
-            changed = sum(old[r] != new[r] for r in range(lo, hi))
+            changed = sum(old[r] != new[r] for r in range(lo, min(hi, len(old), len(new))))
             # 少量状态/进度文字刷新不代表已经翻页，不能阻断正文坐标重试。
             # 大片文本已变但尚未对齐时继续等待，避免再滚一格丢失重叠部分。
             state['pending_changed'] = changed > max(1, min(3, (hi - lo) // 4))
@@ -164,27 +174,38 @@ class TerminalMouseMixin:
         aligned = [b for b in blocks if b.a - b.b == delta]
         lo = min(min(b.a, b.b) for b in aligned)
         hi = max(max(b.a, b.b) + b.size for b in aligned)
-        if state['bounds'] != (0, self.term_rows):
+        if delta == 0:
+            lo = state['bounds'][0]
+        elif state['bounds'] != (0, self.term_rows):
             lo = min(lo, state['bounds'][0])
             hi = max(hi, state['bounds'][1])
+        old_hi = old_footer if old_footer is not None else hi
+        hi = footer if footer is not None else hi
         origin = state['origin']
         # 固定 UI 不是 transcript，不能留在跨页复制的中间。
         if state['bounds'] == (0, self.term_rows):
             for r in range(self.term_rows):
-                if not lo <= r < hi:
+                if not lo <= r < old_hi:
                     state['rows'].pop(origin + r, None)
-        for r in range(lo, hi):
+        for r in range(lo, old_hi):
             state['rows'][origin + r] = state['view'][r]
         origin += delta
         for r in range(lo, hi):
             state['rows'][origin + r] = rows[r]
-        state.update(view=rows, origin=origin, bounds=(lo, hi), pending=0,
+        # A stationary resize cannot reveal which top rows are pinned. Let the
+        # first actual scroll discover them instead of treating the title as text.
+        bounds = (lo, hi)
+        if delta == 0 and state['bounds'] == (0, self.term_rows):
+            bounds = state['bounds']
+        state.update(view=rows, origin=origin, bounds=bounds, footer=footer, pending=0,
                      pending_changed=False)
         # 选择手势最多保留 20000 行，避免长时间拖动无限增长。
         if len(state['rows']) > 20000:
             self._is_selecting = False
             self._auto_scroll_timer.stop()
         self._update_drag_selection_after_scroll()
+        if footer != old_footer and self._is_selecting and self._has_selection():
+            self._update_selection_edge(self._last_mouse_pos.y())
 
     def _scroll_tui_selection(self, going_up, pos, notches=1):
         self._refresh_tui_selection()
@@ -392,7 +413,7 @@ class TerminalMouseMixin:
             self._shift_extend_pending = False
 
             # 检测多击
-            if (self._last_click_pos and
+            if (not url and self._last_click_pos and
                 self._last_click_pos == cell and
                 current_time - self._last_click_time < self._double_click_interval):
                 self._click_count += 1
@@ -484,38 +505,39 @@ class TerminalMouseMixin:
                 self._select_all_mode = False
             self._selection_end = cur
 
-            # 检测是否需要自动滚动（鼠标在边缘区域）— 拉得越远滚得越快
-            y = event.pos().y()
-            edge_zone = 24  # 进入边缘的阈值（像素）
-            bottom_row = self.term_rows
-            if self._tui_selection is not None:
-                state = self._tui_selection
-                bottom_row = state['bounds'][1]
-                if state['footer'] is not None:
-                    bottom_row = min(bottom_row, state['footer'])
-            widget_height = self.PADDING + self._header_h + bottom_row * self.char_height
-
-            top_edge = self.PADDING + self._header_h + edge_zone
-            if y < top_edge:
-                # 鼠标在顶部边缘 / 已拉出 widget 上方 - 向上滚动（查看历史）
-                self._auto_scroll_direction = -1
-                self._auto_scroll_pull = top_edge - y
-                if not self._auto_scroll_timer.isActive():
-                    self._auto_scroll_timer.start(30)  # 间隔更小，反馈更跟手
-            elif y > widget_height - edge_zone:
-                # 鼠标在底部边缘 / 已拉出 widget 下方 - 向下滚动（回到最新）
-                self._auto_scroll_direction = 1
-                self._auto_scroll_pull = y - (widget_height - edge_zone)
-                if not self._auto_scroll_timer.isActive():
-                    self._auto_scroll_timer.start(30)
-            else:
-                # 不在边缘，停止自动滚动
-                self._auto_scroll_direction = 0
-                self._auto_scroll_pull = 0
-                self._auto_scroll_timer.stop()
-
+            self._update_selection_edge(event.pos().y())
             self.update()
         super().mouseMoveEvent(event)
+
+    def _update_selection_edge(self, y):
+        # 检测是否需要自动滚动（鼠标在边缘区域）— 拉得越远滚得越快
+        edge_zone = 24  # 进入边缘的阈值（像素）
+        bottom_row = self.term_rows
+        if self._tui_selection is not None:
+            state = self._tui_selection
+            bottom_row = state['bounds'][1]
+            if state['footer'] is not None:
+                bottom_row = min(bottom_row, state['footer'])
+        widget_height = self.PADDING + self._header_h + bottom_row * self.char_height
+
+        top_edge = self.PADDING + self._header_h + edge_zone
+        if y < top_edge:
+            # 鼠标在顶部边缘 / 已拉出 widget 上方 - 向上滚动（查看历史）
+            self._auto_scroll_direction = -1
+            self._auto_scroll_pull = top_edge - y
+            if not self._auto_scroll_timer.isActive():
+                self._auto_scroll_timer.start(30)  # 间隔更小，反馈更跟手
+        elif y > widget_height - edge_zone:
+            # 鼠标在底部边缘 / 已拉出 widget 下方 - 向下滚动（回到最新）
+            self._auto_scroll_direction = 1
+            self._auto_scroll_pull = y - (widget_height - edge_zone)
+            if not self._auto_scroll_timer.isActive():
+                self._auto_scroll_timer.start(30)
+        else:
+            # 不在边缘，停止自动滚动
+            self._auto_scroll_direction = 0
+            self._auto_scroll_pull = 0
+            self._auto_scroll_timer.stop()
 
     def mouseReleaseEvent(self, event: QMouseEvent):
         """鼠标释放 - 完成选择或移动光标"""
@@ -530,12 +552,13 @@ class TerminalMouseMixin:
             pressed, self._pressed_url = self._pressed_url, None
             if pressed:
                 start, url = pressed
-                if ((event.pos() - start).manhattanLength() < QApplication.startDragDistance()
-                        and self._link_at_pointer(event.pos(), event.modifiers()) == url):
+                if (event.pos() - start).manhattanLength() < QApplication.startDragDistance():
+                    same_target = self._link_at_pointer(event.pos(), event.modifiers()) == url
                     self._clear_selection()
                     self._mouse_mode_click = False
                     self._click_count = 0
-                    self._open_url(url)
+                    if same_target:
+                        self._open_url(url)
                     event.accept()
                     return
 
@@ -548,7 +571,7 @@ class TerminalMouseMixin:
             return
 
         if event.button() == Qt.MouseButton.LeftButton and self._is_selecting:
-            self._refresh_tui_selection()
+            self._refresh_tui_selection(redraw=True)
             if not self._is_selecting:
                 return
             self._selection_end = self._pos_to_absolute_cell(event.pos())
@@ -1178,8 +1201,8 @@ class TerminalMouseMixin:
             if text:
                 clipboard = QApplication.clipboard()
                 clipboard.setText(text)
-                return
-        # 如果没有选择或选中文本为空，复制整个屏幕内容
+            return
+        # 未建立选区时才执行整屏复制。
         self._copy_to_clipboard()
 
     def _select_all(self):

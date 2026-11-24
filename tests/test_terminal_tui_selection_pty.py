@@ -17,8 +17,9 @@ _APP = None
 
 
 @pytest.mark.skipif(os.name == 'nt', reason='POSIX PTY fixture')
-@pytest.mark.parametrize(('start_row', 'going_up'), [(0, False), (4, False), (4, True)])
-def test_timer_drag_across_real_pty_pages(tmp_path, start_row, going_up):
+@pytest.mark.parametrize(('start_row', 'going_up', 'reverse'), [
+    (0, False, False), (4, False, False), (4, True, False), (4, False, True)])
+def test_timer_drag_across_real_pty_pages(tmp_path, start_row, going_up, reverse):
     global _APP
     _APP = QApplication.instance() or QApplication([])
     app = _APP
@@ -60,6 +61,12 @@ def test_timer_drag_across_real_pty_pages(tmp_path, start_row, going_up):
               Qt.MouseButton.LeftButton)
         wait_until(lambda: widget._tui_selection is not None
                    and direction * widget._tui_selection['origin'] >= 2 * widget.term_rows)
+        if reverse:
+            # Keep the button held, and scroll back past the original anchor.
+            going_up = True
+            end = pos(0, 2)
+            mouse(QEvent.Type.MouseMove, end, Qt.MouseButton.LeftButton)
+            wait_until(lambda: widget._tui_selection['origin'] <= -2 * widget.term_rows)
         mouse(QEvent.Type.MouseButtonRelease,
               end, Qt.MouseButton.NoButton)
         origin = widget._tui_selection['origin']

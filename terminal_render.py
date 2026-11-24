@@ -400,7 +400,7 @@ class TerminalRenderMixin:
 
     def _rebuild_cache(self):
         """重建缓存的pixmap"""
-        self._refresh_tui_selection()
+        self._refresh_tui_selection(redraw=True)
         # 防止在 widget 尺寸为 0 时创建无效 pixmap（如拖拽分离 tab 过渡期间）
         if self.width() <= 0 or self.height() <= 0:
             return
