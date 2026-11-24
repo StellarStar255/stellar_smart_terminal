@@ -3,6 +3,7 @@ import json
 import os
 import re
 import sys
+import time
 from pathlib import Path
 
 if os.name == 'nt':
@@ -48,7 +49,16 @@ def draw():
     os.write(1, ''.join(parts).encode())
     temporary = report_path.with_suffix('.tmp')
     temporary.write_text(json.dumps(dict(rows=rows, offset=offset, accepted=accepted)))
-    temporary.replace(report_path)
+    # A concurrent Windows reader can briefly hold the destination without
+    # delete sharing. Keep the update atomic while its read handle closes.
+    for attempt in range(20):
+        try:
+            temporary.replace(report_path)
+            break
+        except PermissionError:
+            if os.name != 'nt' or attempt == 19:
+                raise
+            time.sleep(.01)
 
 
 os.write(1, b'\x1b[?1049h\x1b[?1000;1002;1003;1006h\x1b[?1003l')

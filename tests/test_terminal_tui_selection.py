@@ -187,6 +187,17 @@ class TestTuiSelection(unittest.TestCase):
         self.assertTrue(self.w._get_selected_text().startswith('row 0089 中文 sample\n'))
         self.assertEqual(self.w._selection_start, anchor)
 
+    def test_delayed_redraw_retries_confirmed_transcript_position(self):
+        self.scroll(3)
+        state = self.w._tui_selection
+        self.assertNotEqual(state['bounds'], (0, self.w.term_rows))
+        edge = self.cell(self.w.term_rows - 1)
+        with patch.object(self.w, '_send_wheel_to_app') as send:
+            self.w._scroll_tui_selection(False, edge)
+            state['sent'] -= 1
+            self.w._scroll_tui_selection(False, edge)
+        self.assertEqual([c.args[1] for c in send.call_args_list], [self.pos, self.pos])
+
     def test_edge_timer_forwards_wheel_and_waits_for_redraw(self):
         self.pos = self.cell(self.w.term_rows - 1)
         self.mouse(QEvent.Type.MouseMove, Qt.MouseButton.LeftButton)

@@ -238,13 +238,17 @@ class TerminalMouseMixin:
                 return  # 新页尚未对齐时不能继续发送，否则会丢失中间文本
             # 起点也可能是 Codex 的置顶用户消息（正文外）。没有检测到页面
             # 移动或大面积重绘时，换内部坐标重试；页面移动后即沿用该点。
-            probe = state.get('wheel_probe', 0)
-            row = (self.term_rows // 3, self.term_rows // 2,
-                   self.term_rows // 4)[probe % 3]
-            state['wheel_probe'] = probe + 1
-            state['wheel_pos'] = QPoint(
-                int(self.PADDING + (self.term_cols // 2 + .5) * self.char_width),
-                int(self.PADDING + self._header_h + (row + .5) * self.char_height))
+            lo, hi = state['bounds']
+            point = state['wheel_pos']
+            if (state['bounds'] == (0, self.term_rows) or point is None
+                    or not lo <= self._pos_to_cell(point)[0] < hi):
+                probe = state.get('wheel_probe', 0)
+                row = (self.term_rows // 3, self.term_rows // 2,
+                       self.term_rows // 4)[probe % 3]
+                state['wheel_probe'] = probe + 1
+                state['wheel_pos'] = QPoint(
+                    int(self.PADDING + (self.term_cols // 2 + .5) * self.char_width),
+                    int(self.PADDING + self._header_h + (row + .5) * self.char_height))
         state.update(pending=1 if going_up else -1, sent=now, pending_changed=False)
         # Codex 只接收正文区域内的滚轮；拖到终端边缘时坐标已落在标题、
         # 输入栏或状态栏，程序会忽略。沿用本次从正文开始选择的位置上报。

@@ -795,6 +795,7 @@ class TransferJobHost:
         try:
             if progress is not None and not sip.isdeleted(progress):
                 progress.setValue(bar_max)   # 收尾拉满（关闭对话框）
+                progress.deleteLater()
             elif progress is None and not sip.isdeleted(job):
                 job.set_stage_progress(1.0)
         except RuntimeError:  # Qt 对象已销毁（窗口/面板已关）

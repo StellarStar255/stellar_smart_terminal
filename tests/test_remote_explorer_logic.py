@@ -48,8 +48,17 @@ class _Base(unittest.TestCase):
         app_config.get_config_path = self._orig_get_path
 
     def _panel(self):
+        from PyQt6.QtCore import QEvent
         from remote_explorer_widget import RemoteExplorerPanel
-        return RemoteExplorerPanel(theme={})
+        panel = RemoteExplorerPanel(theme={})
+
+        def dispose():
+            panel.close()
+            panel.deleteLater()
+            self.app.sendPostedEvents(panel, QEvent.Type.DeferredDelete)
+
+        self.addCleanup(dispose)
+        return panel
 
 
 class TestTransferRateTracker(_Base):
@@ -443,6 +452,22 @@ class TestProgressBarBytes(_Base):
         QTimer.singleShot(260, sample_and_finish)   # 中间至少跑过一次 tick
         panel._wait_future_with_progress([fut], "x", sizes=sizes, live=live)
         return sampled
+
+    def test_finished_transfers_release_their_progress_dialogs(self):
+        from PyQt6.QtCore import QEvent
+        from PyQt6.QtWidgets import QProgressDialog
+        panel = self._panel()
+        for failed in (False, True):
+            fut = Future()
+            if failed:
+                fut.set_exception(OSError("transfer failed"))
+                with self.assertRaisesRegex(RuntimeError, "transfer failed"):
+                    panel._wait_future_with_progress([fut], "copy")
+            else:
+                fut.set_result(None)
+                panel._wait_future_with_progress([fut], "copy")
+            self.app.sendPostedEvents(None, QEvent.Type.DeferredDelete)
+            self.assertEqual(panel.findChildren(QProgressDialog), [])
 
     def test_bar_advances_with_bytes_on_single_transfer(self):
         p = self._panel()
