@@ -87,6 +87,35 @@ class TestWorkspaceRestore(unittest.TestCase):
         finally:
             w._close_tab(idx, auto_create_new=False)
 
+    def test_restore_terminal_click_forwarding(self):
+        w = self.w
+        original = w._mouse_click_forward_enabled
+        term = w.tab_terminals[0][0]
+        from unittest.mock import patch
+        from PyQt6.QtCore import QPoint
+        from PyQt6.QtGui import QContextMenuEvent
+        from PyQt6.QtWidgets import QMenu
+        from i18n import t
+
+        def toggle_local_option(menu, _pos):
+            action = next(a for a in menu.actions() if a.text() == t('ctx.forward_tui_clicks'))
+            action.trigger()
+
+        try:
+            term.set_mouse_click_forward_enabled(original)
+            term._process_output_text('\x1b[?1000h')
+            with patch.object(QMenu, 'exec', toggle_local_option):
+                term.contextMenuEvent(QContextMenuEvent(QContextMenuEvent.Reason.Mouse, QPoint(9, 9)))
+            term.set_mouse_click_forward_enabled(original)
+            main_window.MainWindow.restore_workspace_on_start(w)
+            self.assertEqual(term._mouse_click_forward_enabled, not original)
+            idx = w._add_new_tab()
+            self.assertEqual(w.tab_terminals[idx][0]._mouse_click_forward_enabled, original)
+            w._close_tab(idx, auto_create_new=False)
+        finally:
+            term._process_output_text('\x1b[?1000l')
+            term.set_mouse_click_forward_enabled(original)
+
     def test_restore_applies_current_tab_only(self):
         """重启后不再重建多标签（会话无法恢复，空标签没用——用户点名去掉）。
 

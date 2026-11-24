@@ -19,6 +19,7 @@ TerminalWidget 的鼠标事件/选区/文本提取/URL/拖放方法集合，纯�
 import unicodedata
 import functools
 import os
+import re
 import sys
 import time
 from difflib import SequenceMatcher
@@ -104,6 +105,8 @@ class TerminalMouseMixin:
         badge = None
         for row in range(len(rows) - 1, -1, -1):
             cells = rows[row][0]
+            if badge is None and not any(cell.data == '↓' for cell in cells.values()):
+                continue
             text = ''.join(cells[c].data if c in cells else ' '
                            for c in range(max(cells, default=-1) + 1)).strip()
             if text == '↓ Back to bottom · esc':
@@ -274,6 +277,13 @@ class TerminalMouseMixin:
 
         if self._tui_selection is not None:
             lo, hi = self._tui_selection['bounds']
+            footer = self._tui_selection['footer']
+            if footer is not None:
+                hi = min(hi, footer)
+            if display_row >= hi:
+                col = self.term_cols - 1
+            elif display_row < lo:
+                col = 0
             display_row = max(lo, min(display_row, hi - 1))
             return (self._tui_selection['origin'] + display_row, col)
 
@@ -733,6 +743,9 @@ class TerminalMouseMixin:
             forward_clicks.setCheckable(True)
             forward_clicks.setChecked(self._mouse_click_forward_enabled)
             forward_clicks.toggled.connect(self.set_mouse_click_forward_enabled)
+            owner = getattr(self, '_owner_window', None)
+            if owner is not None:
+                forward_clicks.toggled.connect(owner._write_workspace_snapshot)
 
         menu.addSeparator()
 
@@ -1609,7 +1622,11 @@ class TerminalMouseMixin:
         if target.scheme() in ('http', 'https'):
             return target if target.host() else None
         if (target.isLocalFile() and target.authority() in ('', 'localhost')
-                and not target.hasQuery() and not target.hasFragment()):
+                and not target.hasQuery()):
+            if target.hasFragment():
+                fragment = target.fragment()
+                if not re.fullmatch(r'L[1-9][0-9]{0,9}', fragment) or int(fragment[1:]) > 2147483647:
+                    return None
             target.setHost('')
             path = target.toLocalFile()
             if (os.path.isabs(path) and not path.replace('\\', '/').startswith('//')
@@ -1622,9 +1639,8 @@ class TerminalMouseMixin:
         if target is None:
             return
         if target.isLocalFile():
-            path = target.toLocalFile()
-            if os.path.isfile(path):
-                self.file_link_requested.emit(path)
+            line_no = int(target.fragment()[1:]) if target.hasFragment() else 0
+            self.file_link_requested.emit(target.toLocalFile(), line_no)
         else:
             QDesktopServices.openUrl(target)
 

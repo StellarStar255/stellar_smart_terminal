@@ -93,11 +93,14 @@ def test_osc8_file_link_opens_in_editor(terminal, monkeypatch, tmp_path):
     addresses = [local, local.replace('file://', 'file://localhost', 1),
                  local.replace('file://', 'file://example.com', 1),
                  (tmp_path / 'missing.log').as_uri(), 'file:relative.log',
-                 'file:///%2Fserver/share.log', 'custom:///tmp/test.log']
+                 'file:///%2Fserver/share.log', 'custom:///tmp/test.log',
+                 local + '#L2', local + '#L0', local + '#L2147483648',
+                 local + '?query=1#L2', local + '#other']
     for row, address in enumerate(addresses):
         terminal._on_output(f'\x1b]8;;{address}\x1b\\监控日志\x1b]8;;\x1b\\\r\n'.encode())
         QTest.mouseClick(terminal, Qt.MouseButton.LeftButton, pos=_point(terminal, row, 1))
-    assert [Path(call.args[0]) for call in opened.call_args_list] == [path, path]
+    assert [(Path(p), line) for (p, line), _ in opened.call_args_list] == [
+        (path, 0), (path, 0), (tmp_path / 'missing.log', 0), (path, 2)]
     external.assert_not_called()
 
 
@@ -128,3 +131,29 @@ def test_drag_select_and_unsafe_addresses_do_not_open(terminal, monkeypatch):
     opened.assert_not_called()
     QTest.mouseClick(terminal, left, Qt.KeyboardModifier.AltModifier, visible)
     assert opened.call_args.args[0].toString() == 'https://example.com/visible'
+
+
+def test_file_click_reaches_editor_and_reports_missing_file(app, monkeypatch, tmp_path):
+    from main_window import MainWindow
+
+    window = MainWindow()
+    window.show()
+    app.processEvents()
+    terminal = window.tab_terminals[0][0]
+    warning = Mock()
+    monkeypatch.setattr('file_editor.QMessageBox.warning', warning)
+    path = tmp_path / '监控 #1.log'
+    path.write_text('one\ntwo\nthree\n', encoding='utf-8')
+    missing = tmp_path / 'missing.log'
+    try:
+        for row, address in enumerate([path.as_uri() + '#L3', missing.as_uri()]):
+            terminal._on_output(f'\x1b]8;;{address}\a监控日志\x1b]8;;\a\r\n'.encode())
+            QTest.mouseClick(terminal, Qt.MouseButton.LeftButton, pos=_point(terminal, row, 1))
+        editor = window.editor_area._active.editor
+        assert editor.toPlainText() == path.read_text(encoding='utf-8')
+        assert editor.textCursor().blockNumber() == 2
+        warning.assert_called_once()
+        assert str(missing) in warning.call_args.args[2]
+    finally:
+        window.close()
+        window.deleteLater()

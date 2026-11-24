@@ -4638,10 +4638,16 @@ class MainWindow(ThemeMixin, ToolbarMixin, ConfigMixin, ExplorerPanelMixin,
             try:
                 for i in range(w.tab_widget.count()):
                     page = w.tab_widget.widget(i)
-                    tabs.append({
+                    tab = {
                         'cwd': w.tab_cwds.get(i) or '',
                         'name': getattr(page, '_custom_tab_name', None) or '',
-                    })
+                    }
+                    terms = w.tab_terminals.get(i, [])
+                    if terms:
+                        term = w.active_terminal if w.active_terminal in terms else terms[0]
+                        if term._mouse_click_forward_enabled != w._mouse_click_forward_enabled:
+                            tab['mouse_click_forward_enabled'] = term._mouse_click_forward_enabled
+                    tabs.append(tab)
             except Exception:
                 logger.debug("_collect_windows_snapshot: suppressed exception", exc_info=True)
             entries.append({
@@ -4853,6 +4859,10 @@ class MainWindow(ThemeMixin, ToolbarMixin, ConfigMixin, ExplorerPanelMixin,
             terms = self.tab_terminals.get(0, [])
             if terms and not terms[0].has_started():
                 terms[0].set_working_dir(cwd)
+        forward = entry.get('mouse_click_forward_enabled')
+        terms = self.tab_terminals.get(0, [])
+        if terms and isinstance(forward, bool):
+            terms[0].set_mouse_click_forward_enabled(forward)
         name = entry.get('name') or ''
         if name:
             page0 = self.tab_widget.widget(0)

@@ -17,8 +17,8 @@ _APP = None
 
 
 @pytest.mark.skipif(os.name == 'nt', reason='POSIX PTY fixture')
-@pytest.mark.parametrize('start_row', [0, 4])
-def test_timer_drag_across_real_pty_pages(tmp_path, start_row):
+@pytest.mark.parametrize(('start_row', 'going_up'), [(0, False), (4, False), (4, True)])
+def test_timer_drag_across_real_pty_pages(tmp_path, start_row, going_up):
     global _APP
     _APP = QApplication.instance() or QApplication([])
     app = _APP
@@ -51,20 +51,30 @@ def test_timer_drag_across_real_pty_pages(tmp_path, start_row):
         widget.start_process([sys.executable, '-u', str(fixture), str(report)], cwd=str(tmp_path))
         wait_until(lambda: widget.screen._in_alt_screen and widget._mouse_mode
                    and 'row 0104' in widget._get_line_text(4))
+        widget.set_mouse_click_forward_enabled(start_row == 4)
         mouse(QEvent.Type.MouseButtonPress, pos(start_row, 0), Qt.MouseButton.LeftButton)
-        end = pos(widget.term_rows - 4 if start_row == 4 else widget.term_rows + 3,
-                  widget.term_cols - 1)
+        end_row = widget.term_rows - 4 if start_row == 4 else widget.term_rows + 3
+        end = pos(0 if going_up else end_row, 2)
+        direction = -1 if going_up else 1
         mouse(QEvent.Type.MouseMove, end,
               Qt.MouseButton.LeftButton)
         wait_until(lambda: widget._tui_selection is not None
-                   and widget._tui_selection['origin'] >= 2 * widget.term_rows)
+                   and direction * widget._tui_selection['origin'] >= 2 * widget.term_rows)
         mouse(QEvent.Type.MouseButtonRelease,
               end, Qt.MouseButton.NoButton)
         origin = widget._tui_selection['origin']
         expected = '\n'.join(f'row {i:04d} 中文 sample'
                              for i in range(100 + max(1, start_row),
                                             100 + origin + widget.term_rows - 5))
+        if going_up:
+            # The pinned header lies above the transcript. Dragging over it
+            # includes the first visible row from column zero to the anchor.
+            complete_rows = [f'row {i:04d} 中文 sample'
+                             for i in range(101 + origin, 100 + start_row)]
+            expected = '\n'.join([*complete_rows, 'r'])
         assert widget._get_selected_text() == expected
+        widget._copy_selection_to_clipboard()
+        assert app.clipboard().text() == expected
         state = json.loads(report.read_text())
         assert state['accepted'] and all(2 <= row <= widget.term_rows - 5
                                           for row in state['accepted'])
