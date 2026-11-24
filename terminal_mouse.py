@@ -142,13 +142,17 @@ class TerminalMouseMixin:
         普通输出、动画和重复空行不应被误认为翻页。
         """
         state = self._tui_selection
-        if state is None or not self._is_selecting:
+        if state is None:
+            return
+        released = not self._is_selecting
+        if released and (not redraw or not self._has_selection()):
             return
         if not self.screen._in_alt_screen or state['size'] != (self.term_rows, self.term_cols):
-            self._interrupt_selection_drag()
+            if not released:
+                self._interrupt_selection_drag()
             return
         old_footer = state['footer']
-        if not state['pending'] and not (redraw and old_footer is not None):
+        if not released and not state['pending'] and not (redraw and old_footer is not None):
             return
         rows = self._snapshot_tui_rows()
         # The old and new frame may have different transcript heights. Never
@@ -158,10 +162,12 @@ class TerminalMouseMixin:
             detected = self._codex_footer_start(rows)
             if detected is not None:
                 footer = detected
-        if not state['pending'] and footer == old_footer:
+        if not released and not state['pending'] and footer == old_footer:
             return
         old = [self._tui_row_key(r) for r in state['view'][:old_footer]]
         new = [self._tui_row_key(r) for r in rows[:footer]]
+        if released and old == new:
+            return
         blocks = [b for b in SequenceMatcher(None, old, new, autojunk=False).get_matching_blocks()
                   if b.size >= 2 and (not state['pending'] or (b.a - b.b) * state['pending'] < 0)
                   and len({k for k in old[b.a:b.a + b.size] if k}) >= 2]
@@ -196,6 +202,13 @@ class TerminalMouseMixin:
         old_hi = old_footer if old_footer is not None else hi
         hi = footer if footer is not None else hi
         origin = state['origin']
+        if released:
+            # A final wheel reply (or trackpad momentum) can repaint Codex
+            # after mouse-up. Move only the viewport mapping; the selected
+            # endpoints and captured text must stay frozen for copying.
+            state.update(view=rows, origin=origin + delta, bounds=(lo, hi),
+                         footer=footer, pending=0, pending_changed=False)
+            return
         # Keep the last complete page when accepting this frame would exceed
         # the snapshot budget. Reversing over saved rows costs no extra space.
         saved = state['rows']

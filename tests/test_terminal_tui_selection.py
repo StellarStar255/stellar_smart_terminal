@@ -173,6 +173,29 @@ class TestTuiSelection(unittest.TestCase):
         self.assertEqual(self.w._get_selected_text(), expected)
         self.assertFalse(self.w._auto_scroll_timer.isActive())
 
+    def test_release_at_upper_edge_keeps_highlight_after_late_codex_frame(self):
+        self.pos = self.cell(0, 2)
+        self.mouse(QEvent.Type.MouseMove, Qt.MouseButton.LeftButton)
+        for _ in range(self.w.term_rows // 3 + 2):
+            self.scroll(-3)
+        self.w._scroll_tui_selection(True, self.pos)
+        self.mouse(QEvent.Type.MouseButtonRelease, Qt.MouseButton.NoButton)
+        expected = self.w._get_selected_text()
+        self.assertGreater(len(expected.splitlines()), self.w.term_rows)
+
+        def color(row):
+            image = self.w.grab().toImage()
+            pos = self.cell(row, 30) * image.devicePixelRatio()
+            return image.pixelColor(pos)
+
+        selected = color(6)
+        self.offset -= 3
+        self.draw()
+        self.assertEqual(color(9), selected)
+        self.assertNotEqual(color(2), selected)  # newly exposed row outside selection
+        self.w._copy_selection_to_clipboard()
+        self.assertEqual(self.app.clipboard().text(), expected)
+
     def test_upward_selection_and_reverse_keep_anchor(self):
         anchor = self.w._selection_start
         self.pos = self.cell(1)

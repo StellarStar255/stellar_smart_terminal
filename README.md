@@ -6,7 +6,7 @@ English | [简体中文](README.zh-CN.md)
 
 A PyQt6-based smart terminal with file explorer, Git GUI, LLM proxy, and VS Code extension browser.
 
-[v1.35.65](docs/releases/v1.35.65.md) improves multi-page selection in Codex and clicking links with Chinese characters.
+[v1.35.66](docs/releases/v1.35.66.md) keeps a multi-page Codex selection highlighted when a scroll update arrives after mouse release.
 
 <img src="assets/smart_terminal.png" width="300" />
 
