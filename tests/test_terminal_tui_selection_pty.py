@@ -68,7 +68,7 @@ def test_timer_drag_across_real_pty_pages(tmp_path, start_row, going_up, reverse
             if predicate():
                 return
             time.sleep(.005)
-        pytest.fail('PTY/timer did not reach expected state')
+        pytest.fail(f'PTY/timer did not reach expected state ({predicate.__name__})')
 
     def pos(row, col):
         return QPoint(int(widget.PADDING + (col + .3) * widget.char_width),
@@ -82,7 +82,11 @@ def test_timer_drag_across_real_pty_pages(tmp_path, start_row, going_up, reverse
         # The viewer needs only the standard library. Start Python directly
         # so the Windows venv redirector does not interpose another process.
         interpreter = sys._base_executable if os.name == 'nt' else sys.executable
-        widget.start_process([interpreter, '-u', str(fixture), str(report)], cwd=str(tmp_path))
+        command = [interpreter, '-u', str(fixture), str(report)]
+        late_frame = going_up and not reverse
+        if late_frame:
+            command.append('--delay-last-frame')
+        widget.start_process(command, cwd=str(tmp_path))
         wait_until(lambda: widget.screen._in_alt_screen and widget._mouse_mode
                    and 'row 0104' in widget._get_line_text(4))
         widget.set_mouse_click_forward_enabled(start_row == 4)
@@ -100,6 +104,11 @@ def test_timer_drag_across_real_pty_pages(tmp_path, start_row, going_up, reverse
             end = pos(0, 2)
             mouse(QEvent.Type.MouseMove, end, Qt.MouseButton.LeftButton)
             wait_until(lambda: widget._tui_selection['origin'] <= -2 * widget.term_rows)
+        if late_frame:
+            wait_until(report.with_suffix('.pending').exists)
+            before = widget.grab().toImage()
+            sample = pos(6, 30) * before.devicePixelRatio()
+            highlighted = before.pixelColor(sample)
         mouse(QEvent.Type.MouseButtonRelease,
               end, Qt.MouseButton.NoButton)
         origin = widget._tui_selection['origin']
@@ -112,6 +121,20 @@ def test_timer_drag_across_real_pty_pages(tmp_path, start_row, going_up, reverse
             complete_rows = [f'row {i:04d} 中文 sample'
                              for i in range(101 + origin, 100 + start_row)]
             expected = '\n'.join([*complete_rows, 'r'])
+        if late_frame:
+            assert len(expected.splitlines()) > widget.term_rows
+            report.with_suffix('.release').touch()
+            # Observe the child process's repaint in the terminal buffer.
+            # The selection state itself must not be used to detect arrival.
+            wait_until(lambda: f'row {100 + origin - 3 + 1:04d}' in widget._get_line_text(1))
+            def highlight_has_moved():
+                after = widget.grab().toImage()
+                ratio = after.devicePixelRatio()
+                return (all(after.pixelColor(pos(row, 30) * ratio) == highlighted for row in (5, 6, 9))
+                        and after.pixelColor(pos(2, 30) * ratio) != highlighted)
+
+            # Reading the PTY and painting its next Qt frame are asynchronous.
+            wait_until(highlight_has_moved)
         assert widget._get_selected_text() == expected
         widget._copy_selection_to_clipboard()
         assert app.clipboard().text() == expected
