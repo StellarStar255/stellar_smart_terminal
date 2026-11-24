@@ -69,7 +69,7 @@ pyinstaller_args=(--noconfirm)
 if [ "$(uname)" = "Linux" ]; then
     # PyInstaller can exit successfully even when its Qt hook cannot import
     # QtCore, leaving a .deb without a display plugin.
-    "$VENV/bin/python" -c 'from PyQt6.QtWidgets import QApplication'
+    "$VENV/bin/python" -c 'from PyQt6.QtWidgets import QApplication; from PyQt6.QtCore import QLibraryInfo; from pathlib import Path; import ctypes; ctypes.CDLL(str(Path(QLibraryInfo.path(QLibraryInfo.LibraryPath.PluginsPath)) / "platforms/libqxcb.so"))'
     platforms="dist/StellarSmartTerminal/_internal/PyQt6/Qt6/plugins/platforms"
     if [ -d dist/StellarSmartTerminal ] && [ ! -f "$platforms/libqxcb.so" ]; then
         pyinstaller_args+=(--clean)
@@ -210,7 +210,7 @@ Version: $VERSION
 Section: utils
 Priority: optional
 Architecture: $ARCH
-Depends: libc6, libxcb-cursor0, libegl1, libgl1, libglib2.0-0, libxkbcommon0, libdbus-1-3
+Depends: libc6, libxcb-cursor0, libegl1, libgl1, libglib2.0-0, libxkbcommon0, libdbus-1-3, libxcb-keysyms1, libxcb-shape0, libxcb-xkb1, libxkbcommon-x11-0, libxcb-icccm4
 Installed-Size: $INSTALLED_KB
 Maintainer: huangqiliang <goosehuangmatt@gmail.com>
 Description: Stellar Smart Terminal
