@@ -19,7 +19,17 @@ if os.name == 'nt':
         handle = wintypes.HANDLE(msvcrt.get_osfhandle(fd))
         mode = wintypes.DWORD()
         if not kernel.GetConsoleMode(handle, ctypes.byref(mode)):
-            raise ctypes.WinError(ctypes.get_last_error())
+            # The Windows venv launcher or test capture can redirect stdio.
+            # Bind this test viewer directly to its attached pseudoconsole.
+            name = 'CONIN$' if fd == 0 else 'CONOUT$'
+            device = os.open(name, os.O_RDWR | os.O_BINARY)
+            try:
+                os.dup2(device, fd)
+            finally:
+                os.close(device)
+            handle = wintypes.HANDLE(msvcrt.get_osfhandle(fd))
+            if not kernel.GetConsoleMode(handle, ctypes.byref(mode)):
+                raise ctypes.WinError(ctypes.get_last_error())
         if fd == 0:
             mode.value = (mode.value & ~0x7) | 0x200  # raw + ENABLE_VIRTUAL_TERMINAL_INPUT
         else:

@@ -287,6 +287,17 @@ class TestTuiSelection(unittest.TestCase):
             self.w._scroll_tui_selection(False, self.pos)
         self.w._write_to_backend.assert_called_once()
 
+    def test_snapshot_preserves_cursor_positioned_columns_after_release(self):
+        self.w.stream.feed('\x1bc\x1b[?1049h\x1b[?1000h\x1b[5;4H中\x1b[5;11H42')
+        self.pos = self.cell(4, 0)
+        self.mouse(QEvent.Type.MouseButtonPress, Qt.MouseButton.LeftButton)
+        self.pos = self.cell(4, 12)
+        self.mouse(QEvent.Type.MouseMove, Qt.MouseButton.LeftButton)
+        self.mouse(QEvent.Type.MouseButtonRelease, Qt.MouseButton.NoButton)
+        self.w.stream.feed('\x1b[5;1H\x1b[2Kreplacement')
+        self.w._copy_selection_to_clipboard()
+        self.assertEqual(self.app.clipboard().text(), '   中     42')
+
     def test_unrelated_redraw_does_not_invent_a_scroll(self):
         self.w._scroll_tui_selection(True, self.pos)
         self.w.stream.feed('\x1b[6;1Hunrelated progress changed')

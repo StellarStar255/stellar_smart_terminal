@@ -308,7 +308,9 @@ if IS_WINDOWS:
         wintypes.DWORD,  # dwFlags
         ctypes.POINTER(wintypes.HANDLE),  # phPC (HPCON*)
     ]
-    kernel32.CreatePseudoConsole.restype = ctypes.HRESULT
+    # Inspect the HRESULT bits ourselves: ctypes.HRESULT raises OSError
+    # before start() can retry without the optional passthrough flag.
+    kernel32.CreatePseudoConsole.restype = wintypes.DWORD
 
     # ResizePseudoConsole
     kernel32.ResizePseudoConsole.argtypes = [
@@ -474,12 +476,11 @@ if IS_WINDOWS:
                 kernel32.InitializeProcThreadAttributeList(None, 1, 0, ctypes.byref(attr_size))
 
                 attr_list_buf = (ctypes.c_byte * attr_size.value)()
-                self._attr_list_buf = attr_list_buf
-
                 if not kernel32.InitializeProcThreadAttributeList(
                     attr_list_buf, 1, 0, ctypes.byref(attr_size)
                 ):
                     raise OSError(f"InitializeProcThreadAttributeList failed: {kernel32.GetLastError()}")
+                self._attr_list_buf = attr_list_buf
 
                 # 4. 设置 PSEUDOCONSOLE 属性
                 if not kernel32.UpdateProcThreadAttribute(

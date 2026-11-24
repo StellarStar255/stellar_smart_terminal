@@ -153,7 +153,7 @@ def test_file_click_reaches_editor_and_reports_missing_file(app, monkeypatch, tm
         assert editor.toPlainText() == path.read_text(encoding='utf-8')
         assert editor.textCursor().blockNumber() == 2
         warning.assert_called_once()
-        assert str(missing) in warning.call_args.args[2]
+        assert os.path.normcase(str(missing)) in os.path.normcase(warning.call_args.args[2])
     finally:
         window.close()
         window.deleteLater()

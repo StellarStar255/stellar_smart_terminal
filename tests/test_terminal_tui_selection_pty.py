@@ -16,6 +16,37 @@ from terminal_widget import TerminalWidget
 _APP = None
 
 
+@pytest.mark.skipif(os.name != 'nt', reason='requires the Windows ConPTY API')
+def test_conpty_retries_unsupported_passthrough(tmp_path, monkeypatch):
+    import ctypes
+    from terminal_backend import WindowsBackend, kernel32, PSEUDOCONSOLE_PASSTHROUGH
+
+    create = kernel32.CreatePseudoConsole
+    # Exercise ctypes' actual return conversion, including the FAILED bit.
+    stub = ctypes.WINFUNCTYPE(ctypes.c_uint32)(lambda: 0x80070057)
+    reject = ctypes.cast(stub, ctypes.WINFUNCTYPE(create.restype))
+    flags_seen = []
+
+    def create_console(size, reader, writer, flags, result):
+        flags_seen.append(flags)
+        if flags:
+            return reject()
+        return create(size, reader, writer, flags, result)
+
+    monkeypatch.setattr(kernel32, 'CreatePseudoConsole', create_console)
+    backend = WindowsBackend()
+    marker = tmp_path / 'started'
+    try:
+        assert backend.start([sys.executable, '-c', "open('started','w').close()"], cwd=str(tmp_path))
+        deadline = time.monotonic() + 10
+        while not marker.exists() and time.monotonic() < deadline:
+            time.sleep(.02)
+        assert marker.exists()
+        assert flags_seen == [PSEUDOCONSOLE_PASSTHROUGH, 0]
+    finally:
+        backend.stop()
+
+
 @pytest.mark.parametrize(('start_row', 'going_up', 'reverse'), [
     (0, False, False), (4, False, False), (4, True, False), (4, False, True)])
 def test_timer_drag_across_real_pty_pages(tmp_path, start_row, going_up, reverse):
@@ -48,7 +79,10 @@ def test_timer_drag_across_real_pty_pages(tmp_path, start_row, going_up, reverse
                                          buttons, Qt.KeyboardModifier.NoModifier))
 
     try:
-        widget.start_process([sys.executable, '-u', str(fixture), str(report)], cwd=str(tmp_path))
+        # The viewer needs only the standard library. Start Python directly
+        # so the Windows venv redirector does not interpose another process.
+        interpreter = sys._base_executable if os.name == 'nt' else sys.executable
+        widget.start_process([interpreter, '-u', str(fixture), str(report)], cwd=str(tmp_path))
         wait_until(lambda: widget.screen._in_alt_screen and widget._mouse_mode
                    and 'row 0104' in widget._get_line_text(4))
         widget.set_mouse_click_forward_enabled(start_row == 4)

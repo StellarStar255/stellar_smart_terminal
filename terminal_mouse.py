@@ -1183,7 +1183,9 @@ class TerminalMouseMixin:
             col = 0
             while col < term_cols:
                 try:
-                    char = buffer_line[col]
+                    # A snapshot is a sparse dict. Cursor positioning leaves
+                    # blank cells that still occupy columns in copied text.
+                    char = buffer_line.get(col, ' ')
                     char_data = getattr(char, 'data', None)
                     if char_data is None:
                         char_data = char if isinstance(char, str) else ' '
