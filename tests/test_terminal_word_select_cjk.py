@@ -69,6 +69,16 @@ class WordSelectCjkTest(unittest.TestCase):
         got = self._select(line, line.index("一"))
         self.assertEqual(got, "第一段")
 
+    def test_wide_filename_wraps_across_three_rows(self):
+        self.w.term_cols = 8
+        self.w.screen.resize(10, 8)
+        name = "目录中文文件报告日志.zip"
+        self.w.stream.feed(name + " next")
+        for row, col in ((0, 1), (1, 7), (2, 2)):
+            with self.subTest(row=row, col=col):
+                self.w._select_word_at((row, col))
+                self.assertEqual(self.w._get_selected_text(), name)
+
     def test_plain_ascii_behaviour_unchanged(self):
         line = "cd /home/huangqiliang/proj && ls"
         got = self._select(line, line.index("huang"))
@@ -77,6 +87,13 @@ class WordSelectCjkTest(unittest.TestCase):
         self.w._selection_start = self.w._selection_end = None
         self.w._select_word_at((0, line.index("huang")), self.w._WORD_CHARS_NARROW)
         self.assertEqual(self.w._get_selected_text().strip(), "huangqiliang")
+
+    def test_combining_mark_occupies_no_extra_column(self):
+        self.w.stream.feed("x\u0301file.log next")
+        for col, expected in ((0, "x\u0301file.log"), (8, "x\u0301file.log"), (10, "next")):
+            with self.subTest(col=col):
+                self.w._select_word_at((0, col))
+                self.assertEqual(self.w._get_selected_text(), expected)
 
 
 if __name__ == '__main__':

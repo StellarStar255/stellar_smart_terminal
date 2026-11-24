@@ -1448,7 +1448,7 @@ class TerminalMouseMixin:
         total = self._row_count_total()
 
         def content_last_col(r):
-            return len(self._get_line_text(r).rstrip()) - 1
+            return len(self._get_line_text(r, cell_aligned=True).rstrip()) - 1
 
         lo = abs_row
         # 向上扩展到块首（上一行非空、非软换行）
@@ -1470,7 +1470,7 @@ class TerminalMouseMixin:
         判定：行内容无内部空格（单一连续 token），且填满到本行块的应用层折行宽度。
         双击/选词时据此把选区跨过这些硬折行，才能选中完整的 URL。
         """
-        text = self._get_line_text(abs_row)
+        text = self._get_line_text(abs_row, cell_aligned=True)
         core = text.strip()
         if not core or ' ' in core:
             return False  # 空行或含内部空格（散文）→ 不是单一长 token
@@ -1530,7 +1530,7 @@ class TerminalMouseMixin:
         if word_chars is None:
             word_chars = self._WORD_CHARS_WIDE
         row, col = cell
-        line_text = self._get_line_text(row)
+        line_text = self._get_line_text(row, cell_aligned=True)
         if not line_text:
             return
 
@@ -1558,7 +1558,7 @@ class TerminalMouseMixin:
         # 向上扩展：单词顶到行首且上一行是被折行的续行 → 接到上一行末尾的单词部分
         # 用 rstrip() 去掉行尾填充空格（应用层按盒子边距折行时，内容并不顶到终端右边缘）
         while start_col == 0 and start_row > 0 and _is_continuation(start_row - 1):
-            prev_text = self._get_line_text(start_row - 1).rstrip()
+            prev_text = self._get_line_text(start_row - 1, cell_aligned=True).rstrip()
             pmask = self._word_cell_mask(prev_text, word_chars)
             if not prev_text or not pmask[-1]:
                 break
@@ -1572,24 +1572,20 @@ class TerminalMouseMixin:
 
         # 向下扩展：单词顶到行尾且本行被折行 → 接到下一行开头的单词部分
         while end_row < total - 1 and _is_continuation(end_row):
-            cur_text = self._get_line_text(end_row)
+            cur_text = self._get_line_text(end_row, cell_aligned=True)
             # 选中的词必须延伸到本可见行内容末尾，才可能是被折行截断的同一个 token；
             # 否则（双击的是行中间的词）不应跨行，避免把下一行的词错误并入。
             if end_col < len(cur_text.rstrip()) - 1:
                 break
-            next_text = self._get_line_text(end_row + 1)
+            next_text = self._get_line_text(end_row + 1, cell_aligned=True)
             nmask = self._word_cell_mask(next_text, word_chars)
             if not next_text or not nmask[0]:
                 break
-            next_content_end = len(next_text.rstrip()) - 1  # 下一行内容末列（非填充空格）
             e = 0
             while e < len(nmask) and nmask[e]:
                 e += 1
             end_row += 1
             end_col = e - 1
-            # 词没填满下一行的内容宽度 → 它就是 token 的最后一段，停止
-            if end_col != next_content_end:
-                break
 
         self._selection_start = (start_row, start_col)
         self._selection_end = (end_row, end_col)
@@ -1617,11 +1613,12 @@ class TerminalMouseMixin:
         self._selection_end = (end_row, self.term_cols - 1)
         self._is_selecting = False
 
-    def _get_line_text(self, abs_row: int) -> str:
+    def _get_line_text(self, abs_row: int, *, cell_aligned: bool = False) -> str:
         """获取指定绝对行号的文本
 
         Args:
             abs_row: 绝对行号（包括历史记录）
+            cell_aligned: 选词定位时每个 cell 只取首字符，组合音标不占额外列。
         """
         # 持锁迭代历史/缓冲行对象，避免与读取线程的 feed mutate 撕裂
         with self._screen_lock:
@@ -1653,6 +1650,8 @@ class TerminalMouseMixin:
                         chars.append(' ')
                 except (KeyError, IndexError, TypeError):
                     chars.append(' ')
+            if cell_aligned:
+                return ''.join(ch[0] if ch else ' ' for ch in chars)
             return ''.join(chars)
 
     # ==================== URL检测和打开 ====================
@@ -1696,11 +1695,20 @@ class TerminalMouseMixin:
                 return target if self._link_url(target) else ""
             if not include_plain:
                 return ""
-            line_text = self._get_line_text(abs_row)
+            # Match the original text, keeping the pointer in string offsets.
+            # A combining sequence occupies one cell and a wide glyph's
+            # continuation cell contributes no extra character to the URL.
+            cells = [getattr(line.get(i), 'data', ' ') for i in range(self.screen.columns)]
+            if not 0 <= col < len(cells):
+                return ""
+            offset = sum(map(len, cells[:col]))
+            if not cells[col]:
+                offset -= 1
+            line_text = ''.join(cells)
 
         for match in self._url_pattern.finditer(line_text):
             start, end = match.span()
-            if start <= col < end:
+            if start <= offset < end:
                 url = match.group()
                 if url.startswith('www.'):
                     url = 'https://' + url

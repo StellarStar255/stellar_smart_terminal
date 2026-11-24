@@ -173,6 +173,17 @@ def test_link_replaced_between_press_and_release_consumes_click(terminal, monkey
     opened.assert_not_called()
     sent.assert_not_called()
 
+def test_plain_unicode_url_uses_display_columns(terminal):
+    url = 'https://example.org/日志'
+    terminal._process_output_text('x\u0301 ' + url + ' end')
+    first = 2
+    after = first + len(url) + 2  # the two ideographs each occupy two columns
+    for col in range(first, after):
+        assert terminal._get_url_at_pos((0, col)) == url
+    for col in (first - 1, after):
+        assert terminal._get_url_at_pos((0, col)) == ''
+
+
 def test_scroll_away_and_back_while_holding_link_does_not_open(terminal, monkeypatch):
     opened = Mock()
     monkeypatch.setattr(terminal, '_open_url', opened)
