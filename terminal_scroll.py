@@ -240,6 +240,8 @@ class TerminalScrollSearchMixin:
 
     def wheelEvent(self, event):
         """鼠标滚轮事件 - 滚动历史"""
+        if event.phase() == Qt.ScrollPhase.ScrollBegin:
+            self._scroll_accum = self._app_wheel_accum = 0.0
         step_lines = self._wheel_lines(event)
         if step_lines == 0:
             event.accept()

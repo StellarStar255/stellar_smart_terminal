@@ -535,6 +535,10 @@ class TerminalInputMixin:
 
     def event(self, event):
         """处理事件 - 确保特殊键不被Qt拦截"""
+        if (event.type() in (QEvent.Type.UngrabMouse, QEvent.Type.WindowDeactivate,
+                             QEvent.Type.Hide, QEvent.Type.FocusOut)
+                and getattr(self, '_is_selecting', False)):
+            self._interrupt_selection_drag()
         # 处理 ShortcutOverride 事件 - 告诉 Qt 我们要自己处理这些按键，不要当作快捷键
         if event.type() == QEvent.Type.ShortcutOverride:
             key_event = event

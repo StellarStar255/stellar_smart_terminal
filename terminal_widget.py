@@ -855,6 +855,7 @@ class TerminalWidget(TerminalInputMixin, TerminalMouseMixin,
         self._selection_end = None    # (absolute_row, col) 选择终点
         self._tui_selection = None    # 全屏应用滚动选择的不可变行快照
         self._is_selecting = False    # 是否正在选择
+        self._ignore_left_release = False
         self._shift_extend_click = False  # 本次按下是否为 Shift+点击扩展选区
         self._shift_extend_pending = False  # Shift+按下后待定：拖动→新建，纯点击→扩展
         self._shift_press_cell = None     # Shift+按下时的绝对格（拖动时作为新选区起点）
@@ -2196,6 +2197,7 @@ class TerminalWidget(TerminalInputMixin, TerminalMouseMixin,
         # 标记已清理：Qt 可能在控件销毁前仍投递排队中的鼠标事件，
         # 事件处理器据此提前返回，避免访问已置 None 的定时器导致闪退。
         self._cleaned_up = True
+        self._is_selecting = False
         self._output_cancelled.set()
         self._cancel_clipboard_probes()
         if self._cwd_future is not None:

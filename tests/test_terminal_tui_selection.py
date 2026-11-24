@@ -241,6 +241,59 @@ class TestTuiSelection(unittest.TestCase):
         self.assertIsNone(self.w._tui_selection)
         self.assertFalse(self.w._has_selection())
 
+    def test_drag_keeps_logical_cells_across_device_pixel_ratios(self):
+        self.pos = self.cell(8, 24)
+        self.mouse(QEvent.Type.MouseMove, Qt.MouseButton.LeftButton)
+        self.scroll(3)
+        expected = self.w._get_selected_text()
+        anchor = self.w._selection_start
+        for ratio in (1.0, 1.25, 2.0, 1.0):
+            with patch.object(self.w, 'devicePixelRatioF', return_value=ratio):
+                self.w._rebuild_cache()
+                self.assertEqual(self.w._cache_pixmap.devicePixelRatio(), ratio)
+                self.mouse(QEvent.Type.MouseMove, Qt.MouseButton.LeftButton)
+                self.assertEqual(self.w._selection_start, anchor)
+                self.assertEqual(self.w._get_selected_text(), expected)
+
+    def test_grid_resize_preserves_snapshot_width(self):
+        self.pos = self.cell(8, 24)
+        self.mouse(QEvent.Type.MouseMove, Qt.MouseButton.LeftButton)
+        self.scroll(3)
+        expected = self.w._get_selected_text()
+        self.assertIn('中文 sample', expected)
+        self.w.term_cols = 10
+        self.w._refresh_tui_selection()
+        self.assertFalse(self.w._is_selecting)
+        self.assertEqual(self.w._get_selected_text(), expected)
+        self.mouse(QEvent.Type.MouseButtonRelease, Qt.MouseButton.NoButton)
+        self.assertEqual(self.w._get_selected_text(), expected)
+
+    def test_leave_reenter_then_lose_grab_at_edge(self):
+        self.w.set_mouse_click_forward_enabled(True)
+        self.pos = self.cell(self.w.term_rows + 3, 20)
+        self.mouse(QEvent.Type.MouseMove, Qt.MouseButton.LeftButton)
+        self.app.sendEvent(self.w, QEvent(QEvent.Type.Leave))
+        self.assertTrue(self.w._auto_scroll_timer.isActive())
+        self.pos = self.cell(5, 15)
+        self.mouse(QEvent.Type.MouseMove, Qt.MouseButton.LeftButton)
+        self.assertFalse(self.w._auto_scroll_timer.isActive())
+        self.pos = self.cell(self.w.term_rows + 3, 20)
+        self.mouse(QEvent.Type.MouseMove, Qt.MouseButton.LeftButton)
+        expected = self.w._get_selected_text()
+        self.app.sendEvent(self.w, QEvent(QEvent.Type.UngrabMouse))
+        self.assertFalse(self.w._auto_scroll_timer.isActive())
+        self.pos = self.cell(0)
+        self.mouse(QEvent.Type.MouseMove, Qt.MouseButton.NoButton)
+        self.mouse(QEvent.Type.MouseButtonRelease, Qt.MouseButton.NoButton)
+        self.assertEqual(self.w._get_selected_text(), expected)
+        self.w._write_to_backend.assert_not_called()
+
+    def test_cleanup_during_drag_ignores_late_ungrab(self):
+        self.w._backend = None
+        self.w.cleanup()
+        self.app.sendEvent(self.w, QEvent(QEvent.Type.UngrabMouse))
+        self.assertFalse(self.w._is_selecting)
+
     def test_plain_shell_does_not_enable_tui_snapshots(self):
         self.w.stream.feed('\x1b[?1049l')
         self.w._begin_tui_selection()

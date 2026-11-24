@@ -196,6 +196,12 @@ class TestAltScreenForwarding(_Base):
                 TerminalWidget.wheelEvent(w, ev)
         return sent
 
+    def test_new_touchpad_gesture_discards_fraction_from_previous_drag(self):
+        from PyQt6.QtCore import Qt
+        events = [_FakeWheel(pixels=12), _FakeWheel(phase=Qt.ScrollPhase.ScrollEnd),
+                  _FakeWheel(phase=Qt.ScrollPhase.ScrollBegin), _FakeWheel(pixels=8)]
+        self.assertEqual(self._forward(events), [])
+
     def test_tiny_trackpad_events_do_not_each_send_a_notch(self):
         """一次轻扫 160px（10 行）应该发 10 格，而不是 40 格。"""
         sent = self._forward([_FakeWheel(pixels=4) for _ in range(40)])

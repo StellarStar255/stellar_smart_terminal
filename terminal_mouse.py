@@ -140,9 +140,8 @@ class TerminalMouseMixin:
         state = self._tui_selection
         if state is None or not self._is_selecting:
             return
-        if (not self.screen._in_alt_screen
-                or state['size'] != (self.term_rows, self.term_cols)):
-            self._clear_selection()
+        if not self.screen._in_alt_screen or state['size'] != (self.term_rows, self.term_cols):
+            self._interrupt_selection_drag()
             return
         old_footer = state['footer']
         if not state['pending'] and not (redraw and old_footer is not None):
@@ -396,6 +395,10 @@ class TerminalMouseMixin:
         force_local_selection = (event.modifiers() & Qt.KeyboardModifier.ShiftModifier) or self.scroll_offset > 0
 
         if event.button() == Qt.MouseButton.LeftButton:
+            self._ignore_left_release = False
+            if self._tui_selection and (not self.screen._in_alt_screen
+                    or self._tui_selection['size'] != (self.term_rows, self.term_cols)):
+                self._clear_selection()
             self._pressed_url = None
             url = self._link_at_pointer(event.pos(), event.modifiers())
             if url:
@@ -467,6 +470,11 @@ class TerminalMouseMixin:
     def mouseMoveEvent(self, event: QMouseEvent):
         """鼠标移动 - 更新选择区域（使用绝对坐标），支持拖动时自动滚动"""
         if self._cleaned_up:
+            return
+        if self._is_selecting and not event.buttons() & Qt.MouseButton.LeftButton:
+            self._interrupt_selection_drag()
+        if self._ignore_left_release and event.buttons() & Qt.MouseButton.LeftButton:
+            event.accept()
             return
         if (self._pressed_url
                 and (event.pos() - self._pressed_url[0]).manhattanLength() >= QApplication.startDragDistance()):
@@ -549,6 +557,10 @@ class TerminalMouseMixin:
         self._auto_scroll_pull = 0
 
         if event.button() == Qt.MouseButton.LeftButton:
+            if self._ignore_left_release:
+                self._ignore_left_release = False
+                event.accept()
+                return
             pressed, self._pressed_url = self._pressed_url, None
             if pressed:
                 start, url = pressed
@@ -1088,7 +1100,7 @@ class TerminalMouseMixin:
         history = self._get_history_top()
         history_count = len(history)
         total_lines = history_count + self.term_rows
-        term_cols = self.term_cols
+        term_cols = self._tui_selection['size'][1] if self._tui_selection else self.term_cols
 
         # 每行收集: (line_text, is_soft, last_content_col, spaceless, can_heuristic)
         # last_content_col: 整行最后一个非空格字符的列结尾位置（用于判断行是否"填满到行尾"）
@@ -1315,6 +1327,19 @@ class TerminalMouseMixin:
         # Windows(ConPTY) 下软换行行的尾部空格是重绘填充、不可信，拼接前剥掉
         return merge_extracted_lines(line_data, columns,
                                      strip_soft_trailing=(sys.platform == 'win32'))
+
+    def _interrupt_selection_drag(self):
+        """Finish at the last confirmed cell when Qt loses the drag or the grid changes."""
+        self._ignore_left_release = True
+        self._pressed_url = None
+        self._mouse_mode_click = False
+        self._click_count = 0
+        self._is_selecting = False
+        self._auto_scroll_direction = self._auto_scroll_pull = 0
+        self._auto_scroll_timer.stop()
+        if not self._has_selection():
+            self._clear_selection()
+        self.update()
 
     def _clear_selection(self):
         """清除选择"""
