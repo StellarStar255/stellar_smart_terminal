@@ -77,6 +77,76 @@ class TestTuiSelection(unittest.TestCase):
         self.assertEqual(self.w._get_selected_text(), text)
         self.w.grab()  # completed selection must render safely after replacement output
 
+    def test_snapshot_limit_keeps_last_confirmed_page_and_consumes_release(self):
+        self.w.set_mouse_click_forward_enabled(True)
+        self.pos = self.cell(self.w.term_rows - 4, 20)
+        self.mouse(QEvent.Type.MouseMove, Qt.MouseButton.LeftButton)
+        self.scroll(3)
+        state = self.w._tui_selection
+        saved = state['rows']
+        for i in range(20000 - len(saved)):
+            saved[-1 - i] = ({}, False)
+        expected = self.w._get_selected_text()
+        self.w._scroll_tui_selection(False, self.pos)
+        self.offset += 3
+        self.draw()
+        self.w._write_to_backend.reset_mock()
+        self.w._auto_scroll_tick()
+        self.mouse(QEvent.Type.MouseButtonRelease, Qt.MouseButton.NoButton)
+        self.assertFalse(self.w._auto_scroll_timer.isActive())
+        self.assertLessEqual(len(saved), 20000)
+        self.assertEqual(self.w._get_selected_text(), expected)
+        self.w._write_to_backend.assert_not_called()
+
+    def test_returning_drag_to_anchor_is_not_a_click(self):
+        self.w.set_mouse_click_forward_enabled(True)
+        self.pos = self.cell(5)
+        self.mouse(QEvent.Type.MouseButtonPress, Qt.MouseButton.LeftButton)
+        self.pos = self.cell(8, 20)
+        self.mouse(QEvent.Type.MouseMove, Qt.MouseButton.LeftButton)
+        self.pos = self.cell(5)
+        self.mouse(QEvent.Type.MouseMove, Qt.MouseButton.LeftButton)
+        self.mouse(QEvent.Type.MouseButtonRelease, Qt.MouseButton.NoButton)
+        self.w._write_to_backend.assert_not_called()
+
+    def test_alt_screen_exit_before_next_tick_preserves_shell_scroll_position(self):
+        self.pos = self.cell(0)
+        self.mouse(QEvent.Type.MouseMove, Qt.MouseButton.LeftButton)
+        expected = self.w._get_selected_text()
+        self.w.stream.feed('\x1b[?1049l' + 'shell output\r\n' * 50)
+        self.w._auto_scroll_tick()
+        self.assertEqual(self.w.scroll_offset, 0)
+        self.assertFalse(self.w._auto_scroll_timer.isActive())
+        self.assertEqual(self.w._get_selected_text(), expected)
+
+    def test_repeating_logs_need_a_distinguishable_scroll_anchor(self):
+        def draw_pattern(offset, unique):
+            self.w.stream.feed('\x1b[H\x1b[2Jheader')
+            for r in range(1, self.w.term_rows - 2):
+                i = offset + r
+                label = 'checkpoint' if unique and i == 7 else f'status {i % 3}'
+                self.w.stream.feed(f'\x1b[{r+1};1H{label}')
+
+        for unique in (False, True):
+            draw_pattern(0, unique)
+            self.w._begin_tui_selection(self.pos)
+            self.w._scroll_tui_selection(False, self.pos)
+            draw_pattern(4, unique)
+            self.w._refresh_tui_selection()
+            self.assertEqual(self.w._tui_selection['origin'], 4 if unique else 0)
+
+    def test_release_before_wheel_redraw_freezes_visible_selection(self):
+        self.pos = self.cell(8, 20)
+        self.mouse(QEvent.Type.MouseMove, Qt.MouseButton.LeftButton)
+        expected = self.w._get_selected_text()
+        self.w._scroll_tui_selection(False, self.pos)
+        self.mouse(QEvent.Type.MouseButtonRelease, Qt.MouseButton.NoButton)
+        self.offset += 3
+        self.draw()
+        self.w._refresh_tui_selection(redraw=True)
+        self.assertEqual(self.w._get_selected_text(), expected)
+        self.assertFalse(self.w._auto_scroll_timer.isActive())
+
     def test_upward_selection_and_reverse_keep_anchor(self):
         anchor = self.w._selection_start
         self.pos = self.cell(1)

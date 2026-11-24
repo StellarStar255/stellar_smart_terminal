@@ -856,6 +856,7 @@ class TerminalWidget(TerminalInputMixin, TerminalMouseMixin,
         self._tui_selection = None    # 全屏应用滚动选择的不可变行快照
         self._is_selecting = False    # 是否正在选择
         self._ignore_left_release = False
+        self._click_origin = None
         self._shift_extend_click = False  # 本次按下是否为 Shift+点击扩展选区
         self._shift_extend_pending = False  # Shift+按下后待定：拖动→新建，纯点击→扩展
         self._shift_press_cell = None     # Shift+按下时的绝对格（拖动时作为新选区起点）

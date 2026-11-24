@@ -22,6 +22,7 @@ import os
 import re
 import sys
 import time
+from collections import Counter
 from difflib import SequenceMatcher
 
 from PyQt6.QtCore import QPoint, QUrl, Qt
@@ -86,6 +87,8 @@ def _history_gesture(method):
 
 class TerminalMouseMixin:
     """TerminalWidget 的鼠标/选区方法集合（见模块 docstring）"""
+
+    _TUI_SELECTION_ROW_LIMIT = 20_000
 
     def _snapshot_tui_rows(self):
         """复制 cell 和软换行元数据；不能保留会被 TUI 原地重绘的行引用。"""
@@ -161,14 +164,25 @@ class TerminalMouseMixin:
         blocks = [b for b in SequenceMatcher(None, old, new, autojunk=False).get_matching_blocks()
                   if b.size >= 2 and (not state['pending'] or (b.a - b.b) * state['pending'] < 0)
                   and len({k for k in old[b.a:b.a + b.size] if k}) >= 2]
-        if not blocks:
+        # A repeating log can make a four-line scroll look exactly like one
+        # line. Only trust a displacement supported by a pair unique in both
+        # views; keep the confirmed snapshot when the frames are ambiguous.
+        anchors = blocks
+        if any(b.a != b.b for b in blocks):
+            old_pairs = list(zip(old, old[1:]))
+            old_counts = Counter(old_pairs)
+            new_counts = Counter(zip(new, new[1:]))
+            anchors = [b for b in blocks if b.a == b.b or any(
+                old_counts[pair] == new_counts[pair] == 1
+                for pair in old_pairs[b.a:b.a + b.size - 1])]
+        if not anchors:
             lo, hi = state['bounds']
             changed = sum(old[r] != new[r] for r in range(lo, min(hi, len(old), len(new))))
             # 少量状态/进度文字刷新不代表已经翻页，不能阻断正文坐标重试。
             # 大片文本已变但尚未对齐时继续等待，避免再滚一格丢失重叠部分。
             state['pending_changed'] = changed > max(1, min(3, (hi - lo) // 4))
             return
-        block = max(blocks, key=lambda b: b.size)
+        block = max(anchors, key=lambda b: b.size)
         delta = block.a - block.b
         aligned = [b for b in blocks if b.a - b.b == delta]
         lo = min(min(b.a, b.b) for b in aligned)
@@ -181,6 +195,15 @@ class TerminalMouseMixin:
         old_hi = old_footer if old_footer is not None else hi
         hi = footer if footer is not None else hi
         origin = state['origin']
+        # Keep the last complete page when accepting this frame would exceed
+        # the snapshot budget. Reversing over saved rows costs no extra space.
+        saved = state['rows']
+        if len(saved) + 2 * self.term_rows > self._TUI_SELECTION_ROW_LIMIT:
+            incoming = set(range(origin + lo, origin + old_hi))
+            incoming.update(range(origin + delta + lo, origin + delta + hi))
+            if len(saved) + sum(row not in saved for row in incoming) > self._TUI_SELECTION_ROW_LIMIT:
+                self._interrupt_selection_drag()
+                return
         # 固定 UI 不是 transcript，不能留在跨页复制的中间。
         if state['bounds'] == (0, self.term_rows):
             for r in range(self.term_rows):
@@ -198,10 +221,6 @@ class TerminalMouseMixin:
             bounds = state['bounds']
         state.update(view=rows, origin=origin, bounds=bounds, footer=footer, pending=0,
                      pending_changed=False)
-        # 选择手势最多保留 20000 行，避免长时间拖动无限增长。
-        if len(state['rows']) > 20000:
-            self._is_selecting = False
-            self._auto_scroll_timer.stop()
         self._update_drag_selection_after_scroll()
         if footer != old_footer and self._is_selecting and self._has_selection():
             self._update_selection_edge(self._last_mouse_pos.y())
@@ -209,8 +228,9 @@ class TerminalMouseMixin:
     def _scroll_tui_selection(self, going_up, pos, notches=1):
         self._refresh_tui_selection()
         state = self._tui_selection
-        if state is None:
+        if state is None or not self._is_selecting:
             return
+        self._cancel_pending_click()
         now = time.monotonic()
         if state['pending']:
             if now - state['sent'] < 0.15 or state['pending_changed']:
@@ -249,7 +269,7 @@ class TerminalMouseMixin:
         # 上限避免一次跨太远导致选择终点跳动失控
         step = min(step, max(self.term_rows, 8))
 
-        if self._tui_selection is not None and self.screen._in_alt_screen:
+        if self._tui_selection is not None:
             self._scroll_tui_selection(self._auto_scroll_direction < 0,
                                        self._last_mouse_pos, step)
             self.update()
@@ -313,9 +333,15 @@ class TerminalMouseMixin:
 
         return (absolute_row, col)
 
+    def _cancel_pending_click(self):
+        self._click_origin = None
+        self._pressed_url = None
+        self._click_count = 0
+
     def _update_drag_selection_after_scroll(self):
         """视口滚动时，拖动终点跟随鼠标，已完成选区保持原来的文本坐标。"""
         if self._is_selecting and self._last_mouse_pos is not None:
+            self._cancel_pending_click()
             self._selection_end = self._pos_to_absolute_cell(self._last_mouse_pos)
 
     def _absolute_to_display_row(self, absolute_row: int) -> int:
@@ -396,6 +422,7 @@ class TerminalMouseMixin:
 
         if event.button() == Qt.MouseButton.LeftButton:
             self._ignore_left_release = False
+            self._click_origin = event.pos()
             if self._tui_selection and (not self.screen._in_alt_screen
                     or self._tui_selection['size'] != (self.term_rows, self.term_cols)):
                 self._clear_selection()
@@ -476,9 +503,9 @@ class TerminalMouseMixin:
         if self._ignore_left_release and event.buttons() & Qt.MouseButton.LeftButton:
             event.accept()
             return
-        if (self._pressed_url
-                and (event.pos() - self._pressed_url[0]).manhattanLength() >= QApplication.startDragDistance()):
-            self._pressed_url = None
+        if (self._click_origin is not None and event.buttons() & Qt.MouseButton.LeftButton
+                and (event.pos() - self._click_origin).manhattanLength() >= QApplication.startDragDistance()):
+            self._cancel_pending_click()
         # 显式链接直接显示手型；纯文本 URL 仍需修饰键。
         if not event.buttons():
             hovering_url = bool(self._link_at_pointer(event.pos(), event.modifiers()))
@@ -595,7 +622,7 @@ class TerminalMouseMixin:
             end_row, end_col = self._selection_end
             # Shift+点击扩展：起点是远处的锚点而非本次按下点，is_click 的"无拖动"判定
             # 不适用，且用户本就是要扩展选区——不要当成单击去清掉选区/移光标。
-            is_click = (not self._shift_extend_click
+            is_click = (self._click_origin is not None and not self._shift_extend_click
                         and start_row == end_row and abs(start_col - end_col) <= 1)
             if is_click:
                 if self._mouse_mode_click:

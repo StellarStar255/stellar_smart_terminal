@@ -5,7 +5,7 @@ from unittest.mock import Mock
 
 import pytest
 from PyQt6.QtCore import QEvent, QPoint, QPointF, Qt
-from PyQt6.QtGui import QMouseEvent
+from PyQt6.QtGui import QMouseEvent, QWheelEvent
 from PyQt6.QtTest import QTest
 from PyQt6.QtWidgets import QApplication
 
@@ -172,3 +172,20 @@ def test_link_replaced_between_press_and_release_consumes_click(terminal, monkey
     QTest.mouseRelease(terminal, Qt.MouseButton.LeftButton, pos=pos)
     opened.assert_not_called()
     sent.assert_not_called()
+
+def test_scroll_away_and_back_while_holding_link_does_not_open(terminal, monkeypatch):
+    opened = Mock()
+    monkeypatch.setattr(terminal, '_open_url', opened)
+    row = '\x1b]8;;https://example.com/log\a日志\x1b]8;;\a\r\n'
+    terminal._process_output_text(row * (terminal.term_rows + 12))
+    terminal.grab()
+    pos = _point(terminal, 2, 0)
+    left = Qt.MouseButton.LeftButton
+    QTest.mousePress(terminal, left, pos=pos)
+    for angle in (240, -240):
+        terminal.wheelEvent(QWheelEvent(QPointF(pos), QPointF(pos), QPoint(), QPoint(0, angle),
+                                        left, Qt.KeyboardModifier.NoModifier,
+                                        Qt.ScrollPhase.NoScrollPhase, False))
+    assert terminal.scroll_offset == 0
+    QTest.mouseRelease(terminal, left, pos=pos)
+    opened.assert_not_called()
