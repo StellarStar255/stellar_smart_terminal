@@ -109,6 +109,32 @@ class TestTuiSelection(unittest.TestCase):
         self.mouse(QEvent.Type.MouseButtonRelease, Qt.MouseButton.NoButton)
         self.w._write_to_backend.assert_not_called()
 
+    def test_middle_release_during_left_drag_preserves_edge_scroll(self):
+        self.w.set_mouse_click_forward_enabled(True)
+        self.pos = self.cell(self.w.term_rows - 1)
+        left, middle = Qt.MouseButton.LeftButton, Qt.MouseButton.MiddleButton
+        self.mouse(QEvent.Type.MouseMove, left)
+        self.assertTrue(self.w._auto_scroll_timer.isActive())
+        with patch.object(self.w, '_send_mouse_event') as send:
+            for kind, buttons in ((QEvent.Type.MouseButtonPress, left | middle),
+                                  (QEvent.Type.MouseButtonRelease, left)):
+                self.app.sendEvent(self.w, QMouseEvent(kind, QPointF(self.pos), middle,
+                                                       buttons, Qt.KeyboardModifier.NoModifier))
+            self.assertEqual([call.args[1] for call in send.call_args_list], ['press', 'release'])
+        self.assertTrue(self.w._auto_scroll_timer.isActive())
+        self.mouse(QEvent.Type.MouseButtonRelease, Qt.MouseButton.NoButton)
+        self.assertFalse(self.w._auto_scroll_timer.isActive())
+
+    def test_release_checks_drag_distance_without_intermediate_move(self):
+        self.w.set_mouse_click_forward_enabled(True)
+        self.w.char_width = QApplication.startDragDistance() + 8
+        self.pos = self.cell(6, 1)
+        self.mouse(QEvent.Type.MouseButtonPress, Qt.MouseButton.LeftButton)
+        self.pos = self.cell(6, 2)
+        self.mouse(QEvent.Type.MouseButtonRelease, Qt.MouseButton.NoButton)
+        self.assertTrue(self.w._has_selection())
+        self.w._write_to_backend.assert_not_called()
+
     def test_alt_screen_exit_before_next_tick_preserves_shell_scroll_position(self):
         self.pos = self.cell(0)
         self.mouse(QEvent.Type.MouseMove, Qt.MouseButton.LeftButton)

@@ -384,14 +384,15 @@ class TerminalMouseMixin:
         row, col = self._pos_to_cell(self._pointer_pixel(event))
         # SGR 格式: \x1b[<Cb;Cx;CyM (按下) 或 \x1b[<Cb;Cx;Cym (释放)
         # Cb: 按钮编码 (0=左键, 1=中键, 2=右键, 32=移动, 64=滚轮上, 65=滚轮下)
-        button = 0
-        if event.button() == Qt.MouseButton.RightButton:
-            button = 2
-        elif event.button() == Qt.MouseButton.MiddleButton:
-            button = 1
-
-        if event_type == 'move':
-            button = 32  # 移动时加32
+        moving = event_type == 'move'
+        held = event.buttons() if moving else event.button()
+        for code, qt_button in enumerate((Qt.MouseButton.LeftButton, Qt.MouseButton.MiddleButton,
+                                          Qt.MouseButton.RightButton)):
+            if held & qt_button:
+                button = code + (32 if moving else 0)
+                break
+        else:
+            return
 
         suffix = 'M' if event_type in ('press', 'move') else 'm'
         # 坐标是1-based
@@ -589,16 +590,17 @@ class TerminalMouseMixin:
         if self._cleaned_up:
             return
         pos = self._pointer_pixel(event)
-        # 停止自动滚动
-        self._auto_scroll_timer.stop()
-        self._auto_scroll_direction = 0
-        self._auto_scroll_pull = 0
-
         if event.button() == Qt.MouseButton.LeftButton:
+            self._auto_scroll_timer.stop()
+            self._auto_scroll_direction = 0
+            self._auto_scroll_pull = 0
             if self._ignore_left_release:
                 self._ignore_left_release = False
                 event.accept()
                 return
+            if (self._click_origin is not None and
+                    (pos - self._click_origin).manhattanLength() >= QApplication.startDragDistance()):
+                self._cancel_pending_click()
             pressed, self._pressed_url = self._pressed_url, None
             if pressed:
                 start, url = pressed
@@ -616,7 +618,8 @@ class TerminalMouseMixin:
         force_local_selection = (event.modifiers() & Qt.KeyboardModifier.ShiftModifier) or self.scroll_offset > 0
 
         # 如果鼠标模式启用且没有强制本地选择，且不在本地选择流程中
-        if self._mouse_fwd(force_local_selection) and not self._is_selecting:
+        if self._mouse_fwd(force_local_selection) and (
+                event.button() != Qt.MouseButton.LeftButton or not self._is_selecting):
             self._send_mouse_event(event, 'release')
             return
 

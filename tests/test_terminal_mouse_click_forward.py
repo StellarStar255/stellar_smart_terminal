@@ -59,6 +59,26 @@ class TestMouseClickForward(unittest.TestCase):
         self.assertNotIn(b'\x1b[C', blob)
         self.assertNotIn(b'\x1b[D', blob)
 
+    def test_nonleft_drag_reports_the_held_button(self):
+        from PyQt6.QtCore import QEvent, QPointF, Qt
+        from PyQt6.QtGui import QMouseEvent
+        w = self._widget()
+        w._mouse_mode = True
+        w._pos_to_cell = lambda pos: (2, 5)
+        buttons = Qt.MouseButton
+        for held, expected in ((buttons.MiddleButton, [1, 33, 1]),
+                               (buttons.RightButton, [2, 34, 2]),
+                               (buttons.BackButton, [])):
+            with self.subTest(held=held):
+                w._writes.clear()
+                for kind, changed, down, handler in (
+                        (QEvent.Type.MouseButtonPress, held, held, w.mousePressEvent),
+                        (QEvent.Type.MouseMove, buttons.NoButton, held, w.mouseMoveEvent),
+                        (QEvent.Type.MouseButtonRelease, held, buttons.NoButton, w.mouseReleaseEvent)):
+                    handler(QMouseEvent(kind, QPointF(9, 9), changed, down, Qt.KeyboardModifier.NoModifier))
+                self.assertEqual(w._writes, [f'\x1b[<{code};6;3{suffix}'.encode()
+                                             for code, suffix in zip(expected, 'MMm')])
+
     def test_mouse_mode_with_forwarding_off_sends_nothing(self):
         """Claude Code 开了鼠标上报、用户没开"点击转发"：单击必须什么都不发。
         以前会退到"定位光标"路径往程序里灌方向键，Claude Code 的选项框收到
