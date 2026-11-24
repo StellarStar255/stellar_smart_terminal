@@ -47,7 +47,7 @@ from PyQt6.QtCore import QObject, pyqtSignal
 from app_logging import get_logger
 from i18n import t
 from ssh_session import (HostConfig, RemoteEntry,
-                         _CountingReader, _worth_compressing)
+                         _CountingReader, _worth_compressing, _write_upload_tar)
 
 logger = get_logger(__name__)
 
@@ -1524,8 +1524,6 @@ class ControlMasterSession(QObject):
         用 Python 的 tarfile 而不是本机 tar 命令：进度按真实送出的字节算，
         入口既可以是"一个目录"也可以是"一批路径"，也不用要求本机装 tar。
         """
-        import tarfile
-
         q_remote = _qpath(remote_dir)
         with self._lock:
             flags = "-xzpf" if compress else "-xpf"
@@ -1565,14 +1563,7 @@ class ControlMasterSession(QObject):
             try:
                 with ProcessPipeIO(proc, timeout=600,
                                    cancelled=self._cancel_check(proc)) as pipes:
-                    # bufsize 调大：攒到 256KB 再写一次，减少系统调用
-                    tf = tarfile.open(mode="w|gz" if compress else "w|",
-                                      fileobj=_StdinWriter(), bufsize=_CHUNK,
-                                      **({"compresslevel": 1} if compress else {}))
-                    try:
-                        add_entries(tf, note_raw)
-                    finally:
-                        tf.close()
+                    _write_upload_tar(_StdinWriter(), compress, add_entries, note_raw)
                     err = pipes.finish()
             finally:
                 self._reap(proc)

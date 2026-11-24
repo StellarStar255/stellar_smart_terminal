@@ -262,7 +262,7 @@ class TerminalScrollSearchMixin:
             notches = int(abs(self._app_wheel_accum))
             if notches:
                 self._app_wheel_accum -= notches if going_up else -notches
-                pos = event.position().toPoint()
+                pos = self._pointer_pixel(event)
                 if self._is_selecting and self._tui_selection is not None:
                     self._last_mouse_pos = pos
                     self._scroll_tui_selection(going_up, pos, notches)
@@ -314,7 +314,7 @@ class TerminalScrollSearchMixin:
         # 只有在滚动位置实际改变时才更新
         if old_offset != self.scroll_offset:
             if self._is_selecting:
-                self._last_mouse_pos = event.position().toPoint()
+                self._last_mouse_pos = self._pointer_pixel(event)
                 self._update_drag_selection_after_scroll()
             self._invalidate_render_cache()
         event.accept()

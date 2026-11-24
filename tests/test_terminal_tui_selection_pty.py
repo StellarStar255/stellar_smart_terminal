@@ -16,7 +16,6 @@ from terminal_widget import TerminalWidget
 _APP = None
 
 
-@pytest.mark.skipif(os.name == 'nt', reason='POSIX PTY fixture')
 @pytest.mark.parametrize(('start_row', 'going_up', 'reverse'), [
     (0, False, False), (4, False, False), (4, True, False), (4, False, True)])
 def test_timer_drag_across_real_pty_pages(tmp_path, start_row, going_up, reverse):

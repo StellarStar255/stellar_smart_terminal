@@ -311,6 +311,17 @@ class TestTuiSelection(unittest.TestCase):
         self.assertIsNone(self.w._tui_selection)
         self.assertFalse(self.w._has_selection())
 
+    def test_fractional_cells_hit_the_painted_row_and_column(self):
+        self.w.char_width, self.w.char_height = 9.6, 18.75
+        self.w._header_h = 17
+        for row in range(self.w.term_rows):
+            top, height = self.w._row_tile(row)
+            for col in range(self.w.term_cols):
+                left, width = self.w._col_tile(col)
+                for pos in (QPoint(left, top), QPoint(left + width - 1, top + height - 1)):
+                    self.assertEqual(self.w._pos_to_cell(pos), (row, col))
+                    self.assertEqual(self.w._pos_to_absolute_cell(pos), (row, col))
+
     def test_drag_keeps_logical_cells_across_device_pixel_ratios(self):
         self.pos = self.cell(8, 24)
         self.mouse(QEvent.Type.MouseMove, Qt.MouseButton.LeftButton)

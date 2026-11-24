@@ -22,7 +22,9 @@ import tarfile
 import threading
 import time
 import uuid
+import zlib
 from concurrent.futures import Future, ThreadPoolExecutor
+from contextlib import closing
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any, Callable, Optional
@@ -139,6 +141,29 @@ while queue:
         break
 send({'entries': batch, 'done': True, 'truncated': truncated})
 '''
+
+
+def _write_upload_tar(writer, compress, add_entries, note_raw):
+    # Older tarfile versions cannot configure gzip levels on streaming tar.
+    # Compress complete tar blocks so gzip headers do not trigger premature
+    # wire-byte progress callbacks before add_entries reads the first file.
+    if compress:
+        compressor = zlib.compressobj(level=1, wbits=31)  # gzip framing
+
+        class GzipWriter:
+            def write(self, data):
+                chunk = compressor.compress(data)
+                if chunk:
+                    writer.write(chunk)
+                return len(data)
+
+        output = GzipWriter()
+    else:
+        output = writer
+    with closing(tarfile.open(mode="w|", fileobj=output, bufsize=256 * 1024)) as archive:
+        add_entries(archive, note_raw)
+    if compress:
+        writer.write(compressor.flush())
 
 
 class _CountingReader:
@@ -2171,16 +2196,7 @@ class SSHSession(QObject):
                 def flush(self):
                     pass
 
-            # bufsize 调大：tar 块攒到 256KB 再 sendall，减少系统调用次数
-            # compresslevel=1：文本压缩率已经接近上限，CPU 却只有高等级的
-            # 零头（本机 100+ MB/s），不会反过来成为瓶颈
-            tf = tarfile.open(mode="w|gz" if compress else "w|",
-                              fileobj=_ChanWriter(), bufsize=256 * 1024,
-                              **({"compresslevel": 1} if compress else {}))
-            try:
-                add_entries(tf, note_raw)
-            finally:
-                tf.close()
+            _write_upload_tar(_ChanWriter(), compress, add_entries, note_raw)
             chan.shutdown_write()
 
             # 等远端 tar 退出。流式解包（边收边解），EOF 后收尾极快；

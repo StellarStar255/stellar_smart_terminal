@@ -18,6 +18,7 @@ TerminalWidget 的鼠标事件/选区/文本提取/URL/拖放方法集合，纯�
 
 import unicodedata
 import functools
+import math
 import os
 import re
 import sys
@@ -293,6 +294,12 @@ class TerminalMouseMixin:
                 self._update_drag_selection_after_scroll()
                 self._invalidate_render_cache()
 
+    @staticmethod
+    def _pointer_pixel(event):
+        # A fractional Qt position belongs to the pixel containing it.
+        pos = event.position()
+        return QPoint(math.floor(pos.x()), math.floor(pos.y()))
+
     def _pos_to_cell(self, pos: QPoint) -> tuple:
         """将鼠标位置转换为终端单元格坐标 (row, col) - 返回显示区域内的相对行号"""
         x = pos.x() - self.PADDING
@@ -301,6 +308,12 @@ class TerminalMouseMixin:
         col = max(0, min(int(x / self.char_width), self.term_cols - 1))
         row = max(0, min(int(y / self.char_height), self.term_rows - 1))
 
+        # Painting floors each tile boundary. At a fractional boundary the
+        # first painted pixel already belongs to the next cell.
+        if col + 1 < self.term_cols and pos.x() >= self._col_tile(col + 1)[0]:
+            col += 1
+        if row + 1 < self.term_rows and pos.y() >= self._row_tile(row + 1)[0]:
+            row += 1
         return (row, col)
 
     def _pos_to_absolute_cell(self, pos: QPoint) -> tuple:
@@ -309,11 +322,7 @@ class TerminalMouseMixin:
         按下时使用已渲染的视口；拖动中使用当前视口，避免滚动后尚未
         paint 就收到下一次移动/释放事件时仍引用上一帧的位置。
         """
-        x = pos.x() - self.PADDING
-        y = pos.y() - self.PADDING - self._header_h
-
-        col = max(0, min(int(x / self.char_width), self.term_cols - 1))
-        display_row = max(0, min(int(y / self.char_height), self.term_rows - 1))
+        display_row, col = self._pos_to_cell(pos)
 
         if self._tui_selection is not None:
             lo, hi = self._tui_selection['bounds']
@@ -372,8 +381,7 @@ class TerminalMouseMixin:
         if self._backend is None:
             return
 
-        cell = self._pos_to_cell(event.pos())
-        row, col = cell
+        row, col = self._pos_to_cell(self._pointer_pixel(event))
         # SGR 格式: \x1b[<Cb;Cx;CyM (按下) 或 \x1b[<Cb;Cx;Cym (释放)
         # Cb: 按钮编码 (0=左键, 1=中键, 2=右键, 32=移动, 64=滚轮上, 65=滚轮下)
         button = 0
@@ -414,6 +422,7 @@ class TerminalMouseMixin:
         """
         if self._cleaned_up:
             return
+        pos = self._pointer_pixel(event)
         import time
         self.setFocus(Qt.FocusReason.MouseFocusReason)
 
@@ -422,22 +431,22 @@ class TerminalMouseMixin:
 
         if event.button() == Qt.MouseButton.LeftButton:
             self._ignore_left_release = False
-            self._click_origin = event.pos()
+            self._click_origin = pos
             if self._tui_selection and (not self.screen._in_alt_screen
                     or self._tui_selection['size'] != (self.term_rows, self.term_cols)):
                 self._clear_selection()
             self._pressed_url = None
-            url = self._link_at_pointer(event.pos(), event.modifiers())
+            url = self._link_at_pointer(pos, event.modifiers())
             if url:
-                self._pressed_url = (event.pos(), url)
+                self._pressed_url = (pos, url)
             self._refresh_tui_selection()
             if not (event.modifiers() & Qt.KeyboardModifier.ShiftModifier
                     and self._has_selection()):
-                self._begin_tui_selection(event.pos())
-            self._last_mouse_pos = event.pos()
+                self._begin_tui_selection(pos)
+            self._last_mouse_pos = pos
             current_time = time.time()
-            cell = self._pos_to_cell(event.pos())  # 相对坐标，用于点击检测
-            abs_cell = self._pos_to_absolute_cell(event.pos())  # 绝对坐标，用于选择
+            cell = self._pos_to_cell(pos)  # 相对坐标，用于点击检测
+            abs_cell = self._pos_to_absolute_cell(pos)  # 绝对坐标，用于选择
             # 每次按下先复位 Shift 扩展状态（仅下面的扩展分支会重新置位）
             self._shift_extend_click = False
             self._shift_extend_pending = False
@@ -498,17 +507,18 @@ class TerminalMouseMixin:
         """鼠标移动 - 更新选择区域（使用绝对坐标），支持拖动时自动滚动"""
         if self._cleaned_up:
             return
+        pos = self._pointer_pixel(event)
         if self._is_selecting and not event.buttons() & Qt.MouseButton.LeftButton:
             self._interrupt_selection_drag()
         if self._ignore_left_release and event.buttons() & Qt.MouseButton.LeftButton:
             event.accept()
             return
         if (self._click_origin is not None and event.buttons() & Qt.MouseButton.LeftButton
-                and (event.pos() - self._click_origin).manhattanLength() >= QApplication.startDragDistance()):
+                and (pos - self._click_origin).manhattanLength() >= QApplication.startDragDistance()):
             self._cancel_pending_click()
         # 显式链接直接显示手型；纯文本 URL 仍需修饰键。
         if not event.buttons():
-            hovering_url = bool(self._link_at_pointer(event.pos(), event.modifiers()))
+            hovering_url = bool(self._link_at_pointer(pos, event.modifiers()))
             if hovering_url != self._hover_cursor_on:
                 self._hover_cursor_on = hovering_url
                 self.setCursor(
@@ -529,8 +539,8 @@ class TerminalMouseMixin:
             self._refresh_tui_selection()
             if not self._is_selecting:
                 return
-            self._last_mouse_pos = event.pos()
-            cur = self._pos_to_absolute_cell(event.pos())
+            self._last_mouse_pos = pos
+            cur = self._pos_to_absolute_cell(pos)
             # Shift+按下后发生真正的拖动 → 是 Shift+拖动而非 Shift+点击 → 从按下点
             # 新建选区（不再扩展旧锚点），保留鼠标模式程序里的本地框选用法。
             if self._shift_extend_pending and cur != self._shift_press_cell:
@@ -540,7 +550,7 @@ class TerminalMouseMixin:
                 self._select_all_mode = False
             self._selection_end = cur
 
-            self._update_selection_edge(event.pos().y())
+            self._update_selection_edge(pos.y())
             self.update()
         super().mouseMoveEvent(event)
 
@@ -578,6 +588,7 @@ class TerminalMouseMixin:
         """鼠标释放 - 完成选择或移动光标"""
         if self._cleaned_up:
             return
+        pos = self._pointer_pixel(event)
         # 停止自动滚动
         self._auto_scroll_timer.stop()
         self._auto_scroll_direction = 0
@@ -591,8 +602,8 @@ class TerminalMouseMixin:
             pressed, self._pressed_url = self._pressed_url, None
             if pressed:
                 start, url = pressed
-                if (event.pos() - start).manhattanLength() < QApplication.startDragDistance():
-                    same_target = self._link_at_pointer(event.pos(), event.modifiers()) == url
+                if (pos - start).manhattanLength() < QApplication.startDragDistance():
+                    same_target = self._link_at_pointer(pos, event.modifiers()) == url
                     self._clear_selection()
                     self._mouse_mode_click = False
                     self._click_count = 0
@@ -613,7 +624,7 @@ class TerminalMouseMixin:
             self._refresh_tui_selection(redraw=True)
             if not self._is_selecting:
                 return
-            self._selection_end = self._pos_to_absolute_cell(event.pos())
+            self._selection_end = self._pos_to_absolute_cell(pos)
             self._is_selecting = False
 
             # 检查是否是单击（没有拖动选择）
@@ -638,7 +649,7 @@ class TerminalMouseMixin:
                     # 非鼠标模式 - 尝试移动光标到点击位置（使用相对坐标）。
                     # 注意 _move_cursor_to_click 内部还会按"焦点上报/备用屏幕"
                     # 再拦一道：Claude Code 默认不开鼠标上报，走的正是这个分支。
-                    display_cell = self._pos_to_cell(event.pos())
+                    display_cell = self._pos_to_cell(pos)
                     self._move_cursor_to_click(display_cell)
                 # 程序开了鼠标上报、但「点击转发」开关关着：什么都别发。
                 # 清除选择状态
@@ -1640,10 +1651,8 @@ class TerminalMouseMixin:
     def _link_at_pointer(self, pos: QPoint, modifiers) -> str:
         if modifiers & Qt.KeyboardModifier.ShiftModifier:
             return ""
-        x = pos.x() - self.PADDING
-        y = pos.y() - self.PADDING - self._header_h
-        if not (0 <= x < self.term_cols * self.char_width
-                and 0 <= y < self.term_rows * self.char_height):
+        if not (self.PADDING <= pos.x() < self._col_tile(self.term_cols)[0]
+                and self.PADDING + self._header_h <= pos.y() < self._row_tile(self.term_rows)[0]):
             return ""
         # 后台回流可能暂时持锁，悬停或按下时不阻塞界面。
         if not self._screen_lock.acquire(blocking=False):

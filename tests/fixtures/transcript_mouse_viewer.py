@@ -3,11 +3,35 @@ import json
 import os
 import re
 import sys
-import tty
 from pathlib import Path
 
-tty.setraw(0)
-cols, rows = os.get_terminal_size(0)
+if os.name == 'nt':
+    import ctypes
+    import msvcrt
+    from ctypes import wintypes
+
+    kernel = ctypes.WinDLL('kernel32', use_last_error=True)
+    # ConPTY's child is a console application. Receive VT input immediately
+    # and write UTF-8 control sequences without the CRT converting newlines.
+    for fd in (0, 1):
+        msvcrt.setmode(fd, os.O_BINARY)
+        handle = wintypes.HANDLE(msvcrt.get_osfhandle(fd))
+        mode = wintypes.DWORD()
+        if not kernel.GetConsoleMode(handle, ctypes.byref(mode)):
+            raise ctypes.WinError(ctypes.get_last_error())
+        if fd == 0:
+            mode.value = (mode.value & ~0x7) | 0x200  # raw + ENABLE_VIRTUAL_TERMINAL_INPUT
+        else:
+            mode.value |= 0x5  # processed output + ENABLE_VIRTUAL_TERMINAL_PROCESSING
+        if not kernel.SetConsoleMode(handle, mode):
+            raise ctypes.WinError(ctypes.get_last_error())
+    if not kernel.SetConsoleOutputCP(65001):
+        raise ctypes.WinError(ctypes.get_last_error())
+else:
+    import tty
+    tty.setraw(0)
+
+cols, rows = os.get_terminal_size(1)
 offset = 100
 accepted = []
 report_path = Path(sys.argv[1])
@@ -23,7 +47,7 @@ def draw():
         parts.append(f'\x1b[{row + 1};1H{text}')
     os.write(1, ''.join(parts).encode())
     temporary = report_path.with_suffix('.tmp')
-    temporary.write_text(json.dumps(dict(offset=offset, accepted=accepted)))
+    temporary.write_text(json.dumps(dict(rows=rows, offset=offset, accepted=accepted)))
     temporary.replace(report_path)
 
 

@@ -65,7 +65,21 @@ fi
 # 4. PyInstaller 构建（onedir + macOS .app bundle，见 smart_terminal.spec）
 # ---------------------------------------------------------------------------
 echo "==> Running PyInstaller"
-"$VENV/bin/pyinstaller" --noconfirm smart_terminal.spec
+pyinstaller_args=(--noconfirm)
+if [ "$(uname)" = "Linux" ]; then
+    # PyInstaller can exit successfully even when its Qt hook cannot import
+    # QtCore, leaving a .deb without a display plugin.
+    "$VENV/bin/python" -c 'from PyQt6.QtWidgets import QApplication'
+    platforms="dist/StellarSmartTerminal/_internal/PyQt6/Qt6/plugins/platforms"
+    if [ -d dist/StellarSmartTerminal ] && [ ! -f "$platforms/libqxcb.so" ]; then
+        pyinstaller_args+=(--clean)
+    fi
+fi
+"$VENV/bin/pyinstaller" "${pyinstaller_args[@]}" smart_terminal.spec
+if [ "$(uname)" = "Linux" ] && [ ! -f "$platforms/libqxcb.so" ]; then
+    echo "Missing Qt X11 platform plugin in the Linux bundle: $platforms/libqxcb.so" >&2
+    exit 1
+fi
 
 # ---------------------------------------------------------------------------
 # 5. macOS: 公证 + 盖章（stapling），然后打 DMG 并签名。
@@ -196,7 +210,7 @@ Version: $VERSION
 Section: utils
 Priority: optional
 Architecture: $ARCH
-Depends: libc6, libxcb-cursor0, libegl1, libxkbcommon0, libdbus-1-3
+Depends: libc6, libxcb-cursor0, libegl1, libgl1, libglib2.0-0, libxkbcommon0, libdbus-1-3
 Installed-Size: $INSTALLED_KB
 Maintainer: huangqiliang <goosehuangmatt@gmail.com>
 Description: Stellar Smart Terminal

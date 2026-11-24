@@ -189,3 +189,32 @@ def test_scroll_away_and_back_while_holding_link_does_not_open(terminal, monkeyp
     assert terminal.scroll_offset == 0
     QTest.mouseRelease(terminal, left, pos=pos)
     opened.assert_not_called()
+
+
+def test_fractional_pointer_opens_only_the_link_under_its_pixel(terminal, monkeypatch):
+    opened = Mock()
+    monkeypatch.setattr(terminal, '_open_url', opened)
+    terminal.char_width = 9.6
+    terminal._process_output_text('\x1b]8;;https://example.com/a\aA'
+                                  '\x1b]8;;https://example.com/b\aB\x1b]8;;\a')
+    boundary, _ = terminal._col_tile(1)
+    y, height = terminal._row_tile(0)
+    for x in (boundary - .25, boundary, boundary + .25):
+        point = QPointF(x, y + height / 2)
+        for kind, buttons in ((QEvent.Type.MouseButtonPress, Qt.MouseButton.LeftButton),
+                              (QEvent.Type.MouseButtonRelease, Qt.MouseButton.NoButton)):
+            QApplication.sendEvent(terminal, QMouseEvent(kind, point, Qt.MouseButton.LeftButton,
+                                                        buttons, Qt.KeyboardModifier.NoModifier))
+    assert [call.args[0] for call in opened.call_args_list] == [
+        'https://example.com/a', 'https://example.com/b', 'https://example.com/b']
+
+def test_last_link_does_not_extend_into_right_padding(terminal):
+    terminal.char_width = 9.625
+    terminal.term_cols = terminal.screen.columns = 7
+    terminal._process_output_text('\x1b[1;7H\x1b]8;;https://example.com/edge\aZ\x1b]8;;\a')
+    end, _ = terminal._col_tile(7)
+    top, height = terminal._row_tile(0)
+    assert terminal._link_at_pointer(QPoint(end - 1, top + height // 2),
+                                     Qt.KeyboardModifier.NoModifier) == 'https://example.com/edge'
+    assert terminal._link_at_pointer(QPoint(end, top + height // 2),
+                                     Qt.KeyboardModifier.NoModifier) == ''
