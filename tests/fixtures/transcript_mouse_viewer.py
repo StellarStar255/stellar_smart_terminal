@@ -17,7 +17,8 @@ def draw():
     parts = ['\x1b[H\x1b[2JFixed transcript header']
     for row in range(1, rows - 5):
         parts.append(f'\x1b[{row + 1};1Hrow {offset + row:04d} 中文 sample')
-    for row, text in enumerate(['Back to bottom', 'Ask Codex to do anything', '',
+    for row, text in enumerate(['• Waiting for background terminal (esc to interrupt)',
+                                '  └ gh run watch 123', '↓ Back to bottom · esc',
                                 'Model status', 'Keyboard shortcuts'], rows - 5):
         parts.append(f'\x1b[{row + 1};1H{text}')
     os.write(1, ''.join(parts).encode())

@@ -52,12 +52,14 @@ def test_timer_drag_across_real_pty_pages(tmp_path, start_row):
         wait_until(lambda: widget.screen._in_alt_screen and widget._mouse_mode
                    and 'row 0104' in widget._get_line_text(4))
         mouse(QEvent.Type.MouseButtonPress, pos(start_row, 0), Qt.MouseButton.LeftButton)
-        mouse(QEvent.Type.MouseMove, pos(widget.term_rows + 3, widget.term_cols - 1),
+        end = pos(widget.term_rows - 4 if start_row == 4 else widget.term_rows + 3,
+                  widget.term_cols - 1)
+        mouse(QEvent.Type.MouseMove, end,
               Qt.MouseButton.LeftButton)
         wait_until(lambda: widget._tui_selection is not None
                    and widget._tui_selection['origin'] >= 2 * widget.term_rows)
         mouse(QEvent.Type.MouseButtonRelease,
-              pos(widget.term_rows + 3, widget.term_cols - 1), Qt.MouseButton.NoButton)
+              end, Qt.MouseButton.NoButton)
         origin = widget._tui_selection['origin']
         expected = '\n'.join(f'row {i:04d} 中文 sample'
                              for i in range(100 + max(1, start_row),

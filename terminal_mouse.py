@@ -98,11 +98,31 @@ class TerminalMouseMixin:
         return tuple((c, ch.data) for c, ch in sorted(row[0].items())
                      if ch.data.strip())
 
+    @staticmethod
+    def _codex_footer_start(rows):
+        """Locate the fixed controls when Codex is displaying earlier messages."""
+        badge = None
+        for row in range(len(rows) - 1, -1, -1):
+            cells = rows[row][0]
+            text = ''.join(cells[c].data if c in cells else ' '
+                           for c in range(max(cells, default=-1) + 1)).strip()
+            if text == '↓ Back to bottom · esc':
+                badge = row
+            elif badge is not None:
+                if text.startswith('• Waiting for background terminal'):
+                    return row
+                if text and not text.startswith(('└', 'Tip:')):
+                    break
+        return badge
+
     def _begin_tui_selection(self, pos=None):
         self._tui_selection = None
         if self._mouse_mode and self.screen._in_alt_screen:
             rows = self._snapshot_tui_rows()
-            self._tui_selection = dict(view=rows, origin=0,
+            footer = self._codex_footer_start(rows)
+            if footer is not None and pos is not None and self._pos_to_cell(pos)[0] >= footer:
+                footer = None  # Allow a selection starting inside the controls themselves.
+            self._tui_selection = dict(view=rows, origin=0, footer=footer,
                 rows=dict(enumerate(rows)), bounds=(0, self.term_rows),
                 pending=0, sent=0.0, pending_changed=False,
                 wheel_pos=QPoint(pos) if pos is not None else None,
@@ -457,7 +477,13 @@ class TerminalMouseMixin:
             # 检测是否需要自动滚动（鼠标在边缘区域）— 拉得越远滚得越快
             y = event.pos().y()
             edge_zone = 24  # 进入边缘的阈值（像素）
-            widget_height = self.PADDING + self._header_h + self.term_rows * self.char_height
+            bottom_row = self.term_rows
+            if self._tui_selection is not None:
+                state = self._tui_selection
+                bottom_row = state['bounds'][1]
+                if state['footer'] is not None:
+                    bottom_row = min(bottom_row, state['footer'])
+            widget_height = self.PADDING + self._header_h + bottom_row * self.char_height
 
             top_edge = self.PADDING + self._header_h + edge_zone
             if y < top_edge:
