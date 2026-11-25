@@ -5,7 +5,7 @@
     python3 scripts/draft_release_notes.py --since v1.12.0 -o /tmp/notes.md
 
 产出的是**草稿**：按既往 release 的分区风格（🚀 性能 / ✍️ 编辑器 / …）把
-commit 分好组、原文列出，供手工润色成面向用户的双语说明——不是直接可发的
+commit 分好组、原文列出，供手工润色成面向用户的英文说明和中文译文——不是直接可发的
 最终稿（发版说明必须手写，见项目惯例）。
 
 分组规则：conventional commit 的 type/scope 优先，其次匹配主题关键词；
@@ -17,7 +17,7 @@ import subprocess
 import sys
 
 # (分区标题, scope 集合, 主题关键词)——从上到下先匹配先赢。
-# 标题为「中文 / English」双语（2026-07 起 release notes 必须中英双语）。
+# 草稿先输出完整英文正文，再输出对应的中文译文。
 SECTIONS = [
     ("🚀 性能 / Performance", {"perf"},
      ("perf", "性能", "lag", "卡顿", "speed")),
@@ -63,7 +63,7 @@ def classify(ctype: str, scope: str, subject: str) -> str:
             return title
         if any(_kw_hit(low, kw) for kw in keywords):
             return title
-    return FALLBACK_FIX if ctype == "fix" else "🎛️ 界面与默认值"
+    return FALLBACK_FIX if ctype == "fix" else "🎛️ 界面与默认值 / UI & Defaults"
 
 
 def main() -> int:
@@ -90,39 +90,38 @@ def main() -> int:
         # 版本号 bump、发版工件类提交不进说明
         if re.search(r"bump version|release v?\d", subject, re.I):
             continue
-        entry = (f"- **[待润色]** {subj}（`{sha}`）\n"
-                 f"- **[English/待翻译]** …")
+        entry = f"{subj} (`{sha}`)"
         if ctype in SKIP_TYPES:
             skipped.append(entry)
             continue
         grouped.setdefault(classify(ctype, scope, subj), []).append(entry)
 
     version = args.version or "vNEXT"
-    out = [f"<!-- {version} release notes 草稿：由 scripts/draft_release_notes.py "
-           f"从 {since}..HEAD 生成，需手工润色成面向用户的中英双语说明后再发布：",
-           "     每条中文条目后紧跟对应英文条目，导语和下载区也要中英各一段 -->",
-           "",
-           "（一句话导语：本次的主角是 ……。无破坏性变更时注明配置向后兼容。）",
-           "",
-           "(English intro: one sentence summarizing this release. Mention config "
-           "backward-compatibility if there are no breaking changes.)",
-           ""]
-    # 按 SECTIONS 定义的顺序输出，修复区殿后
+    out = [f"<!-- {version} draft from {since}..HEAD. Rewrite commit subjects for readers,",
+           "then translate the complete English notes into Chinese. -->", ""]
     order = [t for t, _, _ in SECTIONS] + [FALLBACK_FIX]
-    for title in order:
-        if title in grouped:
-            out += [f"## {title}", *grouped[title], ""]
-    out += ["---",
-            "",
-            "**下载**：Windows 用 `*-setup.exe`；macOS 推荐 `*.dmg`（arm64）"
-            "或应用内升级；Linux 用 `*.deb`。",
-            "",
-            "**Downloads**: Windows — `*-setup.exe`; macOS — `*.dmg` (arm64) "
-            "recommended, or upgrade in-app; Linux — `*.deb`.",
-            ""]
+    for english in (True, False):
+        if english:
+            out += ["[Summarize the main user-visible change in English.]", ""]
+        else:
+            out += ["## 简体中文", "", "[用中文概括本版主要变化。]", ""]
+        for title in order:
+            if title not in grouped:
+                continue
+            zh, _, en = title.partition(" / ")
+            heading = (en or zh) if english else zh
+            out += [f"### {heading}"]
+            prompt = "Draft in English" if english else "待翻译"
+            out.extend(f"- [{prompt}] {entry}" for entry in grouped[title])
+            out.append("")
+        if english:
+            out += ["### Downloads", "", "Windows x64 (`*-setup.exe`), Apple Silicon "
+                    "(`*.dmg`), and Debian/Ubuntu (`*.deb`).", ""]
+        else:
+            out += ["### 下载", "", "Windows x64 使用 `*-setup.exe`，Apple 芯片 Mac "
+                    "使用 `*.dmg`，Debian/Ubuntu 使用 `*.deb`。", ""]
     if skipped:
-        out += ["<!-- 以下为 chore/docs/refactor/test，默认不进说明，按需取用",
-                *skipped, "-->", ""]
+        out += ["<!-- Internal changes for editorial review:", *skipped, "-->", ""]
 
     text = "\n".join(out)
     if args.output:

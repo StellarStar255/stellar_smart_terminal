@@ -10,7 +10,7 @@ macOS runner 跑 `build.sh` 产出 DMG + zip,Windows runner 跑 `build.bat` 产�
 Linux runner(Ubuntu)跑 `build.sh` 把 onedir 打成 `*-linux-amd64.deb`(含 `.desktop`
 桌面入口与图标),三个平台都跑离屏测试套件,产物先上传到对应 Release 草稿。三平台构建和测试全部通过、五个安装包齐全后，
 由统一发布任务正式发布，避免用户下载到不完整版本。已存在的草稿只补传产物；已公开版本不覆盖附件。
-notes 不会被覆盖；新建的 release 用自动生成的 notes，之后可用 `gh release edit` 替换。
+notes 不会被覆盖；新建的 release 优先使用对应的 `docs/releases/<tag>.md`，缺少该文件时使用 GitHub 自动生成的 notes，之后可用 `gh release edit` 替换。
 
 Ubuntu/Debian 用户:下载 `*-linux-amd64.deb`,`sudo apt install ./Stellar-Smart-Terminal-*.deb`
 (自动拉取 `libxcb-cursor0` 等依赖),装好后在应用菜单搜 “Stellar Smart Terminal” 或命令行
@@ -247,7 +247,7 @@ gh release create v1.6.0 \
     --title "v1.6.0" --notes-file /tmp/release_notes.md
 ```
 
-Release notes 可参考 [v1.5.0](https://github.com/StellarStar255/stellar_smart_terminal/releases/tag/v1.5.0) 的结构:按模块(Terminal / Git panel / Remote / Editor)分组列变更,最后附下载安装说明。
+发布说明以英文为主。标题、摘要、主要变更和下载说明先用英文完整写出，方便直接分享；简体中文译文统一放在英文正文之后。定稿保存在 `docs/releases/<tag>.md`。
 
 起草可用脚本自动分组(产出的是草稿,发布前必须手工润色成面向用户的说明):
 

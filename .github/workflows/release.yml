@@ -1,7 +1,7 @@
 # 推送 v* tag 时自动打包 macOS (arm64) 与 Windows (x64) 并上传到对应 Release。
 #
 # 与手动发版（docs/PACKAGING.md）兼容：已有草稿可补传产物，已公开版本不覆盖附件；
-# release 不存在时创建草稿并生成默认 notes,
+# release 不存在时创建草稿并读取对应标签的发布说明,
 # 三个平台都成功、五个安装包齐全后才统一正式发布。
 # 之后可用 `gh release edit` 替换成手写说明。
 #
@@ -161,8 +161,12 @@ jobs:
           GH_TOKEN: ${{ github.token }}
         run: |
           if ! gh release view "$GITHUB_REF_NAME" >/dev/null 2>&1; then
+            notes=(--generate-notes)
+            if [[ -s "docs/releases/$GITHUB_REF_NAME.md" ]]; then
+              notes=(--notes-file "docs/releases/$GITHUB_REF_NAME.md")
+            fi
             gh release create "$GITHUB_REF_NAME" --verify-tag --draft \
-              --title "$GITHUB_REF_NAME" --generate-notes ||
+              --title "$GITHUB_REF_NAME" "${notes[@]}" ||
               gh release view "$GITHUB_REF_NAME" >/dev/null
           fi
           if [ "$(gh release view "$GITHUB_REF_NAME" --json isDraft --jq .isDraft)" != "true" ]; then
@@ -247,8 +251,12 @@ jobs:
           GH_TOKEN: ${{ github.token }}
         run: |
           if ! gh release view "$GITHUB_REF_NAME" >/dev/null 2>&1; then
+            notes=(--generate-notes)
+            if [[ -s "docs/releases/$GITHUB_REF_NAME.md" ]]; then
+              notes=(--notes-file "docs/releases/$GITHUB_REF_NAME.md")
+            fi
             gh release create "$GITHUB_REF_NAME" --verify-tag --draft \
-              --title "$GITHUB_REF_NAME" --generate-notes ||
+              --title "$GITHUB_REF_NAME" "${notes[@]}" ||
               gh release view "$GITHUB_REF_NAME" >/dev/null
           fi
           if [ "$(gh release view "$GITHUB_REF_NAME" --json isDraft --jq .isDraft)" != "true" ]; then
@@ -319,8 +327,12 @@ jobs:
           GH_TOKEN: ${{ github.token }}
         run: |
           if ! gh release view "$GITHUB_REF_NAME" >/dev/null 2>&1; then
+            notes=(--generate-notes)
+            if [[ -s "docs/releases/$GITHUB_REF_NAME.md" ]]; then
+              notes=(--notes-file "docs/releases/$GITHUB_REF_NAME.md")
+            fi
             gh release create "$GITHUB_REF_NAME" --verify-tag --draft \
-              --title "$GITHUB_REF_NAME" --generate-notes ||
+              --title "$GITHUB_REF_NAME" "${notes[@]}" ||
               gh release view "$GITHUB_REF_NAME" >/dev/null
           fi
           if [ "$(gh release view "$GITHUB_REF_NAME" --json isDraft --jq .isDraft)" != "true" ]; then
