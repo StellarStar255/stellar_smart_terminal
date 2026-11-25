@@ -6,6 +6,8 @@
 
 基于 PyQt6 的智能终端，集成文件管理、Git GUI、LLM 代理和 VS Code 扩展浏览。
 
+**macOS 版已通过 Apple 公证。** 适用于 Apple 芯片 Mac 的应用已使用 Developer ID 证书签名。[下载 Mac 版](https://github.com/StellarStar255/stellar_smart_terminal/releases/latest)
+
 最新版本 [v1.35.66](docs/releases/v1.35.66.md) 修复了 Codex 跨页拖选后松手时高亮消失的问题。
 
 A PyQt6-based smart terminal with file explorer, Git GUI, LLM proxy, and VS Code extension browser.
@@ -118,8 +120,8 @@ No Python required — grab a build from the [**Releases**](https://github.com/S
    Download the `.dmg` (recommended; a zip is also available)
 2. 打开 DMG，把 `Stellar Smart Terminal.app` 拖进 `Applications` 文件夹
    Open the DMG and drag the app into the `Applications` folder
-3. 双击打开即可——自 v1.16.4 起，macOS 版本已使用 Developer ID 签名并通过 Apple 公证，不会再被 Gatekeeper 拦截。
-   Double-click to open — since v1.16.4 the macOS builds are Developer ID signed and notarized by Apple, so Gatekeeper opens them without any prompt.
+3. 双击打开应用。自 v1.16.4 起，macOS 版本已使用 Developer ID 签名并通过 Apple 公证。
+   Double-click to open the app. Since v1.16.4, macOS builds are Developer ID signed and notarized by Apple.
 
    <details><summary>仅旧版本（≤ v1.16.3）需要 / Only for old versions (≤ v1.16.3)</summary>
 

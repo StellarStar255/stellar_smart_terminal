@@ -6,6 +6,8 @@ English | [简体中文](README.zh-CN.md)
 
 A PyQt6-based smart terminal with file explorer, Git GUI, LLM proxy, and VS Code extension browser.
 
+**Signed and notarized for macOS.** The Apple Silicon app is signed with a Developer ID certificate and notarized by Apple. [Download for Mac](https://github.com/StellarStar255/stellar_smart_terminal/releases/latest)
+
 [v1.35.66](docs/releases/v1.35.66.md) keeps a multi-page Codex selection highlighted when a scroll update arrives after mouse release.
 
 <img src="assets/smart_terminal.png" width="300" />
