@@ -2726,7 +2726,8 @@ class MainWindow(ThemeMixin, ToolbarMixin, ConfigMixin, ExplorerPanelMixin,
         self._applying_shared_left_width = False  # 正在应用跨窗口同步的侧栏宽度
         self._nav_output_terms = weakref.WeakSet()
         self._nav_attention = False             # 导航面板"需要注意"标记
-        self._nav_attention_source = None       # 触发注意标记的终端
+        self._nav_attention_terms = weakref.WeakSet()
+        self._nav_nonterminal_attention = False
 
     def _track_detached_window(self, win):
         """登记一个由本窗口派生的顶层窗口：持强引用防 GC，销毁后自动摘除。
@@ -2927,10 +2928,11 @@ class MainWindow(ThemeMixin, ToolbarMixin, ConfigMixin, ExplorerPanelMixin,
                 # 再在终端内部的分屏里把被点的那个窗格展宽
                 self._spring_expand_inner(obj)
         elif event.type() == QEvent.Type.KeyPress:
-            # 用户在点亮绿点的来源终端中按键 → 视为已响应该交互提示，清除绿点。
-            # （来自其他终端/Git 面板的提醒不受影响，仍靠切窗口/切 tab 清除）
-            if obj is self._nav_attention_source:
-                self._clear_nav_attention()
+            # 按键只确认当前终端的提醒，其他分屏或 Git 的提醒继续保留。
+            if obj in self._nav_attention_terms:
+                self._nav_attention_terms.discard(obj)
+                if not self._nav_attention_terms and not self._nav_nonterminal_attention:
+                    self._clear_nav_attention()
             # 标签页徽章：在该终端按键 = 已响应，挂起的橙/绿点回落
             if isinstance(obj, TerminalWidget):
                 _idx = self._find_tab_of_terminal(obj)
@@ -6387,8 +6389,16 @@ class MainWindow(ThemeMixin, ToolbarMixin, ConfigMixin, ExplorerPanelMixin,
 
     # ==================== 导航提醒小标（Claude/命令执行完毕） ====================
 
+    def _can_receive_terminal_alert(self, terminal):
+        # Reader-thread alerts can already be queued when a pane moves or closes.
+        return (not sip.isdeleted(self) and not self._closing_in_progress
+                and self._owns_terminal(terminal) and not sip.isdeleted(terminal)
+                and not terminal._cleaned_up)
+
     def _on_terminal_attention(self, terminal):
         """某个终端疑似执行完毕。若该终端不是你正在看的活动终端，就在导航条目上打绿点。"""
+        if not self._can_receive_terminal_alert(terminal):
+            return
         # 正在前台看着的活动终端不打扰
         if self.isActiveWindow() and terminal is self.active_terminal:
             return
@@ -6403,6 +6413,8 @@ class MainWindow(ThemeMixin, ToolbarMixin, ConfigMixin, ExplorerPanelMixin,
         绿点（用户要求：每次需要指令都提示一次，避免错过）。用户在该终端
         按键响应后由 eventFilter 清除。
         """
+        if not self._can_receive_terminal_alert(terminal):
+            return
         self._request_nav_attention(terminal)
         # 标签页徽章：等待确认（橙点）
         self._set_tab_pending_badge(terminal, 'waiting')
@@ -6413,6 +6425,8 @@ class MainWindow(ThemeMixin, ToolbarMixin, ConfigMixin, ExplorerPanelMixin,
         与 interaction 同级对待——事故比"等确认"更需要人来看。终端侧已做
         30s 静默去重，这里无需再防抖。
         """
+        if not self._can_receive_terminal_alert(terminal):
+            return
         self._request_nav_attention(terminal)
         self._set_tab_pending_badge(terminal, 'waiting')
         try:
@@ -6501,13 +6515,16 @@ class MainWindow(ThemeMixin, ToolbarMixin, ConfigMixin, ExplorerPanelMixin,
         终端命令结束之外的来源（如 Git 面板生成提交信息完成）也可调用。
         「前台时是否不打扰」的判断由各来源自行决定后再调用——终端"执行完毕"
         要求「不是正在看的活动终端」，"等待操作"则无条件点亮，Git 生成要求
-        「窗口不在前台」。source 记录点亮来源终端：用户在该终端按键即视为
-        已响应并清除绿点（非终端来源传 None，只靠切窗口/切 tab 清除）。
+        「窗口不在前台」。在来源终端按键会确认该终端的提醒，最后一个来源确认后
+        熄灭绿点。非终端来源传 None，由切窗口或切 tab 统一清除。
         """
+        if source is None:
+            self._nav_nonterminal_attention = True
+        else:
+            self._nav_attention_terms.add(source)
         if self._nav_attention:
             return  # 已经在提醒，避免重复刷新
         self._nav_attention = True
-        self._nav_attention_source = source
         # 完成提示音：每个提醒「点亮」时响一次（dedup 守卫保证不会连环响）。
         # 声音内容由设置里的「完成提示音」决定，'' 表示静音。
         try:
@@ -6518,7 +6535,8 @@ class MainWindow(ThemeMixin, ToolbarMixin, ConfigMixin, ExplorerPanelMixin,
 
     def _clear_nav_attention(self):
         """清除本窗口的导航提醒小标（用户已查看）"""
-        self._nav_attention_source = None
+        self._nav_attention_terms.clear()
+        self._nav_nonterminal_attention = False
         if self._nav_attention:
             self._nav_attention = False
             self.navigator_attention_changed.emit(False)

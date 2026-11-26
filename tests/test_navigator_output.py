@@ -256,3 +256,60 @@ def test_background_navigator_tracks_new_output_without_animating(panels, embedd
     _APP.processEvents()
     assert not row(nav, source).data(NAV_OUTPUT_ROLE)
     assert not nav.window_list._pulse_timer.isActive()
+
+
+def test_split_pane_key_acknowledges_only_its_own_navigation_alert(panels):
+    window, _, floating, embedded = panels
+    window._split_current_tab()
+    left, right = window.tab_terminals[window.tab_widget.currentIndex()]
+    attention = QSignalSpy(window.navigator_attention_changed)
+    with patch('main_window.play_notify_sound') as sound:
+        left._process_output_text('left\a')
+        right._process_output_text('right\a')
+        right._process_output_text('more work')
+        QTest.keyClick(left, Qt.Key.Key_Shift)
+        for panel in (embedded, floating):
+            assert row(panel, window).data(NAV_ATTENTION_ROLE)
+            assert not panel.window_list._pulse_timer.isActive()
+        QTest.keyClick(right, Qt.Key.Key_Shift)
+        for panel in (embedded, floating):
+            assert not row(panel, window).data(NAV_ATTENTION_ROLE)
+            assert panel.window_list._pulse_timer.isActive()
+        assert list(attention) == [[True], [False]]
+        sound.assert_called_once()
+
+
+def test_terminal_key_preserves_overlapping_git_navigation_alert(panels):
+    window, _, nav, _ = panels
+    terminal = window.terminal
+    with patch('main_window.play_notify_sound'):
+        terminal._process_output_text('waiting\a')
+        window._request_nav_attention()  # Git completion
+        QTest.keyClick(terminal, Qt.Key.Key_Shift)
+        assert row(nav, window).data(NAV_ATTENTION_ROLE)
+        with patch.object(window, 'isActiveWindow', return_value=True):
+            window._add_new_tab(tab_name='reviewed')
+        assert not row(nav, window).data(NAV_ATTENTION_ROLE)
+
+
+def test_queued_terminal_alerts_are_discarded_when_window_closes(panels):
+    from threading import Thread
+
+    window = MainWindow()
+    terminal = window.terminal
+
+    def notify():
+        terminal.interaction_requested.emit()
+        terminal.attention_requested.emit()
+        terminal.alert_matched.emit('ERROR')
+
+    with patch('main_window.play_notify_sound') as sound:
+        worker = Thread(target=notify)
+        worker.start()
+        worker.join()
+        window._force_closing = True
+        window.close()
+        window.deleteLater()
+        _APP.sendPostedEvents(None, QEvent.Type.DeferredDelete)
+        _APP.processEvents()
+        sound.assert_not_called()
