@@ -55,7 +55,7 @@ from PyQt6.QtWidgets import (
 import copy
 from PyQt6 import sip  # 用于检查 C++ 对象是否已被删除
 from PyQt6.QtCore import (Qt, QTimer, QEvent, QPoint, QRect, QObject, QThreadPool,
-                          QVariantAnimation, QEasingCurve, QAbstractAnimation, pyqtSignal)
+                          QVariantAnimation, QEasingCurve, QAbstractAnimation, QTextBoundaryFinder, pyqtSignal)
 from PyQt6.QtGui import QAction, QIcon, QColor, QPixmap, QPainter, QKeySequence
 
 from terminal_widget import TerminalWidget
@@ -3385,28 +3385,53 @@ class MainWindow(ThemeMixin, ToolbarMixin, ConfigMixin, ExplorerPanelMixin,
         clean_text = self._RE_KEYMODE.sub('', clean_text)
         clean_text = self._RE_CTRL.sub('', clean_text)
 
-        if clean_text.strip():
+        if clean_text:
             self._log_buffer.append(clean_text)
             self._log_buffer_chars += len(clean_text)
             if self._log_buffer_chars > self._MAX_LOG_SIZE:
                 # Match the displayed log's rolling half-window even while inactive.
                 self._log_buffer_truncated = True
-                excess = self._log_buffer_chars - self._MAX_LOG_SIZE // 2
-                while excess:
-                    first = self._log_buffer.popleft()
-                    removed = min(len(first), excess)
-                    if removed < len(first):
-                        self._log_buffer.appendleft(first[removed:])
-                    self._log_buffer_chars -= removed
-                    excess -= removed
+                pending = ''.join(self._log_buffer)
+                cut = len(pending) - self._MAX_LOG_SIZE // 2
+                tail = pending[self._log_cluster_boundary(pending, cut):]
+                self._log_buffer.clear()
+                if tail:
+                    self._log_buffer.append(tail)
+                self._log_buffer_chars = len(tail)
             self._schedule_log_flush()
 
     # 日志面板最大字符数（约 500KB，超过时截断前面的内容）
     _MAX_LOG_SIZE = 500000
 
+    @staticmethod
+    def _log_cluster_boundary(text, cut):
+        """Round a Python string index up to a complete grapheme boundary."""
+        if text.isascii():
+            return cut + int(text[cut - 1:cut + 1] == '\r\n')
+        start = text.rfind('\n', 0, cut) + 1
+        # Qt can pair flags one indicator late after a ZWJ emoji. Segment from
+        # the start of the flag run when the cut falls between its indicators.
+        if 0 < cut < len(text) and 0x1F1E6 <= ord(text[cut]) <= 0x1F1FF:
+            run = cut
+            while run > start and 0x1F1E6 <= ord(text[run - 1]) <= 0x1F1FF:
+                run -= 1
+            if run < cut:
+                start = run
+        segment = text[start:]
+        offset = len(text[start:cut].encode('utf-16-le')) // 2
+        boundary = QTextBoundaryFinder(QTextBoundaryFinder.BoundaryType.Grapheme, segment)
+        boundary.setPosition(offset)
+        if boundary.isAtBoundary():
+            return cut
+        advance = boundary.toNextBoundary() - offset
+        while advance > 0:
+            advance -= 2 if ord(text[cut]) > 0xFFFF else 1
+            cut += 1
+        return cut
+
     def _schedule_log_flush(self):
-        if (not self._log_timer.isActive() and self.isActiveWindow()
-                and (self._stats_dirty or (self._log_buffer and self.log_panel_visible))):
+        pending_log = self.log_panel_visible and (self._log_buffer or self._log_buffer_truncated)
+        if (self._stats_dirty or pending_log) and not self._log_timer.isActive() and self.isActiveWindow():
             self._log_timer.start()
 
     def _flush_log_buffer(self):
@@ -3417,7 +3442,7 @@ class MainWindow(ThemeMixin, ToolbarMixin, ConfigMixin, ExplorerPanelMixin,
             self._update_stats()
 
         # 刷新日志 - 仅当日志面板可见或有缓冲内容时处理
-        if not self._log_buffer:
+        if not self._log_buffer and not self._log_buffer_truncated:
             return
 
         if not self.log_panel_visible:
@@ -3445,10 +3470,14 @@ class MainWindow(ThemeMixin, ToolbarMixin, ConfigMixin, ExplorerPanelMixin,
         if char_count > self._MAX_LOG_SIZE:
             cut = char_count - self._MAX_LOG_SIZE // 2
             block = doc.findBlock(cut)
-            layout = block.layout()
-            offset = cut - block.position()
-            if not layout.isValidCursorPosition(offset):
-                cut = block.position() + layout.nextCursorPosition(offset)
+            text = block.text()
+            if not text.isascii():
+                # Document positions count UTF-16 units, including two per astral character.
+                offset = cut - block.position()
+                prefix = text.encode('utf-16-le')[:2 * offset]
+                index = len(prefix.decode('utf-16-le', errors='surrogatepass'))
+                boundary = self._log_cluster_boundary(text, index)
+                cut = block.position() + len(text[:boundary].encode('utf-16-le')) // 2
             cursor = self.log_text.textCursor()
             cursor.setPosition(0)
             cursor.setPosition(cut, cursor.MoveMode.KeepAnchor)

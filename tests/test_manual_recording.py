@@ -245,3 +245,34 @@ def test_log_rollover_preserves_latest_unicode_and_bounds_undo(window, cluster):
         assert not shown.startswith(('\u0301', '\u200d', '💻'))
         assert w.log_text.document().characterCount() - 1 <= w._MAX_LOG_SIZE
         assert w.log_text.document().availableUndoSteps() == 0
+
+
+@pytest.mark.parametrize('cluster', ['a\u0301', '👩‍💻', '🇨🇳'])
+def test_pending_log_rollover_across_packets(window, cluster):
+    w = window
+    if not w.log_panel_visible:
+        w._toggle_log_panel()
+    w._MAX_LOG_SIZE = 32
+    text = cluster * (30 // len(cluster)) + 'END'
+    for char in text:
+        w.terminal.output_recorded.emit(char)
+    w._flush_log_buffer()
+    shown = w.log_text.toPlainText()
+    assert shown.endswith('END')
+    assert shown[:-3] == cluster * (len(shown[:-3]) // len(cluster))
+
+
+def test_whitespace_only_log_packets_preserve_output(window):
+    if not window.log_panel_visible:
+        window._toggle_log_panel()
+    for packet in ['first', '\n', '\t', 'second', ' ', 'line']:
+        window.terminal.output_recorded.emit(packet)
+    window._flush_log_buffer()
+    assert window.log_text.toPlainText() == 'first\n\tsecond line'
+
+
+def test_log_keeps_flag_pairs_after_zwj_emoji():
+    prefix = '👩‍💻'
+    text = prefix + '🇨🇳🇨🇳'
+    for position, expected in [(4, 5), (5, 5), (6, 7)]:
+        assert MainWindow._log_cluster_boundary(text, position) == expected
