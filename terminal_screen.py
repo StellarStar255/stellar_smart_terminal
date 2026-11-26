@@ -655,6 +655,26 @@ class CompatibleHistoryScreen(pyte.HistoryScreen):
         return any(any(cell.data == '›' for cell in self.buffer.get(r, {}).values())
                    for r in range(max(0, y - 4), y))
 
+    def _codex_composer_animation(self, y, previous, current):
+        """Ignore braille particles around Codex's empty input prompt."""
+        if not self._in_alt_screen:
+            return False
+        previous = previous or {}
+        for x in previous.keys() | current.keys():
+            old, new = previous.get(x, ''), current.get(x, '')
+            if old != new and any(ch and not ('\u2800' <= ch <= '\u28ff') for ch in (old, new)):
+                return False
+        for r in range(max(0, y - 1), min(self.lines, y + 2)):
+            cells = self.buffer.get(r, {})
+            if not any(cell.data == '›' for cell in cells.values()):
+                continue
+            text = ''.join(cells[x].data if x in cells else ' '
+                           for x in range(max(cells) + 1))
+            plain = ''.join(' ' if '\u2800' <= ch <= '\u28ff' else ch for ch in text)
+            if plain.strip() == '› Ask Codex to do anything':
+                return True
+        return False
+
     def consume_text_activity(self, dirty_rows, scrolled):
         """Compare written text, ignoring cursor, style and same-content repaints."""
         # A TUI may send the erase and the repaint in separate PTY reads.
@@ -668,7 +688,8 @@ class CompatibleHistoryScreen(pyte.HistoryScreen):
                    if cells else {})
             if row:
                 previous = self._activity_rows.get(y)
-                if row != previous and not self._codex_status_update(y, previous, row):
+                if (row != previous and not self._codex_status_update(y, previous, row)
+                        and not self._codex_composer_animation(y, previous, row)):
                     changed = True
                 self._activity_rows[y] = row
             else:

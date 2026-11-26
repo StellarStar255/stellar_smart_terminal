@@ -507,3 +507,23 @@ def test_idle_codex_model_footer_changes_without_marking_output(panels):
     assert not first.has_nav_output
     term._process_output_text('\x1b[1;1HHere is your result')
     assert first.has_nav_output
+
+
+def test_background_codex_composer_animation_after_startup(panels):
+    first, _, floating, embedded = panels
+    term = first.terminal
+    term._update_terminal_size()
+    y = term.screen.lines - 5
+    term._process_output_text(f'\x1b[?1049h\x1b[{y};1H› Ask Codex to do anything')
+    wait_for(lambda: not first.has_nav_output)
+    for particle in ('⠁', '⠠', '⢀', ' '):
+        for line, column in ((y - 1, 3), (y, 2), (y + 1, 5)):
+            term._process_output_text(f'\x1b[{line};{column}H{particle}')
+            assert not first.has_nav_output
+        for nav in (floating, embedded):
+            assert not row(nav, first).data(NAV_OUTPUT_ROLE)
+    term._process_output_text(f'\x1b[{y+3};1H⠁')
+    assert first.has_nav_output
+    term._on_activity_settled()
+    term._process_output_text(f'\x1b[{y};3Hnew input')
+    assert first.has_nav_output
