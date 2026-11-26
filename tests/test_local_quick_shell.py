@@ -206,6 +206,35 @@ class TestLocalQuickShell(unittest.TestCase):
         self.assertEqual(source.call_count, 3)
         self.assertEqual(self.w._execute_commands.call_count, 3)
 
+    def test_add_command_receives_click_after_search_is_disabled(self):
+        self.w.show()
+        self.w.activateWindow()
+        self.assertTrue(QTest.qWaitForWindowActive(self.w))
+        presets = [{'name': f'Command {i}', 'commands': ['echo ok']} for i in range(100)]
+        self.w.local_quick_commands_provider = lambda: presets
+        add = Mock()
+        self.w.add_local_command_requested.connect(add)
+        pos = self.app.primaryScreen().availableGeometry().bottomRight() - QPoint(400, 90)
+        self.w._add_quick_command_menu(self.menu, pos, 'ctx.local_quick_commands',
+                                       self.w._populate_local_commands_menu, self.w.add_local_command_requested,
+                                       self.w.manage_local_presets_requested, 'ctx.manage_local_presets')
+        menu = self.menu.actions()[0].menu()
+        self.menu.popup(pos)
+        self.menu.setActiveAction(menu.menuAction())
+        QTest.keyClick(self.menu, Qt.Key.Key_Right)
+        self.assertTrue(QTest.qWaitForWindowExposed(menu))
+        for enabled in (True, False):
+            point = menu.actionGeometry(menu.search_toggle).center()
+            QTest.mouseClick(menu, Qt.MouseButton.LeftButton, pos=point)
+            self.app.processEvents()
+            self.assertEqual(menu.search_box.isVisible(), enabled)
+        point = menu.mapToGlobal(menu.actionGeometry(menu.footer_actions[0]).center())
+        target = self.app.widgetAt(point)
+        self.assertIs(target, menu)
+        QTest.mouseClick(target, Qt.MouseButton.LeftButton, pos=target.mapFromGlobal(point))
+        add.assert_called_once_with()
+        self.w._execute_commands.assert_not_called()
+
     def test_long_submenu_scrolls_inside_popup_and_runs_last_preset(self):
         self.w.show()
         self.w.activateWindow()
@@ -251,6 +280,8 @@ class TestLocalQuickShell(unittest.TestCase):
                     rect = submenu.actionGeometry(action)
                     self.assertFalse(rect.isEmpty())
                     self.assertTrue(submenu.rect().contains(rect), (action.text(), rect, submenu.rect()))
+                    self.assertFalse(listing.geometry().intersects(rect))
+                    self.assertIsNone(submenu.childAt(rect.center()))
                     self.assertIs(submenu.actionAt(rect.center()), action)
                     self.assertTrue(screen.availableGeometry().contains(submenu.mapToGlobal(rect.bottomRight())))
             geometry = submenu.geometry()

@@ -28,10 +28,10 @@ from difflib import SequenceMatcher
 
 from PyQt6.QtCore import QPoint, QUrl, Qt
 from PyQt6.QtGui import (
-    QAction, QActionGroup, QDesktopServices, QDragEnterEvent, QDropEvent, QKeySequence, QMouseEvent
+    QAction, QActionGroup, QColor, QPainter, QDesktopServices, QDragEnterEvent, QDropEvent, QKeySequence, QMouseEvent
 )
 from PyQt6.QtWidgets import (
-    QAbstractItemView, QApplication, QListWidget, QListWidgetItem, QMenu, QWidgetAction,
+    QAbstractItemView, QApplication, QListWidget, QListWidgetItem, QMenu, QStyle, QWidgetAction,
 )
 from command_palette import Command, CommandSearchEdit, matching_commands
 from i18n import t
@@ -69,6 +69,36 @@ class _QuickCommandMenu(QMenu):
     command_list = None
     command_list_action = None
     search_toggle = None
+
+    footer_actions = ()
+
+    def paintEvent(self, event):
+        super().paintEvent(event)
+        if not self.footer_actions or self.command_list is None:
+            return
+        commands = self.command_list
+        # List rows use 12px of padding plus the style's text margin.
+        margin = commands.style().pixelMetric(QStyle.PixelMetric.PM_FocusFrameHMargin, None, commands) + 1
+        text_x = commands.viewport().mapTo(self, QPoint(0, 0)).x() + 12 + margin
+        painter = QPainter(self)
+        for action in self.footer_actions:
+            rect = self.actionGeometry(action)
+            if not event.rect().intersects(rect):
+                continue
+            painter.fillRect(rect, QColor("#26263a"))
+            if action is self.activeAction():
+                painter.setPen(Qt.PenStyle.NoPen)
+                painter.setBrush(QColor("#667eea"))
+                painter.drawRoundedRect(rect, 3, 3)
+            painter.setPen(QColor("#f0f0f5"))
+            label = rect.adjusted(text_x - rect.left(), 0, -12, 0)
+            align = Qt.AlignmentFlag.AlignVCenter
+            if action.isCheckable():
+                if action.isChecked():
+                    painter.drawText(label, align | Qt.AlignmentFlag.AlignRight, "✓")
+                label.adjust(0, 0, -painter.fontMetrics().horizontalAdvance("✓") - 8, 0)
+            text = painter.fontMetrics().elidedText(action.text(), Qt.TextElideMode.ElideRight, label.width())
+            painter.drawText(label, align | Qt.AlignmentFlag.AlignLeft, text)
 
     def showEvent(self, event):
         super().showEvent(event)
@@ -1130,6 +1160,7 @@ class TerminalMouseMixin:
         toggle.setCheckable(True)
         toggle.setChecked(enabled)
         menu.search_toggle = toggle
+        menu.footer_actions = tuple(menu.actions()[menu.actions().index(separator) + 1:])
         search = _QuickCommandFilter(menu)
         search.setPlaceholderText(t("ctx.filter_commands"))
         search.setAccessibleName(search.placeholderText())
@@ -1137,17 +1168,22 @@ class TerminalMouseMixin:
         search_action = QWidgetAction(menu)
         search_action.setDefaultWidget(search)
         menu.insertAction(separator, search_action)
-        search_action.setVisible(enabled)
         menu.search_action = search_action
         menu.search_box = search
         search.textChanged.connect(populate)
         populate("")
         width = min(width_limit, max(240, widest + 48))
-        # Budget for the whole popup, including the native footer and frame.
-        height_limit = max(row_height, available.height() * 85 // 100 - menu.sizeHint().height())
+        # Measure the fixed controls before inserting the scrollable list.
+        # QMenu caches QWidgetAction rectangles while a popup is open.
+        budget = available.height() * 85 // 100
         list_height = sum(commands.sizeHintForRow(row) for row in range(commands.count()))
-        height = min(height_limit, list_height)
-        commands.setFixedSize(width, height)
+        heights = {}
+        for show_search in (True, False):
+            search_action.setVisible(show_search)
+            heights[show_search] = min(list_height, max(row_height, budget - menu.sizeHint().height()))
+        search_action.setVisible(enabled)
+        search.setVisible(enabled)
+        commands.setFixedSize(width, heights[enabled])
         commands.setCurrentRow(0)
         scroll_action = QWidgetAction(menu)
         scroll_action.setDefaultWidget(commands)
@@ -1162,11 +1198,10 @@ class TerminalMouseMixin:
             if checkpoint is not None:
                 checkpoint()
             search.clear()
+            # Resize first so changing action visibility lays out the new list height.
+            commands.setFixedHeight(heights[checked])
             search_action.setVisible(checked)
             search.setVisible(checked)
-            # Recalculate with the fixed footer and the current search field.
-            remaining = available.height() * 85 // 100 - (menu.sizeHint().height() - commands.height())
-            commands.setFixedHeight(min(list_height, max(row_height, remaining)))
             if menu.isVisible():
                 # QWidget.adjustSize() caps top-level windows at 2/3 of the screen.
                 menu.resize(menu.sizeHint())

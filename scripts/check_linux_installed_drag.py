@@ -67,7 +67,16 @@ def main():
             wait_for(process, lambda: band_moved(before, baseline, capture_column(*probe)),
                      'Visible selection did not follow the delayed redraw')
             output('xdotool', 'key', 'ctrl+c')
-            lines = output('xclip', '-selection', 'clipboard', '-o').splitlines()
+            # xdotool returns before Qt has necessarily handled the key event
+            # and claimed the X11 clipboard. Wait for the Unicode text target.
+            def text_available():
+                targets = subprocess.run(
+                    ['xclip', '-selection', 'clipboard', '-t', 'TARGETS', '-o'],
+                    capture_output=True, timeout=10)
+                return targets.returncode == 0 and b'UTF8_STRING' in targets.stdout.splitlines()
+
+            wait_for(process, text_available, 'Copied text was not offered on the X11 clipboard')
+            lines = output('xclip', '-selection', 'clipboard', '-t', 'UTF8_STRING', '-o').splitlines()
             # The two endpoints may be partial rows. Every interior row must
             # retain both its number and its Chinese text, in sequence.
             interior = lines[1:-1]
