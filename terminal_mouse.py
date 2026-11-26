@@ -31,8 +31,9 @@ from PyQt6.QtGui import (
     QAction, QActionGroup, QDesktopServices, QDragEnterEvent, QDropEvent, QKeySequence, QMouseEvent
 )
 from PyQt6.QtWidgets import (
-    QAbstractItemView, QApplication, QListWidget, QListWidgetItem, QMenu, QWidgetAction,
+    QAbstractItemView, QApplication, QLineEdit, QListWidget, QListWidgetItem, QMenu, QWidgetAction,
 )
+from command_palette import Command, matching_commands
 from i18n import t
 
 
@@ -53,11 +54,28 @@ class _QuickCommandList(QListWidget):
         super().keyPressEvent(event)
 
 
+class _QuickCommandFilter(QLineEdit):
+    def keyPressEvent(self, event):
+        if event.key() in (Qt.Key.Key_Up, Qt.Key.Key_Down, Qt.Key.Key_Return, Qt.Key.Key_Enter):
+            self.parentWidget().command_list.keyPressEvent(event)
+        else:
+            super().keyPressEvent(event)
+
+
 class _QuickCommandMenu(QMenu):
     command_list = None
     command_list_action = None
 
+    def showEvent(self, event):
+        super().showEvent(event)
+        if self.command_list is not None:
+            self.search_box.setFocus()
+
     def keyPressEvent(self, event):
+        if self.command_list is not None and event.text() and event.text().isprintable():
+            self.search_box.setFocus()
+            self.search_box.keyPressEvent(event)
+            return
         if (self.command_list is not None
                 and self.activeAction() in (None, self.command_list_action)
                 and event.key() not in (Qt.Key.Key_Left, Qt.Key.Key_Right, Qt.Key.Key_Escape)):
@@ -810,7 +828,7 @@ class TerminalMouseMixin:
         menu.addSeparator()
 
         # 重命名/清除分屏标签
-        rename_split_action = QAction(t("ctx.rename_split"), self)
+        rename_split_action = QAction(t("ctx.rename_split"), menu)
         rename_split_action.triggered.connect(self.rename_split_requested.emit)
         menu.addAction(rename_split_action)
 
@@ -822,7 +840,7 @@ class TerminalMouseMixin:
         sens_group.setExclusive(True)
         for factor in self.SCROLL_SENSITIVITY_CHOICES:
             act = QAction(t("ctx.scroll_sensitivity_item", factor=f"{factor:g}"),
-                          self)
+                          scroll_menu)
             act.setCheckable(True)
             act.setChecked(abs(cur_sens - factor) < 0.01)
             sens_group.addAction(act)
@@ -846,74 +864,47 @@ class TerminalMouseMixin:
         # 注意：不设置 setShortcut，因为 Ctrl+C 需要发送到终端进程
         # 复制功能通过 Cmd+C (macOS) 或在 keyPressEvent 中用 QKeySequence.StandardKey.Copy 处理
         copy_label = t("ctx.copy") if sys.platform == 'darwin' else t("ctx.copy_win")
-        copy_action = QAction(copy_label, self)
+        copy_action = QAction(copy_label, menu)
         copy_action.triggered.connect(self._copy_selection_to_clipboard)
         menu.addAction(copy_action)
 
         # 粘贴
         paste_label = t("ctx.paste") if sys.platform == 'darwin' else t("ctx.paste_win")
-        paste_action = QAction(paste_label, self)
+        paste_action = QAction(paste_label, menu)
         paste_action.triggered.connect(self._paste_from_clipboard)
         menu.addAction(paste_action)
 
         menu.addSeparator()
 
-        # 快速命令子菜单
-        if self.quick_commands_provider:
-            presets = self.quick_commands_provider()
-            if presets:
-                quick_cmd_menu = _QuickCommandMenu(t("ctx.quick_commands"), menu)
-                quick_cmd_menu.setStyleSheet(menu.styleSheet())
-
-                self._populate_quick_command_presets(quick_cmd_menu, presets)
-
-                # 添加"添加命令..."选项
-                add_cmd_action = QAction(t("ctx.add_command"), quick_cmd_menu)
-                add_cmd_action.triggered.connect(self.add_command_requested.emit)
-                quick_cmd_menu.addAction(add_cmd_action)
-
-                # 添加"管理预设..."选项
-                manage_action = QAction(t("ctx.manage_presets"), quick_cmd_menu)
-                manage_action.triggered.connect(self.manage_presets_requested.emit)
-                quick_cmd_menu.addAction(manage_action)
-
-                self._fit_quick_command_menu(quick_cmd_menu, event.globalPos())
-                menu.addMenu(quick_cmd_menu)
-
-        # 本地快速命令子菜单
-        local_cmd_menu = _QuickCommandMenu(t("ctx.local_quick_commands"), menu)
-        local_cmd_menu.setStyleSheet(menu.styleSheet())
-
-        self._populate_local_commands_menu(local_cmd_menu)
-
-        # 添加"添加命令..."选项
-        add_local_cmd_action = QAction(t("ctx.add_command"), local_cmd_menu)
-        add_local_cmd_action.triggered.connect(self.add_local_command_requested.emit)
-        local_cmd_menu.addAction(add_local_cmd_action)
-
-        # 添加"管理本地预设..."选项
-        manage_local_action = QAction(t("ctx.manage_local_presets"), local_cmd_menu)
-        manage_local_action.triggered.connect(self.manage_local_presets_requested.emit)
-        local_cmd_menu.addAction(manage_local_action)
-
-        self._fit_quick_command_menu(local_cmd_menu, event.globalPos())
-        menu.addMenu(local_cmd_menu)
+        presets = self.quick_commands_provider() if self.quick_commands_provider else None
+        popup_pos = event.globalPos()
+        if presets:
+            self._add_quick_command_menu(
+                menu, popup_pos, "ctx.quick_commands",
+                lambda submenu: self._populate_quick_command_presets(
+                    submenu, presets, t("palette.quick_commands_global")),
+                self.add_command_requested, self.manage_presets_requested,
+                "ctx.manage_presets")
+        self._add_quick_command_menu(
+            menu, popup_pos, "ctx.local_quick_commands",
+            self._populate_local_commands_menu, self.add_local_command_requested,
+            self.manage_local_presets_requested, "ctx.manage_local_presets")
         menu.addSeparator()
 
         # 打开当前目录
-        open_dir_action = QAction(t("ctx.open_current_dir"), self)
+        open_dir_action = QAction(t("ctx.open_current_dir"), menu)
         open_dir_action.triggered.connect(self._open_current_directory)
         menu.addAction(open_dir_action)
 
         # 复制当前路径
-        copy_dir_action = QAction(t("ctx.copy_current_dir"), self)
+        copy_dir_action = QAction(t("ctx.copy_current_dir"), menu)
         copy_dir_action.triggered.connect(self._copy_current_directory)
         menu.addAction(copy_dir_action)
 
         menu.addSeparator()
 
         # 刷新终端：强制重绘 + 给 PTY 重发尺寸（SIGWINCH），修复偶发花屏/错位
-        refresh_action = QAction(t("ctx.refresh"), self)
+        refresh_action = QAction(t("ctx.refresh"), menu)
         refresh_action.setToolTip(t("ctx.refresh.tip"))
         refresh_action.triggered.connect(self.refresh_terminal)
         menu.addAction(refresh_action)
@@ -921,7 +912,7 @@ class TerminalMouseMixin:
         # 清空回滚历史：丢弃上方积累的历史行、释放内存（保留当前可见屏幕）。
         # 无历史时置灰。
         hist_n = self._get_history_count()
-        clear_sb_action = QAction(t("ctx.clear_scrollback"), self)
+        clear_sb_action = QAction(t("ctx.clear_scrollback"), menu)
         clear_sb_action.setToolTip(t("ctx.clear_scrollback.tip"))
         clear_sb_action.setEnabled(hist_n > 0)
         clear_sb_action.triggered.connect(self.clear_scrollback)
@@ -930,84 +921,104 @@ class TerminalMouseMixin:
         menu.addSeparator()
 
         # 搜索（终端历史，含回滚）
-        search_action = QAction(t("ctx.search"), self)
+        search_action = QAction(t("ctx.search"), menu)
         search_action.triggered.connect(self._show_search_bar)
         menu.addAction(search_action)
 
         # 全选
-        select_all_action = QAction(t("ctx.select_all"), self)
+        select_all_action = QAction(t("ctx.select_all"), menu)
         select_all_action.triggered.connect(self._select_all)
         menu.addAction(select_all_action)
 
         # 清除选择
         if self._has_selection():
-            clear_selection_action = QAction(t("ctx.clear_selection"), self)
+            clear_selection_action = QAction(t("ctx.clear_selection"), menu)
             clear_selection_action.triggered.connect(self._clear_selection)
             menu.addAction(clear_selection_action)
 
         menu.addSeparator()
 
         # 分屏（左右）—— 标签追加当前生效快捷键提示
-        split_action = QAction(t("toolbar.split") + self._shortcut_hint("split_h", "Ctrl+Shift++"), self)
+        split_action = QAction(t("toolbar.split") + self._shortcut_hint("split_h", "Ctrl+Shift++"), menu)
         split_action.triggered.connect(self.split_horizontal_requested.emit)
         menu.addAction(split_action)
 
         # 上下分屏
-        vsplit_action = QAction(t("ctx.split_vertical") + self._shortcut_hint("split_v", "Ctrl+Shift+-"), self)
+        vsplit_action = QAction(t("ctx.split_vertical") + self._shortcut_hint("split_v", "Ctrl+Shift+-"), menu)
         vsplit_action.triggered.connect(self.split_vertical_requested.emit)
         menu.addAction(vsplit_action)
 
         # 关闭当前分屏
         # 提示用 Cmd+W：实际关闭分屏走 close_tab（多分屏时 Cmd+W 优先关当前分屏），
         # 比少有人用的 close_split(Ctrl+Shift+X) 更贴近用户真实操作
-        close_split_action = QAction(t("ctx.close_split") + self._shortcut_hint("close_tab", "Ctrl+W"), self)
+        close_split_action = QAction(t("ctx.close_split") + self._shortcut_hint("close_tab", "Ctrl+W"), menu)
         close_split_action.triggered.connect(self.close_split_requested.emit)
         menu.addAction(close_split_action)
 
         # 向左移动分屏
-        move_left_action = QAction(t("ctx.move_split_left"), self)
+        move_left_action = QAction(t("ctx.move_split_left"), menu)
         move_left_action.triggered.connect(self.move_split_left_requested.emit)
         menu.addAction(move_left_action)
 
         # 向上移动分屏（垂直分屏内）
-        move_up_action = QAction(t("ctx.move_split_up"), self)
+        move_up_action = QAction(t("ctx.move_split_up"), menu)
         move_up_action.triggered.connect(self.move_split_up_requested.emit)
         menu.addAction(move_up_action)
 
         menu.exec(event.globalPos())
         menu.deleteLater()
 
+    def _add_quick_command_menu(self, parent, popup_pos, title, populate,
+                                add_requested, manage_requested, manage_title):
+        menu = _QuickCommandMenu(t(title), parent)
+        menu.setStyleSheet(parent.styleSheet())
+        menu.addAction(t("ctx.add_command"), add_requested.emit)
+        menu.addAction(t(manage_title), manage_requested.emit)
+
+        def prepare():
+            populate(menu)
+            self._fit_quick_command_menu(menu, popup_pos)
+
+        menu.aboutToShow.connect(prepare, Qt.ConnectionType.SingleShotConnection)
+        parent.addMenu(menu)
+
     def _populate_local_commands_menu(self, menu):
         """只列出用户配置的本地命令。Shell 由新建终端流程启动。"""
         presets = (self.local_quick_commands_provider()
                    if self.local_quick_commands_provider else [])
-        self._populate_quick_command_presets(menu, presets)
+        self._populate_quick_command_presets(menu, presets, t("ctx.local_quick_commands"))
 
-    def _populate_quick_command_presets(self, menu, presets):
-        ordered = sorted(presets or (), key=lambda preset: preset.get('pinned') is not True)
+    def _populate_quick_command_presets(self, menu, presets, group):
+        footer = next(iter(menu.actions()), None)
+        ordered = sorted((p for p in presets or () if isinstance(p, dict)),
+                         key=lambda preset: preset.get('pinned') is not True)
+        has_commands = False
         for preset in ordered:
             commands = preset.get('commands', [])
-            if commands:
-                name = preset.get('name', t("common.unnamed"))
+            if isinstance(commands, list) and commands and all(isinstance(cmd, str) for cmd in commands):
+                title = str(preset.get('name') or t("common.unnamed"))
+                name = title
                 if preset.get('pinned') is True:
                     name = f"★  {name}"
-                action = menu.addAction(name)
-                action.triggered.connect(
-                    lambda checked=False, cmds=commands: self._execute_commands(cmds))
-        if menu.actions():
-            menu.addSeparator()
+                action = QAction(name, menu)
+                menu.insertAction(footer, action)
+                has_commands = True
+                command = Command(title, lambda cmds=commands: self._execute_commands(cmds),
+                                  group=group, search_text="\n".join(commands))
+                action.setData(command)
+                action.triggered.connect(lambda checked=False, cmd=command: cmd.run())
+        if has_commands:
+            menu.insertSeparator(footer)
 
     def _fit_quick_command_menu(self, menu, popup_pos):
         screen = QApplication.screenAt(popup_pos) or self.window().screen()
         available = screen.availableGeometry()
         font = menu.fontMetrics()
         row_height = font.height() + 12
-        standard_height_limit = min(16 * row_height, available.height() // 2)
         width_limit = min(460, available.width() // 2)
         actions = menu.actions()
         separator = next((action for action in actions if action.isSeparator()), None)
-        if separator is None or (len(actions) * row_height <= standard_height_limit
-                and menu.sizeHint().width() <= width_limit):
+        if separator is None:
             return
         preset_actions = actions[:actions.index(separator)]
 
@@ -1040,16 +1051,44 @@ class TerminalMouseMixin:
             QScrollBar::add-line:vertical, QScrollBar::sub-line:vertical { height: 0; }
             QScrollBar::add-page:vertical, QScrollBar::sub-page:vertical { background: none; }
         """)
+        entries = []
+        labels = {}
         widest = font.horizontalAdvance(menu.title())
         for action in preset_actions:
             menu.removeAction(action)
-            item = QListWidgetItem(" ".join(action.text().splitlines()))
-            text_width = font.horizontalAdvance(item.text())
-            widest = max(widest, text_width)
-            if text_width + 48 > width_limit:
-                item.setToolTip(item.text())
-            commands.addItem(item)
+            entry = action.data()
+            entries.append(entry)
+            label = " ".join(action.text().splitlines())
+            labels[id(entry)] = label
+            widest = max(widest, font.horizontalAdvance(label))
 
+        def populate(query):
+            commands.clear()
+            matches = matching_commands(query, entries) if query.strip() else entries
+            for entry in matches:
+                label = labels[id(entry)]
+                item = QListWidgetItem(label)
+                item.setData(Qt.ItemDataRole.UserRole, entry)
+                if font.horizontalAdvance(label) + 48 > width_limit:
+                    item.setToolTip(label)
+                commands.addItem(item)
+            if matches:
+                commands.setCurrentRow(0)
+            else:
+                empty = QListWidgetItem(t("ctx.filter_empty"))
+                empty.setFlags(Qt.ItemFlag.NoItemFlags)
+                commands.addItem(empty)
+
+        search = _QuickCommandFilter(menu)
+        search.setPlaceholderText(t("ctx.filter_commands"))
+        search.setAccessibleName(search.placeholderText())
+        search.setClearButtonEnabled(True)
+        search_action = QWidgetAction(menu)
+        search_action.setDefaultWidget(search)
+        menu.insertAction(separator, search_action)
+        menu.search_box = search
+        search.textChanged.connect(populate)
+        populate("")
         width = min(width_limit, max(240, widest + 48))
         # Budget for the whole popup, including the native footer and frame.
         height_limit = max(row_height, available.height() * 85 // 100 - menu.sizeHint().height())
@@ -1064,11 +1103,11 @@ class TerminalMouseMixin:
         menu.command_list_action = scroll_action
 
         def activate(item):
-            action = preset_actions[commands.row(item)]
-            if menu.isVisible() and action.isEnabled():
+            entry = item.data(Qt.ItemDataRole.UserRole)
+            if menu.isVisible() and entry is not None:
                 menu.close()
                 menu.parentWidget().close()
-                action.trigger()
+                entry.run()
 
         commands.itemClicked.connect(activate)
         commands.itemActivated.connect(activate)

@@ -49,6 +49,21 @@ class TestMenuBar(unittest.TestCase):
         self.assertEqual(titles, [t("menu.file"), t("menu.view"), t("menu.terminal"),
                                   t("window.menu"), t("menu.help")])
 
+    def test_help_copies_only_environment_fields(self):
+        from app_updater import get_current_version
+        from i18n import t
+        action, = [act for act in self.win._help_menu.actions()
+                   if act.text() == t("menu.copy_diagnostics")]
+        action.trigger()
+        fields = dict(line.split(": ", 1) for line in self.app.clipboard().text().splitlines())
+        self.assertEqual(set(fields), {"Stellar Smart Terminal", "OS", "CPU", "Qt",
+                                      "Display backend", "Screen (logical pixels)",
+                                      "Device pixel ratio", "Logical DPI"})
+        self.assertEqual(fields["Stellar Smart Terminal"], get_current_version())
+        self.assertEqual(fields["Display backend"], self.app.platformName())
+        self.assertEqual(float(fields["Device pixel ratio"]), self.win.screen().devicePixelRatio())
+        self.assertEqual(self.win.statusBar().currentMessage(), t("menu.diagnostics_copied"))
+
     def test_shortcut_actions_are_shared_not_duplicated(self):
         """菜单里带快捷键的项必须就是 _setup_shortcuts 建的那个 QAction，
         否则同键位两个 QAction → Qt 报歧义、两个都不触发。"""

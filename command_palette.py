@@ -80,6 +80,16 @@ def _fuzzy_score(query: str, hay: str) -> int:
     return 100 + int(len(q) * 50 / span)
 
 
+def matching_commands(query, commands):
+    scored = []
+    for command in commands:
+        score = _fuzzy_score(query, command.haystack())
+        if score >= 0:
+            scored.append((score, command))
+    scored.sort(key=lambda pair: (-pair[0], pair[1].title.lower()))
+    return [command for _, command in scored]
+
+
 class _OutsideClickFilter(QObject):
     """装在 QApplication 上的独立过滤器：弹层可见时，点击弹层/输入框之外 → 收起，
     Esc → 收起。
@@ -469,13 +479,7 @@ class CommandPalette(QWidget):
             # 空 query 显示全部，按 group/title 排序
             items = sorted(commands, key=lambda c: ((c.group or '').lower(), c.title.lower()))
             return items[:limit]
-        scored = []
-        for c in commands:
-            s = _fuzzy_score(query, c.haystack())
-            if s >= 0:
-                scored.append((s, c))
-        scored.sort(key=lambda t: (-t[0], t[1].title.lower()))
-        return [c for _, c in scored[:limit]]
+        return matching_commands(query, commands)[:limit]
 
     def _on_item_activated(self, item: QListWidgetItem):
         self._activate_item(item, 'run')

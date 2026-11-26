@@ -240,7 +240,7 @@ jobs:
           $location = Join-Path $env:RUNNER_TEMP "stellar-installed"
           $result = Start-Process $setup -ArgumentList "/VERYSILENT /SUPPRESSMSGBOXES /NORESTART /DIR=`"$location`"" -PassThru -Wait
           if ($result.ExitCode -ne 0) { throw "Installer exit code $($result.ExitCode)" }
-          python -m pip install pywinauto
+          python -m pip install pywinauto pillow
           if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
           python scripts/check_windows_installed_drag.py "$location/StellarSmartTerminal.exe"
 
@@ -315,6 +315,7 @@ jobs:
       - name: Check installed .deb drag selection and system clipboard
         run: |
           sudo apt-get install -y ./dist/*.deb
+          python3 -m pip install pillow
           for scale in 1 1.25 2; do
             QT_SCALE_FACTOR="$scale" xvfb-run -a -s "-screen 0 3800x2400x24" \
               python3 scripts/check_linux_installed_drag.py

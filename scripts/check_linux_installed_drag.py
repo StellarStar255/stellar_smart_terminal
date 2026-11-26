@@ -8,6 +8,8 @@ import subprocess
 import tempfile
 import time
 
+from installed_drag_visual import band_moved, capture_column, selected_band
+
 
 def output(*args):
     return subprocess.check_output(args, text=True, timeout=10).strip()
@@ -32,7 +34,7 @@ def main():
         config = {
             'onboarding_shown': True, 'workspace_restore_enabled': False,
             'last_preset_index': 0,
-            'presets': [{'name': 'Drag test', 'commands': ['/usr/bin/python3 -u viewer.py wheel.json']}],
+            'presets': [{'name': 'Drag test', 'commands': ['/usr/bin/python3 -u viewer.py wheel.json --delay-down-frame']}],
         }
         (data / '.smart_terminal_config.json').write_text(json.dumps(config))
         report = data / 'wheel.json'
@@ -47,14 +49,23 @@ def main():
                             output('xdotool', 'getwindowgeometry', '--shell', wid).splitlines())
             x, y, width, height = (int(geometry[k]) for k in ('X', 'Y', 'WIDTH', 'HEIGHT'))
             x = str(x + int(.70 * width))
+            end_y = y + int(.69 * height)
+            probe = (int(x) - 16, y + int(.40 * height), y + int(.75 * height))
+            baseline = capture_column(*probe)
             output('xdotool', 'mousemove', x, str(y + int(.62 * height)), 'mousedown', '1',
                    'mousemove', x, str(y + height + 20))
             try:
-                wait_for(process, lambda: json.loads(report.read_text())['offset'] >= 100 + 2 * rows,
+                wait_for(process, report.with_suffix('.pending').exists,
                          'Dragging past the window did not scroll two pages')
-                output('xdotool', 'mousemove', x, str(y + int(.69 * height)))
+                output('xdotool', 'mousemove', x, str(end_y))
             finally:
                 output('xdotool', 'mouseup', '1')
+            before = selected_band(probe, baseline, end_y)
+            offset = json.loads(report.read_text())['offset']
+            report.with_suffix('.release').touch()
+            wait_for(process, lambda: json.loads(report.read_text())['offset'] > offset, 'Missing late PTY frame')
+            wait_for(process, lambda: band_moved(before, baseline, capture_column(*probe)),
+                     'Visible selection did not follow the delayed redraw')
             output('xdotool', 'key', 'ctrl+c')
             lines = output('xclip', '-selection', 'clipboard', '-o').splitlines()
             # The two endpoints may be partial rows. Every interior row must
@@ -66,6 +77,8 @@ def main():
             if not start:
                 raise AssertionError(f'Unexpected first interior row: {interior[0]!r}')
             first = int(start[1])
+            if first >= offset + 1:
+                raise AssertionError("Clipboard omitted rows scrolled out before release")
             expected = [f'row {i:04d} 中文 sample' for i in range(first, first + len(interior))]
             if interior != expected:
                 raise AssertionError('Installed application copied missing, altered, or out-of-order rows')

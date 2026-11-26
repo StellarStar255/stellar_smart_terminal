@@ -10,6 +10,8 @@ import tempfile
 from pywinauto import Application, clipboard, keyboard, mouse
 from pywinauto.timings import wait_until
 
+from installed_drag_visual import band_moved, capture_column, selected_band
+
 
 def main(executable):
     with tempfile.TemporaryDirectory(prefix="stellar-drag-") as directory:
@@ -24,7 +26,7 @@ def main(executable):
         config = {
             "onboarding_shown": True, "workspace_restore_enabled": False,
             "last_preset_index": 0,
-            "presets": [{"name": "Clipboard test", "commands": ["python -u start_viewer.py wheel.json"]}],
+            "presets": [{"name": "Clipboard test", "commands": ["python -u start_viewer.py wheel.json --delay-down-frame"]}],
         }
         (root / ".smart_terminal_config.json").write_text(json.dumps(config))
         report = root / "wheel.json"
@@ -41,13 +43,21 @@ def main(executable):
             rect = window.rectangle()
             x = rect.left + int(.70 * rect.width())
             rows = json.loads(report.read_text())["rows"]
+            end_y = rect.top + int(.69 * rect.height())
+            probe = (x - 16, rect.top + int(.40 * rect.height()), rect.top + int(.75 * rect.height()))
+            baseline = capture_column(*probe)
             mouse.press(coords=(x, rect.top + int(.62 * rect.height())))
             try:
                 mouse.move(coords=(x, rect.bottom + 12))
-                wait_until(30, .1, lambda: json.loads(report.read_text())["offset"] >= 100 + 2 * rows)
-                mouse.move(coords=(x, rect.top + int(.69 * rect.height())))
+                wait_until(30, .1, report.with_suffix(".pending").exists)
+                mouse.move(coords=(x, end_y))
             finally:
-                mouse.release(coords=(x, rect.top + int(.69 * rect.height())))
+                mouse.release(coords=(x, end_y))
+            before = selected_band(probe, baseline, end_y)
+            offset = json.loads(report.read_text())["offset"]
+            report.with_suffix(".release").touch()
+            wait_until(10, .1, lambda: json.loads(report.read_text())["offset"] > offset)
+            wait_until(10, .1, lambda: band_moved(before, baseline, capture_column(*probe)))
             clipboard.EmptyClipboard()
             keyboard.send_keys("^c")
             wait_until(10, .1, lambda: 13 in clipboard.GetClipboardFormats())
@@ -55,6 +65,8 @@ def main(executable):
             if len(interior) <= rows:
                 raise AssertionError(f"Only {len(interior)} complete copied rows for {rows} visible rows")
             first = int(interior[0].split()[1])
+            if first >= offset + 1:
+                raise AssertionError("Clipboard omitted rows scrolled out before release")
             expected = [f"row {n:04d} 中文 sample" for n in range(first, first + len(interior))]
             if interior != expected:
                 raise AssertionError("Copied transcript contains missing, altered or out-of-order rows")

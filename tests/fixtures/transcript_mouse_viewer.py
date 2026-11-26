@@ -47,6 +47,7 @@ offset = 100
 accepted = []
 report_path = Path(sys.argv[1])
 delay_last_frame = '--delay-last-frame' in sys.argv[2:]
+delay_down = '--delay-down-frame' in sys.argv[2:]
 
 
 def draw():
@@ -86,12 +87,13 @@ while True:
         button, col, row = map(int, match.groups())
         # Outside transcript + no forwarded native drag => Codex ignores the wheel.
         if 1 <= row - 1 < rows - 5:
-            if delay_last_frame and offset <= 100 - 2 * rows:
+            if ((delay_last_frame and offset <= 100 - 2 * rows)
+                    or (delay_down and offset >= 100 + 2 * rows)):
                 # Acknowledge the wheel now, but draw only after mouse-up.
                 report_path.with_suffix('.pending').touch()
                 while not report_path.with_suffix('.release').exists():
                     time.sleep(.005)
-                delay_last_frame = False
+                delay_last_frame = delay_down = False
             accepted.append(row)
             offset = max(0, min(1000, offset + (-3 if button == 64 else 3)))
             draw()

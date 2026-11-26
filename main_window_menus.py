@@ -10,9 +10,9 @@
 import os
 import webbrowser
 
-from PyQt6.QtCore import Qt
+from PyQt6.QtCore import Qt, QSysInfo, qVersion
 from PyQt6.QtGui import QAction, QKeySequence
-from PyQt6.QtWidgets import QFileDialog, QMenu, QMessageBox
+from PyQt6.QtWidgets import QApplication, QFileDialog, QMenu, QMessageBox
 
 from i18n import t
 from app_logging import get_logger
@@ -249,11 +249,33 @@ class MenusMixin:
         self._own_action(menu, "shortcuts.menu_item", self._show_shortcut_settings)
         menu.addSeparator()
         self._own_action(menu, "update.menu_item", self._check_for_updates)
+        self._own_action(menu, "menu.copy_diagnostics", self._copy_diagnostics)
         self._own_action(menu, "menu.github", lambda: webbrowser.open(REPO_URL))
         menu.addSeparator()
         about = self._own_action(menu, "menu.about", self._show_about_dialog)
         about.setMenuRole(QAction.MenuRole.AboutRole)   # macOS 归到应用菜单
         self._help_menu = menu
+
+    def _copy_diagnostics(self):
+        from app_updater import get_current_version
+
+        screen = self.screen()
+        lines = [
+            f"Stellar Smart Terminal: {get_current_version() or '?'}",
+            f"OS: {QSysInfo.prettyProductName()}",
+            f"CPU: {QSysInfo.currentCpuArchitecture()}",
+            f"Qt: {qVersion()}",
+            f"Display backend: {QApplication.platformName()}",
+        ]
+        if screen is not None:
+            size = screen.size()
+            lines.extend([
+                f"Screen (logical pixels): {size.width()} x {size.height()}",
+                f"Device pixel ratio: {screen.devicePixelRatio():g}",
+                f"Logical DPI: {screen.logicalDotsPerInch():.1f}",
+            ])
+        QApplication.clipboard().setText("\n".join(lines))
+        self.statusBar().showMessage(t("menu.diagnostics_copied"), 3000)
 
     def _show_about_dialog(self):
         try:

@@ -47,9 +47,10 @@ def test_conpty_retries_unsupported_passthrough(tmp_path, monkeypatch):
         backend.stop()
 
 
-@pytest.mark.parametrize(('start_row', 'going_up', 'reverse'), [
-    (0, False, False), (4, False, False), (4, True, False), (4, False, True)])
-def test_timer_drag_across_real_pty_pages(tmp_path, start_row, going_up, reverse):
+@pytest.mark.parametrize(('start_row', 'going_up', 'reverse', 'delayed_down'), [
+    (0, False, False, False), (4, False, False, False), (4, True, False, False),
+    (4, False, True, False), (4, False, False, True)])
+def test_timer_drag_across_real_pty_pages(tmp_path, start_row, going_up, reverse, delayed_down):
     global _APP
     _APP = QApplication.instance() or QApplication([])
     app = _APP
@@ -83,6 +84,8 @@ def test_timer_drag_across_real_pty_pages(tmp_path, start_row, going_up, reverse
         # so the Windows venv redirector does not interpose another process.
         interpreter = sys._base_executable if os.name == 'nt' else sys.executable
         command = [interpreter, '-u', str(fixture), str(report)]
+        if delayed_down:
+            command.append('--delay-down-frame')
         late_frame = going_up and not reverse
         if late_frame:
             command.append('--delay-last-frame')
@@ -90,6 +93,15 @@ def test_timer_drag_across_real_pty_pages(tmp_path, start_row, going_up, reverse
         wait_until(lambda: widget.screen._in_alt_screen and widget._mouse_mode
                    and 'row 0104' in widget._get_line_text(4))
         widget.set_mouse_click_forward_enabled(start_row == 4)
+        if delayed_down:
+            from scripts.installed_drag_visual import band_moved
+
+            def column():
+                image = widget.grab().toImage()
+                x = int(pos(0, 30).x() * image.devicePixelRatio())
+                return [image.pixelColor(x, y).rgb() for y in range(image.height())]
+
+            baseline = column()
         mouse(QEvent.Type.MouseButtonPress, pos(start_row, 0), Qt.MouseButton.LeftButton)
         end_row = widget.term_rows - 4 if start_row == 4 else widget.term_rows + 3
         end = pos(0 if going_up else end_row, 2)
@@ -109,12 +121,28 @@ def test_timer_drag_across_real_pty_pages(tmp_path, start_row, going_up, reverse
             before = widget.grab().toImage()
             sample = pos(6, 30) * before.devicePixelRatio()
             highlighted = before.pixelColor(sample)
+        if delayed_down:
+            wait_until(report.with_suffix('.pending').exists)
+            end = pos(widget.term_rows // 2, 35)
+            mouse(QEvent.Type.MouseMove, end, Qt.MouseButton.LeftButton)
+            selected = column()
+            sample = int(end.y() * widget.devicePixelRatioF())
+            color = selected[sample]
+            assert color != baseline[sample]
+            edge = next(y for y in range(sample, len(selected)) if selected[y] != color) - 1
         mouse(QEvent.Type.MouseButtonRelease,
               end, Qt.MouseButton.NoButton)
         origin = widget._tui_selection['origin']
         expected = '\n'.join(f'row {i:04d} 中文 sample'
                              for i in range(100 + max(1, start_row),
                                             100 + origin + widget.term_rows - 5))
+        if delayed_down:
+            # Release the pending three-row scroll after freezing the endpoint.
+            end_line = 100 + origin + widget.term_rows // 2
+            expected = '\n'.join(f'row {i:04d} 中文 sample'
+                                 for i in range(100 + start_row, end_line + 1))
+            report.with_suffix('.release').touch()
+            wait_until(lambda: band_moved((edge, color), baseline, column()))
         if going_up:
             # The pinned header lies above the transcript. Dragging over it
             # includes the first visible row from column zero to the anchor.

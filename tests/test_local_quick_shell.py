@@ -5,7 +5,8 @@ from unittest.mock import Mock, patch
 
 os.environ.setdefault('QT_QPA_PLATFORM', 'offscreen')
 
-from PyQt6.QtCore import QPoint, Qt
+from PyQt6.QtCore import QEvent, QPoint, Qt
+from PyQt6.QtGui import QAction, QContextMenuEvent
 from PyQt6.QtTest import QTest
 from PyQt6.QtWidgets import QApplication, QMenu
 from terminal_mouse import _QuickCommandMenu
@@ -75,6 +76,78 @@ class TestLocalQuickShell(unittest.TestCase):
         self.menu.actions()[0].trigger()
         self.w._write_to_backend.assert_called_once_with(b'powershell.exe\r')
         self.w._backend = None
+
+    def test_filter_matches_command_body_and_runs_keyboard_selection(self):
+        self.w.show()
+        self.w.activateWindow()
+        self.assertTrue(QTest.qWaitForWindowActive(self.w))
+        submenu = _QuickCommandMenu('Local commands', self.menu)
+        self.menu.addMenu(submenu)
+        self.w.local_quick_commands_provider = lambda: [
+            {'name': 'One', 'commands': ['git status']},
+            {'name': '二号', 'commands': ['git diff']},
+            {'name': 'Other', 'commands': ['echo hello']}]
+        self.w._populate_local_commands_menu(submenu)
+        submenu.addAction('Manage')
+        self.w._fit_quick_command_menu(submenu, QPoint(30, 30))
+        self.menu.popup(QPoint(30, 30))
+        submenu.popup(QPoint(30 + self.menu.width(), 30))
+        self.app.processEvents()
+        search = submenu.search_box
+        QTest.keyClicks(submenu, 'xyz')
+        self.assertEqual(search.text(), 'xyz')
+        self.assertTrue(submenu.isVisible())
+        QTest.keyClick(search, Qt.Key.Key_Return)
+        self.w._execute_commands.assert_not_called()
+        self.assertTrue(submenu.isVisible())
+        search.setText('二号')
+        self.assertEqual(submenu.command_list.item(0).text(), '二号')
+        search.clear()
+        QTest.keyClicks(search, 'GIT')
+        listing = submenu.command_list
+        self.assertEqual([listing.item(i).text() for i in range(listing.count())], ['二号', 'One'])
+        QTest.keyClick(search, Qt.Key.Key_Down)
+        QTest.keyClick(search, Qt.Key.Key_Return)
+        self.w._execute_commands.assert_called_once_with(['git status'])
+        self.assertFalse(submenu.isVisible())
+
+    def test_context_menu_defers_presets_and_releases_actions(self):
+        source = Mock(return_value=[{'name': 'Local', 'commands': ['echo local']}])
+        self.w.local_quick_commands_provider = source
+        self.w.quick_commands_provider = lambda: [{'name': 'Global', 'commands': ['echo global']}]
+        self.w.show()
+        self.w.activateWindow()
+        self.assertTrue(QTest.qWaitForWindowActive(self.w))
+        before = len(self.w.findChildren(QAction))
+        event = QContextMenuEvent(QContextMenuEvent.Reason.Mouse, QPoint(10, 10))
+
+        def exercise(menu, pos):
+            menus = [a.menu() for a in menu.actions() if isinstance(a.menu(), _QuickCommandMenu)]
+            global_menu, local_menu = menus
+            self.assertIsNone(global_menu.command_list)
+            self.assertIsNone(local_menu.command_list)
+            menu.popup(pos)
+            for _ in range(2):
+                local_menu.popup(pos + QPoint(menu.width(), 0))
+                self.app.processEvents()
+                self.assertEqual(local_menu.command_list.count(), 1)
+                self.assertEqual(local_menu.command_list.item(0).text(), 'Local')
+                local_menu.hide()
+            self.assertIsNone(global_menu.command_list)
+            global_menu.popup(pos + QPoint(menu.width(), 0))
+            self.app.processEvents()
+            QTest.keyClicks(global_menu.search_box, 'global')
+            QTest.keyClick(global_menu.search_box, Qt.Key.Key_Return)
+            self.w._execute_commands.assert_called_with(['echo global'])
+            self.assertFalse(menu.isVisible())
+
+        with patch.object(QMenu, 'exec', exercise):
+            for _ in range(3):
+                self.w.contextMenuEvent(event)
+                self.app.sendPostedEvents(None, QEvent.Type.DeferredDelete)
+                self.assertEqual(len(self.w.findChildren(QAction)), before)
+        self.assertEqual(source.call_count, 3)
+        self.assertEqual(self.w._execute_commands.call_count, 3)
 
     def test_long_submenu_scrolls_inside_popup_and_runs_last_preset(self):
         long_name = 'Long command 中文 & ' * 20
