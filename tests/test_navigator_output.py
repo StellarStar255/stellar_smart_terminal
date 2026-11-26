@@ -53,6 +53,7 @@ def panels(tmp_path, monkeypatch):
             nav.show()
             nav._force_refresh()
         _APP.processEvents()
+        floating.select_window(second)
         try:
             yield first, second, floating, embedded
         finally:
@@ -227,6 +228,7 @@ def test_pulse_stops_when_only_edge_of_active_row_is_visible(panels):
     listing.setFixedHeight(listing.sizeHintForRow(0) + 2 * listing.frameWidth())
     _APP.processEvents()
     active = next(w for w in (first, second) if row(nav, w) is listing.item(0))
+    nav.select_window(second if active is first else first)
     active.terminal._process_output_text('working')
     rect = listing.visualItemRect(row(nav, active))
     listing.verticalScrollBar().setValue(listing.verticalScrollBar().value() + rect.bottom() - 1)
@@ -255,7 +257,8 @@ def test_background_navigator_tracks_new_output_without_animating(panels, embedd
     wait_for(lambda: bool(row(nav, source).data(NAV_OUTPUT_ROLE)))
     QTest.qWait(200)
     assert len(ticks) == 0
-    assert other.window_list._pulse_timer.isActive()
+    # Minimizing the host can bring the output-producing window to the front.
+    assert other.window_list._pulse_timer.isActive() == (other.window_list.viewed_window_id != id(source))
     assert not nav.window_list._pulse_timer.isActive()
     restore()
     wait_for(nav.window_list._pulse_timer.isActive)
@@ -324,3 +327,33 @@ def test_queued_terminal_alerts_are_discarded_when_window_closes(panels):
         _APP.sendPostedEvents(None, QEvent.Type.DeferredDelete)
         _APP.processEvents()
         sound.assert_not_called()
+
+
+def test_viewed_window_suppresses_only_output_marker(panels):
+    first, second, floating, embedded = panels
+    _APP.setActiveWindow(first)
+    def marker_color():
+        listing = floating.window_list
+        rect = listing.visualItemRect(row(floating, first))
+        image = listing.viewport().grab().toImage()
+        x = min(rect.right(), listing.viewport().rect().right()) - 14
+        ratio = image.devicePixelRatio()
+        return image.pixelColor(int(x * ratio), int(rect.center().y() * ratio))
+
+    idle_color = marker_color()
+    first.terminal._process_output_text('working')
+    assert marker_color() == idle_color
+    assert not floating.window_list._pulse_timer.isActive()
+    assert embedded.window_list._pulse_timer.isActive()
+    with patch('main_window.play_notify_sound'):
+        first._request_nav_attention(first.terminal)
+    assert marker_color() == QColor('#2ecc71')
+    first._clear_nav_attention()
+    _APP.setActiveWindow(second)
+    assert floating.window_list._pulse_timer.isActive()
+    first.terminal.stop_process()
+    second.terminal._process_output_text('still working')
+    assert not floating.window_list._pulse_timer.isActive()
+    assert not embedded.window_list._pulse_timer.isActive()
+    floating.select_window(first)
+    assert floating.window_list._pulse_timer.isActive()

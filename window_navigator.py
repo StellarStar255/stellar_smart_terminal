@@ -65,6 +65,11 @@ def _window_list_info(windows):
     return [(id(w), w.windowTitle(), w.get_window_color(), _window_screen_key(w)) for w in windows]
 
 
+def _shows_output_marker(item, viewed_window_id):
+    return (item.data(NAV_OUTPUT_ROLE) and not item.data(NAV_ATTENTION_ROLE)
+            and item.data(Qt.ItemDataRole.UserRole) != viewed_window_id)
+
+
 class NavListWidget(QListWidget):
     """窗口列表：拖拽由本控件自己跑，不走系统原生拖放（QDrag）。
 
@@ -89,6 +94,7 @@ class NavListWidget(QListWidget):
         self.ghost_theme = None   # 面板 _apply_style 灌入当前主题，拖影卡片按它配色
         self.thumbnail_provider = None  # wid → QPixmap：拖影里显示的窗口缩略图（面板提供）
 
+        self.viewed_window_id = None
         self.output_color = QColor('#a6b9d2')
         self._pulse_window = None
         self._pulse_region = QRegion()
@@ -102,7 +108,7 @@ class NavListWidget(QListWidget):
             viewport = self.viewport().rect()
             for row in range(self.count()):
                 item = self.item(row)
-                if item.isHidden() or not item.data(NAV_OUTPUT_ROLE) or item.data(NAV_ATTENTION_ROLE):
+                if item.isHidden() or not _shows_output_marker(item, self.viewed_window_id):
                     continue
                 rect = self.visualItemRect(item)
                 if rect.intersects(viewport):
@@ -272,8 +278,7 @@ class NoHighlightDelegate(QStyledItemDelegate):
         opt.state = opt.state & ~QStyle.StateFlag.State_HasFocus
 
         attention = index.data(NAV_ATTENTION_ROLE)
-        active = index.data(NAV_OUTPUT_ROLE)
-        if not (attention or active):
+        if not attention and not _shows_output_marker(index, getattr(option.widget, 'viewed_window_id', None)):
             super().paint(painter, opt, index)
             return
 
@@ -341,6 +346,9 @@ class WindowNavigatorPanel(QWidget):
 
         self._theme = dict(_FALLBACK_THEME)
         self._setup_ui()
+        viewed = pin_to if pin_to is not None else QApplication.activeWindow()
+        if isinstance(viewed, main_window.MainWindow):
+            self.window_list.viewed_window_id = id(viewed)
         self._apply_style()
         self._load_navigator_config()
 
@@ -1529,6 +1537,10 @@ class WindowNavigatorPanel(QWidget):
         target_id = id(window) if window is not None else None
         if target_id is None:
             return
+        if self.window_list.viewed_window_id != target_id:
+            self.window_list.viewed_window_id = target_id
+            self.window_list.sync_pulse()
+            self.window_list.viewport().update()
         for i in range(self.window_list.count()):
             item = self.window_list.item(i)
             if item and item.data(Qt.ItemDataRole.UserRole) == target_id:
