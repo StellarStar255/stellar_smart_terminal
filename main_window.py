@@ -1325,12 +1325,14 @@ class MainWindow(ThemeMixin, ToolbarMixin, ConfigMixin, ExplorerPanelMixin,
         backend = terminal._backend
         was_starting = terminal.is_starting()
         was_live = was_starting or terminal.is_running()
+        foreground = self._quick_command_foreground_group(backend)
 
         def is_current():
             return (terminal is self._quick_command_terminal()
                     and terminal._process_start_token is session
                     and (terminal._backend is backend or (was_starting and backend is None))
-                    and (not was_live or terminal.is_starting() or terminal.is_running()))
+                    and (not was_live or terminal.is_starting() or terminal.is_running())
+                    and (foreground is None or foreground == self._quick_command_foreground_group(backend)))
         return is_current
 
     def _quick_command_entry(self, terminal, preset, cwd, group, target_is_current):
@@ -1353,14 +1355,16 @@ class MainWindow(ThemeMixin, ToolbarMixin, ConfigMixin, ExplorerPanelMixin,
             return False
 
         def run():
-            if is_current():
-                terminal.setFocus()
-                terminal._execute_commands(displayed)
+            if not is_current() or terminal._defer_native_paste_input(run):
+                return
+            terminal.setFocus()
+            terminal._execute_commands(displayed)
 
         return Command(title=title, run=run, group=group, search_text="\n".join(displayed),
                        insert=lambda: self._insert_palette_preset(terminal, displayed, is_current),
                        edit=lambda: self._edit_palette_preset(preset, cwd),
-                       target=lambda: self._quick_command_target_label(terminal))
+                       target=lambda: (self._quick_command_target_label(terminal) if target_is_current()
+                                       else t("palette.selection_changed")))
 
     def _palette_preset_row(self, preset, cwd):
         if cwd is not None and cwd != self._window_cwd:
@@ -1386,11 +1390,17 @@ class MainWindow(ThemeMixin, ToolbarMixin, ConfigMixin, ExplorerPanelMixin,
         if len(lines) > 1:
             line, accepted = QInputDialog.getItem(
                 self, t("palette.insert_command"), t("palette.choose_command_line"), lines, 0, False)
-            if not accepted or not is_current():
+            if not accepted:
                 return
-        terminal.setFocus()
-        if not terminal.insert_command_line(line):
-            self.statusbar.showMessage(t("palette.insert_failed"), 4000)
+
+        def insert():
+            if not is_current() or terminal._defer_native_paste_input(insert):
+                return
+            terminal.setFocus()
+            if not terminal.insert_command_line(line):
+                self.statusbar.showMessage(t("palette.insert_failed"), 4000)
+
+        insert()
 
     def _edit_palette_preset(self, preset, cwd):
         row = self._palette_preset_row(preset, cwd)
@@ -1420,7 +1430,7 @@ class MainWindow(ThemeMixin, ToolbarMixin, ConfigMixin, ExplorerPanelMixin,
     @staticmethod
     def _quick_command_foreground_group(backend):
         fd = getattr(backend, "_master_fd", None)
-        if fd is not None and hasattr(os, "tcgetpgrp"):
+        if isinstance(fd, int) and fd >= 0 and hasattr(os, "tcgetpgrp"):
             try:
                 group = os.tcgetpgrp(fd)
                 return group if group > 0 else None
@@ -1436,8 +1446,18 @@ class MainWindow(ThemeMixin, ToolbarMixin, ConfigMixin, ExplorerPanelMixin,
         backend = getattr(terminal, "_backend", None)
         pid = getattr(backend, "_child_pid", None)
         foreground = self._quick_command_foreground_group(backend)
+        timer = getattr(self, "_quick_command_host_timer", None)
         if not pid or foreground is None:
+            self._quick_command_probe_target = None
+            if timer is not None:
+                timer.stop()
             return
+        self._quick_command_probe_target = (terminal, backend, foreground)
+        if timer is None:
+            timer = self._quick_command_host_timer = QTimer(self)
+            timer.setInterval(300)
+            timer.timeout.connect(self._refresh_quick_command_host)
+        timer.start()
 
         hosts = self._known_remote_hosts()
         preferred = getattr(terminal, "_ssh_host_config", None)
@@ -1472,23 +1492,17 @@ class MainWindow(ThemeMixin, ToolbarMixin, ConfigMixin, ExplorerPanelMixin,
                 and foreground == self._quick_command_foreground_group(backend)):
             self._quick_command_host = (terminal, backend, foreground, host)
             self.command_palette.refresh_current_details()
-            timer = getattr(self, "_quick_command_host_timer", None)
-            if timer is None:
-                timer = self._quick_command_host_timer = QTimer(self)
-                timer.setInterval(300)
-                timer.timeout.connect(self._refresh_quick_command_host)
-            timer.start()
 
     def _refresh_quick_command_host(self):
-        host = self._quick_command_host
-        if self.command_palette.popup.isVisible() and host is not None:
-            terminal, backend, foreground, _ = host
-            if (terminal is self._quick_command_terminal() and terminal._backend is backend
-                    and foreground == self._quick_command_foreground_group(backend)):
-                return
-            self._quick_command_host = None
-            self.command_palette.refresh_current_details()
-        self._quick_command_host_timer.stop()
+        if not self.command_palette.popup.isVisible():
+            self._quick_command_probe_target = self._quick_command_host = None
+            self._quick_command_host_timer.stop()
+            return
+        terminal = self._quick_command_terminal()
+        backend = getattr(terminal, "_backend", None)
+        foreground = self._quick_command_foreground_group(backend)
+        if (terminal, backend, foreground) != self._quick_command_probe_target:
+            self._probe_quick_command_host()
 
     # 下拉框最多显示多少条历史目录。完整历史不受影响（仍存盘、仍可在
     # 「History」对话框里管理）——只是限制弹窗里的条目数，避免历史越攒越多
@@ -3168,9 +3182,10 @@ class MainWindow(ThemeMixin, ToolbarMixin, ConfigMixin, ExplorerPanelMixin,
                 return
             if not terminal.is_running():
                 return
+            if terminal._defer_native_paste_input(send_next):
+                return
             cmd = commands.pop(0)
-            terminal.send_text(cmd + '\r')
-            if commands:
+            if terminal._send_text_now(cmd + '\r') and commands:
                 QTimer.singleShot(300, send_next)
 
         # 延迟 500ms 等待 shell 初始化

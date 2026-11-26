@@ -506,12 +506,13 @@ def test_preset_commands_wait_for_start_and_stay_with_their_session(app, complet
     terminal = SimpleNamespace(
         _process_start_token=object(),
         is_starting=lambda: state['starting'],
-        is_running=lambda: not state['starting'], send_text=Mock())
+        is_running=lambda: not state['starting'], _defer_native_paste_input=lambda callback: False,
+        _send_text_now=Mock(return_value=True))
     callbacks = []
     with patch('main_window.QTimer.singleShot', side_effect=lambda delay, cb: callbacks.append(cb)):
         MainWindow._send_commands_to_terminal(None, terminal, ['preset command'])
         callbacks.pop(0)()
-        terminal.send_text.assert_not_called()
+        terminal._send_text_now.assert_not_called()
         assert len(callbacks) == 1
         state['starting'] = False
         if completion == 'stopped':
@@ -520,9 +521,9 @@ def test_preset_commands_wait_for_start_and_stay_with_their_session(app, complet
             terminal._process_start_token = object()
         callbacks.pop(0)()
     if completion == 'ready':
-        terminal.send_text.assert_called_once_with('preset command\r')
+        terminal._send_text_now.assert_called_once_with('preset command\r')
     else:
-        terminal.send_text.assert_not_called()
+        terminal._send_text_now.assert_not_called()
 
 
 @pytest.mark.parametrize('action', ['ready', 'stop', 'replace'])

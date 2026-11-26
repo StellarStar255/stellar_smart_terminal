@@ -4,8 +4,12 @@
 纯方法搬迁，行为不变；_open_ssh_in_new_window 构造新窗口/进程级窗口
 计数经 host_class(self) 落到 MainWindow。分屏布局管道方法留在主类。
 """
+import getopt
 import os
+import shlex
+import sys
 import posixpath
+import re
 from concurrent.futures import ThreadPoolExecutor
 from PyQt6 import sip
 from PyQt6.QtCore import QTimer, Qt, QObject, pyqtSignal
@@ -19,6 +23,36 @@ from app_logging import get_logger
 from window_host import host_class
 
 logger = get_logger(__name__)
+
+
+def _ssh_process_args(pid):
+    """Recover argument boundaries that ps removes from options like ProxyCommand."""
+    try:
+        if sys.platform.startswith("linux"):
+            with open(f"/proc/{pid}/cmdline", "rb") as stream:
+                argv = stream.read().rstrip(b"\0").split(b"\0")
+        elif sys.platform == "darwin":
+            import ctypes
+            # Darwin KERN_PROCARGS2 returns argc, the executable path, padding,
+            # argv and the environment. Only decode the counted arguments.
+            size = ctypes.c_size_t(os.sysconf("SC_ARG_MAX"))
+            buffer = ctypes.create_string_buffer(size.value)
+            mib = (ctypes.c_int * 3)(1, 49, pid)
+            if ctypes.CDLL(None).sysctl(mib, 3, buffer, ctypes.byref(size), None, 0):
+                return None
+            raw = buffer.raw[:size.value]
+            count = int.from_bytes(raw[:4], sys.byteorder, signed=True)
+            if count <= 0:
+                return None
+            start = raw.index(b"\0", 4)
+            argv = raw[start:].lstrip(b"\0").split(b"\0", count)[:count]
+        else:
+            return None
+        if not argv or os.path.basename(argv[0]) != b"ssh":
+            return None
+        return shlex.join(os.fsdecode(arg) for arg in argv)
+    except (OSError, ValueError):
+        return None
 
 
 class _PasteProbeRelay(QObject):
@@ -251,11 +285,11 @@ class RemotePanelMixin:
 
     @staticmethod
     def _list_processes():
-        """[(pid, ppid, args)]，一次 ps 拿全表。拿不到返回 []。"""
+        """Read the process tree. Fetch full arguments only for the selected SSH client."""
         import subprocess
         try:
-            out = subprocess.run(['ps', '-axo', 'pid=,ppid=,args='],
-                                 capture_output=True, text=True, timeout=3).stdout
+            out = subprocess.run(['ps', '-axo', 'pid=,ppid=,comm='],
+                                 capture_output=True, text=True, errors='replace', timeout=3).stdout
         except Exception:
             return []
         rows = []
@@ -290,7 +324,7 @@ class RemotePanelMixin:
 
         for pid, ppid, args in rows:
             if foreground_group is not None and pid == shell_pid and is_ssh(pid, args):
-                return args  # The shell may have exec'd ssh directly.
+                return args if processes is not None else _ssh_process_args(pid)
             children.setdefault(ppid, []).append((pid, args))
         if foreground_group == shell_pid:
             return None  # The shell owns the prompt; descendants can be background jobs.
@@ -303,7 +337,7 @@ class RemotePanelMixin:
             seen.add(cur)
             for pid, args in children.get(cur, []):
                 if is_ssh(pid, args):
-                    return args
+                    return args if processes is not None else _ssh_process_args(pid)
                 stack.append(pid)
         return None
 
@@ -315,30 +349,62 @@ class RemotePanelMixin:
 
     @staticmethod
     def _match_host_for_ssh_args(args, hosts, preferred=None):
-        """把 ssh 命令行对到已知主机：ControlPath 精确对上 > user@hostname 整词 >
-        别名整词 > hostname 整词；preferred（标签打开时记的主机）优先验证。"""
-        import ssh_control
-        tokens = args.split()
+        """Match OpenSSH client options and destination, ignoring the remote command."""
+        # OpenSSH accepts client options on either side of the destination,
+        # but stops interpreting options once the remote command begins.
+        options = "46AaCfGgKkMNnqsTtVvXxYyB:b:c:D:E:e:F:I:i:J:L:l:m:O:o:p:P:Q:R:S:W:w:"
+        try:
+            tokens = shlex.split(args)
+            if not tokens or os.path.basename(tokens[0]) != "ssh":
+                return None
+            before, rest = getopt.getopt(tokens[1:], options)
+            if not rest:
+                return None
+            destination = rest[0]
+            after, _ = getopt.getopt(rest[1:], options)
+            user, _, name = destination.rpartition("@")
+            port = None
+            if destination.startswith("ssh://"):
+                from urllib.parse import urlsplit, unquote
+                uri = urlsplit(destination)
+                name, user, port = uri.hostname, unquote(uri.username or ""), uri.port
+        except (ValueError, getopt.GetoptError):
+            return None
+
+        settings = {}
+        identity = ([("-l", user)] if user else []) + ([("-p", str(port))] if port else [])
+        for key, value in before + identity + after:
+            if key == "-o":
+                pair = re.split(r"\s*=\s*|\s+", value.strip(), maxsplit=1)
+                if len(pair) == 2:
+                    settings.setdefault(pair[0].lower(), pair[1])
+            elif key == "-S":
+                settings["controlpath"] = value
+            elif key in ("-p", "-l"):
+                settings.setdefault("port" if key == "-p" else "user", value)
+
         ordered = ([preferred] if preferred is not None else []) + [
-            h for h in hosts if h is not preferred]
-        for h in ordered:
-            try:
-                ctl = ssh_control.control_path_for(h)
-            except Exception:
-                ctl = ""
-            if ctl and any(tok.endswith(f"ControlPath={ctl}") for tok in tokens):
-                return h
-        for h in ordered:
-            target = f"{h.user}@{h.hostname}" if h.user else h.hostname
-            if target in tokens:
-                return h
-        for h in ordered:
-            if h.alias in tokens:
-                return h
-        for h in ordered:
-            if h.hostname and h.hostname in tokens:
-                return h
-        return None
+            h for h in hosts if h != preferred]
+        ctl = settings.get("controlpath")
+        if ctl:
+            import ssh_control
+            for host in ordered:
+                if ctl == ssh_control.control_path_for(host):
+                    return host
+
+        user = settings.get("user")
+        try:
+            port = int(settings["port"]) if "port" in settings else None
+        except ValueError:
+            return None
+        candidates = [h for h in ordered if (not user or h.user == user)
+                      and (port is None or h.port == port)
+                      and ("hostname" not in settings or h.hostname == settings["hostname"])]
+        for host in candidates:
+            if host.alias == name:
+                return host
+        matches = [h for h in candidates if h.hostname == name]
+        return matches[0] if len(matches) == 1 else None
 
     def _ssh_host_for_terminal(self, term):
         """term 里此刻正跑着的 ssh 连的是哪台已知主机；不在 ssh 里返回 None。

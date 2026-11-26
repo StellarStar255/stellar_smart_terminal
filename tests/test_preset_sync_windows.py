@@ -307,6 +307,112 @@ class PresetSyncAcrossWindowsTest(unittest.TestCase):
             self.assertNotIn('SSH training', palette.target_label.text())
             palette._clear_and_hide()
 
+    def test_ssh_selection_cannot_run_or_insert_into_local_shell(self):
+        window = self.windows[0]
+        term = window.terminal
+        window.presets = [{'name': 'Remote command', 'commands': ['echo target']}]
+        backend = SimpleNamespace(is_running=True)
+        with patch.object(term, '_backend', backend), \
+                patch.object(window, '_quick_command_foreground_group', return_value=42) as group, \
+                patch.object(term, '_execute_commands') as execute, \
+                patch.object(term, 'insert_command_line') as insert:
+            remote, = window.command_palette._rank('echo target')
+            group.return_value = 21
+            remote.run()
+            remote.insert()
+            execute.assert_not_called()
+            insert.assert_not_called()
+            local, = window.command_palette._rank('echo target')
+            local.run()
+            execute.assert_called_once_with(['echo target'])
+
+    def test_deferred_palette_input_rechecks_foreground_at_delivery(self):
+        window = self.windows[0]
+        term = window.terminal
+        window.presets = [{'name': 'Remote', 'commands': ['echo target']}]
+        queued = []
+
+        def defer(callback):
+            queued.append(callback)
+            return True
+
+        with patch.object(term, '_backend', SimpleNamespace(is_running=True)), \
+                patch.object(window, '_quick_command_foreground_group', return_value=42) as group, \
+                patch.object(term, '_execute_commands') as execute, \
+                patch.object(term, 'insert_command_line') as insert:
+            remote, = window.command_palette._rank('echo target')
+            with patch.object(term, '_defer_native_paste_input', side_effect=defer):
+                remote.run()
+                remote.insert()
+            self.assertEqual(len(queued), 2)
+            group.return_value = 21
+            for callback in queued:
+                callback()
+            execute.assert_not_called()
+            insert.assert_not_called()
+
+    @unittest.skipUnless(hasattr(os, 'tcgetpgrp'), 'requires POSIX PTY job control')
+    def test_real_ssh_foreground_exit_does_not_send_selection_to_shell(self):
+        import shutil
+        import time
+        from pathlib import Path
+        from PyQt6.QtCore import Qt
+        from PyQt6.QtTest import QTest
+        from ssh_session import HostConfig
+        from i18n import t
+
+        if not shutil.which('ssh'):
+            self.skipTest('requires the OpenSSH client')
+        window = self.windows[0]
+        window.activateWindow()
+        term = window.terminal
+        term.setFocus()
+        self.app.processEvents()
+        palette = window.command_palette
+        window.presets = [{'name': 'RemoteOnly', 'commands': ['echo stale >> received']},
+                          {'name': 'LocalOnly', 'commands': ['echo fresh >> received']}]
+        host = HostConfig(alias='test-ssh', hostname='palette-test.invalid', user='test')
+        decoy = HostConfig(alias='jump', hostname='gateway.invalid', user='ops')
+
+        def wait_for(check):
+            deadline = time.monotonic() + 5
+            while not check() and time.monotonic() < deadline:
+                QTest.qWait(20)
+            self.assertTrue(check(), '\n'.join(term.screen.display))
+
+        with TemporaryDirectory() as project, patch.object(window, '_known_remote_hosts', return_value=[decoy, host]):
+            try:
+                term.start_process(['/bin/sh', '-i'], cwd=project)
+                backend = term._backend
+
+                def group():
+                    return window._quick_command_foreground_group(backend)
+
+                wait_for(lambda: group() == backend._child_pid)
+                palette.focus_search()
+                palette.line_edit.setText('RemoteOnly')
+                # The local proxy holds the transport open until SSH is interrupted.
+                # No network service, credentials or user SSH config are needed.
+                term.send_text("ssh -F /dev/null -o 'ProxyCommand=sleep 10' test@palette-test.invalid echo ops@gateway.invalid\r")
+                wait_for(lambda: group() not in (None, backend._child_pid))
+                wait_for(lambda: getattr(window, '_quick_command_host', None) is not None)
+                palette.line_edit.setText('RemoteOn')
+                self.assertIn('SSH test-ssh', palette.target_label.text())
+                term.send_text('\x03')
+                wait_for(lambda: group() == backend._child_pid)
+                wait_for(lambda: palette.target_label.text() == t('palette.selection_changed'))
+                QTest.keyClick(palette.line_edit, Qt.Key.Key_Return)
+                self.assertEqual(window.statusbar.currentMessage(), t('palette.selection_changed'))
+                palette.focus_search()
+                palette.line_edit.setText('LocalOnly')
+                QTest.keyClick(palette.line_edit, Qt.Key.Key_Return)
+                received = Path(project) / 'received'
+                wait_for(lambda: received.exists() and 'fresh' in received.read_text())
+                self.assertEqual(received.read_text().splitlines(), ['fresh'])
+            finally:
+                palette._clear_and_hide()
+                term.stop_process()
+
     def test_palette_edit_selects_exact_local_preset_and_saves_it(self):
         from PyQt6.QtWidgets import QDialog
         from dialogs import PresetDialog

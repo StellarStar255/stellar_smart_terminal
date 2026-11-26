@@ -2796,18 +2796,26 @@ class TerminalWidget(TerminalInputMixin, TerminalMouseMixin,
         if self._cleaned_up or not commands:
             return
         commands = list(commands)
-        if self._defer_native_paste_input(lambda: self._execute_commands(commands)):
-            return
-        if not self.is_running():
-            self._start_and_execute(commands)
-            return
-        for cmd in commands:
-            # 发送命令并加回车（终端中 Enter 键发送 \r 而非 \n）
-            data = (cmd + '\r').encode('utf-8')
-            if self._write_to_backend(data):
-                # 记录输入
+        backend = self._backend
+        session = self._process_start_token
+        was_running = self.is_running()
+
+        def deliver():
+            if self._cleaned_up or self._process_start_token is not session or self._backend is not backend:
+                return
+            if not was_running:
+                self._start_and_execute(commands)
+                return
+            for cmd in commands:
+                if self._backend is not backend or self._process_start_token is not session:
+                    return
+                if not self._write_to_backend((cmd + '\r').encode('utf-8')):
+                    return
                 if cmd.strip():
                     self.input_recorded.emit(cmd)
+
+        if not self._defer_native_paste_input(deliver):
+            deliver()
 
     def _start_and_execute(self, commands: list):
         """启动终端并执行命令"""

@@ -667,11 +667,15 @@ class TerminalInputMixin:
             return
         elif self._defer_native_paste_input(lambda: self.send_text(text)):
             return
+        self._send_text_now(text)
+
+    def _send_text_now(self, text: str) -> bool:
+        """Write after deferred input has drained and report writer admission."""
         try:
             data = text.encode('utf-8')
             if not self._write_to_backend(data):
                 self._cancel_clipboard_probes()
-                return
+                return False
 
             # 如果文本以换行结尾，说明是提交命令
             if text.endswith(('\r', '\n')):
@@ -685,8 +689,10 @@ class TerminalInputMixin:
             else:
                 # 不是提交，只是追加到缓冲区
                 self.input_buffer += text
+            return True
         except Exception as e:
             logger.warning(f"Send text error: {e}")
+            return False
 
     def _paste_from_clipboard(self):
         """从剪贴板粘贴（支持文本、图片和音频文件）

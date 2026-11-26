@@ -164,6 +164,16 @@ class TestRemotePasteUpload(unittest.TestCase):
         self.assertEqual(len(typed), 1)
         self.assertEqual(shlex.split(typed[0].decode()), [self.local])
 
+    def test_unknown_destination_with_known_remote_argument_uses_local_path(self):
+        term, typed, _ = self._terminal()
+        session = _FakeSession('gpu13')
+        self.win.remote_panel = _FakePanel(session, '/data/proj')
+        self.win._ssh_args_under = lambda pid: 'ssh unknown-host echo gpu13'
+        term._deliver_media_path(self.local)
+        self.assertTrue(self._wait(lambda: typed))
+        self.assertEqual(shlex.split(typed[0].decode()), [self.local])
+        self.assertFalse(session.calls)
+
     def test_process_scan_runs_off_gui_thread(self):
         """识别 ssh 要起一次 ps（最坏 3 秒）：不能卡在 GUI 线程里。"""
         term, typed, pasted = self._terminal()
@@ -215,6 +225,47 @@ class TestSshDetection(unittest.TestCase):
         self.assertIs(M._match_host_for_ssh_args("ssh -p 22 192.168.1.9", [a, b, c]), c)
         self.assertIsNone(M._match_host_for_ssh_args("ssh nowhere", [a, b, c]))
 
+
+    def test_only_destination_and_real_control_options_select_a_host(self):
+        import ssh_control
+
+        match = self.mw.MainWindow._match_host_for_ssh_args
+        jump = HostConfig(alias="gateway", hostname="jump.example", user="ops")
+        target = HostConfig(alias="worker", hostname="worker.example", user="runner")
+        hosts = [jump, target]
+        socket = ssh_control.control_path_for(jump)
+        for command, expected in [
+            ("ssh -J gateway worker", target),
+            ("ssh -ttJgateway worker echo ops@jump.example", target),
+            ("ssh -F gateway unknown echo worker", None),
+            ("ssh unknown echo gateway", None),
+            (f"ssh worker echo ControlPath={socket}", target),
+            (f"ssh worker -S {socket}", jump),
+            ("ssh -o 'ProxyCommand=ssh gateway -W %h:%p' worker", target),
+            ("ssh runner@worker echo ops@jump.example", target),
+        ]:
+            with self.subTest(command=command):
+                self.assertIs(match(command, hosts, preferred=jump), expected)
+
+    def test_explicit_user_and_port_disambiguate_shared_hostname(self):
+        match = self.mw.MainWindow._match_host_for_ssh_args
+        a = HostConfig(alias='prod', hostname='node.example', user='alice', port=22)
+        b = HostConfig(alias='lab', hostname='node.example', user='bob', port=2202)
+        # Windows and tabs may retain distinct copies of the same saved profile.
+        from dataclasses import replace
+        saved_copy = replace(b)
+        self.assertIs(match('ssh bob@node.example', [a, b], preferred=saved_copy), saved_copy)
+        for args, expected in [
+            ('ssh node.example', None),
+            ('ssh -l bob -p2202 node.example', b),
+            ('ssh -o "User bob" -oPort=2202 node.example', b),
+            ('ssh ssh://bob@node.example:2202 -p 22', b),
+            ('ssh bob@node.example -l alice', b),
+            ('ssh -p 22 bob@node.example', None),
+            ('ssh -oHostName=other.example prod', None),
+        ]:
+            with self.subTest(args=args):
+                self.assertIs(match(args, [a, b], preferred=a), expected)
 
 if __name__ == '__main__':
     unittest.main()

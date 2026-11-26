@@ -219,6 +219,82 @@ def test_preset_command_waits_for_pending_paste(terminal):
     assert written == [b'prefix ', b'next\r']
 
 
+def test_quick_command_remainder_does_not_follow_session_replacement(terminal):
+    widget, written = terminal
+    widget._backend.is_running = True
+    new_write = Mock(return_value=True)
+    widget.input_recorded.connect(lambda _: setattr(
+        widget, '_backend', SimpleNamespace(is_running=True, write=new_write)))
+    widget._execute_commands(['first', 'second'])
+    assert written == [b'first\r']
+    new_write.assert_not_called()
+
+
+def test_queued_quick_command_does_not_restart_exited_process(terminal):
+    widget, written = terminal
+    widget._backend.is_running = True
+    with slow_probe(.1), patch.object(widget, 'start_process') as start:
+        widget._paste_from_clipboard_macos(SimpleNamespace(text=lambda: ''))
+        widget._execute_commands(['next'])
+        widget._backend.is_running = False
+        pump_until(lambda: widget._native_paste_process is None)
+        start.assert_not_called()
+    assert not written
+
+
+@pytest.mark.skipif(os.name == 'nt', reason='Real Unix PTY')
+def test_writer_rejection_stops_remaining_quick_commands(terminal, tmp_path, monkeypatch):
+    from terminal_writer import TerminalWriter
+    widget, _ = terminal
+    widget._backend = None
+    received = tmp_path / 'received'
+    program = ("import sys\nwith open('received', 'w', buffering=1) as f:\n"
+               "    for line in sys.stdin: f.write(line)\n")
+    recorded = []
+    widget.input_recorded.connect(recorded.append)
+    try:
+        widget.start_process([sys.executable, '-u', '-c', program], cwd=str(tmp_path))
+        pump_until(received.exists)
+        monkeypatch.setattr(TerminalWriter, 'MAX_PENDING_BYTES', 256)
+        widget._execute_commands(['first', 'x' * 300, 'third'])
+        widget._execute_commands(['independent'])
+        pump_until(lambda: 'independent' in received.read_text())
+        assert received.read_text().splitlines() == ['first', 'independent']
+        assert recorded == ['first', 'independent']
+    finally:
+        widget.stop_process()
+
+
+def test_session_preset_stops_after_deferred_writer_rejection(terminal):
+    from main_window import MainWindow
+    widget, written = terminal
+    widget._backend.is_running = True
+    attempts = []
+
+    def write(data):
+        attempts.append(data)
+        if data == b'rejected\r':
+            return False
+        written.append(data)
+        return True
+
+    widget._backend.write = write
+    callbacks = []
+    # Drive the preset timers independently of the real clipboard probe.
+    with patch('main_window.QTimer') as timer:
+        timer.singleShot.side_effect = lambda delay, cb: callbacks.append(cb)
+        MainWindow._send_commands_to_terminal(None, widget, ['first', 'rejected', 'third'])
+        callbacks.pop(0)()
+        with slow_probe(.1):
+            widget._paste_from_clipboard_macos(SimpleNamespace(text=lambda: 'prefix '))
+            callbacks.pop(0)()
+            assert attempts == [b'first\r']
+            pump_until(lambda: widget._native_paste_process is None)
+        assert callbacks == []
+    assert attempts == [b'first\r', b'prefix ', b'rejected\r']
+    assert written == [b'first\r', b'prefix ']
+
+
 def test_synchronous_probe_start_failure_cannot_strand_later_input(terminal, monkeypatch):
     widget, written = terminal
     # 每步都让出事件循环，覆盖排队输入分批回放的情况。
