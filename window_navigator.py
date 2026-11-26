@@ -727,6 +727,8 @@ class WindowNavigatorPanel(QWidget):
                 background-color: {th['bg_light']};
             }}
         """)
+        self.window_list.doItemsLayout()
+        self.window_list.sync_pulse()
 
     def _extract_folder_name(self, title: str, window=None) -> str:
         """从窗口标题中提取文件夹名

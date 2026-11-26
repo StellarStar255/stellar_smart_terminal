@@ -20,6 +20,16 @@ from window_navigator import NAV_ATTENTION_ROLE, NAV_OUTPUT_ROLE, WindowNavigato
 _APP = None
 
 
+def start_output_process(terminal, program, cwd=None):
+    interpreter = sys.executable
+    if os.name == 'nt':
+        # The Windows venv launcher and pytest capture can redirect stdout.
+        # Exercise the attached pseudoconsole, as a console application would.
+        interpreter = sys._base_executable
+        program = "import sys\nsys.stdout = open('CONOUT$', 'w', buffering=1)\n" + program
+    terminal.start_process([interpreter, '-u', '-c', program], cwd=cwd)
+
+
 def wait_for(check):
     deadline = time.monotonic() + 5
     while not check() and time.monotonic() < deadline:
@@ -101,7 +111,7 @@ def test_real_output_pulses_then_settles_and_green_takes_priority(panels, tmp_pa
                "while not pathlib.Path('release').exists():\n"
                "    time.sleep(.25)\n    print('work',flush=True)\n"
                "time.sleep(10)")
-    terminal.start_process([sys.executable, '-u', '-c', program], cwd=str(tmp_path))
+    start_output_process(terminal, program, cwd=str(tmp_path))
     wait_for(lambda: bool(row(nav, first).data(NAV_OUTPUT_ROLE)))
     listing.scrollToItem(row(nav, first))
 
@@ -135,6 +145,7 @@ def test_real_output_pulses_then_settles_and_green_takes_priority(panels, tmp_pa
     assert not listing._pulse_timer.isActive()
     first._clear_nav_attention()
     wait_for(listing._pulse_timer.isActive)
+    wait_for(lambda: 'work' in '\n'.join(terminal.screen.display))
     release.touch()
     QTest.qWait(450)
     assert row(nav, first).data(NAV_OUTPUT_ROLE)
@@ -240,7 +251,7 @@ def test_background_navigator_tracks_new_output_without_animating(panels, embedd
     _APP.processEvents()
     ticks = QSignalSpy(nav.window_list._pulse_timer.timeout)
     program = "import time\nwhile True:\n print('working', flush=True)\n time.sleep(.05)"
-    source.terminal.start_process([sys.executable, '-u', '-c', program])
+    start_output_process(source.terminal, program)
     wait_for(lambda: bool(row(nav, source).data(NAV_OUTPUT_ROLE)))
     QTest.qWait(200)
     assert len(ticks) == 0

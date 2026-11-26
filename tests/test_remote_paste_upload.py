@@ -217,7 +217,7 @@ class TestSshDetection(unittest.TestCase):
         a = HostConfig(alias='gpu13', hostname='bastion.example', user='me@root@10.0.0.13')
         b = HostConfig(alias='gpu16', hostname='bastion.example', user='me@root@10.0.0.16')
         c = HostConfig(alias='lab', hostname='192.168.1.9', user='huang')
-        ctl = ssh_control.control_path_for(b)
+        ctl = shlex.quote(ssh_control.control_path_for(b))
         self.assertIs(M._match_host_for_ssh_args(
             f"ssh -o ControlMaster=no -o ControlPath={ctl} me@root@10.0.0.13@bastion.example", [a, b, c]), b)
         self.assertIs(M._match_host_for_ssh_args("ssh -tt me@root@10.0.0.13@bastion.example", [a, b, c]), a)
@@ -233,7 +233,7 @@ class TestSshDetection(unittest.TestCase):
         jump = HostConfig(alias="gateway", hostname="jump.example", user="ops")
         target = HostConfig(alias="worker", hostname="worker.example", user="runner")
         hosts = [jump, target]
-        socket = ssh_control.control_path_for(jump)
+        socket = shlex.quote(ssh_control.control_path_for(jump))
         for command, expected in [
             ("ssh -J gateway worker", target),
             ("ssh -ttJgateway worker echo ops@jump.example", target),
