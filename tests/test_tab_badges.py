@@ -119,6 +119,19 @@ class TestTabBadges(unittest.TestCase):
         self.assertFalse(bar._pulse_timer.isActive())
         self.term.set_output_marker_enabled(True)
 
+    def test_exit_keeps_selected_tab_unmarked_in_inactive_window(self):
+        from unittest.mock import patch
+        w = self.w
+        idx = w.tab_widget.currentIndex()
+        selected = w.tab_terminals[idx][0]
+        with patch.object(w, 'isActiveWindow', return_value=False):
+            w._on_tab_session_ended(selected)
+            self.assertTrue(w.tab_widget.tabIcon(idx).isNull())
+            w._on_tab_session_ended(self.term)
+            self.assertFalse(w.tab_widget.tabIcon(self.idx).isNull())
+        w.tab_widget.setCurrentIndex(self.idx)
+        self.assertTrue(w.tab_widget.tabIcon(self.idx).isNull())
+
     def test_icon_cache_reuse(self):
         w = self.w
         self.assertIs(w._tab_badge_icon('waiting'), w._tab_badge_icon('waiting'))

@@ -2119,13 +2119,7 @@ class TabSplitMixin:
                     if stopped_mark not in current_title:
                         self.tab_widget.setTabText(idx, f"{current_title} {stopped_mark}")
                     # 徽章：后台标签的会话结束 → 绿点提醒；正在看的 → 清点
-                    page = self.tab_widget.widget(idx)
-                    if page is not None:
-                        if idx != self.tab_widget.currentIndex() or not self.isActiveWindow():
-                            page._badge_pending = 'done'
-                        else:
-                            page._badge_pending = None
-                    self._refresh_tab_badge(idx)
+                    self._set_tab_pending_badge(terminal, 'done')
                 break
 
         # 如果是当前标签页，更新状态
