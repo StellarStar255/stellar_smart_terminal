@@ -114,7 +114,12 @@ class TestTabBadges(unittest.TestCase):
         w.tab_widget.setCurrentIndex(1)
         bar.grab()
         self.assertTrue(bar._pulse_timer.isActive())
-        self.term.set_output_marker_enabled(False)
+        bar.setUpdatesEnabled(False)
+        try:
+            self.term.set_output_marker_enabled(False)
+            self.assertFalse(bar._pulse_timer.isActive())
+        finally:
+            bar.setUpdatesEnabled(True)
         bar.grab()
         self.assertFalse(bar._pulse_timer.isActive())
         self.term.set_output_marker_enabled(True)

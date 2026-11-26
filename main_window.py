@@ -6611,7 +6611,7 @@ class MainWindow(ThemeMixin, ToolbarMixin, ConfigMixin, ExplorerPanelMixin,
             self._nav_output_terms.add(terminal)
         else:
             self._nav_output_terms.discard(terminal)
-        self.detachable_tab_bar.update()
+        self.detachable_tab_bar.output_changed(bool(self._nav_output_terms))
         if was_active != self.has_nav_output:
             self.navigator_output_changed.emit(self.has_nav_output)
 

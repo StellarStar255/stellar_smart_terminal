@@ -491,6 +491,11 @@ class DetachableTabBar(QTabBar):
         self._pulse_timer.setInterval(80)
         self._pulse_timer.timeout.connect(self._update_output_dots)
 
+    def output_changed(self, has_output):
+        if not has_output:
+            self._pulse_timer.stop()
+        self.update()
+
     def _update_output_dots(self):
         if not self.isVisible() or self.window().isMinimized():
             self._pulse_timer.stop()
