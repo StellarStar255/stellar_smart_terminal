@@ -2349,7 +2349,8 @@ class MainWindow(ThemeMixin, ToolbarMixin, ConfigMixin, ExplorerPanelMixin,
     def current_session(self, session):
         """设置当前标签页的会话"""
         idx = self.tab_widget.currentIndex()
-        self.tab_sessions[idx] = session
+        if idx >= 0:
+            self.tab_sessions[idx] = session
 
     def _reload_dir_history_from_config(self):
         """从配置文件重新加载目录历史（确保多窗口间同步）"""
@@ -3082,9 +3083,6 @@ class MainWindow(ThemeMixin, ToolbarMixin, ConfigMixin, ExplorerPanelMixin,
         Args:
             cwd: 可选的工作目录，如果不指定则使用窗口级别的工作目录
         """
-        if not self.terminal:
-            return
-
         # 防止重复点击：检查启动按钮是否被禁用
         if not self.start_btn.isEnabled():
             return
@@ -3092,18 +3090,15 @@ class MainWindow(ThemeMixin, ToolbarMixin, ConfigMixin, ExplorerPanelMixin,
         # 临时禁用启动按钮，防止重复点击
         self.start_btn.setEnabled(False)
 
-        # 如果当前tab有正在运行的会话，自动新建一个tab来启动
-        if self.terminal.is_running():
-            # 新建tab
-            self._add_new_tab()
-            # 此时 self.terminal 已经指向新tab的终端
-
         # 获取选中的预设
         preset_idx = self.preset_combo.currentIndex()
         if preset_idx < 0 or preset_idx >= len(self.presets):
             self._styled_message_box(QMessageBox.Icon.Warning, t("msg.hint"), t("msg.select_or_create_preset"))
             self.start_btn.setEnabled(True)  # 恢复按钮
             return
+
+        if self.terminal is None or self.terminal.is_running():
+            self._add_new_tab()
 
         preset = self.presets[preset_idx]
         default_shell = get_default_shell()
@@ -4937,7 +4932,7 @@ class MainWindow(ThemeMixin, ToolbarMixin, ConfigMixin, ExplorerPanelMixin,
                 logger.exception("failed to restore sidebar panel after update")
         # 标签页恢复（目录/自定义名，不自动起会话）。旧快照没有 tabs 键则跳过
         tabs = entry.get('tabs')
-        if isinstance(tabs, list) and tabs:
+        if isinstance(tabs, list):
             try:
                 self._restore_tabs_from_snapshot(tabs, entry.get('current_tab', 0))
             except Exception:
@@ -4950,6 +4945,9 @@ class MainWindow(ThemeMixin, ToolbarMixin, ConfigMixin, ExplorerPanelMixin,
         启动会话——避免重启后未经确认就批量拉起 claude/ssh。
         """
         if not tabs:
+            # Only discard the unused startup tab when restoring an empty window.
+            if self.tab_widget.count() == 1 and self.terminal and not self.terminal.has_started():
+                self._close_tab(0)
             return
         try:
             cur = int(current_idx)

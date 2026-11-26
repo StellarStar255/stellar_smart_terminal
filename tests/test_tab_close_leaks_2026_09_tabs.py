@@ -74,41 +74,34 @@ class _WindowCase(unittest.TestCase):
 
 
 # ---------------------------------------------------------------------------
-# 1. Cmd+W 关最后一个标签必须先过编辑器的保存提示
-# ---------------------------------------------------------------------------
-class TestCloseLastTabPromptsEditorSave(_WindowCase):
-    def _run_close(self, prompt_reply):
+class TestCloseLastTab(_WindowCase):
+    def test_empty_workspace_restores_and_start_opens_one_tab(self):
         win = self.win
+        win._apply_restored_window_state({})
         self.assertEqual(win.tab_widget.count(), 1)
-        closed = []
-        win.close = lambda: closed.append(True) or True
-        with mock.patch.object(self.mw.MainWindow, '_focus_in_editor_area',
-                               return_value=False), \
-             mock.patch.object(type(win.editor_area), 'prompt_save_all',
-                               return_value=prompt_reply) as prompt, \
-             mock.patch.object(type(win.editor_area), 'flush_autosave_all') as flush, \
+        win._apply_restored_window_state({'tabs': []})
+        self.assertEqual(win.tab_widget.count(), 0)
+        self.assertEqual(win.tab_sessions, {})
+        win.presets = [{'name': 'Test shell', 'commands': ['sh']}]
+        win.preset_combo.setCurrentIndex(0)
+        with mock.patch.object(self.TerminalWidget, 'start_process') as start:
+            win.start_btn.click()
+            start.assert_called_once()
+        self.assertEqual(win.tab_widget.count(), 1)
+        self.assertIs(win.active_terminal, win.tab_terminals[0][0])
+
+    def test_close_window_only_after_tabs_are_closed(self):
+        win = self.win
+        with mock.patch.object(win, '_focus_in_editor_area', return_value=False), \
+             mock.patch.object(win, 'close') as close, \
              mock.patch('main_window_tabs.QMessageBox.question',
                         return_value=QMessageBox.StandardButton.Yes):
             win._close_tab_or_window()
-        return prompt, flush, closed
-
-    def test_cancel_in_editor_prompt_aborts_window_close(self):
-        """编辑器提示里点取消 → 标签不关、窗口不关、不置 _force_closing。"""
-        prompt, flush, closed = self._run_close(prompt_reply=False)
-        self.assertEqual(prompt.call_count, 1,
-                         "Cmd+W 关最后一个标签没有先问编辑器是否保存")
-        self.assertEqual(closed, [], "编辑器提示取消后窗口仍被关闭")
-        self.assertEqual(self.win.tab_widget.count(), 1, "取消后标签页被关掉了")
-        self.assertFalse(self.win._force_closing)
-        flush.assert_not_called()
-
-    def test_confirmed_prompt_flushes_autosave_then_closes(self):
-        """保存/丢弃后：刷崩溃恢复备份，再走强制关闭。"""
-        prompt, flush, closed = self._run_close(prompt_reply=True)
-        self.assertEqual(prompt.call_count, 1)
-        self.assertEqual(flush.call_count, 1)
-        self.assertEqual(closed, [True])
-        self.assertTrue(self.win._force_closing)
+            self.assertEqual(win.tab_widget.count(), 0)
+            close.assert_not_called()
+            self.assertFalse(win._force_closing)
+            win._close_tab_or_window()
+            close.assert_called_once()
 
 
 # ---------------------------------------------------------------------------
@@ -132,14 +125,16 @@ class TestCloseTabDestroysPage(_WindowCase):
         self.assertEqual(len(win.tab_widget.findChildren(self.TerminalWidget)),
                          remaining)
 
-    def test_close_last_tab_recreates_and_leaves_no_orphans(self):
+    def test_close_last_tab_leaves_empty_window_and_can_reopen(self):
         win = self.win
         self.assertEqual(win.tab_widget.count(), 1)
         old_term = win.tab_terminals[0][0]
-        win._close_tab(0)               # auto_create_new=True → 补一个新标签
+        win._close_tab(0)
         _flush(self.app)
-        self.assertEqual(win.tab_widget.count(), 1)
+        self.assertEqual(win.tab_widget.count(), 0)
+        self.assertIsNone(win.terminal)
         self.assertTrue(sip.isdeleted(old_term))
+        win._new_terminal()
         self.assertEqual(len(win.tab_widget.findChildren(self.TerminalWidget)), 1)
         self.assertIs(win.active_terminal, win.tab_terminals[0][0])
 

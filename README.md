@@ -10,7 +10,7 @@ A PyQt6-based smart terminal with file explorer, Git GUI, LLM proxy, and VS Code
 
 **Signed and notarized for macOS.** The Apple Silicon app is signed with a Developer ID certificate and notarized by Apple.
 
-[v1.35.76 release notes](docs/releases/v1.35.76.md) — Background Codex sessions now stay quiet while the idle prompt animates. New terminal output still lights the gray activity dot.
+[v1.35.77 release notes](docs/releases/v1.35.77.md) — Closing the last terminal tab leaves the window open. Press Cmd+W again to close the empty window, or click Start to run a preset.
 
 <img src="assets/smart_terminal.png" width="300" />
 

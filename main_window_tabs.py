@@ -639,13 +639,16 @@ class TabSplitMixin:
         terminal.setFocus()
         self.statusbar.showMessage(t("status.move_split_up_done"), 3000)
 
-    def _close_tab(self, index, auto_create_new=True):
+    def _close_tab(self, index, auto_create_new=False):
         """关闭指定标签页
 
         Args:
             index: 要关闭的标签页索引
             auto_create_new: 如果关闭后没有标签页了，是否自动创建新的
         """
+        if not 0 <= index < self.tab_widget.count():
+            return
+
         # 杀终端前先校验索引映射：映射错位时 tab_terminals[index] 是**别的
         # 标签页**的终端列表，直接 cleanup 会把后面标签的 shell 杀掉、
         # 再被打上「已停止」标记——用户表现为「关掉前面的标签后，
@@ -694,6 +697,12 @@ class TabSplitMixin:
         if current >= 0:
             self._on_tab_changed(current)
 
+        else:
+            self.active_terminal = None
+            self._update_running_state(False)
+            self.setWindowTitle("Smart Terminal")
+            self._checkpoint_workspace()
+
         # 如果没有标签页了，根据参数决定是否创建新的
         if self.tab_widget.count() == 0 and auto_create_new:
             self._new_terminal()
@@ -724,57 +733,18 @@ class TabSplitMixin:
                 # 有多个分屏，关闭当前选中的分屏
                 self._close_current_split()
             else:
-                # 只有一个分屏，关闭整个标签页。
-                # 若这是最后一个标签页，这一步会退出整个窗口 → 一律二次确认，
-                # 避免一次误触把整个窗口（布局/会话）丢掉。有进程在跑时用更强措辞。
-                if self.tab_widget.count() == 1:
-                    # _force_closing 会让 closeEvent 跳过编辑器的保存提示，
-                    # 所以这里先替它问一遍：取消 → 什么都不关。
-                    if not self._prompt_editor_save_before_window_close():
-                        return
-                    has_running_process = any(t.is_running() for t in terminals)
-                    msg = (t("msg.confirm_close_last_tab") if has_running_process
-                           else t("msg.confirm_close_window"))
+                if self.tab_widget.count() == 1 and any(term.is_running() for term in terminals):
                     reply = QMessageBox.question(
-                        self, t("msg.confirm_close_title"), msg,
+                        self, t("msg.confirm_close_title"), t("msg.confirm_close_last_tab"),
                         QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No,
-                        QMessageBox.StandardButton.No  # 默认选择"否"，回车不会误关
+                        QMessageBox.StandardButton.No,
                     )
                     if reply != QMessageBox.StandardButton.Yes:
                         return
-                    # 已经确认过了，self.close() 触发的 closeEvent 不必再问一次。
-                    # 强制路径不再刷编辑器的崩溃恢复备份，这里补上（同 force_close_with_save）。
-                    self._flush_editor_autosave_quietly()
-                    self._force_closing = True
-
-                self._close_tab(idx, auto_create_new=False)
-                # 如果关闭后没有标签页了，关闭窗口
-                if self.tab_widget.count() == 0:
-                    self.close()
+                self._close_tab(idx)
         else:
             # 没有标签页了，关闭整个窗口
             self.close()
-
-    def _prompt_editor_save_before_window_close(self) -> bool:
-        """关窗前替 closeEvent 走一遍编辑器的保存提示；返回 False = 用户取消。"""
-        area = getattr(self, 'editor_area', None)
-        if area is None:
-            return True
-        try:
-            return bool(area.prompt_save_all())
-        except Exception as e:
-            logger.warning(f"[Close] editor save prompt failed: {e}")
-            return True
-
-    def _flush_editor_autosave_quietly(self):
-        """刷编辑器的崩溃恢复备份；任何异常都不能阻断关窗。"""
-        area = getattr(self, 'editor_area', None)
-        if area is None:
-            return
-        try:
-            area.flush_autosave_all()
-        except Exception as e:
-            logger.warning(f"[Close] editor autosave flush failed: {e}")
 
     def _align_child_with_parent_geometry(self, new_window, abort_check=None):
         """让子窗口与本窗口逐像素重合（位置+尺寸），并持续校正 macOS 的异步微调。"""

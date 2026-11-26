@@ -10,7 +10,7 @@
 
 **macOS 版已通过 Apple 公证。** 适用于 Apple 芯片 Mac 的应用已使用 Developer ID 证书签名。
 
-[v1.35.76 更新说明](docs/releases/v1.35.76.md) — 在后台启动 Codex 后，空闲输入框的动画不会点亮灰点。终端有新输出时仍会提示。
+[v1.35.77 更新说明](docs/releases/v1.35.77.md) — 关闭最后一个终端标签后，窗口可保持空白。再按一次 Cmd+W 可关闭窗口，也可以点「启动」运行预设。
 
 A PyQt6-based smart terminal with file explorer, Git GUI, LLM proxy, and VS Code extension browser.
 
