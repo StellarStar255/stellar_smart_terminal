@@ -1099,6 +1099,8 @@ TRANSLATIONS = {
     "ctx.paste": {"zh": "粘贴 (⌘V)", "en": "Paste (⌘V)", "fr": "Coller (⌘V)"},
     "ctx.paste_win": {"zh": "粘贴 (Ctrl+V)", "en": "Paste (Ctrl+V)", "fr": "Coller (Ctrl+V)"},
     "ctx.show_command_search": {"zh": "显示命令搜索框", "en": "Show Command Search", "fr": "Afficher la recherche de commandes"},
+    "ctx.terminal_output_marker": {"zh": "显示此终端的输出灰点", "en": "Show Output Dot for This Terminal", "fr": "Afficher le point d’activité de ce terminal"},
+    "window.output_marker": {"zh": "显示此窗口的输出灰点", "en": "Show Output Dot for This Window", "fr": "Afficher le point d’activité de cette fenêtre"},
     "ctx.filter_commands": {"zh": "筛选命令…", "en": "Filter commands…", "fr": "Filtrer les commandes…"},
     "ctx.filter_empty": {"zh": "没有匹配的命令", "en": "No matching commands", "fr": "Aucune commande correspondante"},
     "ctx.quick_commands": {"zh": "快速命令", "en": "Quick Commands", "fr": "Commandes rapides"},

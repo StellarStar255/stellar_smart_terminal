@@ -776,6 +776,7 @@ class TerminalWidget(TerminalInputMixin, TerminalMouseMixin,
         # scroll_offset 只由 GUI 线程读写：读取线程 feed 新增历史行时经此信号
         # marshal 回 GUI 做回滚位置补偿，避免两线程并发改 scroll_offset
         self._history_grew.connect(self._on_history_grew)
+        self.output_marker_enabled = True
         self._had_output_activity = False
         self._activity_bytes = 0
         self._ACTIVITY_IDLE_MS = 1500

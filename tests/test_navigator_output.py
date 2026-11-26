@@ -357,3 +357,67 @@ def test_viewed_window_suppresses_only_output_marker(panels):
     assert not embedded.window_list._pulse_timer.isActive()
     floating.select_window(first)
     assert floating.window_list._pulse_timer.isActive()
+
+
+def test_output_dot_mutes_target_pane_or_window_and_restores_choices(panels):
+    from PyQt6.QtGui import QContextMenuEvent
+    from PyQt6.QtWidgets import QMenu
+    import app_config
+    from i18n import t
+
+    first, second, nav, embedded = panels
+    monitor = first.terminal
+    first._add_new_tab(tab_name='other')
+    other = first.terminal
+    monitor._process_output_text('GPU usage')
+    second.terminal._process_output_text('other window')
+
+    def click_action(key, expected):
+        def choose(menu, *_):
+            action = next(a for a in menu.actions() if a.text() == t(key))
+            assert action.isChecked() is expected
+            action.trigger()
+            return action
+        return patch.object(QMenu, 'exec', choose)
+
+    def toggle_window(expected):
+        with click_action('window.output_marker', expected):
+            pos = nav.window_list.visualItemRect(row(nav, first)).center()
+            nav._show_window_context_menu(pos)
+
+    def check_first(active):
+        for panel in (nav, embedded):
+            assert row(panel, first).data(NAV_OUTPUT_ROLE) is active
+            assert row(panel, second).data(NAV_OUTPUT_ROLE)
+
+    with click_action('ctx.terminal_output_marker', True):
+        monitor.contextMenuEvent(QContextMenuEvent(QContextMenuEvent.Reason.Mouse, QPoint(5, 5)))
+    monitor._process_output_text('GPU usage again')
+    check_first(False)
+    other._process_output_text('important job')
+    check_first(True)
+    toggle_window(True)
+    check_first(False)
+    with patch('main_window.play_notify_sound'):
+        first._request_nav_attention(other)
+    assert row(nav, first).data(NAV_ATTENTION_ROLE)
+    first._clear_nav_attention()
+    for panel in (nav, embedded):
+        panel._force_refresh()
+    check_first(False)
+    first._write_workspace_snapshot()
+    entries = app_config.read_config()['workspace_snapshot']['windows']
+    saved = next(entry for entry in entries if entry['window_id'] == first._workspace_id)
+    assert saved['output_marker_enabled'] is False
+    assert saved['tabs'][0]['output_marker_enabled'] is False
+    assert next(e for e in entries if e['window_id'] == second._workspace_id)['output_marker_enabled']
+    toggle_window(False)
+    check_first(True)
+    other.stop_process()
+    check_first(False)
+    monitor.set_output_marker_enabled(True)
+    check_first(True)
+    first._apply_restored_window_state(dict(saved, current_tab=0))
+    check_first(False)
+    assert not monitor.output_marker_enabled
+    assert not first.window_output_marker_enabled

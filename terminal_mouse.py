@@ -423,6 +423,12 @@ class TerminalMouseMixin:
         return (self._mouse_mode and not force_local_selection
                 and self._mouse_click_forward_enabled)
 
+    def set_output_marker_enabled(self, enabled):
+        self.output_marker_enabled = enabled
+        owner = getattr(self, '_owner_window', None)
+        if owner is not None:
+            owner._set_nav_output(self, self._had_output_activity)
+
     def set_mouse_click_forward_enabled(self, enabled: bool):
         """设置是否把鼠标点击转发给开启鼠标上报的 TUI 程序（默认关闭）。"""
         self._mouse_click_forward_enabled = bool(enabled)
@@ -864,6 +870,17 @@ class TerminalMouseMixin:
                 lambda checked=False, f=factor: self.set_scroll_sensitivity(f))
             scroll_menu.addAction(act)
         menu.addMenu(scroll_menu)
+        marker = menu.addAction(t("ctx.terminal_output_marker"))
+        marker.setCheckable(True)
+        marker.setChecked(self.output_marker_enabled)
+
+        def toggle_marker(enabled):
+            self.set_output_marker_enabled(enabled)
+            owner = getattr(self, '_owner_window', None)
+            if owner is not None:
+                owner._checkpoint_workspace()
+
+        marker.triggered.connect(toggle_marker)
 
         if self._mouse_mode:
             forward_clicks = menu.addAction(t("ctx.forward_tui_clicks"))

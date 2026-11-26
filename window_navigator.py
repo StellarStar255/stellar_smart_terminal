@@ -1078,7 +1078,7 @@ class WindowNavigatorPanel(QWidget):
                 # 只把 id（Python int）塞进 UserRole；真正的对象通过 weakref 解
                 item.setData(Qt.ItemDataRole.UserRole, wid)
                 item.setData(NAV_ATTENTION_ROLE, bool(getattr(window, '_nav_attention', False)))
-                item.setData(NAV_OUTPUT_ROLE, bool(window._nav_output_terms))
+                item.setData(NAV_OUTPUT_ROLE, window.has_nav_output)
                 new_refs[wid] = _weakref.ref(window)
                 item.setForeground(QColor(color))
                 self.window_list.addItem(item)
@@ -1114,7 +1114,7 @@ class WindowNavigatorPanel(QWidget):
         for row in range(self.window_list.count()):
             item = self.window_list.item(row)
             if item.data(Qt.ItemDataRole.UserRole) == wid:
-                item.setData(NAV_OUTPUT_ROLE, bool(window._nav_output_terms))
+                item.setData(NAV_OUTPUT_ROLE, window.has_nav_output)
                 item.setData(NAV_ATTENTION_ROLE, window._nav_attention)
                 self.window_list.sync_pulse()
                 break
@@ -1293,11 +1293,21 @@ class WindowNavigatorPanel(QWidget):
             move_menu.setToolTip(t("window.move_to_display_single"))
         menu.addSeparator()
 
+        marker = menu.addAction(t("window.output_marker"))
+        marker.setCheckable(True)
+        marker.setChecked(window.window_output_marker_enabled)
+        menu.addSeparator()
         force_close_action = menu.addAction(t("window.force_close"))
         force_close_action.setToolTip(t("window.force_close_tooltip"))
 
         chosen = menu.exec(self.window_list.viewport().mapToGlobal(pos))
-        if chosen is force_close_action and not sip.isdeleted(window):
+        menu.deleteLater()
+        if sip.isdeleted(window):
+            return
+        if chosen is marker:
+            window.set_window_output_marker_enabled(marker.isChecked())
+            window._checkpoint_workspace()
+        elif chosen is force_close_action:
             self._force_close_window(window, item.text())
 
     def _on_quick_close_changed(self, state):

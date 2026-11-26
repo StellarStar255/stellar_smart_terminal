@@ -177,6 +177,7 @@ class TestNavigatorGrip(unittest.TestCase):
         self.addCleanup(nav.deleteLater)
         w = QWidget()
         w.force_close_with_save = lambda: None
+        w.window_output_marker_enabled = True
         w.setGeometry(QRect(100, 100, 300, 200))
         w.show()
         self.addCleanup(w.deleteLater)

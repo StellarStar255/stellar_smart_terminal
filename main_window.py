@@ -2725,6 +2725,7 @@ class MainWindow(ThemeMixin, ToolbarMixin, ConfigMixin, ExplorerPanelMixin,
         self._closing_in_progress = False       # closeEvent 已进入清理阶段（防重入）
         self._force_closing = False             # 强制关闭路径：跳过确认弹窗
         self._applying_shared_left_width = False  # 正在应用跨窗口同步的侧栏宽度
+        self.window_output_marker_enabled = True
         self._nav_output_terms = weakref.WeakSet()
         self._nav_attention = False             # 导航面板"需要注意"标记
         self._nav_attention_terms = weakref.WeakSet()
@@ -4691,6 +4692,8 @@ class MainWindow(ThemeMixin, ToolbarMixin, ConfigMixin, ExplorerPanelMixin,
                     terms = w.tab_terminals.get(i, [])
                     if terms:
                         term = w.active_terminal if w.active_terminal in terms else terms[0]
+                        if not term.output_marker_enabled:
+                            tab['output_marker_enabled'] = False
                         if term._mouse_click_forward_enabled != w._mouse_click_forward_enabled:
                             tab['mouse_click_forward_enabled'] = term._mouse_click_forward_enabled
                     tabs.append(tab)
@@ -4698,6 +4701,7 @@ class MainWindow(ThemeMixin, ToolbarMixin, ConfigMixin, ExplorerPanelMixin,
                 logger.debug("_collect_windows_snapshot: suppressed exception", exc_info=True)
             entries.append({
                 'window_id': w._workspace_id,
+                'output_marker_enabled': w.window_output_marker_enabled,
                 'quick_command_search': dict(w._quick_command_search),
                 'preset_name': w.preset_combo.currentText(),
                 'cwd': getattr(w, '_window_cwd', '') or '',
@@ -4845,6 +4849,7 @@ class MainWindow(ThemeMixin, ToolbarMixin, ConfigMixin, ExplorerPanelMixin,
         目标值会让 macOS 首显挪动后 Qt 缓存与真实几何脱节，后续 setGeometry
         被当作「无变化」跳过，窗口永远校不回来）。
         """
+        self.set_window_output_marker_enabled(entry.get('output_marker_enabled') is not False)
         search = entry.get('quick_command_search')
         self._quick_command_search = {key: True for key in ('global', 'local')
                                       if isinstance(search, dict) and search.get(key) is True}
@@ -4911,6 +4916,8 @@ class MainWindow(ThemeMixin, ToolbarMixin, ConfigMixin, ExplorerPanelMixin,
                 terms[0].set_working_dir(cwd)
         forward = entry.get('mouse_click_forward_enabled')
         terms = self.tab_terminals.get(0, [])
+        if terms:
+            terms[0].set_output_marker_enabled(entry.get('output_marker_enabled') is not False)
         if terms and isinstance(forward, bool):
             terms[0].set_mouse_click_forward_enabled(forward)
         name = entry.get('name') or ''
@@ -6505,14 +6512,24 @@ class MainWindow(ThemeMixin, ToolbarMixin, ConfigMixin, ExplorerPanelMixin,
         self.tab_widget.setTabIcon(
             idx, self._tab_badge_icon(state) if state else QIcon())
 
+    @property
+    def has_nav_output(self):
+        return self.window_output_marker_enabled and bool(self._nav_output_terms)
+
+    def set_window_output_marker_enabled(self, enabled):
+        was_active = self.has_nav_output
+        self.window_output_marker_enabled = enabled
+        if self.has_nav_output != was_active:
+            self.navigator_output_changed.emit(self.has_nav_output)
+
     def _set_nav_output(self, terminal, active):
-        was_active = bool(self._nav_output_terms)
-        if active:
+        was_active = self.has_nav_output
+        if active and terminal.output_marker_enabled:
             self._nav_output_terms.add(terminal)
         else:
             self._nav_output_terms.discard(terminal)
-        if was_active != bool(self._nav_output_terms):
-            self.navigator_output_changed.emit(not was_active)
+        if was_active != self.has_nav_output:
+            self.navigator_output_changed.emit(self.has_nav_output)
 
     def _request_nav_attention(self, source=None):
         """点亮本窗口的导航绿点（后台任务完成提醒的通用入口）。
