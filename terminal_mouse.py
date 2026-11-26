@@ -875,7 +875,7 @@ class TerminalMouseMixin:
                 padding: 4px;
             }
             QMenu::item {
-                padding: 6px 20px;
+                padding: 6px 20px 6px 4px;
                 border-radius: 3px;
             }
             QMenu::item:selected {
