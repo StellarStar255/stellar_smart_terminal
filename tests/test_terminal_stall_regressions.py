@@ -614,3 +614,16 @@ def test_reader_survives_transient_first_read(error):
     finally:
         backend._master_fd = None
         backend.stop()
+
+
+def test_prompt_scan_only_reads_footer_rows(app):
+    widget = TerminalWidget()
+    try:
+        widget.screen.resize(lines=40, columns=80)
+        widget.stream.feed('Enter to confirm\x1b[26;1H选择  ESC TO CANCEL')
+        rows_before = set(widget.screen.buffer)
+        assert widget._detect_interaction_prompt() == '选择  ESC TO CANCEL'
+        assert set(widget.screen.buffer) == rows_before
+    finally:
+        widget.cleanup()
+        widget.deleteLater()

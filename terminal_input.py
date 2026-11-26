@@ -613,12 +613,15 @@ class TerminalInputMixin:
         if input_method:
             input_method.update(Qt.InputMethodQuery.ImCursorRectangle)
         # 恢复光标闪烁
+        self._resume_cursor_if_focused()
         self.cursor_visible = True
         self.update()
 
     def focusOutEvent(self, event):
         """失去焦点时的处理"""
         super().focusOutEvent(event)
+        if self.cursor_timer:
+            self.cursor_timer.stop()
         # 重置输入法状态，避免候选框残留
         from PyQt6.QtGui import QGuiApplication
         input_method = QGuiApplication.inputMethod()

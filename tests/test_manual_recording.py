@@ -182,3 +182,47 @@ def test_stopping_process_includes_output_arriving_during_stop(window):
     w.session_manager.flush()
     saved = w.session_manager.load_session(session.session_id)
     assert saved.entries[-1].content == 'stop tail'
+
+
+def test_inactive_log_rolls_over_and_flushes_recent_output(window, monkeypatch):
+    w = window
+    monkeypatch.setattr(w, '_MAX_LOG_SIZE', 100)
+    if not w.log_panel_visible:
+        w._toggle_log_panel()
+    w._clear_log()
+    w.log_text.setPlainText('old displayed text')
+    with patch.object(w, 'isActiveWindow', return_value=False):
+        for i in range(50):
+            w.terminal.output_recorded.emit(f'line-{i:02d}\n')
+            assert w._log_buffer_chars <= 100
+        assert not w._log_timer.isActive()
+    with patch.object(w, 'isActiveWindow', return_value=True):
+        w._schedule_log_flush()
+        assert w._log_timer.isActive()
+        from PyQt6.QtTest import QTest
+        QTest.qWait(300)
+    shown = w.log_text.toPlainText()
+    assert shown.endswith('line-49\n')
+    assert ''.join(f'line-{i:02d}\n' for i in range(50)).endswith(shown)
+    assert w._log_buffer_chars == 0
+    assert not w._log_timer.isActive()
+
+
+def test_cursor_timer_follows_focused_tab(window):
+    first = window.terminal
+    window.activateWindow()
+    first.setFocus()
+    _app.processEvents()
+    assert first.cursor_timer.isActive()
+    window._add_new_tab()
+    second = window.terminal
+    second.setFocus()
+    _app.processEvents()
+    assert second.cursor_timer.isActive()
+    first.resume_timers()
+    assert not first.cursor_timer.isActive()
+    window.tab_widget.setCurrentIndex(0)
+    first.setFocus()
+    _app.processEvents()
+    assert first.cursor_timer.isActive()
+    assert not second.cursor_timer.isActive()

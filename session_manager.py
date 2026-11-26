@@ -6,6 +6,7 @@ import json
 import os
 import re
 from collections import deque
+from itertools import chain
 from concurrent.futures import Future, ThreadPoolExecutor
 from pathlib import Path
 from typing import List, Optional, Dict, Any
@@ -50,20 +51,19 @@ class SessionEntry:
         if self._content_cache is None:
             # Cache reads without collapsing the deque: later eviction should
             # copy at most one small head chunk, never the entire session.
-            self._content_cache = ''.join(self._parts)
-        body = self._content_cache
-        if self._truncated:
-            return self.TRUNCATION_MARK + body
-        return body
+            if self._truncated:
+                self._content_cache = ''.join(chain((self.TRUNCATION_MARK,), self._parts))
+            else:
+                self._content_cache = ''.join(self._parts)
+        return self._content_cache
 
     @content.setter
     def content(self, value: str):
-        self._truncated = len(value) > self.MAX_CONTENT_CHARS
-        value = value[-self.MAX_CONTENT_CHARS:] if self._truncated else value
-        self._parts = deque(value[i:i + self._PART_CHARS]
-                            for i in range(0, len(value), self._PART_CHARS))
-        self._content_cache = value
-        self._length = len(value)
+        self._parts = deque()
+        self._content_cache = None
+        self._length = 0
+        self._truncated = False
+        self.append_content(value)
 
     @property
     def content_length(self) -> int:
@@ -75,9 +75,14 @@ class SessionEntry:
         if not text:
             return
         self._content_cache = None
+        start = max(0, len(text) - self.MAX_CONTENT_CHARS)
+        if len(text) >= self.MAX_CONTENT_CHARS:
+            self._truncated |= bool(start or self._length)
+            self._parts.clear()
+            self._length = 0
         self._parts.extend(text[i:i + self._PART_CHARS]
-                           for i in range(0, len(text), self._PART_CHARS))
-        self._length += len(text)
+                           for i in range(start, len(text), self._PART_CHARS))
+        self._length += len(text) - start
         excess = self._length - self.MAX_CONTENT_CHARS
         if excess > 0:
             self._truncated = True

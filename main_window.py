@@ -8,6 +8,7 @@ import json
 import sys
 import time
 import weakref
+from collections import deque
 from pathlib import Path
 from datetime import datetime
 
@@ -396,10 +397,13 @@ class MainWindow(ThemeMixin, ToolbarMixin, ConfigMixin, ExplorerPanelMixin,
         self.api_server_clear_after_query = {}  # type: dict[int, bool]
 
         # 日志缓冲区（批量更新以提高性能）
-        self._log_buffer = []
+        self._log_buffer_truncated = False
+        self._log_buffer = deque()
+        self._log_buffer_chars = 0
         self._log_timer = QTimer()
         self._log_timer.timeout.connect(self._flush_log_buffer)
-        self._log_timer.start(200)  # 每200ms刷新一次日志（降低频率减少开销）
+        self._log_timer.setSingleShot(True)
+        self._log_timer.setInterval(200)
 
         # 统计更新节流
         self._stats_dirty = False
@@ -601,7 +605,7 @@ class MainWindow(ThemeMixin, ToolbarMixin, ConfigMixin, ExplorerPanelMixin,
                 self._clear_nav_attention()
                 # 窗口激活时恢复定时器
                 if hasattr(self, '_log_timer') and self._log_timer:
-                    self._log_timer.start(200)
+                    self._schedule_log_flush()
                 # 恢复所有终端的定时器（错开启动以避免雷鸣群效应）
                 if hasattr(self, 'tab_terminals'):
                     delay = 0
@@ -610,7 +614,7 @@ class MainWindow(ThemeMixin, ToolbarMixin, ConfigMixin, ExplorerPanelMixin,
                             # 每个终端延迟 20ms 启动，避免同时触发
                             # 使用闭包捕获终端引用，确保安全访问
                             def resume_terminal_timers(term=terminal):
-                                if not sip.isdeleted(term):
+                                if not sip.isdeleted(term) and term.window().isActiveWindow():
                                     term.resume_timers()
                             QTimer.singleShot(delay, resume_terminal_timers)
                             delay += 20
@@ -3363,7 +3367,8 @@ class MainWindow(ThemeMixin, ToolbarMixin, ConfigMixin, ExplorerPanelMixin,
                 and self.session_manager.current_session):
             try:
                 self.session_manager.add_output(text)
-                self._stats_dirty = True  # 标记需要更新统计
+                self._stats_dirty = True
+                self._schedule_log_flush()
             except RuntimeError:
                 # 会话可能在输出过程中结束，忽略此错误
                 pass
@@ -3381,9 +3386,27 @@ class MainWindow(ThemeMixin, ToolbarMixin, ConfigMixin, ExplorerPanelMixin,
 
         if clean_text.strip():
             self._log_buffer.append(clean_text)
+            self._log_buffer_chars += len(clean_text)
+            if self._log_buffer_chars > self._MAX_LOG_SIZE:
+                # Match the displayed log's rolling half-window even while inactive.
+                self._log_buffer_truncated = True
+                excess = self._log_buffer_chars - self._MAX_LOG_SIZE // 2
+                while excess:
+                    first = self._log_buffer.popleft()
+                    removed = min(len(first), excess)
+                    if removed < len(first):
+                        self._log_buffer.appendleft(first[removed:])
+                    self._log_buffer_chars -= removed
+                    excess -= removed
+            self._schedule_log_flush()
 
     # 日志面板最大字符数（约 500KB，超过时截断前面的内容）
     _MAX_LOG_SIZE = 500000
+
+    def _schedule_log_flush(self):
+        if (not self._log_timer.isActive() and self.isActiveWindow()
+                and (self._stats_dirty or (self._log_buffer and self.log_panel_visible))):
+            self._log_timer.start()
 
     def _flush_log_buffer(self):
         """刷新日志缓冲区"""
@@ -3396,16 +3419,17 @@ class MainWindow(ThemeMixin, ToolbarMixin, ConfigMixin, ExplorerPanelMixin,
         if not self._log_buffer:
             return
 
-        # 日志面板隐藏时，只保留最近的缓冲内容，避免内存无限增长
         if not self.log_panel_visible:
-            # 限制隐藏时的缓冲区大小（保留最后10条）
-            if len(self._log_buffer) > 10:
-                self._log_buffer = self._log_buffer[-10:]
             return
 
         # 合并缓冲区内容
         combined = ''.join(self._log_buffer)
         self._log_buffer.clear()
+        self._log_buffer_chars = 0
+
+        if self._log_buffer_truncated:
+            self.log_text.clear()
+            self._log_buffer_truncated = False
 
         # 一次性更新日志面板
         cursor = self.log_text.textCursor()
@@ -3452,6 +3476,7 @@ class MainWindow(ThemeMixin, ToolbarMixin, ConfigMixin, ExplorerPanelMixin,
         self.main_splitter.setUpdatesEnabled(False)
         if self.log_panel_visible:
             self.log_panel_container.show()
+            self._schedule_log_flush()
         else:
             self.log_panel_container.hide()
         self._update_splitter_sizes()
@@ -5401,6 +5426,9 @@ class MainWindow(ThemeMixin, ToolbarMixin, ConfigMixin, ExplorerPanelMixin,
 
     def _clear_log(self):
         """清空日志"""
+        self._log_buffer.clear()
+        self._log_buffer_chars = 0
+        self._log_buffer_truncated = False
         self.log_text.clear()
 
     def _debug_special_chars(self):

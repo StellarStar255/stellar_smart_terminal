@@ -238,3 +238,19 @@ def test_git_bounded_collection_times_out_and_reaps_child(app, monkeypatch, tmp_
             proc.kill()
         proc.wait()
         manager.deleteLater()
+
+
+def test_oversized_session_append_allocates_only_the_retained_tail(monkeypatch):
+    limit = 64 * 1024
+    monkeypatch.setattr(SessionEntry, 'MAX_CONTENT_CHARS', limit)
+    entry = SessionEntry('output', 'existing')
+    payload = 'x' * (64 * limit) + 'latest'
+    tracemalloc.start()
+    try:
+        entry.append_content(payload)
+        _, peak = tracemalloc.get_traced_memory()
+    finally:
+        tracemalloc.stop()
+    assert peak < 4 * limit
+    assert entry.content == SessionEntry.TRUNCATION_MARK + payload[-limit:]
+    assert entry.to_dict()['content'] is entry.content

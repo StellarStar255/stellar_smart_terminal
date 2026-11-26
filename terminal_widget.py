@@ -716,9 +716,10 @@ class TerminalWidget(TerminalInputMixin, TerminalMouseMixin,
 
         # 光标闪烁
         self.cursor_visible = True
-        self.cursor_timer = QTimer()
+        self.cursor_timer = QTimer(self)
         self.cursor_timer.timeout.connect(self._toggle_cursor)
-        self.cursor_timer.start(530)  # 略微错开避免与其他定时器同步
+        self.cursor_timer.setInterval(530)
+        self._timers_paused = False
 
         # 内容变化标志（脏标记）
         self._content_dirty = False
@@ -972,6 +973,7 @@ class TerminalWidget(TerminalInputMixin, TerminalMouseMixin,
     def showEvent(self, event):
         """窗口显示时重新计算字符尺寸"""
         super().showEvent(event)
+        self._resume_cursor_if_focused()
         # 窗口显示后重新计算，这时DPI等信息更准确
         self._calculate_char_size()
         self._update_terminal_size()
@@ -982,6 +984,8 @@ class TerminalWidget(TerminalInputMixin, TerminalMouseMixin,
 
     def hideEvent(self, event):
         super().hideEvent(event)
+        if self.cursor_timer:
+            self.cursor_timer.stop()
         # The screen owns the text and images. Recreate its DPR-sized raster on show.
         self._cache_pixmap = None
         self._cache_valid = False
@@ -993,6 +997,11 @@ class TerminalWidget(TerminalInputMixin, TerminalMouseMixin,
         """
         from PyQt6.QtCore import QSize
         return QSize(800, 600)
+
+    def _resume_cursor_if_focused(self):
+        if (self.cursor_timer and not self._timers_paused and self.isVisible()
+                and self.hasFocus() and not self.cursor_timer.isActive()):
+            self.cursor_timer.start()
 
     def _toggle_cursor(self):
         """切换光标可见性 - 只更新光标区域，不重建整个缓存"""
@@ -1772,17 +1781,22 @@ class TerminalWidget(TerminalInputMixin, TerminalMouseMixin,
         返回匹配行拼接成的签名字符串（供调用方去重），没有提示则返回 None。
         """
         try:
-            # screen.display 会遍历各行 cell dict 生成字符串；读取线程并发 feed
-            # 会往行 dict 插键 → "dict changed size during iteration"，故持锁快照
             with self._screen_lock:
-                lines = self.screen.display[-15:]
+                screen = self.screen
+                lines = []
+                for y in range(max(0, screen.lines - 15), screen.lines):
+                    row = screen.buffer.get(y)
+                    if row:
+                        # Wide-character continuation cells have empty data.
+                        lines.append(''.join(row[x].data for x in range(screen.columns)))
         except Exception:
             logger.debug("_detect_interaction_prompt: snapshot failed", exc_info=True)
             return None
-        matched = [
-            line.strip() for line in lines
-            if any(marker in line.lower() for marker in self._INTERACTION_MARKERS)
-        ]
+        matched = []
+        for line in lines:
+            lower = line.lower()
+            if any(marker in lower for marker in self._INTERACTION_MARKERS):
+                matched.append(line.strip())
         if not matched:
             return None
         return '\n'.join(matched)
@@ -2404,7 +2418,8 @@ class TerminalWidget(TerminalInputMixin, TerminalMouseMixin,
 
     def pause_timers(self):
         """暂停/降速定时器（用于窗口失活时减少开销）"""
-        if hasattr(self, 'cursor_timer') and self.cursor_timer:
+        self._timers_paused = True
+        if self.cursor_timer:
             self.cursor_timer.stop()
         # 降低 refresh_timer 频率到 200ms（5fps），保持后台更新但减少开销
         if hasattr(self, 'refresh_timer') and self.refresh_timer:
@@ -2412,8 +2427,8 @@ class TerminalWidget(TerminalInputMixin, TerminalMouseMixin,
 
     def resume_timers(self):
         """恢复所有定时器（用于窗口激活时）"""
-        if hasattr(self, 'cursor_timer') and self.cursor_timer:
-            self.cursor_timer.start(530)
+        self._timers_paused = False
+        self._resume_cursor_if_focused()
         # 恢复 refresh_timer 到 50ms（20fps）
         if hasattr(self, 'refresh_timer') and self.refresh_timer:
             self.refresh_timer.setInterval(50)
