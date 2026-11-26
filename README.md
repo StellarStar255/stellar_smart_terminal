@@ -6,9 +6,11 @@ English | [简体中文](README.zh-CN.md)
 
 A PyQt6-based smart terminal with file explorer, Git GUI, LLM proxy, and VS Code extension browser.
 
-**Signed and notarized for macOS.** The Apple Silicon app is signed with a Developer ID certificate and notarized by Apple. [Download for Mac](https://github.com/StellarStar255/stellar_smart_terminal/releases/latest)
+**[Download for macOS, Windows or Linux](https://github.com/StellarStar255/stellar_smart_terminal/releases/latest)**
 
-[v1.35.69](docs/releases/v1.35.69.md) shows output activity on background windows and keeps the window you are viewing quiet.
+**Signed and notarized for macOS.** The Apple Silicon app is signed with a Developer ID certificate and notarized by Apple.
+
+[v1.35.76 release notes](docs/releases/v1.35.76.md) — Background Codex sessions now stay quiet while the idle prompt animates. New terminal output still lights the gray activity dot.
 
 <img src="assets/smart_terminal.png" width="300" />
 

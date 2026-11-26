@@ -6,9 +6,11 @@
 
 基于 PyQt6 的智能终端，集成文件管理、Git GUI、LLM 代理和 VS Code 扩展浏览。
 
-**macOS 版已通过 Apple 公证。** 适用于 Apple 芯片 Mac 的应用已使用 Developer ID 证书签名。[下载 Mac 版](https://github.com/StellarStar255/stellar_smart_terminal/releases/latest)
+**[下载 macOS、Windows 或 Linux 版](https://github.com/StellarStar255/stellar_smart_terminal/releases/latest)**
 
-最新版本 [v1.35.69](docs/releases/v1.35.69.md) 只在其他窗口有输出时显示灰蓝色呼吸点，当前窗口仍保留绿色提醒。
+**macOS 版已通过 Apple 公证。** 适用于 Apple 芯片 Mac 的应用已使用 Developer ID 证书签名。
+
+[v1.35.76 更新说明](docs/releases/v1.35.76.md) — 在后台启动 Codex 后，空闲输入框的动画不会点亮灰点。终端有新输出时仍会提示。
 
 A PyQt6-based smart terminal with file explorer, Git GUI, LLM proxy, and VS Code extension browser.
 

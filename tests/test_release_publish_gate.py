@@ -65,3 +65,15 @@ GITHUB_REF_NAME=v1.2.3
                             capture_output=True, timeout=5)
     assert result.returncode == 0, result.stderr
     assert ('UPLOADED' in result.stdout) is draft
+
+
+@pytest.mark.parametrize('filename', ['README.md', 'README.zh-CN.md'])
+def test_readme_release_summary_matches_package_version(filename):
+    root = Path(__file__).resolve().parents[1]
+    project = (root / 'pyproject.toml').read_text(encoding='utf-8')
+    version = re.search(r'^version = "([^"]+)"$', project, re.MULTILINE)[1]
+    notes = f'docs/releases/v{version}.md'
+    intro = (root / filename).read_text(encoding='utf-8').split('<img', 1)[0]
+    assert re.search(r'\[v' + re.escape(version) + r'\b[^\]]*\]\(' + re.escape(notes) + r'\)', intro)
+    assert (root / notes).is_file()
+    assert '(https://github.com/StellarStar255/stellar_smart_terminal/releases/latest)' in intro
