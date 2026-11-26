@@ -1610,6 +1610,7 @@ class TerminalWidget(TerminalInputMixin, TerminalMouseMixin,
         # 插在片间修正了 _total_history_lines 不会被算进来——与整块原子时
         # "只计本次 feed 新增"的语义一致。
         lines_added = 0
+        new_text = False
         screen = self.screen
         lock = self._screen_lock
         batches = self._output_batches(parts)
@@ -1625,13 +1626,22 @@ class TerminalWidget(TerminalInputMixin, TerminalMouseMixin,
                 if cancelled.is_set():
                     return
                 old_total = screen._total_history_lines
-                for kind, piece in current:
-                    if kind == 'link':
-                        screen.hyperlink = piece
-                    elif kind == 'graphics':
-                        screen.graphics.handle(piece, screen.cursor.x, screen.cursor.y)
-                    else:
-                        self._feed_locked(piece)
+                render_dirty = screen.dirty
+                screen.dirty = set()
+                screen._drew_text = False
+                try:
+                    for kind, piece in current:
+                        if kind == 'link':
+                            screen.hyperlink = piece
+                        elif kind == 'graphics':
+                            screen.graphics.handle(piece, screen.cursor.x, screen.cursor.y)
+                        else:
+                            self._feed_locked(piece)
+                    new_text |= screen.consume_text_activity(
+                        screen.dirty, screen._total_history_lines > old_total)
+                finally:
+                    render_dirty.update(screen.dirty)
+                    screen.dirty = render_dirty
                 lines_added += screen._total_history_lines - old_total
                 current = next(batches, None)
                 if current is None:
@@ -1671,7 +1681,7 @@ class TerminalWidget(TerminalInputMixin, TerminalMouseMixin,
         # 线程时(PARSE_ON_READER_THREAD)，经 _output_activity 信号 marshal 回 GUI。
         # 同线程发射时是直连(等价于原地调用)，无额外延迟。
         if text:
-            self._output_activity.emit(len(text), cancelled)
+            self._output_activity.emit(len(text) if new_text else 0, cancelled)
         elif len(parts) > 1:
             # A graphics-only packet also needs a frame.
             self._refresh_requested.emit()
@@ -1723,7 +1733,7 @@ class TerminalWidget(TerminalInputMixin, TerminalMouseMixin,
         self._schedule_refresh()
         if not self._output_buffer_timer.isActive():
             self._output_buffer_timer.start()
-        if (self._output_cancelled.is_set()
+        if (not n or self._output_cancelled.is_set()
                 or (source is not None and source is not self._output_cancelled)
                 or (self._backend is not None and not getattr(self._backend, 'is_running', True))):
             return

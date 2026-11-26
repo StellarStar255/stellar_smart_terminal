@@ -475,3 +475,35 @@ def test_output_dot_actions_on_tab_and_split_headers(panels):
             win._show_tab_context_menu(bar.tabRect(0).center())
         assert (first.output_marker_enabled, second.output_marker_enabled) == states
         assert unrelated.output_marker_enabled
+
+
+def test_idle_codex_repaint_does_not_light_window_dot(panels):
+    first, _, floating, embedded = panels
+    term = first.terminal
+    frame = b'\x1b[HAsk Codex to do anything'
+    term._on_output(frame)
+    assert first.has_nav_output
+    term._on_activity_settled()
+    for packet in (b'\x1b[?25l', b'\x1b[6', b'n', frame, b'\x1b[2K', frame,
+                   b'\x1b[H\x1b[2K\x1b[32mAsk Codex to do anything\x1b[m'):
+        term._on_output(packet)
+        assert not first.has_nav_output
+        for nav in (floating, embedded):
+            assert not row(nav, first).data(NAV_OUTPUT_ROLE)
+    term._on_output(b'\x1b[HWorking on your request')
+    assert first.has_nav_output
+    term._on_output(b'\x1b[?25h')
+    assert first.has_nav_output
+
+
+def test_idle_codex_model_footer_changes_without_marking_output(panels):
+    first, _, _, _ = panels
+    term = first.terminal
+    y = term.screen.lines - 1
+    term._process_output_text(f'\x1b[?1049h\x1b[{y-2};1H› Ask Codex to do anything'
+                              f'\x1b[{y};1H  GPT-6.2-Astra default · ~/project')
+    term._on_activity_settled()
+    term._process_output_text(f'\x1b[{y};1H\x1b[2K  GPT-6.2-Astra medium · ~/project')
+    assert not first.has_nav_output
+    term._process_output_text('\x1b[1;1HHere is your result')
+    assert first.has_nav_output

@@ -61,24 +61,27 @@ def test_ssh_target_discovery_skips_background_jobs():
             10, [(10, 1, 'ssh exec-host')], foreground_group=10) == 'ssh exec-host'
 
 
+def wait_for(predicate):
+    deadline = time.monotonic() + 2
+    while not predicate() and time.monotonic() < deadline:
+        _APP.processEvents()
+        time.sleep(.005)
+
+
 def test_enter_waits_until_remote_path_is_inserted(remote):
     widget, written, uploads = remote
+    widget._PASTE_DRAIN_MAX_ACTIONS = 1
     widget._deliver_media_path('/tmp/a.png')
     widget.send_text('\r')
     assert written == []
     complete(widget, uploads[0], '/remote/a.png')
+    wait_for(lambda: len(written) >= 2)
     assert written == [b'/remote/a.png', b'\r']
     assert widget._pending_remote_pastes == {}
 
 
 def test_multiple_files_and_text_keep_original_order(remote):
     widget, written, uploads = remote
-
-    def wait_for(predicate):
-        deadline = time.monotonic() + 2
-        while not predicate() and time.monotonic() < deadline:
-            _APP.processEvents()
-            time.sleep(.005)
 
     widget._paste_file_paths(['/tmp/a.png', '/tmp/note.txt', '/tmp/b.png'])
     widget.send_text('\r')

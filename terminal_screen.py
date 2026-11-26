@@ -346,6 +346,8 @@ class CompatibleHistoryScreen(pyte.HistoryScreen):
     _ALT_SCREEN_MODES = frozenset({47, 1047, 1049})
 
     def __init__(self, *args, **kwargs):
+        self._activity_rows = {}
+        self._drew_text = False
         self.graphics = TerminalGraphics()
         super().__init__(*args, **kwargs)
         # 累计推入历史的总行数（用于滚动位置稳定化）
@@ -640,7 +642,42 @@ class CompatibleHistoryScreen(pyte.HistoryScreen):
 
     # ------ 原有功能 ------
 
+    def _codex_status_update(self, y, previous, current):
+        """Codex can resolve its model/effort after its idle prompt is visible."""
+        if y < self.lines - 4 or not previous or not self._in_alt_screen:
+            return False
+        def row_text(row):
+            return ''.join(row.get(x, ' ') for x in range(max(row) + 1)).strip()
+        old, new = row_text(previous), row_text(current)
+        if not all(text.lower().startswith('gpt-') and ' · ' in text
+                   for text in (old, new)):
+            return False
+        return any(any(cell.data == '›' for cell in self.buffer.get(r, {}).values())
+                   for r in range(max(0, y - 4), y))
+
+    def consume_text_activity(self, dirty_rows, scrolled):
+        """Compare written text, ignoring cursor, style and same-content repaints."""
+        # A TUI may send the erase and the repaint in separate PTY reads.
+        # Keep the last text baseline through cursor-only and erase-only reads.
+        if not self._drew_text:
+            return False
+        changed = False
+        for y in dirty_rows:
+            cells = self.buffer.get(y)
+            row = ({x: cell.data for x, cell in cells.items() if cell.data.strip()}
+                   if cells else {})
+            if row:
+                previous = self._activity_rows.get(y)
+                if row != previous and not self._codex_status_update(y, previous, row):
+                    changed = True
+                self._activity_rows[y] = row
+            else:
+                self._activity_rows.pop(y, None)
+        return changed or scrolled
+
     def draw(self, *chars):
+        if not self._drew_text:
+            self._drew_text = any(piece.strip() for piece in chars)
         self._in_draw = True
         attrs = self.cursor.attrs
         try:
