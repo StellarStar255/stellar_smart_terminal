@@ -889,6 +889,7 @@ class MainWindow(ThemeMixin, ToolbarMixin, ConfigMixin, ExplorerPanelMixin,
         # 使用自定义可分离的标签栏
         self.detachable_tab_bar = DetachableTabBar(self.tab_widget)
         self.tab_widget.setTabBar(self.detachable_tab_bar)
+        self.detachable_tab_bar.output_tabs = self._tabs_with_output
         # 关掉 documentMode 标签栏的原生"基座"绘制：macOS 深色系统外观下它会
         # 无视 QSS、按 NSAppearance 横贯整行画一条深灰底（浅色主题下极其突兀），
         # 而且 widget.grab() 复现不出来（只有真实屏幕合成才可见）。
@@ -6564,7 +6565,7 @@ class MainWindow(ThemeMixin, ToolbarMixin, ConfigMixin, ExplorerPanelMixin,
     def _set_tab_pending_badge(self, terminal, state):
         """给终端所在标签页挂起 waiting/done 徽章并刷新。"""
         idx = self._find_tab_of_terminal(terminal)
-        if idx is None:
+        if idx is None or idx == self.tab_widget.currentIndex():
             return
         page = self.tab_widget.widget(idx)
         if page is not None:
@@ -6597,12 +6598,20 @@ class MainWindow(ThemeMixin, ToolbarMixin, ConfigMixin, ExplorerPanelMixin,
         if self.has_nav_output != was_active:
             self.navigator_output_changed.emit(self.has_nav_output)
 
+    def _tabs_with_output(self):
+        active = getattr(self, '_nav_output_terms', None)
+        if active:
+            for idx, terms in self.tab_terminals.items():
+                if any(term in active for term in terms):
+                    yield idx
+
     def _set_nav_output(self, terminal, active):
         was_active = self.has_nav_output
         if active and terminal.output_marker_enabled:
             self._nav_output_terms.add(terminal)
         else:
             self._nav_output_terms.discard(terminal)
+        self.detachable_tab_bar.update()
         if was_active != self.has_nav_output:
             self.navigator_output_changed.emit(self.has_nav_output)
 

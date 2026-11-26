@@ -31,6 +31,7 @@ class TestTabBadges(unittest.TestCase):
         import main_window
         # 共用一个 MainWindow（每用例新建/销毁完整主窗口会在 CI 段错误）
         cls.w = main_window.MainWindow()
+        cls.w._add_new_tab()
         cls.w.show()
         cls.app.processEvents()
 
@@ -46,7 +47,8 @@ class TestTabBadges(unittest.TestCase):
 
     def setUp(self):
         w = self.w
-        self.idx = w.tab_widget.currentIndex()
+        w.tab_widget.setCurrentIndex(1)
+        self.idx = 0
         self.term = w.tab_terminals[self.idx][0]
         # 清干净挂起态
         page = w.tab_widget.widget(self.idx)
@@ -92,6 +94,30 @@ class TestTabBadges(unittest.TestCase):
         finally:
             self.term.is_running = orig
             w._refresh_tab_badge(self.idx)
+
+    def test_background_output_pulses_until_selected_or_acknowledged(self):
+        w = self.w
+        bar = w.detachable_tab_bar
+        self.term.output_active_changed.emit(True)
+        bar.grab()
+        self.assertTrue(bar._pulse_timer.isActive())
+        self.assertTrue(bar._pulse_region.intersects(bar.tabRect(self.idx)))
+        w._set_tab_pending_badge(self.term, 'done')
+        bar.grab()
+        self.assertFalse(bar._pulse_timer.isActive())
+        self.assertFalse(bar.tabIcon(self.idx).isNull())
+        w.tab_widget.setCurrentIndex(self.idx)
+        w._on_terminal_interaction(self.term)
+        bar.grab()
+        self.assertTrue(bar.tabIcon(self.idx).isNull())
+        self.assertFalse(bar._pulse_timer.isActive())
+        w.tab_widget.setCurrentIndex(1)
+        bar.grab()
+        self.assertTrue(bar._pulse_timer.isActive())
+        self.term.set_output_marker_enabled(False)
+        bar.grab()
+        self.assertFalse(bar._pulse_timer.isActive())
+        self.term.set_output_marker_enabled(True)
 
     def test_icon_cache_reuse(self):
         w = self.w

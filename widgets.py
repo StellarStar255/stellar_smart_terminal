@@ -2,6 +2,7 @@
 通用小控件
 从 main_window.py 拆分出来的不依赖 MainWindow 的控件类
 """
+import math
 import os
 import time
 
@@ -10,8 +11,8 @@ from PyQt6.QtWidgets import (
     QStyle, QStyledItemDelegate, QStyleOptionButton, QStyleOptionComboBox,
     QStylePainter, QTabBar, QWidget
 )
-from PyQt6.QtCore import Qt, QTimer, QEvent, QPoint, QPointF, QRectF, QStringListModel, pyqtSignal
-from PyQt6.QtGui import QColor, QPainter, QPainterPath, QPalette, QPen
+from PyQt6.QtCore import Qt, QTimer, QEvent, QPoint, QPointF, QRect, QRectF, QStringListModel, pyqtSignal
+from PyQt6.QtGui import QColor, QPainter, QPainterPath, QPalette, QPen, QRegion
 
 from utils import parse_search_tokens, name_matches_tokens
 
@@ -483,6 +484,47 @@ class DetachableTabBar(QTabBar):
         self._drag_tab_index = -1
         self._is_dragging = False
         self._original_cursor = None
+
+        self.output_tabs = None
+        self._pulse_region = QRegion()
+        self._pulse_timer = QTimer(self)
+        self._pulse_timer.setInterval(80)
+        self._pulse_timer.timeout.connect(self._update_output_dots)
+
+    def _update_output_dots(self):
+        if not self.isVisible() or self.window().isMinimized():
+            self._pulse_timer.stop()
+        else:
+            self.update(self._pulse_region)
+
+    def hideEvent(self, event):
+        self._pulse_timer.stop()
+        super().hideEvent(event)
+
+    def paintEvent(self, event):
+        super().paintEvent(event)
+        region = QRegion()
+        if self.output_tabs and not self.window().isMinimized():
+            painter = QPainter(self)
+            painter.setRenderHint(QPainter.RenderHint.Antialiasing)
+            color = QColor('#94a3b8')
+            color.setAlphaF(0.72 + 0.28 * math.cos(math.pi * time.monotonic()))
+            painter.setPen(Qt.PenStyle.NoPen)
+            painter.setBrush(color)
+            for idx in self.output_tabs():
+                if idx == self.currentIndex() or not self.isTabVisible(idx) or not self.tabIcon(idx).isNull():
+                    continue
+                tab = self.tabRect(idx)
+                dot = QRect(tab.left() + 3, tab.center().y() - 1, 8, 8)
+                if self.rect().contains(dot):
+                    painter.drawEllipse(dot)
+                    region |= QRegion(dot.adjusted(-1, -1, 1, 1))
+            painter.end()
+        self._pulse_region = region
+        if region.isEmpty():
+            self._pulse_timer.stop()
+        elif not self._pulse_timer.isActive():
+            self._pulse_timer.start()
 
     def mouseDoubleClickEvent(self, event):
         # 双击标签 → 就地重命名（双击空白处不处理）
