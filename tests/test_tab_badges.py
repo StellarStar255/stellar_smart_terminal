@@ -5,7 +5,7 @@
 - interaction/attention 信号 → 标签页出现挂起徽章（橙/绿点）
 - 清除挂起（切标签/按键路径共用 _clear_tab_pending_badge）后：
   无运行终端 → 图标清空；挂起态优先于运行态
-- 图标缓存（同 state 复用同一 QIcon）
+- 状态切换时标签几何与标题像素稳定
 - _find_tab_of_terminal 定位
 
     QT_QPA_PLATFORM=offscreen python3 -m pytest tests/test_tab_badges.py -v
@@ -61,9 +61,9 @@ class TestTabBadges(unittest.TestCase):
 
     def test_interaction_sets_waiting_badge(self):
         w = self.w
-        self.assertTrue(w.tab_widget.tabIcon(self.idx).isNull())
+        self.assertIsNone(w._tab_badge_color(self.idx))
         w._on_terminal_interaction(self.term)
-        self.assertFalse(w.tab_widget.tabIcon(self.idx).isNull())
+        self.assertIsNotNone(w._tab_badge_color(self.idx))
         self.assertEqual(
             getattr(w.tab_widget.widget(self.idx), '_badge_pending', None),
             'waiting')
@@ -71,13 +71,13 @@ class TestTabBadges(unittest.TestCase):
     def test_done_badge_and_clear(self):
         w = self.w
         w._set_tab_pending_badge(self.term, 'done')
-        self.assertFalse(w.tab_widget.tabIcon(self.idx).isNull())
+        self.assertIsNotNone(w._tab_badge_color(self.idx))
         # 清除挂起：无运行终端 → 图标清空
         w._clear_tab_pending_badge(self.idx)
         self.assertIsNone(
             getattr(w.tab_widget.widget(self.idx), '_badge_pending', None))
         if not any(t.is_running() for t in w.tab_terminals[self.idx]):
-            self.assertTrue(w.tab_widget.tabIcon(self.idx).isNull())
+            self.assertIsNone(w._tab_badge_color(self.idx))
 
     def test_no_persistent_dot_while_running(self):
         """常驻「运行中」灰点已移除：挂起提醒显示图标，清除后即空——
@@ -87,10 +87,9 @@ class TestTabBadges(unittest.TestCase):
         self.term.is_running = lambda: True
         try:
             w._set_tab_pending_badge(self.term, 'waiting')
-            icon_waiting = w.tab_widget.tabIcon(self.idx)
-            self.assertFalse(icon_waiting.isNull())
+            self.assertEqual(w._tab_badge_color(self.idx), "#f59e0b")
             w._clear_tab_pending_badge(self.idx)
-            self.assertTrue(w.tab_widget.tabIcon(self.idx).isNull())
+            self.assertIsNone(w._tab_badge_color(self.idx))
         finally:
             self.term.is_running = orig
             w._refresh_tab_badge(self.idx)
@@ -105,11 +104,11 @@ class TestTabBadges(unittest.TestCase):
         w._set_tab_pending_badge(self.term, 'done')
         bar.grab()
         self.assertFalse(bar._pulse_timer.isActive())
-        self.assertFalse(bar.tabIcon(self.idx).isNull())
+        self.assertIsNotNone(w._tab_badge_color(self.idx))
         w.tab_widget.setCurrentIndex(self.idx)
         w._on_terminal_interaction(self.term)
         bar.grab()
-        self.assertTrue(bar.tabIcon(self.idx).isNull())
+        self.assertIsNone(w._tab_badge_color(self.idx))
         self.assertFalse(bar._pulse_timer.isActive())
         w.tab_widget.setCurrentIndex(1)
         bar.grab()
@@ -131,19 +130,34 @@ class TestTabBadges(unittest.TestCase):
         selected = w.tab_terminals[idx][0]
         with patch.object(w, 'isActiveWindow', return_value=False):
             w._on_tab_session_ended(selected)
-            self.assertTrue(w.tab_widget.tabIcon(idx).isNull())
+            self.assertIsNone(w._tab_badge_color(idx))
             w._on_tab_session_ended(self.term)
-            self.assertFalse(w.tab_widget.tabIcon(self.idx).isNull())
+            self.assertIsNotNone(w._tab_badge_color(self.idx))
         w.tab_widget.setCurrentIndex(self.idx)
-        self.assertTrue(w.tab_widget.tabIcon(self.idx).isNull())
+        self.assertIsNone(w._tab_badge_color(self.idx))
 
-    def test_icon_cache_reuse(self):
+    def test_status_changes_only_repaint_the_dot(self):
         w = self.w
-        self.assertIs(w._tab_badge_icon('waiting'), w._tab_badge_icon('waiting'))
-        self.assertIsNot(w._tab_badge_icon('waiting'), w._tab_badge_icon('done'))
-        # 未知/已移除状态（如老的 'running'）安全返回空图标，不抛异常
-        self.assertTrue(w._tab_badge_icon('running').isNull())
-
+        bar = w.detachable_tab_bar
+        rect = bar.tabRect(self.idx)
+        baseline = bar.grab(rect).toImage()
+        scale = baseline.devicePixelRatio()
+        title = baseline.rect().adjusted(round(20 * scale), 0, 0, 0)
+        self.term.output_active_changed.emit(True)
+        grey = bar.grab(rect).toImage()
+        self.assertNotEqual(grey, baseline)
+        self.assertEqual(grey.copy(title), baseline.copy(title))
+        for state in ('waiting', 'done', None):
+            w._set_tab_pending_badge(self.term, state)
+            frame = bar.grab(rect).toImage()
+            self.assertEqual(bar.tabRect(self.idx), rect)
+            self.assertEqual(frame.copy(title), baseline.copy(title))
+            if state:
+                self.assertNotEqual(frame, baseline)
+                center = round(10 * scale), round((rect.height() // 2 + 2) * scale)
+                self.assertEqual(frame.pixelColor(*center).name(), w._tab_badge_color(self.idx))
+        self.term.output_active_changed.emit(False)
+        self.assertEqual(bar.grab(rect).toImage(), baseline)
 
 if __name__ == '__main__':
     unittest.main()

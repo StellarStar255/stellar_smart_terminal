@@ -479,7 +479,6 @@ class ThemeMixin:
             QTabBar::tab:selected {{
                 background-color: {t['bg_dark']};
                 color: {t['text']};
-                font-weight: 600;
                 margin-top: 0px;
                 padding-top: 10px;
                 border-top: 2px solid {t['accent']};

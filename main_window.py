@@ -56,7 +56,7 @@ import copy
 from PyQt6 import sip  # 用于检查 C++ 对象是否已被删除
 from PyQt6.QtCore import (Qt, QTimer, QEvent, QPoint, QRect, QObject, QThreadPool,
                           QVariantAnimation, QEasingCurve, QAbstractAnimation, QTextBoundaryFinder, pyqtSignal)
-from PyQt6.QtGui import QAction, QIcon, QColor, QPixmap, QPainter, QKeySequence
+from PyQt6.QtGui import QAction, QIcon, QColor, QKeySequence
 
 from terminal_widget import TerminalWidget
 from session_manager import SessionManager, Session, SessionEntry
@@ -889,6 +889,7 @@ class MainWindow(ThemeMixin, ToolbarMixin, ConfigMixin, ExplorerPanelMixin,
         # 使用自定义可分离的标签栏
         self.detachable_tab_bar = DetachableTabBar(self.tab_widget)
         self.tab_widget.setTabBar(self.detachable_tab_bar)
+        self.detachable_tab_bar.badge_color = self._tab_badge_color
         self.detachable_tab_bar.output_tabs = self._tabs_with_output
         # 关掉 documentMode 标签栏的原生"基座"绘制：macOS 深色系统外观下它会
         # 无视 QSS、按 NSAppearance 横贯整行画一条深灰底（浅色主题下极其突兀），
@@ -938,7 +939,6 @@ class MainWindow(ThemeMixin, ToolbarMixin, ConfigMixin, ExplorerPanelMixin,
             QTabBar::tab:selected {
                 background-color: #1a1a2e;
                 color: #ffffff;
-                font-weight: 600;
                 margin-top: 0px;
                 padding-top: 10px;
                 border-top: 2px solid #667eea;
@@ -3043,29 +3043,6 @@ class MainWindow(ThemeMixin, ToolbarMixin, ConfigMixin, ExplorerPanelMixin,
 
 
 
-    def _scrollback_dot_icon(self, level: int) -> QIcon:
-        """生成/缓存 scrollback 压力指示点图标：0=空 / 1=琥珀 / 2=红。"""
-        if level <= 0:
-            return QIcon()
-        cache = getattr(self, '_scrollback_icon_cache', None)
-        if cache is None:
-            cache = self._scrollback_icon_cache = {}
-        if level in cache:
-            return cache[level]
-        color = QColor('#e0a83a') if level == 1 else QColor('#e0524c')  # 琥珀 / 红
-        sz = 14
-        pm = QPixmap(sz, sz)
-        pm.fill(Qt.GlobalColor.transparent)
-        p = QPainter(pm)
-        p.setRenderHint(QPainter.RenderHint.Antialiasing)
-        p.setPen(Qt.PenStyle.NoPen)
-        p.setBrush(color)
-        p.drawEllipse(3, 3, sz - 6, sz - 6)
-        p.end()
-        icon = QIcon(pm)
-        cache[level] = icon
-        return icon
-
     def _on_scrollback_pressure(self, terminal):
         """某终端的 scrollback 压力变化 → 更新其所在 tab 的指示点（取该 tab 内最高等级）。"""
         try:
@@ -3082,7 +3059,8 @@ class MainWindow(ThemeMixin, ToolbarMixin, ConfigMixin, ExplorerPanelMixin,
                     if lv > level:
                         level = lv
                         worst = term
-                self.tab_widget.setTabIcon(idx, self._scrollback_dot_icon(level))
+                self.tab_widget.widget(idx)._scrollback_level = level
+                self._refresh_tab_badge(idx)
                 self.tab_widget.setTabToolTip(
                     idx, worst.scrollback_tooltip() if worst is not None else "")
                 break
@@ -6535,26 +6513,11 @@ class MainWindow(ThemeMixin, ToolbarMixin, ConfigMixin, ExplorerPanelMixin,
         'done': '#22c55e',
     }
 
-    def _tab_badge_icon(self, state) -> QIcon:
-        color = self._TAB_BADGE_COLORS.get(state)
-        if color is None:
-            return QIcon()
-        cache = getattr(self, '_tab_badge_icon_cache', None)
-        if cache is None:
-            cache = self._tab_badge_icon_cache = {}
-        icon = cache.get(state)
-        if icon is None:
-            pm = QPixmap(12, 12)
-            pm.fill(Qt.GlobalColor.transparent)
-            p = QPainter(pm)
-            p.setRenderHint(QPainter.RenderHint.Antialiasing)
-            p.setPen(Qt.PenStyle.NoPen)
-            p.setBrush(QColor(color))
-            p.drawEllipse(2, 2, 8, 8)
-            p.end()
-            icon = QIcon(pm)
-            cache[state] = icon
-        return icon
+    def _tab_badge_color(self, idx):
+        page = self.tab_widget.widget(idx)
+        pending = self._TAB_BADGE_COLORS.get(getattr(page, '_badge_pending', None))
+        level = getattr(page, '_scrollback_level', 0)
+        return pending or {1: '#e0a83a', 2: '#e0524c'}.get(level)
 
     def _find_tab_of_terminal(self, terminal):
         for idx, terminals in self.tab_terminals.items():
@@ -6580,13 +6543,8 @@ class MainWindow(ThemeMixin, ToolbarMixin, ConfigMixin, ExplorerPanelMixin,
         self._refresh_tab_badge(idx)
 
     def _refresh_tab_badge(self, idx):
-        """按挂起提醒态（waiting/done）刷新一个标签页的图标；无挂起则清空。"""
-        page = self.tab_widget.widget(idx)
-        if page is None:
-            return
-        state = getattr(page, '_badge_pending', None)
-        self.tab_widget.setTabIcon(
-            idx, self._tab_badge_icon(state) if state else QIcon())
+        bar = self.detachable_tab_bar
+        bar.update(bar.tabRect(idx))
 
     @property
     def has_nav_output(self):

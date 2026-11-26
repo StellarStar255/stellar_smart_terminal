@@ -485,6 +485,7 @@ class DetachableTabBar(QTabBar):
         self._is_dragging = False
         self._original_cursor = None
 
+        self.badge_color = None
         self.output_tabs = None
         self._pulse_region = QRegion()
         self._pulse_timer = QTimer(self)
@@ -515,14 +516,18 @@ class DetachableTabBar(QTabBar):
             color = QColor('#94a3b8')
             color.setAlphaF(0.72 + 0.28 * math.cos(math.pi * time.monotonic()))
             painter.setPen(Qt.PenStyle.NoPen)
-            painter.setBrush(color)
-            for idx in self.output_tabs():
-                if idx == self.currentIndex() or not self.isTabVisible(idx) or not self.tabIcon(idx).isNull():
+            output = set(self.output_tabs())
+            for idx in range(self.count()):
+                badge = self.badge_color(idx) if self.badge_color else None
+                pulse = idx in output and idx != self.currentIndex() and not badge
+                if not self.isTabVisible(idx) or not (badge or pulse):
                     continue
                 tab = self.tabRect(idx)
                 dot = QRect(tab.left() + 7, tab.center().y(), 6, 6)
                 if self.rect().contains(dot):
+                    painter.setBrush(QColor(badge) if badge else color)
                     painter.drawEllipse(dot)
+                if pulse and self.rect().contains(dot):
                     region |= QRegion(dot.adjusted(-1, -1, 1, 1))
             painter.end()
         self._pulse_region = region
