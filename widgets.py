@@ -520,7 +520,7 @@ class DetachableTabBar(QTabBar):
                 if idx == self.currentIndex() or not self.isTabVisible(idx) or not self.tabIcon(idx).isNull():
                     continue
                 tab = self.tabRect(idx)
-                dot = QRect(tab.left() + 3, tab.center().y() - 1, 8, 8)
+                dot = QRect(tab.left() + 7, tab.center().y(), 6, 6)
                 if self.rect().contains(dot):
                     painter.drawEllipse(dot)
                     region |= QRegion(dot.adjusted(-1, -1, 1, 1))

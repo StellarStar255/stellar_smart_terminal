@@ -469,7 +469,7 @@ class ThemeMixin:
             QTabBar::tab {{
                 background-color: {t['bg_medium']};
                 color: {t['text_dim']};
-                padding: 6px 4px 6px 14px;
+                padding: 6px 4px 6px 22px;
                 margin-right: 2px;
                 margin-top: 4px;
                 border-top-left-radius: 7px;

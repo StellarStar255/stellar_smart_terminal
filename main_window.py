@@ -927,7 +927,7 @@ class MainWindow(ThemeMixin, ToolbarMixin, ConfigMixin, ExplorerPanelMixin,
             QTabBar::tab {
                 background-color: #0f1626;
                 color: #888;
-                padding: 6px 4px 6px 14px;
+                padding: 6px 4px 6px 22px;
                 margin-right: 2px;
                 margin-top: 4px;
                 border-top-left-radius: 7px;
