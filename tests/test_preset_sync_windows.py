@@ -107,6 +107,31 @@ class PresetSyncAcrossWindowsTest(unittest.TestCase):
             execute.assert_called_once_with(['tmux attach -t project_two'])
             other_execute.assert_not_called()
 
+    def test_palette_preedit_does_not_run_current_result(self):
+        from PyQt6.QtCore import Qt
+        from PyQt6.QtGui import QInputMethodEvent
+        from PyQt6.QtTest import QTest
+
+        window = self.windows[0]
+        window.presets = [{'name': 'IME验证', 'commands': ['echo selected']}]
+        window.activateWindow()
+        self.app.processEvents()
+        palette = window.command_palette
+        palette.focus_search()
+        field = palette.line_edit
+        field.setText('IME')
+        with patch.object(window.terminal, '_execute_commands') as execute:
+            self.app.sendEvent(field, QInputMethodEvent('yan', []))
+            QTest.keyClick(field, Qt.Key.Key_Return)
+            execute.assert_not_called()
+            self.assertTrue(palette.popup.isVisible())
+            commit = QInputMethodEvent()
+            commit.setCommitString('验证')
+            self.app.sendEvent(field, commit)
+            self.assertEqual(field.text(), 'IME验证')
+            QTest.keyClick(field, Qt.Key.Key_Return)
+            execute.assert_called_once_with(['echo selected'])
+
     def test_palette_inserts_one_line_without_submitting(self):
         from PyQt6.QtCore import Qt
         from PyQt6.QtTest import QTest

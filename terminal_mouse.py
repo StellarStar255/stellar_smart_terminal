@@ -31,9 +31,9 @@ from PyQt6.QtGui import (
     QAction, QActionGroup, QDesktopServices, QDragEnterEvent, QDropEvent, QKeySequence, QMouseEvent
 )
 from PyQt6.QtWidgets import (
-    QAbstractItemView, QApplication, QLineEdit, QListWidget, QListWidgetItem, QMenu, QWidgetAction,
+    QAbstractItemView, QApplication, QListWidget, QListWidgetItem, QMenu, QWidgetAction,
 )
-from command_palette import Command, matching_commands
+from command_palette import Command, CommandSearchEdit, matching_commands
 from i18n import t
 
 
@@ -42,7 +42,7 @@ class _QuickCommandList(QListWidget):
         # Let the enclosing menu handle submenu navigation and dismissal.
         key = event.key()
         if (key in (Qt.Key.Key_Left, Qt.Key.Key_Right, Qt.Key.Key_Escape)
-                or (key == Qt.Key.Key_Down and self.currentRow() == self.count() - 1)):
+                or (key == Qt.Key.Key_Down and self.currentRow() in (-1, self.count() - 1))):
             event.ignore()
             return
         if key in (Qt.Key.Key_Return, Qt.Key.Key_Enter):
@@ -54,9 +54,12 @@ class _QuickCommandList(QListWidget):
         super().keyPressEvent(event)
 
 
-class _QuickCommandFilter(QLineEdit):
+class _QuickCommandFilter(CommandSearchEdit):
     def keyPressEvent(self, event):
-        if event.key() in (Qt.Key.Key_Up, Qt.Key.Key_Down, Qt.Key.Key_Return, Qt.Key.Key_Enter):
+        if self.composing:
+            super().keyPressEvent(event)
+            event.accept()
+        elif event.key() in (Qt.Key.Key_Up, Qt.Key.Key_Down, Qt.Key.Key_Return, Qt.Key.Key_Enter):
             self.parentWidget().command_list.keyPressEvent(event)
         else:
             super().keyPressEvent(event)
@@ -77,14 +80,14 @@ class _QuickCommandMenu(QMenu):
             self.search_box.keyPressEvent(event)
             return
         if (self.command_list is not None
-                and self.activeAction() in (None, self.command_list_action)
+                and self.activeAction() in (None, self.search_action, self.command_list_action)
                 and event.key() not in (Qt.Key.Key_Left, Qt.Key.Key_Right, Qt.Key.Key_Escape)):
             # A submenu opened by hovering may receive keys before its list has focus.
             self.command_list.keyPressEvent(event)
             if event.isAccepted():
                 return
             # Down from the last command enters the fixed footer.
-            if self.activeAction() is None and event.key() == Qt.Key.Key_Down:
+            if event.key() == Qt.Key.Key_Down:
                 self.setActiveAction(self.command_list_action)
         super().keyPressEvent(event)
 
@@ -1086,6 +1089,7 @@ class TerminalMouseMixin:
         search_action = QWidgetAction(menu)
         search_action.setDefaultWidget(search)
         menu.insertAction(separator, search_action)
+        menu.search_action = search_action
         menu.search_box = search
         search.textChanged.connect(populate)
         populate("")

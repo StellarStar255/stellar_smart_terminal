@@ -6,7 +6,7 @@ from unittest.mock import Mock, patch
 os.environ.setdefault('QT_QPA_PLATFORM', 'offscreen')
 
 from PyQt6.QtCore import QEvent, QPoint, Qt
-from PyQt6.QtGui import QAction, QContextMenuEvent
+from PyQt6.QtGui import QAction, QContextMenuEvent, QInputMethodEvent
 from PyQt6.QtTest import QTest
 from PyQt6.QtWidgets import QApplication, QMenu
 from terminal_mouse import _QuickCommandMenu
@@ -110,6 +110,59 @@ class TestLocalQuickShell(unittest.TestCase):
         QTest.keyClick(search, Qt.Key.Key_Return)
         self.w._execute_commands.assert_called_once_with(['git status'])
         self.assertFalse(submenu.isVisible())
+
+    def _open_project_menu_with_keyboard(self):
+        self.w.show()
+        self.w.activateWindow()
+        self.assertTrue(QTest.qWaitForWindowActive(self.w))
+        self.w.local_quick_commands_provider = lambda: [
+            {'name': 'Other', 'commands': ['echo other']},
+            {'name': '中文', 'commands': ['echo selected']}]
+        self.w._add_quick_command_menu(
+            self.menu, QPoint(30, 30), 'ctx.local_quick_commands',
+            self.w._populate_local_commands_menu, self.w.add_local_command_requested,
+            self.w.manage_local_presets_requested, 'ctx.manage_local_presets')
+        self.menu.popup(QPoint(30, 30))
+        action = self.menu.actions()[0]
+        self.menu.setActiveAction(action)
+        QTest.keyClick(self.menu, Qt.Key.Key_Right)
+        self.app.processEvents()
+        self.assertIs(self.app.focusWidget(), action.menu().search_box)
+        return action.menu()
+
+    def test_preedit_return_preserves_menu_until_committed_query_is_confirmed(self):
+        menu = self._open_project_menu_with_keyboard()
+        field = menu.search_box
+        self.app.sendEvent(field, QInputMethodEvent('zhong', []))
+        QTest.keyClick(self.app.focusWidget(), Qt.Key.Key_Down)
+        QTest.keyClick(self.app.focusWidget(), Qt.Key.Key_Return)
+        self.assertTrue(menu.isVisible())
+        self.assertEqual(menu.command_list.currentRow(), 0)
+        self.w._execute_commands.assert_not_called()
+        commit = QInputMethodEvent()
+        commit.setCommitString('中文')
+        self.app.sendEvent(field, commit)
+        QTest.keyClick(self.app.focusWidget(), Qt.Key.Key_Backspace)
+        self.assertEqual(field.text(), '中')
+        self.assertEqual(menu.command_list.count(), 1)
+        QTest.keyClick(self.app.focusWidget(), Qt.Key.Key_Return)
+        self.w._execute_commands.assert_called_once_with(['echo selected'])
+
+    def test_down_from_filtered_results_reaches_footer_in_one_press(self):
+        managed = Mock()
+        self.w.manage_local_presets_requested.connect(managed)
+        for query in ('other', 'missing'):
+            with self.subTest(query=query):
+                menu = self._open_project_menu_with_keyboard()
+                QTest.keyClicks(self.app.focusWidget(), query)
+                QTest.keyClick(self.app.focusWidget(), Qt.Key.Key_Down)
+                self.assertIs(menu.activeAction(), menu.actions()[-2])
+                QTest.keyClick(self.app.focusWidget(), Qt.Key.Key_Down)
+                self.assertIs(menu.activeAction(), menu.actions()[-1])
+                QTest.keyClick(self.app.focusWidget(), Qt.Key.Key_Return)
+                self.w._execute_commands.assert_not_called()
+                self.menu.clear()
+        self.assertEqual(managed.call_count, 2)
 
     def test_context_menu_defers_presets_and_releases_actions(self):
         source = Mock(return_value=[{'name': 'Local', 'commands': ['echo local']}])

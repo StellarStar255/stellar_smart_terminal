@@ -90,6 +90,19 @@ def matching_commands(query, commands):
     return [command for _, command in scored]
 
 
+class CommandSearchEdit(QLineEdit):
+    """Keep command shortcuts out of an unfinished input-method composition."""
+    composing = False
+
+    def inputMethodEvent(self, event):
+        self.composing = bool(event.preeditString())
+        super().inputMethodEvent(event)
+
+    def focusOutEvent(self, event):
+        super().focusOutEvent(event)
+        self.composing = False
+
+
 class _OutsideClickFilter(QObject):
     """装在 QApplication 上的独立过滤器：弹层可见时，点击弹层/输入框之外 → 收起，
     Esc → 收起。
@@ -112,6 +125,8 @@ class _OutsideClickFilter(QObject):
                 if not p._point_in_popup_or_input(gp):
                     p._hide_popup()  # 仅收起，不消费事件，点击照常透传
             elif et == QEvent.Type.KeyPress and ev.key() == Qt.Key.Key_Escape:
+                if obj is p.line_edit and p.line_edit.composing:
+                    return False
                 p._clear_and_hide()
                 return True
         return super().eventFilter(obj, ev)
@@ -158,7 +173,7 @@ class CommandPalette(QWidget):
         layout.setContentsMargins(0, 0, 0, 0)
         layout.setSpacing(0)
 
-        self.line_edit = QLineEdit(self)
+        self.line_edit = CommandSearchEdit(self)
         self.line_edit.setPlaceholderText(placeholder)
         self.line_edit.setMinimumWidth(360)
         self.line_edit.setFixedHeight(28)
@@ -539,6 +554,8 @@ class CommandPalette(QWidget):
             elif ev.type() == QEvent.Type.KeyPress:
                 ke: QKeyEvent = ev
                 key = ke.key()
+                if self.line_edit.composing:
+                    return False
                 if key in (Qt.Key.Key_Down, Qt.Key.Key_Up):
                     if not self.popup.isVisible():
                         self._refresh_popup()
