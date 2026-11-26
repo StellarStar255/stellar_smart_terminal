@@ -1127,9 +1127,7 @@ class ThemeMixin:
                     )
                 else:
                     terminal.reset_to_dark_theme_colors()
-                terminal._cache_valid = False
-                terminal._content_dirty = True
-                terminal.update()
+                terminal._invalidate_render_cache()
 
         # 更新窗口和Dock图标（根据设置决定是否使用蒙版）
         self._update_app_icon_by_theme()

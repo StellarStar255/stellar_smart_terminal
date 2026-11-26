@@ -493,7 +493,6 @@ class TerminalInputMixin:
         preedit_string = event.preeditString()
         if self._preedit_string != preedit_string:
             self._preedit_string = preedit_string
-            self._content_dirty = True
             # 更新输入法候选框位置
             from PyQt6.QtGui import QGuiApplication
             from PyQt6.QtCore import Qt

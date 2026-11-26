@@ -68,14 +68,27 @@ class _QuickCommandFilter(CommandSearchEdit):
 class _QuickCommandMenu(QMenu):
     command_list = None
     command_list_action = None
+    search_toggle = None
 
     def showEvent(self, event):
         super().showEvent(event)
         if self.command_list is not None:
-            self.search_box.setFocus()
+            (self.search_box if self.search_action.isVisible() else self.command_list).setFocus()
+
+    def mouseReleaseEvent(self, event):
+        if (self.search_toggle is not None and event.button() == Qt.MouseButton.LeftButton
+                and self.actionAt(event.position().toPoint()) is self.search_toggle):
+            self.search_toggle.trigger()
+            return
+        super().mouseReleaseEvent(event)
 
     def keyPressEvent(self, event):
-        if self.command_list is not None and event.text() and event.text().isprintable():
+        if (self.search_toggle is not None and self.activeAction() is self.search_toggle
+                and event.key() in (Qt.Key.Key_Return, Qt.Key.Key_Enter, Qt.Key.Key_Space)):
+            self.search_toggle.trigger()
+            return
+        if (self.command_list is not None and self.search_action.isVisible()
+                and event.text() and event.text().isprintable()):
             self.search_box.setFocus()
             self.search_box.keyPressEvent(event)
             return
@@ -980,7 +993,8 @@ class TerminalMouseMixin:
 
         def prepare():
             populate(menu)
-            self._fit_quick_command_menu(menu, popup_pos)
+            scope = "local" if title == "ctx.local_quick_commands" else "global"
+            self._fit_quick_command_menu(menu, popup_pos, scope)
 
         menu.aboutToShow.connect(prepare, Qt.ConnectionType.SingleShotConnection)
         parent.addMenu(menu)
@@ -1020,7 +1034,7 @@ class TerminalMouseMixin:
         if has_commands:
             menu.insertSeparator(footer)
 
-    def _fit_quick_command_menu(self, menu, popup_pos):
+    def _fit_quick_command_menu(self, menu, popup_pos, scope="global"):
         screen = QApplication.screenAt(popup_pos) or self.window().screen()
         available = screen.availableGeometry()
         font = menu.fontMetrics()
@@ -1089,6 +1103,13 @@ class TerminalMouseMixin:
                 empty.setFlags(Qt.ItemFlag.NoItemFlags)
                 commands.addItem(empty)
 
+        owner = getattr(self, '_owner_window', None) or self.window()
+        preferences = getattr(owner, '_quick_command_search', {})
+        enabled = preferences.get(scope) is True
+        toggle = menu.addAction(t("ctx.show_command_search"))
+        toggle.setCheckable(True)
+        toggle.setChecked(enabled)
+        menu.search_toggle = toggle
         search = _QuickCommandFilter(menu)
         search.setPlaceholderText(t("ctx.filter_commands"))
         search.setAccessibleName(search.placeholderText())
@@ -1096,6 +1117,7 @@ class TerminalMouseMixin:
         search_action = QWidgetAction(menu)
         search_action.setDefaultWidget(search)
         menu.insertAction(separator, search_action)
+        search_action.setVisible(enabled)
         menu.search_action = search_action
         menu.search_box = search
         search.textChanged.connect(populate)
@@ -1103,8 +1125,8 @@ class TerminalMouseMixin:
         width = min(width_limit, max(240, widest + 48))
         # Budget for the whole popup, including the native footer and frame.
         height_limit = max(row_height, available.height() * 85 // 100 - menu.sizeHint().height())
-        height = min(height_limit, sum(commands.sizeHintForRow(row)
-                                       for row in range(commands.count())))
+        list_height = sum(commands.sizeHintForRow(row) for row in range(commands.count()))
+        height = min(height_limit, list_height)
         commands.setFixedSize(width, height)
         commands.setCurrentRow(0)
         scroll_action = QWidgetAction(menu)
@@ -1112,6 +1134,26 @@ class TerminalMouseMixin:
         menu.insertAction(separator, scroll_action)
         menu.command_list = commands
         menu.command_list_action = scroll_action
+
+        def toggle_search(checked):
+            preferences[scope] = checked
+            owner._quick_command_search = preferences
+            checkpoint = getattr(owner, '_checkpoint_workspace', None)
+            if checkpoint is not None:
+                checkpoint()
+            search.clear()
+            search_action.setVisible(checked)
+            search.setVisible(checked)
+            # Recalculate with the fixed footer and the current search field.
+            remaining = available.height() * 85 // 100 - (menu.sizeHint().height() - commands.height())
+            commands.setFixedHeight(min(list_height, max(row_height, remaining)))
+            if menu.isVisible():
+                menu.adjustSize()
+                menu.setActiveAction(None)
+                (search if checked else commands).setFocus()
+                menu.move(menu.x(), max(available.top(), min(menu.y(), available.bottom() - menu.height() + 1)))
+
+        toggle.toggled.connect(toggle_search)
 
         def activate(item):
             entry = item.data(Qt.ItemDataRole.UserRole)

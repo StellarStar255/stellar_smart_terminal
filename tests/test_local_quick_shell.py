@@ -93,6 +93,7 @@ class TestLocalQuickShell(unittest.TestCase):
         self.menu.popup(QPoint(30, 30))
         submenu.popup(QPoint(30 + self.menu.width(), 30))
         self.app.processEvents()
+        submenu.search_toggle.trigger()
         search = submenu.search_box
         QTest.keyClicks(submenu, 'xyz')
         self.assertEqual(search.text(), 'xyz')
@@ -118,6 +119,7 @@ class TestLocalQuickShell(unittest.TestCase):
         self.w.local_quick_commands_provider = lambda: [
             {'name': 'Other', 'commands': ['echo other']},
             {'name': '中文', 'commands': ['echo selected']}]
+        self.w._quick_command_search = {'local': True}
         self.w._add_quick_command_menu(
             self.menu, QPoint(30, 30), 'ctx.local_quick_commands',
             self.w._populate_local_commands_menu, self.w.add_local_command_requested,
@@ -156,9 +158,9 @@ class TestLocalQuickShell(unittest.TestCase):
                 menu = self._open_project_menu_with_keyboard()
                 QTest.keyClicks(self.app.focusWidget(), query)
                 QTest.keyClick(self.app.focusWidget(), Qt.Key.Key_Down)
-                self.assertIs(menu.activeAction(), menu.actions()[-2])
+                self.assertIs(menu.activeAction(), menu.actions()[-3])
                 QTest.keyClick(self.app.focusWidget(), Qt.Key.Key_Down)
-                self.assertIs(menu.activeAction(), menu.actions()[-1])
+                self.assertIs(menu.activeAction(), menu.actions()[-2])
                 QTest.keyClick(self.app.focusWidget(), Qt.Key.Key_Return)
                 self.w._execute_commands.assert_not_called()
                 self.menu.clear()
@@ -189,6 +191,8 @@ class TestLocalQuickShell(unittest.TestCase):
             self.assertIsNone(global_menu.command_list)
             global_menu.popup(pos + QPoint(menu.width(), 0))
             self.app.processEvents()
+            if not global_menu.search_toggle.isChecked():
+                global_menu.search_toggle.trigger()
             QTest.keyClicks(global_menu.search_box, 'global')
             QTest.keyClick(global_menu.search_box, Qt.Key.Key_Return)
             self.w._execute_commands.assert_called_with(['echo global'])

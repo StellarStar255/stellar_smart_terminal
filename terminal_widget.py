@@ -418,6 +418,7 @@ class TerminalWidget(TerminalInputMixin, TerminalMouseMixin,
     alert_matched = pyqtSignal(str)  # 输出命中提醒规则（参数=命中的模式文本）
     output_active_changed = pyqtSignal(bool)
     _output_activity = pyqtSignal(int, object)  # 一批输出已处理（参数=字节数）：在 GUI 线程重置空闲计时器
+    _refresh_requested = pyqtSignal()
     _history_grew = pyqtSignal(int)  # feed 新增历史行数：读取线程 marshal 回 GUI 线程做回滚位置补偿
     scrollback_pressure_changed = pyqtSignal(int)  # 回滚历史"卡顿压力"等级变化（0 无 / 1 琥珀 / 2 红）
     _reflow_finished = pyqtSignal(int, float)  # 后台 reflow 完成（行数, 毫秒）：worker 线程 marshal 回 GUI 收尾
@@ -738,7 +739,7 @@ class TerminalWidget(TerminalInputMixin, TerminalMouseMixin,
         # 刷新定时器 - 只在有变化时重绘，降低频率
         self.refresh_timer = QTimer()
         self.refresh_timer.timeout.connect(self._conditional_update)
-        self.refresh_timer.start(50)  # 20fps 足够流畅
+        self.refresh_timer.setInterval(50)
 
         # 输出记录缓冲区 - 批量发送以减少信号开销
         self._output_buffer = deque()
@@ -749,7 +750,8 @@ class TerminalWidget(TerminalInputMixin, TerminalMouseMixin,
         self._output_buffer_lock = threading.Lock()
         self._output_buffer_timer = QTimer()
         self._output_buffer_timer.timeout.connect(self._flush_output_buffer)
-        self._output_buffer_timer.start(100)  # 每100ms刷新一次
+        self._output_buffer_timer.setSingleShot(True)
+        self._output_buffer_timer.setInterval(100)
 
         # Resize 防抖定时器 - 避免拖拽时频繁重绘导致闪烁
         self._resize_timer = QTimer()
@@ -770,6 +772,7 @@ class TerminalWidget(TerminalInputMixin, TerminalMouseMixin,
         # AutoConnection：同线程发射→直连；读取线程发射→自动排队到 GUI 线程，
         # 保证 _activity_idle_timer.start() 始终在 GUI 线程执行。
         self._output_activity.connect(self._on_output_activity)
+        self._refresh_requested.connect(self._schedule_refresh)
         # scroll_offset 只由 GUI 线程读写：读取线程 feed 新增历史行时经此信号
         # marshal 回 GUI 做回滚位置补偿，避免两线程并发改 scroll_offset
         self._history_grew.connect(self._on_history_grew)
@@ -976,6 +979,12 @@ class TerminalWidget(TerminalInputMixin, TerminalMouseMixin,
         # 会透出桌面。这里在布局稳定后再强制重绘一次兜底——只是一次额外 paint，绝对安全。
         QTimer.singleShot(0, self.update)
 
+    def hideEvent(self, event):
+        super().hideEvent(event)
+        # The screen owns the text and images. Recreate its DPR-sized raster on show.
+        self._cache_pixmap = None
+        self._cache_valid = False
+
     def sizeHint(self):
         """返回固定的默认大小建议，不依赖当前 term_cols/term_rows。
         避免 sizeHint ↔ term_cols 反馈循环导致的 resize 震荡。
@@ -986,16 +995,33 @@ class TerminalWidget(TerminalInputMixin, TerminalMouseMixin,
 
     def _toggle_cursor(self):
         """切换光标可见性 - 只更新光标区域，不重建整个缓存"""
+        if self.scroll_offset or not self.hasFocus() or not self.isVisible():
+            return
+        if not self._screen_lock.acquire(blocking=False):
+            return
+        try:
+            cursor = self.screen.cursor
+            if cursor.hidden or not (0 <= cursor.x < self.term_cols and 0 <= cursor.y < self.term_rows):
+                return
+            x, width = self._col_tile(cursor.x)
+            y, height = self._row_tile(cursor.y)
+        finally:
+            self._screen_lock.release()
         self.cursor_visible = not self.cursor_visible
-        # 光标单独绘制，不需要使缓存失效，只触发重绘
-        self.update()
+        self.update(x, y, width, height)
+
+    def _schedule_refresh(self):
+        if self.refresh_timer is not None and not self.refresh_timer.isActive():
+            self.refresh_timer.start()
 
     def _conditional_update(self):
         """条件刷新 - 只在内容变化时重绘"""
-        if self._content_dirty:
-            self._invalidate_render_cache()
-            # 内容增长可能改变 scrollback 压力等级（节流到刷新频率，开销仅一次乘法）
-            self._update_scrollback_level()
+        if not self._content_dirty:
+            self.refresh_timer.stop()
+            return
+        self._invalidate_render_cache()
+        # 内容增长可能改变 scrollback 压力等级（节流到刷新频率，开销仅一次乘法）
+        self._update_scrollback_level()
 
     def _update_terminal_size(self):
         """根据窗口大小更新终端尺寸"""
@@ -1636,6 +1662,9 @@ class TerminalWidget(TerminalInputMixin, TerminalMouseMixin,
         # 同线程发射时是直连(等价于原地调用)，无额外延迟。
         if text:
             self._output_activity.emit(len(text), cancelled)
+        elif len(parts) > 1:
+            # A graphics-only packet also needs a frame.
+            self._refresh_requested.emit()
 
     def _output_batches(self, parts):
         """每批按原顺序应用链接和文本，限制持锁期间处理的字符及链接数。"""
@@ -1679,7 +1708,12 @@ class TerminalWidget(TerminalInputMixin, TerminalMouseMixin,
 
     def _on_output_activity(self, n: int, source=None):
         """GUI 线程：标记有输出活动并重置“执行完毕”空闲计时器。"""
-        if (self._cleaned_up or self._output_cancelled.is_set()
+        if self._cleaned_up:
+            return
+        self._schedule_refresh()
+        if not self._output_buffer_timer.isActive():
+            self._output_buffer_timer.start()
+        if (self._output_cancelled.is_set()
                 or (source is not None and source is not self._output_cancelled)
                 or (self._backend is not None and not getattr(self._backend, 'is_running', True))):
             return

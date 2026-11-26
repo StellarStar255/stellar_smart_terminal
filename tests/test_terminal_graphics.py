@@ -62,6 +62,16 @@ def test_chunked_upload_uses_cursor_and_paints_image(terminal):
     assert frame.pixelColor(x - 1, y + 1).name() == '#000000'
 
 
+def test_image_only_output_schedules_frame_without_text_activity(terminal):
+    packets = []
+    terminal._output_activity.connect(lambda *args: packets.append(args))
+    terminal._process_output_text(command('a=T,f=100,i=9,c=2,r=2', red_png()))
+    assert terminal.refresh_timer.isActive()
+    assert not terminal._output_buffer_timer.isActive()
+    assert not packets
+    assert 9 in terminal.screen.graphics.placements
+
+
 def test_resize_reuse_delete_and_screen_switch(terminal):
     terminal._process_output_text(command('a=T,f=100,i=9,c=2,r=2', red_png()))
     graphics = terminal.screen.graphics

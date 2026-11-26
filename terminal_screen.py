@@ -21,6 +21,10 @@ from terminal_graphics import TerminalGraphics
 LinkedChar = namedtuple("LinkedChar", (*Char._fields, "hyperlink"))
 
 
+# Common immutable cells can be shared by every scrollback line.
+_PLAIN_CELLS = {c: Char(c) for c in map(chr, range(32, 127))}
+
+
 # pyte 0.8 未实现 REP (CSI Pn b) —— 把前一个图形字符重复 N 次。
 # nvidia-smi / watch / 部分现代 CLI 会用 "─\x1b[60b" 这种方式画横线，
 # 不注册这个分发会导致整段重复被静默丢弃（表格横线只剩一两格）。
@@ -676,6 +680,11 @@ class CompatibleHistoryScreen(pyte.HistoryScreen):
         top, bottom = self.margins or (0, self.lines - 1)
         if self.cursor.y == bottom and not self._in_alt_screen:
             # 备用屏幕上不追踪主屏幕的历史行数
+            line = self.buffer[top]
+            for column, cell in line.items():
+                plain = _PLAIN_CELLS.get(cell.data)
+                if plain is not None and cell == plain:
+                    line[column] = plain
             self._total_history_lines += 1
         if self._in_draw:
             # draw() 触发的 index 是自动换行（软换行）

@@ -260,5 +260,70 @@ class TestRestartAndCleanup(_Base):
                          "_execute_command（发 \\n，无调用者）应已删除")
 
 
+class TestIdleRendering(_Base):
+    def test_idle_timers_and_background_frame(self):
+        from PyQt6.QtTest import QTest
+        w = self._widget()
+        recorded = []
+        w.output_recorded.connect(recorded.append)
+        try:
+            w.show()
+            self.app.processEvents()
+            initial = w.grab().toImage()
+            self.assertFalse(w.refresh_timer.isActive())
+            self.assertFalse(w._output_buffer_timer.isActive())
+            w.hide()
+            self.assertIsNone(w._cache_pixmap)
+
+            producer = threading.Thread(target=w._on_output, args=(b'background text',))
+            producer.start()
+            producer.join(2)
+            self.assertFalse(producer.is_alive())
+            self.app.processEvents()
+            QTest.qWait(220)
+            self.assertEqual(recorded, ['background text'])
+            self.assertFalse(w.refresh_timer.isActive())
+            self.assertFalse(w._output_buffer_timer.isActive())
+            self.assertIsNone(w._cache_pixmap)
+            w.show()
+            displayed = w.grab().toImage()
+            self.assertNotEqual(initial, displayed)
+            self.assertTrue(w.screen.display[0].startswith('background text'))
+        finally:
+            w.close()
+            w.deleteLater()
+
+    def test_blink_invalidates_only_visible_cursor_cell(self):
+        w = self._widget()
+        try:
+            with mock.patch.object(w, 'hasFocus', return_value=True), \
+                    mock.patch.object(w, 'isVisible', return_value=True), \
+                    mock.patch.object(w, 'update') as update:
+                w.stream.feed('abc')
+                w._toggle_cursor()
+                x, width = w._col_tile(3)
+                y, height = w._row_tile(0)
+                update.assert_called_once_with(x, y, width, height)
+                update.reset_mock()
+                w.stream.feed('\x1b[?25l')
+                w._toggle_cursor()
+                update.assert_not_called()
+        finally:
+            w.cleanup()
+            w.deleteLater()
+
+    def test_scrollback_shares_plain_cells_and_preserves_styled_cells(self):
+        from terminal_screen import CompatibleHistoryScreen
+        import pyte
+        screen = CompatibleHistoryScreen(12, 2, history=20)
+        stream = pyte.Stream(screen)
+        stream.feed('AA\x1b[31mA\x1b[0m中\r\n' * 5)
+        first, second = list(screen.history.top)[:2]
+        self.assertIs(first[0], second[1])
+        self.assertEqual(first[2].fg, 'red')
+        self.assertEqual(first[3].data, '中')
+        self.assertEqual(first[4].data, '')
+
+
 if __name__ == '__main__':
     unittest.main()

@@ -2721,6 +2721,7 @@ class MainWindow(ThemeMixin, ToolbarMixin, ConfigMixin, ExplorerPanelMixin,
         """MainWindow 本体（非 mixin）的关窗/联动标志，唯一默认值"""
         import uuid
         self._workspace_id = uuid.uuid4().hex
+        self._quick_command_search = {}
         self._closing_in_progress = False       # closeEvent 已进入清理阶段（防重入）
         self._force_closing = False             # 强制关闭路径：跳过确认弹窗
         self._applying_shared_left_width = False  # 正在应用跨窗口同步的侧栏宽度
@@ -4697,6 +4698,7 @@ class MainWindow(ThemeMixin, ToolbarMixin, ConfigMixin, ExplorerPanelMixin,
                 logger.debug("_collect_windows_snapshot: suppressed exception", exc_info=True)
             entries.append({
                 'window_id': w._workspace_id,
+                'quick_command_search': dict(w._quick_command_search),
                 'preset_name': w.preset_combo.currentText(),
                 'cwd': getattr(w, '_window_cwd', '') or '',
                 'geometry': [geo.x(), geo.y(), geo.width(), geo.height()],
@@ -4843,6 +4845,9 @@ class MainWindow(ThemeMixin, ToolbarMixin, ConfigMixin, ExplorerPanelMixin,
         目标值会让 macOS 首显挪动后 Qt 缓存与真实几何脱节，后续 setGeometry
         被当作「无变化」跳过，窗口永远校不回来）。
         """
+        search = entry.get('quick_command_search')
+        self._quick_command_search = {key: True for key in ('global', 'local')
+                                      if isinstance(search, dict) and search.get(key) is True}
         window_id = entry.get('window_id')
         if isinstance(window_id, str) and window_id:
             self._workspace_id = window_id

@@ -186,6 +186,7 @@ class TerminalRenderMixin:
             if painter.isActive():
                 self._draw_cached_frame(painter)
             self._content_dirty = True
+            self._schedule_refresh()
             return
         try:
             self._paint_screen(event)
@@ -193,10 +194,13 @@ class TerminalRenderMixin:
             self._screen_lock.release()
 
     def _draw_cached_frame(self, painter):
-        opaque_bg = QColor(self.bg_color)
-        opaque_bg.setAlpha(255)
         painter.setCompositionMode(QPainter.CompositionMode.CompositionMode_Source)
-        painter.fillRect(self.rect(), opaque_bg)
+        # A complete, opaque cache already includes the background.
+        if (not self._cache_pixmap
+                or self._cache_pixmap.deviceIndependentSize() != self.size()):
+            opaque_bg = QColor(self.bg_color)
+            opaque_bg.setAlpha(255)
+            painter.fillRect(self.rect(), opaque_bg)
         if self._cache_pixmap and not self._cache_pixmap.isNull():
             painter.drawPixmap(0, 0, self._cache_pixmap)
         painter.setCompositionMode(QPainter.CompositionMode.CompositionMode_SourceOver)

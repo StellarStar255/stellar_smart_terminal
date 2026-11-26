@@ -128,6 +128,8 @@ class PresetSyncAcrossWindowsTest(unittest.TestCase):
             parent.popup(QPoint(30, 30))
             menu.popup(QPoint(200, 30))
             self.app.processEvents()
+            if not menu.search_toggle.isChecked():
+                menu.search_toggle.trigger()
             menu.search_box.setText('duplicate')
             return menu
 
