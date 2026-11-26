@@ -276,3 +276,30 @@ def test_log_keeps_flag_pairs_after_zwj_emoji():
     text = prefix + '🇨🇳🇨🇳'
     for position, expected in [(4, 5), (5, 5), (6, 7)]:
         assert MainWindow._log_cluster_boundary(text, position) == expected
+
+
+@pytest.mark.parametrize('first', ['🇨', '👩‍💻🇨'])
+def test_pending_flags_continue_displayed_run(window, first):
+    w = window
+    if not w.log_panel_visible:
+        w._toggle_log_panel()
+    w._MAX_LOG_SIZE = 32
+    w.terminal.output_recorded.emit(first)
+    w._flush_log_buffer()
+    w.terminal.output_recorded.emit('🇳' + '🇨🇳' * 16 + 'END')
+    w._flush_log_buffer()
+    shown = w.log_text.toPlainText()
+    assert shown == '🇨🇳' * 6 + 'END'
+
+
+def test_log_crlf_is_independent_of_flush_boundaries(window):
+    w = window
+    if not w.log_panel_visible:
+        w._toggle_log_panel()
+    text = 'first\r\n\r\nsecond\rthird\n'
+    for cut in range(len(text) + 1):
+        w._clear_log()
+        for packet in (text[:cut], text[cut:]):
+            w.terminal.output_recorded.emit(packet)
+            w._flush_log_buffer()
+        assert w.log_text.toPlainText() == 'first\n\nsecond\nthird\n', cut

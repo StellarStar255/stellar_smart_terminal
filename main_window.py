@@ -398,6 +398,7 @@ class MainWindow(ThemeMixin, ToolbarMixin, ConfigMixin, ExplorerPanelMixin,
 
         # 日志缓冲区（批量更新以提高性能）
         self._log_buffer_truncated = False
+        self._log_ended_with_cr = False
         self._log_buffer = deque()
         self._log_buffer_chars = 0
         self._log_timer = QTimer()
@@ -3390,10 +3391,16 @@ class MainWindow(ThemeMixin, ToolbarMixin, ConfigMixin, ExplorerPanelMixin,
             self._log_buffer_chars += len(clean_text)
             if self._log_buffer_chars > self._MAX_LOG_SIZE:
                 # Match the displayed log's rolling half-window even while inactive.
-                self._log_buffer_truncated = True
                 pending = ''.join(self._log_buffer)
                 cut = len(pending) - self._MAX_LOG_SIZE // 2
+                if (not self._log_buffer_truncated and not pending.isascii()
+                        and pending.find('\n', 0, cut) == -1):
+                    # The previous flush may have displayed only part of a grapheme.
+                    previous = self.log_text.document().lastBlock().text()
+                    pending = previous + pending
+                    cut += len(previous)
                 tail = pending[self._log_cluster_boundary(pending, cut):]
+                self._log_buffer_truncated = True
                 self._log_buffer.clear()
                 if tail:
                     self._log_buffer.append(tail)
@@ -3456,6 +3463,10 @@ class MainWindow(ThemeMixin, ToolbarMixin, ConfigMixin, ExplorerPanelMixin,
         if self._log_buffer_truncated:
             self.log_text.clear()
             self._log_buffer_truncated = False
+        elif self._log_ended_with_cr and combined.startswith('\n'):
+            # QTextEdit already rendered the previous flush's CR as a line break.
+            combined = combined[1:]
+        self._log_ended_with_cr = combined.endswith('\r')
 
         # 一次性更新日志面板
         cursor = self.log_text.textCursor()
@@ -5464,6 +5475,7 @@ class MainWindow(ThemeMixin, ToolbarMixin, ConfigMixin, ExplorerPanelMixin,
         self._log_buffer.clear()
         self._log_buffer_chars = 0
         self._log_buffer_truncated = False
+        self._log_ended_with_cr = False
         self.log_text.clear()
 
     def _debug_special_chars(self):
