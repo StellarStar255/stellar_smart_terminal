@@ -1631,6 +1631,7 @@ class TabSplitMixin:
         """)
         rename = menu.addAction(t("ctx.rename_split"))
         rename.triggered.connect(lambda: self._rename_split(terminal))
+        terminal.add_output_marker_action(menu, t("pane.output_marker"))
         parent = terminal.parent()
         flip = menu.addAction(t("pane.flip_orientation"))
         flip.setEnabled(isinstance(parent, QSplitter) and parent.count() > 1)
@@ -2525,6 +2526,29 @@ class TabSplitMixin:
 
         menu.addSeparator()
 
+        terminals = self.tab_terminals.get(tab_index, [])
+        if len(terminals) == 1:
+            terminals[0].add_output_marker_action(menu)
+        elif terminals:
+            dots = menu.addMenu(t("tab.output_markers"))
+            all_panes = dots.addAction(t("tab.all_output_markers"))
+            all_panes.setCheckable(True)
+            all_panes.setChecked(any(term.output_marker_enabled for term in terminals))
+            page = self.tab_widget.widget(tab_index)
+
+            def toggle_all(enabled):
+                index = self.tab_widget.indexOf(page)
+                for term in self.tab_terminals.get(index, ()):
+                    term.set_output_marker_enabled(enabled)
+                self._checkpoint_workspace()
+
+            all_panes.triggered.connect(toggle_all)
+            dots.addSeparator()
+            for number, term in enumerate(terminals, start=1):
+                label = t("tab.numbered_split", n=number)
+                if term.get_split_label():
+                    label += " · " + term.get_split_label().replace("&", "&&")
+                term.add_output_marker_action(dots, label)
         # 重命名标签页（可复用历史名称）
         rename_action = menu.addAction(t("tab.rename"))
         rename_action.triggered.connect(lambda: self._rename_tab(tab_index))

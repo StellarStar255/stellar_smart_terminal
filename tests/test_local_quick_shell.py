@@ -207,6 +207,9 @@ class TestLocalQuickShell(unittest.TestCase):
         self.assertEqual(self.w._execute_commands.call_count, 3)
 
     def test_long_submenu_scrolls_inside_popup_and_runs_last_preset(self):
+        self.w.show()
+        self.w.activateWindow()
+        self.assertTrue(QTest.qWaitForWindowActive(self.w))
         long_name = 'Long command 中文 & ' * 20
         presets = [{'name': f'Command {i}', 'commands': [f'echo {i}']} for i in range(100)]
         presets[-1]['name'] = long_name.strip()
@@ -223,7 +226,9 @@ class TestLocalQuickShell(unittest.TestCase):
         self.w._fit_quick_command_menu(submenu, pos)
 
         self.menu.popup(pos)
-        submenu.popup(pos + QPoint(self.menu.width(), 0))
+        self.menu.setActiveAction(submenu.menuAction())
+        QTest.keyClick(self.menu, Qt.Key.Key_Right)
+        self.assertTrue(QTest.qWaitForWindowExposed(submenu))
         self.app.processEvents()
         try:
             listing = submenu.command_list
@@ -235,6 +240,19 @@ class TestLocalQuickShell(unittest.TestCase):
             self.assertEqual(listing.count(), len(presets))
             scrollbar = listing.verticalScrollBar()
             self.assertGreater(scrollbar.maximum(), 0)
+            footer = [add_action, manage_action, submenu.search_toggle]
+            for enabled in (True, False, True, False):
+                toggle_rect = submenu.actionGeometry(submenu.search_toggle)
+                QTest.mouseClick(submenu, Qt.MouseButton.LeftButton, pos=toggle_rect.center())
+                self.app.processEvents()
+                self.assertTrue(submenu.isVisible())
+                self.assertEqual(submenu.search_box.isVisible(), enabled)
+                for action in footer:
+                    rect = submenu.actionGeometry(action)
+                    self.assertFalse(rect.isEmpty())
+                    self.assertTrue(submenu.rect().contains(rect), (action.text(), rect, submenu.rect()))
+                    self.assertIs(submenu.actionAt(rect.center()), action)
+                    self.assertTrue(screen.availableGeometry().contains(submenu.mapToGlobal(rect.bottomRight())))
             geometry = submenu.geometry()
             controls = [submenu.actionGeometry(action) for action in (add_action, manage_action)]
             self.assertTrue(all(submenu.rect().contains(rect) for rect in controls))

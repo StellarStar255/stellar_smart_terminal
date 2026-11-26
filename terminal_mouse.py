@@ -429,6 +429,19 @@ class TerminalMouseMixin:
         if owner is not None:
             owner._set_nav_output(self, self._had_output_activity)
 
+    def add_output_marker_action(self, menu, label=None):
+        marker = menu.addAction(label or t("ctx.terminal_output_marker"))
+        marker.setCheckable(True)
+        marker.setChecked(self.output_marker_enabled)
+
+        def toggle_marker(enabled):
+            self.set_output_marker_enabled(enabled)
+            owner = getattr(self, '_owner_window', None)
+            if owner is not None:
+                owner._checkpoint_workspace()
+
+        marker.triggered.connect(toggle_marker)
+
     def set_mouse_click_forward_enabled(self, enabled: bool):
         """设置是否把鼠标点击转发给开启鼠标上报的 TUI 程序（默认关闭）。"""
         self._mouse_click_forward_enabled = bool(enabled)
@@ -870,17 +883,7 @@ class TerminalMouseMixin:
                 lambda checked=False, f=factor: self.set_scroll_sensitivity(f))
             scroll_menu.addAction(act)
         menu.addMenu(scroll_menu)
-        marker = menu.addAction(t("ctx.terminal_output_marker"))
-        marker.setCheckable(True)
-        marker.setChecked(self.output_marker_enabled)
-
-        def toggle_marker(enabled):
-            self.set_output_marker_enabled(enabled)
-            owner = getattr(self, '_owner_window', None)
-            if owner is not None:
-                owner._checkpoint_workspace()
-
-        marker.triggered.connect(toggle_marker)
+        self.add_output_marker_action(menu)
 
         if self._mouse_mode:
             forward_clicks = menu.addAction(t("ctx.forward_tui_clicks"))
@@ -1165,7 +1168,8 @@ class TerminalMouseMixin:
             remaining = available.height() * 85 // 100 - (menu.sizeHint().height() - commands.height())
             commands.setFixedHeight(min(list_height, max(row_height, remaining)))
             if menu.isVisible():
-                menu.adjustSize()
+                # QWidget.adjustSize() caps top-level windows at 2/3 of the screen.
+                menu.resize(menu.sizeHint())
                 menu.setActiveAction(None)
                 (search if checked else commands).setFocus()
                 menu.move(menu.x(), max(available.top(), min(menu.y(), available.bottom() - menu.height() + 1)))

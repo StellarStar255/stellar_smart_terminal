@@ -421,3 +421,57 @@ def test_output_dot_mutes_target_pane_or_window_and_restores_choices(panels):
     check_first(False)
     assert not monitor.output_marker_enabled
     assert not first.window_output_marker_enabled
+
+
+def test_muted_output_pane_keeps_preference_across_window_move(panels):
+    source, target, floating, embedded = panels
+    source._add_new_tab(tab_name='monitor')
+    monitor = source.terminal
+    monitor._process_output_text('GPU status')
+    monitor.set_output_marker_enabled(False)
+    target.set_window_output_marker_enabled(False)
+    assert target._move_pane_next_to(source, monitor, target.terminal, Qt.Orientation.Horizontal, False)
+    target.set_window_output_marker_enabled(True)
+    monitor._process_output_text('next GPU status')
+    for panel in (floating, embedded):
+        assert not row(panel, source).data(NAV_OUTPUT_ROLE)
+        assert not row(panel, target).data(NAV_OUTPUT_ROLE)
+    monitor.set_output_marker_enabled(True)
+    for panel in (floating, embedded):
+        assert row(panel, target).data(NAV_OUTPUT_ROLE)
+        assert not row(panel, source).data(NAV_OUTPUT_ROLE)
+
+
+def test_output_dot_actions_on_tab_and_split_headers(panels):
+    from PyQt6.QtWidgets import QMenu
+    from i18n import t
+    win = panels[0]
+    first = win.terminal
+    bar = win.tab_widget.tabBar()
+
+    def choose(menu, *_):
+        action = next(action for action in menu.actions() if action.text() == t(key))
+        action.trigger()
+
+    key = 'ctx.terminal_output_marker'
+    with patch.object(QMenu, 'exec', choose):
+        win._show_tab_context_menu(bar.tabRect(0).center())
+    assert not first.output_marker_enabled
+    win._split_current_tab()
+    first, second = win.tab_terminals[0]
+    key = 'pane.output_marker'
+    with patch.object(QMenu, 'exec', choose):
+        win._show_pane_menu(second, QPoint(20, 20))
+    assert not first.output_marker_enabled and not second.output_marker_enabled
+    win._add_new_tab(tab_name='unrelated')
+    unrelated = win.terminal
+
+    def choose_split(menu, *_):
+        dots = next(a.menu() for a in menu.actions() if a.text() == t('tab.output_markers'))
+        dots.actions()[choice].trigger()
+
+    for choice, states in [(-1, (False, True)), (0, (False, False)), (0, (True, True))]:
+        with patch.object(QMenu, 'exec', choose_split):
+            win._show_tab_context_menu(bar.tabRect(0).center())
+        assert (first.output_marker_enabled, second.output_marker_enabled) == states
+        assert unrelated.output_marker_enabled
