@@ -8,7 +8,7 @@
 
 **macOS 版已通过 Apple 公证。** 适用于 Apple 芯片 Mac 的应用已使用 Developer ID 证书签名。[下载 Mac 版](https://github.com/StellarStar255/stellar_smart_terminal/releases/latest)
 
-最新版本 [v1.35.66](docs/releases/v1.35.66.md) 修复了 Codex 跨页拖选后松手时高亮消失的问题。
+最新版本 [v1.35.67](docs/releases/v1.35.67.md) 在窗口导航中加入呼吸点，方便查看哪些窗口的终端正在输出。
 
 A PyQt6-based smart terminal with file explorer, Git GUI, LLM proxy, and VS Code extension browser.
 
