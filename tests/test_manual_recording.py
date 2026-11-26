@@ -226,3 +226,22 @@ def test_cursor_timer_follows_focused_tab(window):
     _app.processEvents()
     assert first.cursor_timer.isActive()
     assert not second.cursor_timer.isActive()
+
+
+@pytest.mark.parametrize('cluster', ['🙂', 'a\u0301', 'אבג', '👩‍💻'])
+def test_log_rollover_preserves_latest_unicode_and_bounds_undo(window, cluster):
+    w = window
+    if not w.log_panel_visible:
+        w._toggle_log_panel()
+    w._MAX_LOG_SIZE = 102
+    text = ''
+    for index in range(12):
+        chunk = cluster * 8 + f'[{index}]'
+        text += chunk
+        w.terminal.output_recorded.emit(chunk)
+        w._flush_log_buffer()
+        shown = w.log_text.toPlainText()
+        assert text.endswith(shown) and shown.endswith(f'[{index}]')
+        assert not shown.startswith(('\u0301', '\u200d', '💻'))
+        assert w.log_text.document().characterCount() - 1 <= w._MAX_LOG_SIZE
+        assert w.log_text.document().availableUndoSteps() == 0

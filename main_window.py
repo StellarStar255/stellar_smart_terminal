@@ -1162,6 +1162,7 @@ class MainWindow(ThemeMixin, ToolbarMixin, ConfigMixin, ExplorerPanelMixin,
         self.log_text = QTextEdit()
         self.log_text.setObjectName("logPanel")
         self.log_text.setReadOnly(True)
+        self.log_text.setUndoRedoEnabled(False)
         self.log_text.setLineWrapMode(QTextEdit.LineWrapMode.NoWrap)
         log_layout.addWidget(self.log_text)
 
@@ -3439,13 +3440,18 @@ class MainWindow(ThemeMixin, ToolbarMixin, ConfigMixin, ExplorerPanelMixin,
 
         # 限制日志大小，防止内存无限增长（仅在需要时检查）
         doc = self.log_text.document()
-        char_count = doc.characterCount()
+        # QTextDocument includes a final paragraph separator in its UTF-16 length.
+        char_count = doc.characterCount() - 1
         if char_count > self._MAX_LOG_SIZE:
-            # 保留后半部分，删除前半部分
+            cut = char_count - self._MAX_LOG_SIZE // 2
+            block = doc.findBlock(cut)
+            layout = block.layout()
+            offset = cut - block.position()
+            if not layout.isValidCursorPosition(offset):
+                cut = block.position() + layout.nextCursorPosition(offset)
             cursor = self.log_text.textCursor()
-            cursor.movePosition(cursor.MoveOperation.Start)
-            cursor.movePosition(cursor.MoveOperation.Right, cursor.MoveMode.KeepAnchor,
-                               char_count - self._MAX_LOG_SIZE // 2)
+            cursor.setPosition(0)
+            cursor.setPosition(cut, cursor.MoveMode.KeepAnchor)
             cursor.removeSelectedText()
 
         # 自动滚动到底部
