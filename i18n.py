@@ -388,6 +388,7 @@ TRANSLATIONS = {
     "toolbar.llm_config_tooltip": {"zh": "LLM API 配置", "en": "LLM API Configuration", "fr": "Configuration de l’API LLM"},
     "toolbar.settings_tooltip": {"zh": "工具栏设置", "en": "Toolbar Settings", "fr": "Paramètres de la barre d’outils"},
     "palette.placeholder": {"zh": "搜索命令…（⌘K）", "en": "Search commands… (⌘K)", "fr": "Rechercher des commandes… (⌘K)"},
+    "palette.selection_changed": {"zh": "命令或目标终端已变化，请重新选择。", "en": "The command or target terminal changed. Select it again.", "fr": "La commande ou le terminal cible a changé. Sélectionnez à nouveau la commande."},
     "palette.quick_commands_global": {"zh": "全局快速命令", "en": "Global Quick Commands", "fr": "Commandes rapides globales"},
     "palette.insert_command": {"zh": "填入终端", "en": "Insert into Terminal", "fr": "Insérer dans le terminal"},
     "palette.edit_preset": {"zh": "编辑预设", "en": "Edit Preset", "fr": "Modifier le préréglage"},

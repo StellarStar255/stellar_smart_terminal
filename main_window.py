@@ -1305,11 +1305,10 @@ class MainWindow(ThemeMixin, ToolbarMixin, ConfigMixin, ExplorerPanelMixin,
                 palette.register(label, w.click, group=group_name, tooltip=tooltip)
 
     def _quick_command_palette_entries(self):
-        from command_palette import Command
-
         terminal = self._quick_command_terminal()
         if terminal is None:
             return
+        target_is_current = self._quick_command_target_guard(terminal)
         for presets, group, cwd in (
             (self.presets, t("palette.quick_commands_global"), None),
             (self.local_presets, t("ctx.local_quick_commands"), self._window_cwd),
@@ -1317,21 +1316,51 @@ class MainWindow(ThemeMixin, ToolbarMixin, ConfigMixin, ExplorerPanelMixin,
             for preset in presets:
                 if not isinstance(preset, dict):
                     continue
-                commands = preset.get("commands")
-                if (not isinstance(commands, list) or not commands
-                        or not all(isinstance(command, str) for command in commands)):
-                    continue
-                yield Command(
-                    title=str(preset.get("name") or t("common.unnamed")),
-                    run=lambda preset=preset, cwd=cwd: self._run_palette_preset(
-                        terminal, preset, cwd),
-                    group=group,
-                    search_text="\n".join(commands),
-                    insert=lambda preset=preset, cwd=cwd: self._insert_palette_preset(
-                        terminal, preset, cwd),
-                    edit=lambda preset=preset, cwd=cwd: self._edit_palette_preset(preset, cwd),
-                    target=lambda: self._quick_command_target_label(terminal),
-                )
+                entry = self._quick_command_entry(terminal, preset, cwd, group, target_is_current)
+                if entry is not None:
+                    yield entry
+
+    def _quick_command_target_guard(self, terminal):
+        session = terminal._process_start_token
+        backend = terminal._backend
+        was_starting = terminal.is_starting()
+        was_live = was_starting or terminal.is_running()
+
+        def is_current():
+            return (terminal is self._quick_command_terminal()
+                    and terminal._process_start_token is session
+                    and (terminal._backend is backend or (was_starting and backend is None))
+                    and (not was_live or terminal.is_starting() or terminal.is_running()))
+        return is_current
+
+    def _quick_command_entry(self, terminal, preset, cwd, group, target_is_current):
+        from command_palette import Command
+
+        commands = preset.get("commands")
+        if (not isinstance(commands, list) or not commands
+                or not all(isinstance(command, str) for command in commands)):
+            return None
+        displayed = commands.copy()
+        title = str(preset.get("name") or t("common.unnamed"))
+
+        def is_current():
+            if (target_is_current()
+                    and self._palette_preset_row(preset, cwd) is not None
+                    and preset.get("commands") == displayed
+                    and str(preset.get("name") or t("common.unnamed")) == title):
+                return True
+            self.statusbar.showMessage(t("palette.selection_changed"), 4000)
+            return False
+
+        def run():
+            if is_current():
+                terminal.setFocus()
+                terminal._execute_commands(displayed)
+
+        return Command(title=title, run=run, group=group, search_text="\n".join(displayed),
+                       insert=lambda: self._insert_palette_preset(terminal, displayed, is_current),
+                       edit=lambda: self._edit_palette_preset(preset, cwd),
+                       target=lambda: self._quick_command_target_label(terminal))
 
     def _palette_preset_row(self, preset, cwd):
         if cwd is not None and cwd != self._window_cwd:
@@ -1339,16 +1368,8 @@ class MainWindow(ThemeMixin, ToolbarMixin, ConfigMixin, ExplorerPanelMixin,
         presets = self.presets if cwd is None else self.local_presets
         return next((row for row, current in enumerate(presets) if current is preset), None)
 
-    def _run_palette_preset(self, terminal, preset, cwd):
-        if terminal is not self._quick_command_terminal():
-            return
-        if self._palette_preset_row(preset, cwd) is not None:
-            terminal.setFocus()
-            terminal._execute_commands(preset["commands"])
-
-    def _insert_palette_preset(self, terminal, preset, cwd):
-        if (terminal is not self._quick_command_terminal()
-                or self._palette_preset_row(preset, cwd) is None):
+    def _insert_palette_preset(self, terminal, commands, is_current):
+        if not is_current():
             return
         if not terminal.is_running():
             self.statusbar.showMessage(t("palette.insert_needs_terminal"), 4000)
@@ -1356,18 +1377,16 @@ class MainWindow(ThemeMixin, ToolbarMixin, ConfigMixin, ExplorerPanelMixin,
 
         # A plain PTY can interpret every newline as Enter. Choose a single line
         # from a multi-command preset so insertion behaves consistently in any shell.
-        lines = [line for command in preset["commands"]
+        lines = [line for command in commands
                  for line in command.replace("\r\n", "\n").replace("\r", "\n").split("\n")
                  if line.strip()]
         if not lines:
             return
         line = lines[0]
         if len(lines) > 1:
-            backend = terminal._backend
             line, accepted = QInputDialog.getItem(
                 self, t("palette.insert_command"), t("palette.choose_command_line"), lines, 0, False)
-            if (not accepted or terminal is not self._quick_command_terminal()
-                    or terminal._backend is not backend or self._palette_preset_row(preset, cwd) is None):
+            if not accepted or not is_current():
                 return
         terminal.setFocus()
         if not terminal.insert_command_line(line):

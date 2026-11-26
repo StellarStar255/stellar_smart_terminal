@@ -267,19 +267,16 @@ def test_paste_then_enter_reaches_real_shell_as_one_command(terminal):
 
 
 @pytest.mark.parametrize('replace_session', [False, True])
-def test_startup_preset_does_not_run_in_replacement_session(terminal, replace_session):
+def test_startup_preset_queued_behind_paste_stays_in_its_session(terminal, replace_session):
     widget, written = terminal
-    original = SimpleNamespace(is_running=True, write=lambda data: written.append(data) or True)
-    delayed = []
-    with patch.object(widget, 'start_process',
-                      side_effect=lambda *args, **kwargs: setattr(widget, '_backend', original)), \
-            patch('terminal_widget.QTimer.singleShot', side_effect=lambda ms, fn: delayed.append(fn)):
+    widget._backend.is_running = True
+    with slow_probe(.1):
+        widget._paste_from_clipboard_macos(SimpleNamespace(text=lambda: 'prefix '))
         widget._start_and_execute(['preset'])
-    assert len(delayed) == 1
-    if replace_session:
-        widget._backend = SimpleNamespace(is_running=True, write=lambda data: written.append(data) or True)
-    delayed[0]()
-    assert written == ([] if replace_session else [b'preset\r'])
+        if replace_session:
+            widget._backend = SimpleNamespace(is_running=True, write=lambda data: written.append(data) or True)
+        pump_until(lambda: widget._native_paste_process is None)
+    assert written == ([] if replace_session else [b'prefix ', b'preset\r'])
 
 
 @pytest.mark.parametrize('copy_during_save', [False, True, 'queued_paste'])

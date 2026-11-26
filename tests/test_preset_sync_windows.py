@@ -107,6 +107,117 @@ class PresetSyncAcrossWindowsTest(unittest.TestCase):
             execute.assert_called_once_with(['tmux attach -t project_two'])
             other_execute.assert_not_called()
 
+    def test_open_command_menu_rejects_replaced_preset_and_keeps_duplicate_target(self):
+        from PyQt6.QtCore import QPoint, Qt
+        from PyQt6.QtTest import QTest
+        from PyQt6.QtWidgets import QMenu
+        from terminal_mouse import _QuickCommandMenu
+
+        window = self.windows[0]
+        terminal = window.terminal
+        window.activateWindow()
+        terminal.setFocus()
+        self.app.processEvents()
+        parent = QMenu(terminal)
+        def open_results():
+            menu = _QuickCommandMenu('Local', parent)
+            parent.addMenu(menu)
+            terminal._populate_local_commands_menu(menu)
+            menu.addAction('Manage')
+            terminal._fit_quick_command_menu(menu, QPoint(30, 30))
+            parent.popup(QPoint(30, 30))
+            menu.popup(QPoint(200, 30))
+            self.app.processEvents()
+            menu.search_box.setText('duplicate')
+            return menu
+
+        window.local_presets = [{'name': 'duplicate', 'commands': ['echo first']},
+                                {'name': 'duplicate', 'commands': ['echo second']}]
+        with patch.object(terminal, '_execute_commands') as execute:
+            menu = open_results()
+            QTest.keyClick(menu.search_box, Qt.Key.Key_Down)
+            QTest.keyClick(menu.search_box, Qt.Key.Key_Return)
+            execute.assert_called_once_with(['echo second'])
+            execute.reset_mock()
+            menu = open_results()
+            window.local_presets = [{'name': 'duplicate', 'commands': ['echo replacement']}]
+            QTest.keyClick(menu.search_box, Qt.Key.Key_Return)
+            execute.assert_not_called()
+
+    def test_palette_rechecks_command_contents_before_execution(self):
+        window = self.windows[0]
+        preset = {'name': 'same title', 'commands': ['echo original']}
+        window.presets = [preset]
+        entry, = window.command_palette._rank('echo original')
+        preset['commands'][0] = 'echo edited'
+        with patch.object(window.terminal, '_execute_commands') as execute:
+            entry.run()
+            execute.assert_not_called()
+            current, = window.command_palette._rank('echo edited')
+            current.run()
+            execute.assert_called_once_with(['echo edited'])
+
+    def test_open_result_does_not_follow_tab_or_restarted_session(self):
+        from i18n import t
+
+        window = self.windows[0]
+        first = window.terminal
+        window.presets = [{'name': 'Target test', 'commands': ['echo expected']}]
+        entry, = window.command_palette._rank('echo expected')
+        with patch('terminal_widget.TerminalWidget.start_process'):
+            window.shortcut_actions['new_terminal'].trigger()
+        window._force_closing = True
+        other = window.terminal
+        self.assertIsNot(first, other)
+        with patch.object(first, '_execute_commands') as first_run, \
+                patch.object(other, '_execute_commands') as other_run:
+            entry.run()
+            first_run.assert_not_called()
+            other_run.assert_not_called()
+            self.assertEqual(window.statusbar.currentMessage(), t("palette.selection_changed"))
+            current, = window.command_palette._rank('echo expected')
+            with patch.object(other, '_process_start_token', object()):
+                current.run()
+                other_run.assert_not_called()
+
+    def test_insert_rechecks_body_after_line_picker(self):
+        window = self.windows[0]
+        terminal = window.terminal
+        preset = {'name': 'Choose line', 'commands': ['echo one', 'echo two']}
+        window.presets = [preset]
+
+        def pick(*args):
+            preset['commands'].remove('echo two')
+            return 'echo two', True
+
+        with patch.object(terminal, 'is_running', return_value=True), \
+                patch.object(terminal, 'insert_command_line') as insert, \
+                patch('main_window.QInputDialog.getItem', side_effect=pick) as picker:
+            entry, = window.command_palette._rank('echo two')
+            entry.insert()
+            picker.assert_called_once()
+            insert.assert_not_called()
+
+    def test_open_result_survives_completion_of_its_own_pending_start(self):
+        window = self.windows[0]
+        terminal = window.terminal
+        window.presets = [{'name': 'Startup', 'commands': ['echo ready']}]
+        with patch.object(terminal, '_process_start_token', object()), \
+                patch.object(terminal, '_pending_process_start', object()), \
+                patch.object(terminal, '_backend', None), \
+                patch.object(terminal, '_execute_commands') as execute:
+            entry, = window.command_palette._rank('echo ready')
+            terminal._pending_process_start = None
+            entry.run()  # Start failed, leaving no backend.
+            execute.assert_not_called()
+            terminal._backend = Mock(is_running=True)
+            entry.run()
+            execute.assert_called_once_with(['echo ready'])
+            live_entry, = window.command_palette._rank('echo ready')
+            terminal._backend.is_running = False
+            live_entry.run()
+            execute.assert_called_once_with(['echo ready'])
+
     def test_palette_preedit_does_not_run_current_result(self):
         from PyQt6.QtCore import Qt
         from PyQt6.QtGui import QInputMethodEvent
@@ -175,7 +286,7 @@ class PresetSyncAcrossWindowsTest(unittest.TestCase):
         window.activateWindow()
         term.setFocus()
         self.app.processEvents()
-        backend = SimpleNamespace(_child_pid=21)
+        backend = SimpleNamespace(_child_pid=21, is_running=True)
         with patch.object(term, '_backend', backend), \
                 patch.object(window, '_quick_command_foreground_group', return_value=42) as group, \
                 patch.object(window, '_known_remote_hosts', return_value=[host]), \

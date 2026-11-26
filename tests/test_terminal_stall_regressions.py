@@ -553,6 +553,36 @@ def test_quick_command_waits_for_a_shell_started_after_reflow(app, action):
         widget.deleteLater()
 
 
+@pytest.mark.parametrize('already_starting', [False, True])
+def test_startup_quick_commands_preserve_requested_process_and_order(app, already_starting):
+    widget = TerminalWidget()
+    backend = Mock(is_running=True)
+    backend.write.return_value = True
+    try:
+        with patch('terminal_widget.create_backend', return_value=backend), \
+                patch.object(widget, '_get_default_shell', return_value='default-shell'):
+            if already_starting:
+                with busy_screen(widget):
+                    widget.start_process(['requested-program'])
+                    widget._execute_commands(['first', 'second'])
+                    widget._execute_commands(['third'])
+            else:
+                widget._execute_commands(['first', 'second'])
+                widget._execute_commands(['third'])
+            deadline = time.monotonic() + 2
+            while backend.write.call_count < 3 and time.monotonic() < deadline:
+                app.processEvents()
+                time.sleep(.005)
+        backend.start.assert_called_once()
+        target = 'requested-program' if already_starting else 'default-shell'
+        assert backend.start.call_args.args[0] == [target]
+        assert [call.args[0] for call in backend.write.call_args_list] == [
+            b'first\r', b'second\r', b'third\r']
+    finally:
+        widget.cleanup()
+        widget.deleteLater()
+
+
 @pytest.mark.parametrize('error', [BlockingIOError(), InterruptedError()])
 def test_coalescing_delivers_prefix_after_transient_read_error(error):
     def read_more():

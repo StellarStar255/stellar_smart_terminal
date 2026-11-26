@@ -885,7 +885,7 @@ class TerminalMouseMixin:
             self._add_quick_command_menu(
                 menu, popup_pos, "ctx.quick_commands",
                 lambda submenu: self._populate_quick_command_presets(
-                    submenu, presets, t("palette.quick_commands_global")),
+                    submenu, self.quick_commands_provider(), t("palette.quick_commands_global")),
                 self.add_command_requested, self.manage_presets_requested,
                 "ctx.manage_presets")
         self._add_quick_command_menu(
@@ -989,27 +989,34 @@ class TerminalMouseMixin:
         """只列出用户配置的本地命令。Shell 由新建终端流程启动。"""
         presets = (self.local_quick_commands_provider()
                    if self.local_quick_commands_provider else [])
-        self._populate_quick_command_presets(menu, presets, t("ctx.local_quick_commands"))
+        self._populate_quick_command_presets(menu, presets, t("ctx.local_quick_commands"), local=True)
 
-    def _populate_quick_command_presets(self, menu, presets, group):
+    def _populate_quick_command_presets(self, menu, presets, group, local=False):
         footer = next(iter(menu.actions()), None)
         ordered = sorted((p for p in presets or () if isinstance(p, dict)),
                          key=lambda preset: preset.get('pinned') is not True)
         has_commands = False
+        owner = getattr(self, '_owner_window', None)
+        target_is_current = owner._quick_command_target_guard(self) if owner is not None else None
         for preset in ordered:
-            commands = preset.get('commands', [])
-            if isinstance(commands, list) and commands and all(isinstance(cmd, str) for cmd in commands):
+            if owner is not None:
+                cwd = owner._window_cwd if local else None
+                command = owner._quick_command_entry(self, preset, cwd, group, target_is_current)
+                if command is None:
+                    continue
+            else:
+                commands = preset.get('commands')
+                if not isinstance(commands, list) or not commands or not all(isinstance(c, str) for c in commands):
+                    continue
                 title = str(preset.get('name') or t("common.unnamed"))
-                name = title
-                if preset.get('pinned') is True:
-                    name = f"★  {name}"
-                action = QAction(name, menu)
-                menu.insertAction(footer, action)
-                has_commands = True
                 command = Command(title, lambda cmds=commands: self._execute_commands(cmds),
                                   group=group, search_text="\n".join(commands))
-                action.setData(command)
-                action.triggered.connect(lambda checked=False, cmd=command: cmd.run())
+            label = f"★  {command.title}" if preset.get('pinned') is True else command.title
+            action = QAction(label, menu)
+            menu.insertAction(footer, action)
+            has_commands = True
+            action.setData(command)
+            action.triggered.connect(lambda checked=False, cmd=command: cmd.run())
         if has_commands:
             menu.insertSeparator(footer)
 

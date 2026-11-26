@@ -594,6 +594,7 @@ class TerminalWidget(TerminalInputMixin, TerminalMouseMixin,
         # 挪到读取线程时，这把锁即提供真正的互斥。
         self._screen_lock = threading.RLock()
         self._output_cancelled = threading.Event()
+        self._startup_commands = []
         self._pending_process_start = None
         self._process_start_token = None
         # 显示路径用的历史行数缓存：异步 reflow worker 持锁期间滚动条/滚轮
@@ -1343,6 +1344,7 @@ class TerminalWidget(TerminalInputMixin, TerminalMouseMixin,
             # "退出 → 再启动"都泄漏一个 fd（旧实例从未被清理）
             self.stop_process()
 
+        self._startup_commands.clear()
         request = (list(command), cwd)
         self._process_start_token = request
         self._pending_process_start = request
@@ -1409,7 +1411,11 @@ class TerminalWidget(TerminalInputMixin, TerminalMouseMixin,
             # 延迟再次更新终端大小（确保窗口布局完成）
             QTimer.singleShot(100, self._update_terminal_size)
             QTimer.singleShot(500, self._update_terminal_size)
+            if self._startup_commands:
+                commands, self._startup_commands = self._startup_commands, []
+                self._execute_commands(commands)
         else:
+            self._startup_commands.clear()
             logger.error("[Terminal] Failed to start process")
             self._backend = None
             self._signal_bridge = None
@@ -2172,6 +2178,7 @@ class TerminalWidget(TerminalInputMixin, TerminalMouseMixin,
 
     def stop_process(self):
         """停止进程并清理资源"""
+        self._startup_commands.clear()
         self._pending_process_start = None
         self._process_start_token = None
         self._output_cancelled.set()
@@ -2786,13 +2793,12 @@ class TerminalWidget(TerminalInputMixin, TerminalMouseMixin,
 
     def _execute_commands(self, commands: list):
         """执行多个命令（依次执行）"""
-        if not commands:
+        if self._cleaned_up or not commands:
             return
         commands = list(commands)
         if self._defer_native_paste_input(lambda: self._execute_commands(commands)):
             return
-        if self._backend is None or not self._backend.is_running:
-            # 终端未运行，先启动终端再执行命令
+        if not self.is_running():
             self._start_and_execute(commands)
             return
         for cmd in commands:
@@ -2805,24 +2811,14 @@ class TerminalWidget(TerminalInputMixin, TerminalMouseMixin,
 
     def _start_and_execute(self, commands: list):
         """启动终端并执行命令"""
-        # 获取当前工作目录。不回退 os.getcwd()：打包 app 从 Finder 启动时
-        # 主进程 cwd 是 /，shell 会起在根目录，改退用户主目录
-        cwd = getattr(self, '_working_dir', None) or str(Path.home())
-        # 启动默认 shell
-        shell = self._get_default_shell()
-        self.start_process([shell], cwd=cwd)
-        token = self._process_start_token
-        backend = self._backend
-        commands = list(commands)
-        # 延迟执行命令，等待终端启动完成
-        def delayed_execute():
-            if self._cleaned_up or self._process_start_token is not token:
-                return
-            if backend is not None and self._backend is not backend:
-                return
-            if self.is_starting():
-                QTimer.singleShot(50, delayed_execute)
-                return
-            if self.is_running():
-                self._execute_commands(commands)
-        QTimer.singleShot(300, delayed_execute)
+        if self._cleaned_up or not commands:
+            return
+        if not self.is_starting():
+            cwd = getattr(self, '_working_dir', None) or str(Path.home())
+            self.start_process([self._get_default_shell()], cwd=cwd)
+        if self.is_starting():
+            # The requested process is waiting for reflow. Its successful start
+            # drains this batch; stop or replacement discards it.
+            self._startup_commands.extend(commands)
+        elif self.is_running():
+            self._execute_commands(commands)
