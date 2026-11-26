@@ -106,7 +106,8 @@ class NavListWidget(QListWidget):
                 rect = self.visualItemRect(item)
                 if rect.intersects(viewport):
                     x = min(rect.right(), viewport.right()) - 14
-                    region |= QRegion(QRect(x - 5, rect.center().y() - 5, 11, 11))
+                    marker = QRect(x - 5, rect.center().y() - 5, 11, 11)
+                    region |= QRegion(marker.intersected(viewport))
         self._pulse_region = region
         if region.isEmpty():
             self._pulse_timer.stop()

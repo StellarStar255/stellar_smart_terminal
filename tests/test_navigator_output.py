@@ -7,12 +7,13 @@ from unittest.mock import patch
 os.environ.setdefault('QT_QPA_PLATFORM', 'offscreen')
 
 import pytest
-from PyQt6.QtCore import QEvent, Qt
+from PyQt6.QtCore import QEvent, QModelIndex, QPoint, Qt
 from PyQt6.QtGui import QColor
 from PyQt6.QtTest import QSignalSpy, QTest
 from PyQt6.QtWidgets import QApplication
 
 from main_window import MainWindow
+from utils import get_config_path
 from window_navigator import NAV_ATTENTION_ROLE, NAV_OUTPUT_ROLE, WindowNavigatorPanel
 
 
@@ -27,8 +28,10 @@ def wait_for(check):
 
 
 @pytest.fixture
-def panels():
+def panels(tmp_path, monkeypatch):
     global _APP
+    monkeypatch.setenv('STELLAR_DATA_DIR', str(tmp_path))
+    monkeypatch.setattr(MainWindow, 'CONFIG_FILE', get_config_path())
     _APP = QApplication.instance() or QApplication([])
     first, second = MainWindow(), MainWindow()
     for window in (first, second):
@@ -168,3 +171,57 @@ def test_attention_changes_preserve_rows_scroll_and_other_window_pulse(panels):
     with patch.object(nav, '_refresh_window_list', wraps=nav._refresh_window_list) as refresh:
         nav._check_and_refresh()
         refresh.assert_not_called()
+
+
+def test_pulse_tracks_reordered_row_font_size_and_scroll(panels):
+    first, second, nav, _ = panels
+    listing = nav.window_list
+    listing.setFixedHeight(160)
+    _APP.processEvents()
+    first.terminal._process_output_text('working')
+    item = row(nav, first)
+    src = listing.row(item)
+    dst = listing.count() if src == 0 else 0
+    assert listing.model().moveRow(QModelIndex(), src, QModelIndex(), dst)
+    _APP.processEvents()
+
+    assert listing.row(row(nav, first)) != src
+
+    def marker_center():
+        rect = listing.visualItemRect(row(nav, first))
+        return QPoint(min(rect.right(), listing.viewport().rect().right()) - 14, rect.center().y())
+
+    assert listing._pulse_region.contains(marker_center())
+    nav._font_size = 24
+    nav._apply_list_font_size()
+    _APP.processEvents()
+    assert listing._pulse_region.contains(marker_center())
+    listing.setFixedHeight(listing.sizeHintForRow(0) + listing.horizontalScrollBar().sizeHint().height()
+                           + 2 * listing.frameWidth())
+    listing.scrollToItem(row(nav, second), listing.ScrollHint.PositionAtTop)
+    _APP.processEvents()
+    assert not listing.viewport().rect().contains(marker_center())
+    assert not listing._pulse_timer.isActive()
+    listing.scrollToItem(row(nav, first), listing.ScrollHint.PositionAtTop)
+    _APP.processEvents()
+    assert listing._pulse_timer.isActive()
+    assert listing._pulse_region.contains(marker_center())
+
+
+def test_pulse_stops_when_only_edge_of_active_row_is_visible(panels):
+    first, second, nav, _ = panels
+    listing = nav.window_list
+    listing.setVerticalScrollMode(listing.ScrollMode.ScrollPerPixel)
+    listing.setHorizontalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAlwaysOff)
+    listing.setFixedHeight(listing.sizeHintForRow(0) + 2 * listing.frameWidth())
+    _APP.processEvents()
+    active = next(w for w in (first, second) if row(nav, w) is listing.item(0))
+    active.terminal._process_output_text('working')
+    rect = listing.visualItemRect(row(nav, active))
+    listing.verticalScrollBar().setValue(listing.verticalScrollBar().value() + rect.bottom() - 1)
+    _APP.processEvents()
+    rect = listing.visualItemRect(row(nav, active))
+    assert rect.intersects(listing.viewport().rect()) and rect.center().y() + 5 < 0
+    assert not listing._pulse_timer.isActive()
+    listing.verticalScrollBar().setValue(0)
+    assert listing._pulse_timer.isActive()
