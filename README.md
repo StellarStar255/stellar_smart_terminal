@@ -8,7 +8,7 @@ A PyQt6-based smart terminal with file explorer, Git GUI, LLM proxy, and VS Code
 
 **Signed and notarized for macOS.** The Apple Silicon app is signed with a Developer ID certificate and notarized by Apple. [Download for Mac](https://github.com/StellarStar255/stellar_smart_terminal/releases/latest)
 
-[v1.35.68](docs/releases/v1.35.68.md) adds a breathing indicator to the window navigator so you can see which terminals are producing output.
+[v1.35.69](docs/releases/v1.35.69.md) shows output activity on background windows and keeps the window you are viewing quiet.
 
 <img src="assets/smart_terminal.png" width="300" />
 
