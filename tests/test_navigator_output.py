@@ -225,3 +225,34 @@ def test_pulse_stops_when_only_edge_of_active_row_is_visible(panels):
     assert not listing._pulse_timer.isActive()
     listing.verticalScrollBar().setValue(0)
     assert listing._pulse_timer.isActive()
+
+
+@pytest.mark.parametrize('embedded_panel', [False, True], ids=['hide-floating-panel', 'minimize-host-window'])
+def test_background_navigator_tracks_new_output_without_animating(panels, embedded_panel):
+    source, host, floating, embedded = panels
+    nav = embedded if embedded_panel else floating
+    conceal = host.showMinimized if embedded_panel else floating.hide
+    restore = host.showNormal if embedded_panel else floating.show
+    concealed = host.isMinimized if embedded_panel else floating.isHidden
+    other = floating if embedded_panel else embedded
+    conceal()
+    wait_for(concealed)
+    _APP.processEvents()
+    ticks = QSignalSpy(nav.window_list._pulse_timer.timeout)
+    program = "import time\nwhile True:\n print('working', flush=True)\n time.sleep(.05)"
+    source.terminal.start_process([sys.executable, '-u', '-c', program])
+    wait_for(lambda: bool(row(nav, source).data(NAV_OUTPUT_ROLE)))
+    QTest.qWait(200)
+    assert len(ticks) == 0
+    assert other.window_list._pulse_timer.isActive()
+    assert not nav.window_list._pulse_timer.isActive()
+    restore()
+    wait_for(nav.window_list._pulse_timer.isActive)
+    conceal()
+    wait_for(concealed)
+    wait_for(lambda: not nav.window_list._pulse_timer.isActive())
+    source.terminal.stop_process()
+    restore()
+    _APP.processEvents()
+    assert not row(nav, source).data(NAV_OUTPUT_ROLE)
+    assert not nav.window_list._pulse_timer.isActive()

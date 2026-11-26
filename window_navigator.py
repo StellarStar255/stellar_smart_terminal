@@ -90,6 +90,7 @@ class NavListWidget(QListWidget):
         self.thumbnail_provider = None  # wid → QPixmap：拖影里显示的窗口缩略图（面板提供）
 
         self.output_color = QColor('#a6b9d2')
+        self._pulse_window = None
         self._pulse_region = QRegion()
         self._pulse_timer = QTimer(self)
         self._pulse_timer.setInterval(80)
@@ -97,7 +98,7 @@ class NavListWidget(QListWidget):
 
     def sync_pulse(self):
         region = QRegion()
-        if self.isVisible():
+        if self.isVisible() and not self.window().isMinimized():
             viewport = self.viewport().rect()
             for row in range(self.count()):
                 item = self.item(row)
@@ -119,6 +120,14 @@ class NavListWidget(QListWidget):
 
     def showEvent(self, event):
         super().showEvent(event)
+        handle = self.window().windowHandle()
+        if handle is not self._pulse_window:
+            if self._pulse_window is not None and not sip.isdeleted(self._pulse_window):
+                self._pulse_window.windowStateChanged.disconnect(self.sync_pulse)
+            self._pulse_window = handle
+            if handle is not None:
+                # Cocoa may deliver the child show event before clearing the minimized state.
+                handle.windowStateChanged.connect(self.sync_pulse, Qt.ConnectionType.QueuedConnection)
         self.sync_pulse()
 
     def resizeEvent(self, event):
