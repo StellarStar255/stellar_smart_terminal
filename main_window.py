@@ -7,6 +7,7 @@ import re
 import json
 import sys
 import time
+import weakref
 from pathlib import Path
 from datetime import datetime
 
@@ -151,6 +152,7 @@ class MainWindow(ThemeMixin, ToolbarMixin, ConfigMixin, ExplorerPanelMixin,
                  MenusMixin, QMainWindow):
     """主窗口"""
 
+    navigator_output_changed = pyqtSignal(bool)
     _quick_command_host_ready = pyqtSignal(object, object, object)
 
     # 配置文件路径（源码运行=项目目录；打包运行=平台用户数据目录，见 utils.get_data_dir）
@@ -2721,6 +2723,7 @@ class MainWindow(ThemeMixin, ToolbarMixin, ConfigMixin, ExplorerPanelMixin,
         self._closing_in_progress = False       # closeEvent 已进入清理阶段（防重入）
         self._force_closing = False             # 强制关闭路径：跳过确认弹窗
         self._applying_shared_left_width = False  # 正在应用跨窗口同步的侧栏宽度
+        self._nav_output_terms = weakref.WeakSet()
         self._nav_attention = False             # 导航面板"需要注意"标记
         self._nav_attention_source = None       # 触发注意标记的终端
 
@@ -2753,7 +2756,7 @@ class MainWindow(ThemeMixin, ToolbarMixin, ConfigMixin, ExplorerPanelMixin,
         'split_vertical_requested', 'move_split_left_requested',
         'move_split_up_requested', 'rename_split_requested',
         'pane_drag_requested', 'split_label_committed', 'pane_menu_requested',
-        'attention_requested', 'interaction_requested',
+        'attention_requested', 'interaction_requested', 'output_active_changed',
         'alert_matched', 'scrollback_pressure_changed',
     )
 
@@ -2783,6 +2786,7 @@ class MainWindow(ThemeMixin, ToolbarMixin, ConfigMixin, ExplorerPanelMixin,
             'pane_drag_requested': lambda pos, t=terminal: self._begin_pane_drag(t, pos),
             'split_label_committed': self._remember_split_name,
             'pane_menu_requested': lambda pos, t=terminal: self._show_pane_menu(t, pos),
+            'output_active_changed': lambda active, term=terminal: self._set_nav_output(term, active),
             'attention_requested': lambda t=terminal: self._on_terminal_attention(t),
             'interaction_requested': lambda t=terminal: self._on_terminal_interaction(t),
             'alert_matched': lambda pat, t=terminal: self._on_terminal_alert(t, pat),
@@ -2877,6 +2881,10 @@ class MainWindow(ThemeMixin, ToolbarMixin, ConfigMixin, ExplorerPanelMixin,
                 pass  # 旧窗口的 C++ 对象已销毁，过滤器随之失效
             if getattr(old, 'active_terminal', None) is terminal:
                 old.active_terminal = None
+        if terminal._had_output_activity and old is not self:
+            if old is not None:
+                old._set_nav_output(terminal, False)
+            self._set_nav_output(terminal, True)
         terminal._owner_window = self
         terminal.installEventFilter(self)
 
@@ -6476,6 +6484,15 @@ class MainWindow(ThemeMixin, ToolbarMixin, ConfigMixin, ExplorerPanelMixin,
         state = getattr(page, '_badge_pending', None)
         self.tab_widget.setTabIcon(
             idx, self._tab_badge_icon(state) if state else QIcon())
+
+    def _set_nav_output(self, terminal, active):
+        was_active = bool(self._nav_output_terms)
+        if active:
+            self._nav_output_terms.add(terminal)
+        else:
+            self._nav_output_terms.discard(terminal)
+        if was_active != bool(self._nav_output_terms):
+            self.navigator_output_changed.emit(not was_active)
 
     def _request_nav_attention(self, source=None):
         """点亮本窗口的导航绿点（后台任务完成提醒的通用入口）。

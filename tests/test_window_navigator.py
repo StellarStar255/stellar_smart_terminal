@@ -346,8 +346,10 @@ class TestAttentionDotVisibility(unittest.TestCase):
             hbar_out = lw.horizontalScrollBar().maximum() > 0
             return count, hbar_out
         finally:
+            from PyQt6.QtCore import QEvent
+            lw.close()
             lw.deleteLater()
-            self.app.processEvents()
+            self.app.sendPostedEvents(lw, QEvent.Type.DeferredDelete)
 
     def test_dot_visible_in_narrow_list(self):
         # 220px 窄列表：文字被截断、出横向滚动条，绿点仍须可见

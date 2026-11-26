@@ -5,13 +5,15 @@
 本面板，本面板反向调用 MainWindow 的静态方法与类型判断。为打破 import 环，
 这里对 MainWindow 用延迟模块引用（只在方法内访问 main_window.MainWindow）。
 """
+import math
 import os
 import re
+import time
 import weakref
 
 from PyQt6 import sip
-from PyQt6.QtCore import Qt, QEvent, QModelIndex, QPoint, QSize, QTimer, pyqtSignal
-from PyQt6.QtGui import QBrush, QColor, QCursor, QPainter
+from PyQt6.QtCore import Qt, QEvent, QModelIndex, QPoint, QRect, QSize, QTimer, pyqtSignal
+from PyQt6.QtGui import QBrush, QColor, QCursor, QPainter, QRegion
 from PyQt6.QtWidgets import (
     QApplication, QCheckBox, QHBoxLayout, QLabel, QLineEdit, QListWidget,
     QListWidgetItem, QMenu, QMessageBox, QPushButton, QStyle,
@@ -32,6 +34,7 @@ logger = get_logger(__name__)
 
 # 导航条目的「执行完毕」提醒标记角色（绿点）
 NAV_ATTENTION_ROLE = Qt.ItemDataRole.UserRole + 1
+NAV_OUTPUT_ROLE = Qt.ItemDataRole.UserRole + 2
 
 # 未收到主题前的兜底配色（与 themes.THEMES['深蓝'] 一致）。
 # 面板样式一律从 self._theme 取色，MainWindow._apply_theme 会调 apply_theme()
@@ -81,6 +84,50 @@ class NavListWidget(QListWidget):
         self.indicator_color = QColor('#667eea')
         self.ghost_theme = None   # 面板 _apply_style 灌入当前主题，拖影卡片按它配色
         self.thumbnail_provider = None  # wid → QPixmap：拖影里显示的窗口缩略图（面板提供）
+
+        self.output_color = QColor('#a6b9d2')
+        self._pulse_region = QRegion()
+        self._pulse_timer = QTimer(self)
+        self._pulse_timer.setInterval(80)
+        self._pulse_timer.timeout.connect(self._paint_next_pulse)
+
+    def sync_pulse(self):
+        region = QRegion()
+        if self.isVisible():
+            viewport = self.viewport().rect()
+            for row in range(self.count()):
+                item = self.item(row)
+                if item.isHidden() or not item.data(NAV_OUTPUT_ROLE) or item.data(NAV_ATTENTION_ROLE):
+                    continue
+                rect = self.visualItemRect(item)
+                if rect.intersects(viewport):
+                    x = min(rect.right(), viewport.right()) - 14
+                    region |= QRegion(QRect(x - 5, rect.center().y() - 5, 11, 11))
+        self._pulse_region = region
+        if region.isEmpty():
+            self._pulse_timer.stop()
+        elif not self._pulse_timer.isActive():
+            self._pulse_timer.start()
+
+    def _paint_next_pulse(self):
+        self.viewport().update(self._pulse_region)
+
+    def showEvent(self, event):
+        super().showEvent(event)
+        self.sync_pulse()
+
+    def resizeEvent(self, event):
+        super().resizeEvent(event)
+        self.sync_pulse()
+
+    def scrollContentsBy(self, dx, dy):
+        super().scrollContentsBy(dx, dy)
+        self.sync_pulse()
+
+    def hideEvent(self, event):
+        self._pulse_timer.stop()
+        self._pulse_region = QRegion()
+        super().hideEvent(event)
 
     def is_dragging(self) -> bool:
         return self._drag_row is not None
@@ -210,27 +257,33 @@ class NoHighlightDelegate(QStyledItemDelegate):
         opt.state = opt.state & ~QStyle.StateFlag.State_Selected
         opt.state = opt.state & ~QStyle.StateFlag.State_HasFocus
 
-        # 绘制文本和其他内容
-        super().paint(painter, opt, index)
+        attention = index.data(NAV_ATTENTION_ROLE)
+        active = index.data(NAV_OUTPUT_ROLE)
+        if not (attention or active):
+            super().paint(painter, opt, index)
+            return
 
-        # 「执行完毕」提醒：在条目右侧画一个绿色小圆点。
-        # 右端取「条目右端」与「可视区右缘」的较小者：窄侧栏出横向滚动条时
-        # 条目右端在可视区外，不钳制的话绿点会画到屏幕外看不见。
-        if index.data(NAV_ATTENTION_ROLE):
-            r = option.rect
-            d = 8
-            right = r.right()
-            view = option.widget
-            if view is not None:
-                right = min(right, view.viewport().rect().right())
-            cx = right - d - 6
-            cy = r.center().y()
-            painter.save()
-            painter.setRenderHint(QPainter.RenderHint.Antialiasing, True)
-            painter.setPen(Qt.PenStyle.NoPen)
-            painter.setBrush(QColor('#2ecc71'))
-            painter.drawEllipse(QPoint(cx, cy), d // 2, d // 2)
-            painter.restore()
+        # Pin the marker inside the viewport even when the title scrolls horizontally.
+        r = option.rect
+        view = option.widget
+        right = min(r.right(), view.viewport().rect().right()) if view is not None else r.right()
+        center = QPoint(right - 14, r.center().y())
+        painter.save()
+        painter.setClipRect(r.adjusted(0, 0, center.x() - 8 - r.right(), 0),
+                            Qt.ClipOperation.IntersectClip)
+        super().paint(painter, opt, index)
+        painter.restore()
+
+        color = QColor('#2ecc71')
+        if not attention:
+            color = QColor(view.output_color)
+            color.setAlphaF(0.72 + 0.28 * math.cos(math.pi * time.monotonic()))
+        painter.save()
+        painter.setRenderHint(QPainter.RenderHint.Antialiasing, True)
+        painter.setPen(Qt.PenStyle.NoPen)
+        painter.setBrush(color)
+        painter.drawEllipse(center, 4, 4)
+        painter.restore()
 
 
 class WindowNavigatorPanel(QWidget):
@@ -779,6 +832,7 @@ class WindowNavigatorPanel(QWidget):
                 item_text = item.text().lower()
                 # 所有关键词都必须匹配
                 item.setHidden(not all(kw in item_text for kw in keywords))
+        self.window_list.sync_pulse()
 
     def apply_theme(self, theme: dict):
         """应用主题配色（themes.THEMES 的一项）并重刷所有子控件样式。"""
@@ -824,6 +878,7 @@ class WindowNavigatorPanel(QWidget):
             f"color: {th['accent']}; font-weight: bold; font-size: {self._sf(13)}px;")
         self.group_move_grip.set_colors(th['text_dim'], th['accent'])
         self.window_list.indicator_color = QColor(th['accent'])
+        self.window_list.output_color = QColor('#486581' if th.get('is_light_theme') else '#a6b9d2')
         self.window_list.ghost_theme = dict(th)
 
         self.search_input.setStyleSheet(f"""
@@ -921,6 +976,7 @@ class WindowNavigatorPanel(QWidget):
             if wid in self._hooked_window_ids:
                 continue
             try:
+                w.navigator_output_changed.connect(self._update_output_row)
                 w.windowTitleChanged.connect(self._check_and_refresh)
                 w.destroyed.connect(self._on_hooked_window_destroyed)
                 self._hooked_window_ids.add(wid)
@@ -1000,6 +1056,7 @@ class WindowNavigatorPanel(QWidget):
                 # 只把 id（Python int）塞进 UserRole；真正的对象通过 weakref 解
                 item.setData(Qt.ItemDataRole.UserRole, wid)
                 item.setData(NAV_ATTENTION_ROLE, bool(getattr(window, '_nav_attention', False)))
+                item.setData(NAV_OUTPUT_ROLE, bool(window._nav_output_terms))
                 new_refs[wid] = _weakref.ref(window)
                 item.setForeground(QColor(color))
                 self.window_list.addItem(item)
@@ -1026,6 +1083,17 @@ class WindowNavigatorPanel(QWidget):
             current_item = self.window_list.currentItem()
             if current_item:
                 self._update_item_colors(current_item)
+
+        self._filter_window_list(self.search_input.text())
+
+    def _update_output_row(self, active):
+        wid = id(self.sender())
+        for row in range(self.window_list.count()):
+            item = self.window_list.item(row)
+            if item.data(Qt.ItemDataRole.UserRole) == wid:
+                item.setData(NAV_OUTPUT_ROLE, active)
+                self.window_list.sync_pulse()
+                break
 
     # 淡化背景色缓存（类级别缓存）
     _faded_bg_cache = {}

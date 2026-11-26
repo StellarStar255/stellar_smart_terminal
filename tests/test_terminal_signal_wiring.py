@@ -42,7 +42,7 @@ EXPECTED_SIGNALS = (
     'close_split_requested', 'split_horizontal_requested',
     'split_vertical_requested', 'move_split_left_requested',
     'move_split_up_requested', 'rename_split_requested',
-    'attention_requested', 'interaction_requested',
+    'attention_requested', 'interaction_requested', 'output_active_changed',
     'alert_matched', 'scrollback_pressure_changed',
 )
 

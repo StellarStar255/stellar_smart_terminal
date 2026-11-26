@@ -416,7 +416,8 @@ class TerminalWidget(TerminalInputMixin, TerminalMouseMixin,
     attention_requested = pyqtSignal()  # 疑似本轮命令/Claude 执行完毕（输出停顿），请求导航提醒
     interaction_requested = pyqtSignal()  # 终端响铃（BEL）：程序正在等待用户操作（如 Claude 确认提示）
     alert_matched = pyqtSignal(str)  # 输出命中提醒规则（参数=命中的模式文本）
-    _output_activity = pyqtSignal(int)  # 一批输出已处理（参数=字节数）：在 GUI 线程重置空闲计时器
+    output_active_changed = pyqtSignal(bool)
+    _output_activity = pyqtSignal(int, object)  # 一批输出已处理（参数=字节数）：在 GUI 线程重置空闲计时器
     _history_grew = pyqtSignal(int)  # feed 新增历史行数：读取线程 marshal 回 GUI 线程做回滚位置补偿
     scrollback_pressure_changed = pyqtSignal(int)  # 回滚历史"卡顿压力"等级变化（0 无 / 1 琥珀 / 2 红）
     _reflow_finished = pyqtSignal(int, float)  # 后台 reflow 完成（行数, 毫秒）：worker 线程 marshal 回 GUI 收尾
@@ -1634,7 +1635,7 @@ class TerminalWidget(TerminalInputMixin, TerminalMouseMixin,
         # 线程时(PARSE_ON_READER_THREAD)，经 _output_activity 信号 marshal 回 GUI。
         # 同线程发射时是直连(等价于原地调用)，无额外延迟。
         if text:
-            self._output_activity.emit(len(text))
+            self._output_activity.emit(len(text), cancelled)
 
     def _output_batches(self, parts):
         """每批按原顺序应用链接和文本，限制持锁期间处理的字符及链接数。"""
@@ -1676,12 +1677,15 @@ class TerminalWidget(TerminalInputMixin, TerminalMouseMixin,
                 except Exception:
                     logger.debug("_on_output: suppressed exception", exc_info=True)
 
-    def _on_output_activity(self, n: int):
+    def _on_output_activity(self, n: int, source=None):
         """GUI 线程：标记有输出活动并重置“执行完毕”空闲计时器。"""
-        if (self._cleaned_up
+        if (self._cleaned_up or self._output_cancelled.is_set()
+                or (source is not None and source is not self._output_cancelled)
                 or (self._backend is not None and not getattr(self._backend, 'is_running', True))):
             return
-        self._had_output_activity = True
+        if not self._had_output_activity:
+            self._had_output_activity = True
+            self.output_active_changed.emit(True)
         self._activity_bytes += n
         self._activity_idle_timer.start(self._ACTIVITY_IDLE_MS)
 
@@ -1748,6 +1752,12 @@ class TerminalWidget(TerminalInputMixin, TerminalMouseMixin,
             return None
         return '\n'.join(matched)
 
+    def _end_output_activity(self):
+        self._activity_bytes = 0
+        if self._had_output_activity:
+            self._had_output_activity = False
+            self.output_active_changed.emit(False)
+
     def _on_activity_settled(self):
         """输出停顿超过阈值：疑似本轮命令/Claude 执行完毕 → 请求导航提醒。
 
@@ -1769,8 +1779,7 @@ class TerminalWidget(TerminalInputMixin, TerminalMouseMixin,
                 sig = self._detect_interaction_prompt()
             finally:
                 self._screen_lock.release()
-        self._had_output_activity = False
-        self._activity_bytes = 0
+        self._end_output_activity()
         if not substantial:
             return
         if sig is not None:
@@ -1790,8 +1799,7 @@ class TerminalWidget(TerminalInputMixin, TerminalMouseMixin,
             return
         self._cancel_clipboard_probes()
         self._activity_idle_timer.stop()
-        self._had_output_activity = False
-        self._activity_bytes = 0
+        self._end_output_activity()
         self._pending_user_command = False
         self._pending_ssh_password = None
         # 已退出的标签页仍保留屏幕供查看，但不能继续占用输入线程和 PTY。
@@ -2182,6 +2190,9 @@ class TerminalWidget(TerminalInputMixin, TerminalMouseMixin,
         self._pending_process_start = None
         self._process_start_token = None
         self._output_cancelled.set()
+        self._activity_idle_timer.stop()
+        self._end_output_activity()
+        self._pending_user_command = False
         self._cancel_clipboard_probes()
         # 先断开信号连接，防止在清理过程中触发回调
         if self._signal_bridge:
