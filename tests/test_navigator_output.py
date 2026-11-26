@@ -140,3 +140,31 @@ def test_real_output_pulses_then_settles_and_green_takes_priority(panels, tmp_pa
     assert not row(nav, first).data(NAV_ATTENTION_ROLE)
     QTest.qWait(180)
     assert not listing._pulse_timer.isActive()
+
+
+def test_attention_changes_preserve_rows_scroll_and_other_window_pulse(panels):
+    first, second, nav, embedded = panels
+    listing = nav.window_list
+    listing.setFixedHeight(32)
+    _APP.processEvents()
+    last = listing.item(listing.count() - 1)
+    listing.scrollToItem(last, listing.ScrollHint.PositionAtTop)
+    position = listing.verticalScrollBar().value()
+    assert position > 0
+    first.terminal._process_output_text('running')
+    second.terminal._process_output_text('also running')
+    original = row(nav, first)
+    with patch('main_window.play_notify_sound'):
+        first._request_nav_attention(first.terminal)
+    for panel in (nav, embedded):
+        assert row(panel, first).data(NAV_ATTENTION_ROLE)
+        assert row(panel, second).data(NAV_OUTPUT_ROLE)
+    assert row(nav, first) is original
+    assert listing.verticalScrollBar().value() == position
+    first._clear_nav_attention()
+    assert row(nav, first) is original
+    assert listing.verticalScrollBar().value() == position
+    assert not row(embedded, first).data(NAV_ATTENTION_ROLE)
+    with patch.object(nav, '_refresh_window_list', wraps=nav._refresh_window_list) as refresh:
+        nav._check_and_refresh()
+        refresh.assert_not_called()

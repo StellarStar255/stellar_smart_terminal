@@ -61,6 +61,10 @@ def _window_screen_key(w):
         return None
 
 
+def _window_list_info(windows):
+    return [(id(w), w.windowTitle(), w.get_window_color(), _window_screen_key(w)) for w in windows]
+
+
 class NavListWidget(QListWidget):
     """窗口列表：拖拽由本控件自己跑，不走系统原生拖放（QDrag）。
 
@@ -345,7 +349,7 @@ class WindowNavigatorPanel(QWidget):
             logger.debug("__init__: suppressed exception", exc_info=True)
 
         # 缓存上次的窗口信息，避免不必要的刷新
-        self._last_window_info = []  # [(title, color), ...]
+        self._last_window_info = []
         self._cached_windows = []  # 缓存窗口引用
 
         # 刷新以事件驱动为主：建/关窗、换色、换目录、切 tab 走
@@ -803,8 +807,7 @@ class WindowNavigatorPanel(QWidget):
 
         # 检查窗口标题/颜色/所在屏幕是否变化
         try:
-            current_info = [(w.windowTitle(), w.get_window_color(),
-                             _window_screen_key(w)) for w in current_windows]
+            current_info = _window_list_info(self._cached_windows)
         except Exception:
             # 窗口在遍历过程中被删除
             self._refresh_window_list()
@@ -976,7 +979,8 @@ class WindowNavigatorPanel(QWidget):
             if wid in self._hooked_window_ids:
                 continue
             try:
-                w.navigator_output_changed.connect(self._update_output_row)
+                w.navigator_output_changed.connect(self._update_status_row)
+                w.navigator_attention_changed.connect(self._update_status_row)
                 w.windowTitleChanged.connect(self._check_and_refresh)
                 w.destroyed.connect(self._on_hooked_window_destroyed)
                 self._hooked_window_ids.add(wid)
@@ -1001,12 +1005,10 @@ class WindowNavigatorPanel(QWidget):
             self._last_window_info = []
             return
 
-        # 检查是否有变化（标题/颜色/提醒/所在屏幕——窗口跨屏挪动也要重建，
+        # 检查是否有变化（标题/颜色/所在屏幕——窗口跨屏挪动也要重建，
         # 因为钉死的内嵌面板只显示本屏窗口）
         try:
-            current_info = [(w.windowTitle(), w.get_window_color(),
-                             bool(getattr(w, '_nav_attention', False)),
-                             _window_screen_key(w)) for w in windows]
+            current_info = _window_list_info(windows)
         except Exception:
             # 窗口在遍历过程中被删除，重新刷新
             self._last_window_info = []
@@ -1086,12 +1088,14 @@ class WindowNavigatorPanel(QWidget):
 
         self._filter_window_list(self.search_input.text())
 
-    def _update_output_row(self, active):
-        wid = id(self.sender())
+    def _update_status_row(self):
+        window = self.sender()
+        wid = id(window)
         for row in range(self.window_list.count()):
             item = self.window_list.item(row)
             if item.data(Qt.ItemDataRole.UserRole) == wid:
-                item.setData(NAV_OUTPUT_ROLE, active)
+                item.setData(NAV_OUTPUT_ROLE, bool(window._nav_output_terms))
+                item.setData(NAV_ATTENTION_ROLE, window._nav_attention)
                 self.window_list.sync_pulse()
                 break
 

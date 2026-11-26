@@ -153,6 +153,7 @@ class MainWindow(ThemeMixin, ToolbarMixin, ConfigMixin, ExplorerPanelMixin,
     """主窗口"""
 
     navigator_output_changed = pyqtSignal(bool)
+    navigator_attention_changed = pyqtSignal(bool)
     _quick_command_host_ready = pyqtSignal(object, object, object)
 
     # 配置文件路径（源码运行=项目目录；打包运行=平台用户数据目录，见 utils.get_data_dir）
@@ -6513,20 +6514,14 @@ class MainWindow(ThemeMixin, ToolbarMixin, ConfigMixin, ExplorerPanelMixin,
             play_notify_sound(self._notify_sound)
         except Exception:
             logger.debug("_request_nav_attention: suppressed exception", exc_info=True)
-        try:
-            MainWindow._broadcast_navigator_refresh(invalidate_cache=True)
-        except Exception:
-            logger.debug("_request_nav_attention: suppressed exception", exc_info=True)
+        self.navigator_attention_changed.emit(True)
 
     def _clear_nav_attention(self):
         """清除本窗口的导航提醒小标（用户已查看）"""
         self._nav_attention_source = None
         if self._nav_attention:
             self._nav_attention = False
-            try:
-                MainWindow._broadcast_navigator_refresh(invalidate_cache=True)
-            except Exception:
-                logger.debug("_clear_nav_attention: suppressed exception", exc_info=True)
+            self.navigator_attention_changed.emit(False)
 
     def _show_openai_server_dialog(self, tab_index: int):
         """显示 OpenAI 服务器配置对话框"""
