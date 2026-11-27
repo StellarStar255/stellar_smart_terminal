@@ -187,6 +187,20 @@ class _PresetNameDelegate(QStyledItemDelegate):
         return size
 
 
+def confirm_preset_run(parent, preset, commands):
+    if preset.get("confirm_before_run") is not True:
+        return True
+    box = QMessageBox(parent)
+    box.setIcon(QMessageBox.Icon.Question)
+    box.setWindowTitle(t("preset.confirm_before_run"))
+    box.setTextFormat(Qt.TextFormat.PlainText)
+    box.setText(t("preset.run_question", name=preset.get("name") or t("common.unnamed")))
+    box.setInformativeText("\n".join(commands))
+    box.setStandardButtons(QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.Cancel)
+    box.setDefaultButton(QMessageBox.StandardButton.Cancel)
+    return box.exec() == QMessageBox.StandardButton.Yes
+
+
 class PresetDialog(QDialog):
     """预设命令管理对话框"""
 
@@ -289,8 +303,12 @@ class PresetDialog(QDialog):
         right_layout.addLayout(name_layout)
         self.pin_checkbox = QCheckBox(t("preset.pin_quick_command"))
         self.pin_checkbox.setEnabled(False)
-        self.pin_checkbox.clicked.connect(self._on_pin_changed)
+        self.pin_checkbox.clicked.connect(lambda checked: self._set_preset_flag("pinned", checked))
         right_layout.addWidget(self.pin_checkbox)
+        self.confirm_checkbox = QCheckBox(t("preset.confirm_before_run"))
+        self.confirm_checkbox.setEnabled(False)
+        self.confirm_checkbox.clicked.connect(lambda checked: self._set_preset_flag("confirm_before_run", checked))
+        right_layout.addWidget(self.confirm_checkbox)
 
         # 命令（多行）
         right_layout.addWidget(QLabel(t("preset.commands_label")))
@@ -430,6 +448,8 @@ class PresetDialog(QDialog):
                 self.name_edit.setText(preset.get('name', ''))
                 self.commands_edit.setPlainText('\n'.join(preset.get('commands', [])))
                 self.pin_checkbox.setChecked(preset.get('pinned') is True)
+                self.confirm_checkbox.setChecked(preset.get("confirm_before_run") is True)
+                self.confirm_checkbox.setEnabled(True)
                 self.pin_checkbox.setEnabled(True)
                 self.name_edit.blockSignals(False)
                 self.commands_edit.blockSignals(False)
@@ -439,6 +459,8 @@ class PresetDialog(QDialog):
         self.commands_edit.blockSignals(True)
         self.name_edit.clear()
         self.commands_edit.clear()
+        self.confirm_checkbox.setChecked(False)
+        self.confirm_checkbox.setEnabled(False)
         self.pin_checkbox.setChecked(False)
         self.pin_checkbox.setEnabled(False)
         self.name_edit.blockSignals(False)
@@ -455,15 +477,15 @@ class PresetDialog(QDialog):
             preset['name'] = text
             self._set_preset_item_name(item, preset)
 
-    def _on_pin_changed(self, checked):
+    def _set_preset_flag(self, key, checked):
         item = self.preset_list.currentItem()
         preset = self._get_preset_by_id(item.data(Qt.ItemDataRole.UserRole)) if item else None
         if preset is None:
             return
         if checked:
-            preset['pinned'] = True
+            preset[key] = True
         else:
-            preset.pop('pinned', None)
+            preset.pop(key, None)
         self._set_preset_item_name(item, preset)
 
     def _on_commands_changed(self):

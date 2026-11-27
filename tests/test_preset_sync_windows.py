@@ -54,6 +54,25 @@ class PresetSyncAcrossWindowsTest(unittest.TestCase):
     def _names(w):
         return [w.preset_combo.itemText(i) for i in range(w.preset_combo.count())]
 
+    def test_confirm_before_run_guards_palette_and_start(self):
+        from PyQt6.QtWidgets import QMessageBox
+        w = self.windows[0]
+        preset = w.presets[w.preset_combo.currentIndex()]
+        preset.update(commands=['echo first', 'echo second'], confirm_before_run=True)
+        entry = next(e for e in w._quick_command_palette_entries() if e.title == preset['name'])
+        with patch.object(QMessageBox, 'exec', return_value=QMessageBox.StandardButton.Cancel) as prompt, \
+                patch.object(w.terminal, '_execute_commands') as execute, \
+                patch.object(w.terminal, 'start_process') as start:
+            entry.run()
+            w._start_session()
+            self.assertEqual(prompt.call_count, 2)
+            self.assertTrue(w.start_btn.isEnabled())
+            execute.assert_not_called()
+            start.assert_not_called()
+            prompt.return_value = QMessageBox.StandardButton.Yes
+            entry.run()
+            execute.assert_called_once_with(preset['commands'])
+
     def test_new_preset_shows_up_in_other_window(self):
         a, b = self.windows
         self.assertEqual(b.preset_combo.currentText(), 'Claude')

@@ -89,7 +89,7 @@ from widgets import (
     DetachableTabBar, _NavResizeHandle,
 )
 from dialogs import (
-    get_default_shell, PresetDialog, LLMConfigDialog,
+    confirm_preset_run, get_default_shell, PresetDialog, LLMConfigDialog,
     DirectoryHistoryDialog, ShortcutSettingsDialog,
     ShortcutCheatSheetDialog,
 )
@@ -1368,11 +1368,13 @@ class MainWindow(ThemeMixin, ToolbarMixin, ConfigMixin, ExplorerPanelMixin,
         def run():
             if not is_current():
                 return
+            if terminal is not None and terminal._defer_native_paste_input(run):
+                return
+            if not confirm_preset_run(self, preset, displayed) or not is_current():
+                return
             if terminal is None:
                 self._new_terminal()
                 self.terminal._execute_commands(displayed)
-                return
-            if terminal._defer_native_paste_input(run):
                 return
             terminal.setFocus()
             terminal._execute_commands(displayed)
@@ -3110,14 +3112,14 @@ class MainWindow(ThemeMixin, ToolbarMixin, ConfigMixin, ExplorerPanelMixin,
             self.start_btn.setEnabled(True)  # 恢复按钮
             return
 
+        preset = self.presets[preset_idx]
+        commands = list(preset.get('commands') or [get_default_shell()])
+        if not confirm_preset_run(self, preset, commands):
+            self.start_btn.setEnabled(True)
+            return
+
         if self.terminal is None or self.terminal.is_running() or self.terminal.is_starting():
             self._add_new_tab()
-
-        preset = self.presets[preset_idx]
-        default_shell = get_default_shell()
-        commands = preset.get('commands', [default_shell])
-        if not commands:
-            commands = [default_shell]
 
         # 第一条命令作为 shell（如 zsh, bash）
         shell_cmd = commands[0]

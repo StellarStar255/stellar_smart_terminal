@@ -272,6 +272,8 @@ TRANSLATIONS = {
     "preset.save_tooltip": {"zh": "保存当前编辑的预设", "en": "Save current preset", "fr": "Enregistrer le préréglage actuel"},
     "preset.delete": {"zh": "删除", "en": "Delete", "fr": "Supprimer"},
     "preset.name_label": {"zh": "名称:", "en": "Name:", "fr": "Nom :"},
+    "preset.confirm_before_run": {"zh": "执行前确认", "en": "Confirm before running", "fr": "Confirmer avant l’exécution"},
+    "preset.run_question": {"zh": "要执行“{name}”吗？", "en": "Run “{name}”?", "fr": "Exécuter « {name} » ?"},
     "preset.pin_quick_command": {"zh": "置顶到快速命令菜单", "en": "Pin to top of Quick Commands menu", "fr": "Épingler en haut du menu des commandes rapides"},
     "preset.commands_label": {"zh": "命令 (每行一条):", "en": "Commands (one per line):", "fr": "Commandes (une par ligne) :"},
     "preset.commands_placeholder": {"zh": "例如 (PowerShell + 代理，login claude 前必须这样设置代理):\n$env:http_proxy = \"http://127.0.0.1:7897\"\n$env:https_proxy = \"http://127.0.0.1:7897\"\nclaude --model fable\n\n(cmd.exe 用 set http_proxy=... ；bash/zsh 用 export http_proxy=...)", "en": "Example (PowerShell + proxy — set the proxy this way before you can login claude):\n$env:http_proxy = \"http://127.0.0.1:7897\"\n$env:https_proxy = \"http://127.0.0.1:7897\"\nclaude --model fable\n\n(cmd.exe uses set http_proxy=... ; bash/zsh uses export http_proxy=...)", "fr": "Exemple (PowerShell + proxy ; définissez le proxy ainsi avant de vous connecter à claude) :\n$env:http_proxy = \"http://127.0.0.1:7897\"\n$env:https_proxy = \"http://127.0.0.1:7897\"\nclaude --model fable\n\n(cmd.exe utilise set http_proxy=... ; bash/zsh utilise export http_proxy=...)"},

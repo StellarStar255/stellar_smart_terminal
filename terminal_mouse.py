@@ -34,6 +34,7 @@ from PyQt6.QtWidgets import (
     QAbstractItemView, QApplication, QListWidget, QListWidgetItem, QMenu, QPushButton, QStyle, QTabWidget, QWidgetAction,
 )
 from command_palette import Command, CommandSearchEdit, matching_commands
+from dialogs import confirm_preset_run
 from i18n import t
 
 
@@ -324,7 +325,11 @@ class TerminalMenuMixin:
                 if not isinstance(commands, list) or not commands or not all(isinstance(c, str) for c in commands):
                     continue
                 title = str(preset.get('name') or t("common.unnamed"))
-                command = Command(title, lambda cmds=commands: self._execute_commands(cmds),
+                def run(preset=preset, cmds=commands.copy()):
+                    if confirm_preset_run(self, preset, cmds):
+                        self._execute_commands(cmds)
+
+                command = Command(title, run,
                                   group=group, search_text="\n".join(commands))
             label = f"★  {command.title}" if preset.get('pinned') is True else command.title
             action = QAction(label, menu)

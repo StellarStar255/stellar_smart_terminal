@@ -66,6 +66,17 @@ class PresetJsonTransferTest(unittest.TestCase):
             self.assertEqual(PresetDialog._parse_presets_json(json.dumps(payload)), self.source)
         self.assertEqual(PresetDialog._parse_presets_json('[]'), [])
 
+    def test_confirmation_is_saved_per_preset(self):
+        self.manager.confirm_checkbox.click()
+        self.manager._add_preset()
+        self.assertFalse(self.manager.confirm_checkbox.isChecked())
+        saved = self.manager.get_presets()
+        reloaded = PresetDialog(saved)
+        self.addCleanup(reloaded.deleteLater)
+        self.assertTrue(reloaded.confirm_checkbox.isChecked())
+        reloaded.confirm_checkbox.click()
+        self.assertEqual(reloaded.get_presets()[0], self.source[0])
+
     def test_pin_persists_with_preset_and_can_be_removed(self):
         self.manager.pin_checkbox.click()
         self.assertTrue(self.manager.preset_list.item(0).text().startswith('★'))
