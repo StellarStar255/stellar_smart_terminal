@@ -258,6 +258,8 @@ TRANSLATIONS = {
     "window.sort_toggle_tooltip": {"zh": "点击切换排序方式", "en": "Click to change sort mode", "fr": "Cliquez pour changer le mode de tri"},
     "window.maximize_all": {"zh": "最大化所有窗口", "en": "Maximize All Windows", "fr": "Agrandir toutes les fenêtres"},
     "window.refresh": {"zh": "刷新", "en": "Refresh", "fr": "Actualiser"},
+    "window.folder_alias": {"zh": "设置文件夹别名…", "en": "Set Folder Alias…", "fr": "Définir l’alias du dossier…"},
+    "window.folder_alias_prompt": {"zh": "{folder}\n导航显示名称（留空恢复默认名称）", "en": "{folder}\nNavigator name (leave blank to restore the default)", "fr": "{folder}\nNom dans le navigateur (laisser vide pour rétablir le nom par défaut)"},
     "window.force_close": {"zh": "强制关闭(自动保存)", "en": "Force Close (Auto-Save)", "fr": "Forcer la fermeture (sauvegarde automatique)"},
     "window.force_close_tooltip": {"zh": "保存会话和配置后关闭窗口，跳过确认弹窗", "en": "Save session and config, then close without confirmation", "fr": "Enregistrer la session et les paramètres, puis fermer sans confirmation"},
     "window.force_close_confirm_title": {"zh": "确认强制关闭", "en": "Confirm Force Close", "fr": "Confirmer la fermeture forcée"},

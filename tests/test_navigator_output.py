@@ -527,3 +527,38 @@ def test_background_codex_composer_animation_after_startup(panels):
     term._on_activity_settled()
     term._process_output_text(f'\x1b[{y};3Hnew input')
     assert first.has_nav_output
+
+
+def test_folder_alias_menu_persists_and_follows_directory(panels, tmp_path):
+    from PyQt6.QtWidgets import QInputDialog, QMenu
+    from i18n import t
+
+    first, second, floating, _ = panels
+    folder = tmp_path / 'project'
+    first._window_cwd = second._window_cwd = str(folder)
+    floating._force_refresh()
+
+    def rename(value, accepted=True):
+        def choose(menu, *_):
+            return next(a for a in menu.actions() if a.text() == t('window.folder_alias'))
+        with patch.object(QMenu, 'exec', choose), patch.object(
+                QInputDialog, 'getText', return_value=(value, accepted)):
+            pos = floating.window_list.visualItemRect(row(floating, first)).center()
+            floating._show_window_context_menu(pos)
+
+    rename('  训练服务器  ')
+    for window in (first, second):
+        assert row(floating, window).text().endswith('训练服务器')
+    reopened = WindowNavigatorPanel()
+    try:
+        reopened._force_refresh()
+        assert row(reopened, first).text().endswith('训练服务器')
+        second._window_cwd = str(tmp_path / 'other' / 'project')
+        floating._check_and_refresh()
+        assert not row(floating, second).text().endswith('训练服务器')
+        rename('cancelled', False)
+        assert row(floating, first).text().endswith('训练服务器')
+        rename(' ')
+        assert not row(floating, first).text().endswith('训练服务器')
+    finally:
+        reopened.deleteLater()

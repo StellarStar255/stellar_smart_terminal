@@ -15,7 +15,7 @@ from PyQt6 import sip
 from PyQt6.QtCore import Qt, QEvent, QModelIndex, QPoint, QRect, QSize, QTimer, pyqtSignal
 from PyQt6.QtGui import QBrush, QColor, QCursor, QPainter, QRegion
 from PyQt6.QtWidgets import (
-    QApplication, QCheckBox, QHBoxLayout, QLabel, QLineEdit, QListWidget,
+    QApplication, QCheckBox, QHBoxLayout, QInputDialog, QLabel, QLineEdit, QListWidget,
     QListWidgetItem, QMenu, QMessageBox, QPushButton, QStyle,
     QStyleOptionViewItem, QStyledItemDelegate, QVBoxLayout, QWidget,
 )
@@ -62,7 +62,7 @@ def _window_screen_key(w):
 
 
 def _window_list_info(windows):
-    return [(id(w), w.windowTitle(), w.get_window_color(), _window_screen_key(w)) for w in windows]
+    return [(id(w), w.windowTitle(), w.get_window_color(), _window_screen_key(w), getattr(w, "_window_cwd", None)) for w in windows]
 
 
 def _shows_output_marker(item, viewed_window_id):
@@ -331,6 +331,7 @@ class WindowNavigatorPanel(QWidget):
         self._sort_mode = 'time'
         # 简洁显示模式：只显示文件夹名
         self._compact_mode = True
+        self._folder_aliases = {}
         # 快速关闭：勾选后右键"强制关闭"跳过确认弹窗
         self._quick_close = False
         # 手动排序的窗口顺序（存储窗口ID）
@@ -1029,7 +1030,7 @@ class WindowNavigatorPanel(QWidget):
             if self._sort_mode == 'time':
                 windows.sort(key=lambda w: w.get_created_time())
             elif self._sort_mode == 'name':
-                windows.sort(key=lambda w: w.windowTitle())
+                windows.sort(key=lambda w: self._folder_aliases.get(self._folder_key(w)) or w.windowTitle())
             elif self._sort_mode == 'manual':
                 # 手动排序：按保存的顺序排列，新窗口放到末尾
                 order_map = {wid: idx for idx, wid in enumerate(self._manual_order)}
@@ -1084,13 +1085,18 @@ class WindowNavigatorPanel(QWidget):
                     continue
                 title = window.windowTitle()
                 # 简洁模式：提取文件夹名
-                if self._compact_mode:
+                alias = self._folder_aliases.get(self._folder_key(window))
+                if alias:
+                    display_title = alias
+                elif self._compact_mode:
                     display_title = self._extract_folder_name(title, window)
                 else:
                     display_title = title
                 display_title = f"{idx}. {display_title}"
                 color = self._item_text_color(window.get_window_color())
                 item = QListWidgetItem(display_title)
+                if alias:
+                    item.setToolTip(window._window_cwd)
                 wid = id(window)
                 # 只把 id（Python int）塞进 UserRole；真正的对象通过 weakref 解
                 item.setData(Qt.ItemDataRole.UserRole, wid)
@@ -1310,6 +1316,9 @@ class WindowNavigatorPanel(QWidget):
             move_menu.setToolTip(t("window.move_to_display_single"))
         menu.addSeparator()
 
+        folder = self._folder_key(window)
+        rename = menu.addAction(t("window.folder_alias"))
+        rename.setEnabled(bool(folder))
         marker = menu.addAction(t("window.output_marker"))
         marker.setCheckable(True)
         marker.setChecked(window.window_output_marker_enabled)
@@ -1317,17 +1326,51 @@ class WindowNavigatorPanel(QWidget):
         force_close_action = menu.addAction(t("window.force_close"))
         force_close_action.setToolTip(t("window.force_close_tooltip"))
 
+        displayed_name = item.text()
         chosen = menu.exec(self.window_list.viewport().mapToGlobal(pos))
         if sip.isdeleted(menu):
             return
         menu.deleteLater()
         if sip.isdeleted(window):
             return
-        if chosen is marker:
+        if chosen is rename:
+            self._edit_folder_alias(folder)
+        elif chosen is marker:
             window.set_window_output_marker_enabled(marker.isChecked())
             window._checkpoint_workspace()
         elif chosen is force_close_action:
-            self._force_close_window(window, item.text())
+            self._force_close_window(window, displayed_name)
+
+    @staticmethod
+    def _folder_key(window):
+        cwd = getattr(window, '_window_cwd', None)
+        return os.path.normcase(os.path.abspath(cwd)) if cwd else ''
+
+    def _edit_folder_alias(self, folder):
+        name, ok = QInputDialog.getText(
+            self, t("window.folder_alias"), t("window.folder_alias_prompt", folder=folder),
+            text=self._folder_aliases.get(folder, ''))
+        if not ok or sip.isdeleted(self):
+            return
+        alias = name.strip()
+        updated = {}
+
+        def save(config):
+            current = config.get('navigator_folder_aliases', {})
+            if isinstance(current, dict):
+                updated.update(current)
+            if alias:
+                updated[folder] = alias
+            else:
+                updated.pop(folder, None)
+            config['navigator_folder_aliases'] = updated
+
+        if not app_config.update_config_with(save, description='navigator-folder-alias'):
+            QMessageBox.warning(self, t('msg.save_failed'), t('status.config_save_failed'))
+            return
+        for nav in {self, *main_window.MainWindow._iter_navigators()}:
+            nav._folder_aliases = updated
+            nav._force_refresh()
 
     def _on_quick_close_changed(self, state):
         """Quick Close 勾选状态变化：更新内部标志、保存配置并广播到所有导航面板。
@@ -1503,6 +1546,9 @@ class WindowNavigatorPanel(QWidget):
         try:
             config = app_config.read_config()
             if config:
+                aliases = config.get('navigator_folder_aliases', {})
+                if isinstance(aliases, dict):
+                    self._folder_aliases = aliases
                 mode = config.get('navigator_sort_mode', 'time')
                 self._sort_mode = mode if mode in ('time', 'name', 'manual') else 'time'
                 order = config.get('navigator_manual_order', [])
