@@ -127,7 +127,8 @@ class TestGroupMoveSession(unittest.TestCase):
         import window_group_move as gm
         window, _ = self._make_windows()
         with mock.patch.object(gm.QTimer, 'singleShot') as timer:
-            self.assertTrue(gm.move_window_to_point(window, QPoint(350, 200)))
+            # Simulate a placement that the window manager has not accepted.
+            gm._schedule_placement_check(window, window.geometry().translated(10, 10))
             pending = timer.call_args.args[1]
         second = gm.GroupMoveSession([window], QPoint(350, 200))
         second.drag_to(QPoint(410, 280))
@@ -167,6 +168,31 @@ class TestGroupMoveSession(unittest.TestCase):
         window.showNormal()
         self.app.processEvents()
         self.assertEqual(window.geometry(), normal)
+
+    def test_manual_resize_after_drop_survives_placement_check(self):
+        from PyQt6.QtCore import QPoint, QSize
+        from PyQt6.QtTest import QTest
+        from window_group_move import move_window_to_point
+        window, _ = self._make_windows()
+        self.assertTrue(move_window_to_point(window, QPoint(350, 200)))
+        size = QSize(245, 175)
+        window.resize(size)
+        QTest.qWait(450)
+        self.assertEqual(window.size(), size)
+
+    def test_group_move_respects_windows_closed_or_maximized_during_drag(self):
+        from PyQt6.QtCore import QPoint
+        from window_group_move import GroupMoveSession
+        window, closing = self._make_windows()
+        session = GroupMoveSession([window, closing], QPoint())
+        window.showMaximized()
+        closing.close()
+        self.app.processEvents()
+        before = (window.geometry(), closing.geometry())
+        session.drag_to(QPoint(60, 60))
+        session.cancel()
+        self.assertTrue(window.isMaximized())
+        self.assertEqual((window.geometry(), closing.geometry()), before)
 
     def test_cancel_snaps_windows_back(self):
         from PyQt6.QtCore import QPoint

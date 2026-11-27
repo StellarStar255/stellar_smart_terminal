@@ -10,7 +10,7 @@
 
 **macOS 版已通过 Apple 公证。** 适用于 Apple 芯片 Mac 的应用已使用 Developer ID 证书签名。
 
-[v1.35.82 更新说明](docs/releases/v1.35.82.md) — Spring 分屏切换后，终端文字更快适配新宽度。快捷命令高亮跟随鼠标，可按预设开启执行前确认。预设下拉列表超出一屏时会显示滚动条。
+[v1.35.83 更新说明](docs/releases/v1.35.83.md) — 在窗口导航器的齿轮菜单中选择「最大化所有窗口」，即可让各个终端在各自屏幕上最大化。跨屏搬动后，还原窗口也会留在目标屏幕。
 
 A PyQt6-based smart terminal with file explorer, Git GUI, LLM proxy, and VS Code extension browser.
 

@@ -48,6 +48,9 @@ def cancel_pending_placement(window):
 
 
 def _schedule_placement_check(window, geometry):
+    observed = window.geometry()
+    if observed == geometry:
+        return
     window._pending_move_geometry = geometry
 
     def check():
@@ -56,7 +59,8 @@ def _schedule_placement_check(window, geometry):
         cancel_pending_placement(window)
         if not window.isVisible() or window.isMinimized() or window.isFullScreen() or window.isMaximized():
             return
-        if window.geometry() != geometry:
+        # A newer resize or move takes priority over retrying a failed placement.
+        if window.geometry() == observed:
             # Force a native resize when the window manager adjusted the placement.
             window.resize(geometry.width(), max(1, geometry.height() - 1))
             window.setGeometry(geometry)
@@ -88,9 +92,14 @@ class GroupMoveSession:
                 logger.debug("GroupMoveSession: skip window", exc_info=True)
 
     def _alive(self):
-        for it in self.items:
-            if not sip.isdeleted(it[0]):
-                yield it
+        for item in self.items:
+            window, _, _, _, was_maximized = item
+            if sip.isdeleted(window) or not window.isVisible():
+                continue
+            if window.isFullScreen() or window.isMinimized():
+                continue
+            if window.isMaximized() == was_maximized:
+                yield item
 
     def drag_to(self, global_pos: QPoint):
         delta = global_pos - self.start
