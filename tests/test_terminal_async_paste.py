@@ -266,7 +266,6 @@ def test_writer_rejection_stops_remaining_quick_commands(terminal, tmp_path, mon
 
 
 def test_session_preset_stops_after_deferred_writer_rejection(terminal):
-    from main_window import MainWindow
     widget, written = terminal
     widget._backend.is_running = True
     attempts = []
@@ -281,9 +280,9 @@ def test_session_preset_stops_after_deferred_writer_rejection(terminal):
     widget._backend.write = write
     callbacks = []
     # Drive the preset timers independently of the real clipboard probe.
-    with patch('main_window.QTimer') as timer:
+    with patch('terminal_widget.QTimer') as timer:
         timer.singleShot.side_effect = lambda delay, cb: callbacks.append(cb)
-        MainWindow._send_commands_to_terminal(None, widget, ['first', 'rejected', 'third'])
+        widget._send_preset_commands(['first', 'rejected', 'third'])
         callbacks.pop(0)()
         with slow_probe(.1):
             widget._paste_from_clipboard_macos(SimpleNamespace(text=lambda: 'prefix '))

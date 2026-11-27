@@ -500,7 +500,7 @@ def test_start_during_reflow_is_nonblocking_and_cancelable(app, action):
 
 @pytest.mark.parametrize('completion', ['ready', 'stopped', 'replaced'])
 def test_preset_commands_wait_for_start_and_stay_with_their_session(app, completion):
-    from main_window import MainWindow
+    from terminal_widget import TerminalWidget
 
     state = {'starting': True}
     terminal = SimpleNamespace(
@@ -509,8 +509,8 @@ def test_preset_commands_wait_for_start_and_stay_with_their_session(app, complet
         is_running=lambda: not state['starting'], _defer_native_paste_input=lambda callback: False,
         _send_text_now=Mock(return_value=True))
     callbacks = []
-    with patch('main_window.QTimer.singleShot', side_effect=lambda delay, cb: callbacks.append(cb)):
-        MainWindow._send_commands_to_terminal(None, terminal, ['preset command'])
+    with patch('terminal_widget.QTimer.singleShot', side_effect=lambda delay, cb: callbacks.append(cb)):
+        TerminalWidget._send_preset_commands(terminal, ['preset command'])
         callbacks.pop(0)()
         terminal._send_text_now.assert_not_called()
         assert len(callbacks) == 1

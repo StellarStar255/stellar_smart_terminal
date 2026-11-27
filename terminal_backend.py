@@ -769,6 +769,7 @@ else:
             super().__init__()
             self._master_fd: Optional[int] = None
             self._child_pid: Optional[int] = None
+            self._exec_status_fd: Optional[int] = None
             self._reader_thread: Optional[threading.Thread] = None
             self._cols = 80
             self._rows = 24
@@ -786,8 +787,14 @@ else:
 
         def start(self, command: List[str], cwd: Optional[str] = None,
                   cols: int = 80, rows: int = 24) -> bool:
-            if self._child_pid is not None:
+            if self.begin_start(command, cwd, cols, rows) is None:
                 return False
+            return self.finish_start()
+
+        def begin_start(self, command, cwd, cols, rows) -> Optional[int]:
+            """Fork and return the exec-status fd. Readability signals completion."""
+            if self._child_pid is not None:
+                return None
 
             self._cols = cols
             self._rows = rows
@@ -808,26 +815,34 @@ else:
                 # The non-inheritable write end closes on exec. A child that cannot
                 # start reports its OS error here before the parent announces success.
                 try:
-                    error_read, error_write = os.pipe()
-                    with os.fdopen(error_read, "rb") as errors:
-                        try:
-                            self._child_pid = os.fork()
-                            if self._child_pid == 0:
-                                try:
-                                    self._child_exec(slave_fd, command, cwd, cols, rows,
-                                                     smart_terminal_pid)
-                                except BaseException as exc:
-                                    os.write(error_write, str(exc).encode("utf-8", "replace")[:1024])
-                                finally:
-                                    os._exit(127)
-                        finally:
-                            os.close(error_write)
-                        error = errors.read(1024)
+                    self._exec_status_fd, error_write = os.pipe()
+                    try:
+                        self._child_pid = os.fork()
+                        if self._child_pid == 0:
+                            try:
+                                self._child_exec(slave_fd, command, cwd, cols, rows,
+                                                 smart_terminal_pid)
+                            except BaseException as exc:
+                                os.write(error_write, str(exc).encode("utf-8", "replace")[:1024])
+                            finally:
+                                os._exit(127)
+                    finally:
+                        os.close(error_write)
                 finally:
                     os.close(slave_fd)
+                return self._exec_status_fd
+            except Exception as exc:
+                self.start_error = str(exc)
+                self._cleanup()
+                return None
+
+        def finish_start(self) -> bool:
+            try:
+                error = os.read(self._exec_status_fd, 1024)
+                os.close(self._exec_status_fd)
+                self._exec_status_fd = None
                 if error:
                     raise RuntimeError(error.decode("utf-8", "replace"))
-
                 self._running = True
                 self._input_closed = False
                 self._reader_thread = threading.Thread(target=self._read_loop, daemon=True)
@@ -839,8 +854,6 @@ else:
                 logger.error(f"[UnixBackend] Error starting process: {e}")
                 self._cleanup()
                 return False
-
-            return False
 
         def _child_exec(self, slave_fd, command, cwd, cols, rows,
                         smart_terminal_pid):
@@ -1083,7 +1096,10 @@ else:
             # 发送终止信号
             if self._child_pid:
                 try:
-                    os.kill(self._child_pid, signal.SIGTERM)
+                    # Before exec the child can still inherit our SIGTERM handler.
+                    # Cancel that startup before it can launch the requested program.
+                    sig = signal.SIGKILL if self._exec_status_fd is not None else signal.SIGTERM
+                    os.kill(self._child_pid, sig)
                 except ProcessLookupError:  # 子进程已退出
                     pass
 
@@ -1116,7 +1132,7 @@ else:
                 except Exception:
                     logger.debug("_cleanup: suppressed exception", exc_info=True)
                 self._master_fd = None
-            for attr in ('_wake_r', '_wake_w'):
+            for attr in ('_exec_status_fd', '_wake_r', '_wake_w'):
                 fd = getattr(self, attr, None)
                 if fd is not None:
                     try:

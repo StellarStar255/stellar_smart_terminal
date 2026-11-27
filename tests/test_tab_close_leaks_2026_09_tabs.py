@@ -16,6 +16,7 @@ import gc
 import os
 import sys
 import tempfile
+import time
 import types
 import unittest
 from pathlib import Path
@@ -27,7 +28,7 @@ os.environ.setdefault('QT_QPA_PLATFORM', 'offscreen')
 
 from PyQt6 import sip
 from PyQt6.QtCore import QEvent, QPoint, Qt, QTimer
-from PyQt6.QtGui import QCloseEvent, QContextMenuEvent, QKeySequence
+from PyQt6.QtGui import QCloseEvent, QContextMenuEvent, QInputMethodEvent, QKeySequence
 from PyQt6.QtTest import QTest
 from PyQt6.QtWidgets import QApplication, QMenu, QMessageBox
 
@@ -78,12 +79,92 @@ class _WindowCase(unittest.TestCase):
 
 # ---------------------------------------------------------------------------
 class TestCloseLastTab(_WindowCase):
+    def _wait_for_start_result(self, terminal):
+        for _ in range(100):
+            if not terminal.is_starting():
+                return
+            QTest.qWait(20)
+        self.fail("Timed out waiting for the terminal startup result")
+
+    @unittest.skipIf(os.name == "nt", "Requires a POSIX shell")
+    def test_startup_input_stays_in_order_and_in_original_tab(self):
+        from terminal_backend import UnixBackend
+
+        win = self.win
+        self._ensure_tabs(2)
+        term = win.terminal
+        child_exec = UnixBackend._child_exec
+
+        def delayed_exec(backend, *args):
+            time.sleep(0.2)
+            child_exec(backend, *args)
+
+        with tempfile.TemporaryDirectory() as cwd:
+            with mock.patch.object(UnixBackend, "_child_exec", delayed_exec):
+                term.start_process(["/bin/sh"], cwd)
+            QTest.keyClicks(term, "echo firsx")
+            QTest.keyClick(term, Qt.Key.Key_Backspace)
+            QTest.keyClicks(term, "t > steps")
+            QTest.keyClick(term, Qt.Key.Key_Return)
+            QTest.keyClicks(term, "echo ")
+            ime = QInputMethodEvent()
+            ime.setCommitString("第二")
+            QApplication.sendEvent(term, ime)
+            # Snapshot clipboard text without touching the user's system clipboard.
+            term._ensure_clipboard_watch()
+            with mock.patch.object(QApplication, "clipboard") as clipboard:
+                clipboard.return_value.text.return_value = "-paste"
+                term._paste_from_clipboard()
+                term._on_clipboard_data_changed()
+            win.tab_widget.setCurrentIndex(0)
+            self._wait_for_start_result(term)
+            win.tab_widget.setCurrentIndex(1)
+            QTest.keyClicks(term, " >> steps")
+            QTest.keyClick(term, Qt.Key.Key_Return)
+            marker = Path(cwd, "steps")
+            for _ in range(100):
+                QTest.qWait(20)
+                if marker.exists() and len(marker.read_text().splitlines()) == 2:
+                    break
+            self.assertEqual(marker.read_text().splitlines(), ["first", "第二-paste"])
+
+    @unittest.skipIf(os.name == "nt", "Requires a POSIX shell")
+    def test_slow_start_allows_switching_tabs_and_cancellation(self):
+        import signal
+        from terminal_backend import UnixBackend
+
+        win = self.win
+        self._ensure_tabs(2)
+        term = win.terminal
+        child_exec = UnixBackend._child_exec
+
+        def delayed_exec(backend, *args):
+            signal.signal(signal.SIGTERM, signal.SIG_IGN)
+            time.sleep(0.6)
+            child_exec(backend, *args)
+
+        with tempfile.TemporaryDirectory() as cwd:
+            with mock.patch.object(UnixBackend, "_child_exec", delayed_exec):
+                term.start_process(["/bin/sh", "-c", "touch launched"], cwd)
+            timer_states = []
+            QTimer.singleShot(20, lambda: timer_states.append(term.is_starting()))
+            win.tab_widget.setCurrentIndex(0)
+            QTest.qWait(80)
+            self.assertEqual(timer_states, [True])
+            win.tab_widget.setCurrentIndex(1)
+            self.assertTrue(win.stop_btn.isEnabled())
+            win.stop_btn.click()
+            self.assertEqual(win.tab_widget.count(), 1)
+            QTest.qWait(650)
+            self.assertFalse(Path(cwd, "launched").exists())
+
     @unittest.skipIf(os.name == "nt", "Requires a POSIX shell")
     def test_stop_split_keeps_sibling_shell_and_output(self):
         win = self.win
         left = win.terminal
         with tempfile.TemporaryDirectory() as cwd:
             left.start_process(["/bin/sh"], cwd)
+            self._wait_for_start_result(left)
             left._send_text_now("echo LEFT_OUTPUT\r")
             for _ in range(100):
                 QTest.qWait(20)
@@ -91,6 +172,7 @@ class TestCloseLastTab(_WindowCase):
                     break
             win._split_current_tab()
             right = win.terminal
+            self._wait_for_start_result(right)
             self.assertIsNot(left, right)
             left.setFocus()
             self.app.processEvents()
@@ -119,11 +201,13 @@ class TestCloseLastTab(_WindowCase):
         with tempfile.TemporaryDirectory() as cwd:
             shell = Path(cwd, "missing-shell")
             term.start_process([str(shell)], cwd)
+            self._wait_for_start_result(term)
             self.assertFalse(term.is_running())
             self.assertEqual(win.session_label.text(), t("status.start_failed"))
             self.assertIn("missing-shell", "".join(term.screen.display).replace(" ", ""))
             shell.symlink_to("/bin/sh")
             QTest.keyClick(term, Qt.Key.Key_Return)
+            self._wait_for_start_result(term)
             self.assertTrue(term.is_running())
             self.assertEqual(win.session_label.text(), t("status.running"))
             term._send_text_now("pwd > actual-cwd\r")
@@ -133,6 +217,79 @@ class TestCloseLastTab(_WindowCase):
                 if marker.exists() and marker.read_text().strip():
                     break
             self.assertTrue(Path(marker.read_text().strip()).samefile(cwd))
+
+    @unittest.skipIf(os.name == "nt", "Requires a POSIX shell")
+    def test_retry_restores_preset_commands_once_in_order(self):
+        win = self.win
+        with tempfile.TemporaryDirectory() as cwd:
+            shell = Path(cwd, "missing-shell")
+            marker = Path(cwd, "steps")
+            win.presets = [{"name": "Probe", "commands": [
+                str(shell), "echo first >> steps", "echo second >> steps"]}]
+            win.preset_combo.setCurrentIndex(0)
+            win._start_session(cwd)
+            term = win.terminal
+            QTest.qWait(600)
+            self.assertTrue(term._failed_process_start)
+            QTest.keyClick(term, Qt.Key.Key_Return)
+            QTest.qWait(100)
+            self.assertTrue(term._failed_process_start)
+            shell.symlink_to("/bin/sh")
+            QTest.keyClick(term, Qt.Key.Key_Return)
+            QTest.qWait(1500)
+            self.assertEqual(marker.read_text().splitlines(), ["first", "second"])
+
+    @unittest.skipIf(os.name == "nt", "Requires a POSIX shell")
+    def test_retry_runs_selected_quick_commands_but_discards_typed_input(self):
+        term = self.win.terminal
+        with tempfile.TemporaryDirectory() as cwd:
+            term.set_working_dir(cwd)
+            shell = Path(cwd, "missing-shell")
+            with mock.patch.object(term, "_get_default_shell", return_value=str(shell)):
+                term._execute_commands(["echo first >> steps"])
+                term._execute_commands(["echo second >> steps"])
+                term.send_text("touch stale-input\r")
+                self._wait_for_start_result(term)
+                self.assertTrue(term._failed_process_start)
+                QTest.keyClick(term, Qt.Key.Key_Return)
+                self._wait_for_start_result(term)
+                self.assertTrue(term._failed_process_start)
+                shell.symlink_to("/bin/sh")
+                QTest.keyClick(term, Qt.Key.Key_Return)
+                self._wait_for_start_result(term)
+                term.send_text("echo done >> steps\r")
+                marker = Path(cwd, "steps")
+                for _ in range(100):
+                    QTest.qWait(20)
+                    if marker.exists() and "done" in marker.read_text():
+                        break
+                self.assertEqual(marker.read_text().splitlines(), ["first", "second", "done"])
+                self.assertFalse(Path(cwd, "stale-input").exists())
+
+    @unittest.skipIf(os.name == "nt", "Requires a POSIX shell")
+    def test_stop_and_replacement_discard_pending_keys_and_commands(self):
+        term = self.win.terminal
+        with tempfile.TemporaryDirectory() as cwd:
+            for stop_first in (True, False):
+                term.start_process(["/bin/sh"], cwd)
+                term._execute_commands(["touch stale-quick"])
+                QTest.keyClicks(term, "touch stale-keys")
+                QTest.keyClick(term, Qt.Key.Key_Return)
+                if stop_first:
+                    term.stop_process()
+                term.start_process(["/bin/sh"], cwd)
+                self._wait_for_start_result(term)
+                term.send_text("echo ok >> fresh\r")
+                marker = Path(cwd, "fresh")
+                expected = ["ok"] if stop_first else ["ok", "ok"]
+                for _ in range(100):
+                    QTest.qWait(20)
+                    if marker.exists() and marker.read_text().splitlines() == expected:
+                        break
+                self.assertEqual(marker.read_text().splitlines(), expected)
+                self.assertFalse(Path(cwd, "stale-quick").exists())
+                self.assertFalse(Path(cwd, "stale-keys").exists())
+                term.stop_process()
 
     def test_window_close_buttons_and_default(self):
         from i18n import t

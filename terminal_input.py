@@ -171,6 +171,9 @@ class TerminalInputMixin:
                 # macOS: 物理 Ctrl+C 始终发送 SIGINT（复制由 Cmd+C 处理）
                 if sys.platform != 'darwin' and self._has_selection():
                     self._copy_selection_to_clipboard()
+                elif self.is_starting():
+                    self._startup_input.clear()
+                    self._retryable_quick_commands.clear()
                 elif self._backend is not None:
                     self._cancel_clipboard_probes()
                     self.input_buffer = ''
@@ -261,15 +264,15 @@ class TerminalInputMixin:
         # macOS: Cmd+Right/Left 跳到行末/行首
         if sys.platform == 'darwin':
             if (modifiers & Qt.KeyboardModifier.ControlModifier) and key == Qt.Key.Key_Right:
-                if self._backend is not None:
-                    if self._defer_native_paste_key(event):
+                if self.is_starting() or self._backend is not None:
+                    if self._defer_terminal_key(event):
                         return
                     self._write_to_backend(b'\x05')
                 event.accept()
                 return
             if (modifiers & Qt.KeyboardModifier.ControlModifier) and key == Qt.Key.Key_Left:
-                if self._backend is not None:
-                    if self._defer_native_paste_key(event):
+                if self.is_starting() or self._backend is not None:
+                    if self._defer_terminal_key(event):
                         return
                     self._write_to_backend(b'\x01')
                 event.accept()
@@ -347,6 +350,10 @@ class TerminalInputMixin:
             event.accept()
             return
 
+        if self.is_starting():
+            self._defer_terminal_key(event)
+            return
+
         # === 终端未运行时的 GUI 快捷键 ===
         if self._backend is None or not getattr(self._backend, 'is_running', True):
             if (key in (Qt.Key.Key_Return, Qt.Key.Key_Enter)
@@ -378,7 +385,7 @@ class TerminalInputMixin:
             event.accept()
             return
 
-        if self._defer_native_paste_key(event):
+        if self._defer_terminal_key(event):
             return
 
         # 输入时自动滚动到底部（走整屏重绘路径，并同步滚动条）
@@ -508,12 +515,15 @@ class TerminalInputMixin:
 
         # 处理已确认提交的文本
         commit_string = event.commitString()
-        if commit_string and self._backend is not None:
+        if commit_string and (self.is_starting() or self._backend is not None):
             self._commit_ime_text(commit_string)
             self._preedit_string = ''
         event.accept()
 
     def _commit_ime_text(self, text):
+        if self.is_starting():
+            self._startup_input.append(lambda: self._commit_ime_text(text))
+            return
         if self._cleaned_up or self._backend is None:
             return
         if self._defer_native_paste_input(lambda: self._commit_ime_text(text)):
@@ -664,6 +674,13 @@ class TerminalInputMixin:
 
     def send_text(self, text: str):
         """发送文本到终端"""
+        if self.is_starting():
+            if text == '\x03':
+                self._startup_input.clear()
+                self._retryable_quick_commands.clear()
+            else:
+                self._startup_input.append(lambda: self.send_text(text))
+            return
         if self._backend is None or not getattr(self._backend, 'is_running', True):
             self._cancel_clipboard_probes()
             return
@@ -709,6 +726,20 @@ class TerminalInputMixin:
         因此在 macOS 上完全避免调用 mimeData()，
         改用 clipboard.text()（安全）+ osascript 原生命令处理图片/文件。
         """
+        if self.is_starting():
+            self._ensure_clipboard_watch()
+            token = self._clipboard_change_token() if sys.platform == "darwin" else None
+            generation = getattr(self, "_clipboard_generation", 0)
+            text = QApplication.clipboard().text()
+
+            def paste_at_start():
+                if self._clipboard_request_is_current(token, generation):
+                    self._paste_from_clipboard()
+                elif text:
+                    self._paste_text_value(text)
+
+            self._startup_input.append(paste_at_start)
+            return
         if self._backend is None or not getattr(self._backend, 'is_running', True):
             return
 
@@ -1234,7 +1265,12 @@ if (paths.length > 0) {{
         current = self._clipboard_change_token()
         return current is None or token == current
 
-    def _defer_native_paste_key(self, event):
+    def _defer_terminal_key(self, event):
+        if self.is_starting():
+            copied = event.clone()
+            self._startup_input.append(lambda: self.keyPressEvent(copied))
+            event.accept()
+            return True
         if (getattr(self, '_native_paste_dispatching', False)
                 or (getattr(self, '_native_paste_process', None) is None
                     and not getattr(self, '_native_paste_queue', None))):

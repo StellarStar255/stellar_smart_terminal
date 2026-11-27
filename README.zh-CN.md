@@ -10,7 +10,7 @@
 
 **macOS 版已通过 Apple 公证。** 适用于 Apple 芯片 Mac 的应用已使用 Developer ID 证书签名。
 
-[v1.35.78 更新说明](docs/releases/v1.35.78.md) — 右键点击空白终端区，即可在新 Shell 中运行全局或本地快捷命令。
+[v1.35.79 更新说明](docs/releases/v1.35.79.md) — Shell 启动期间即可输入，失败后可重试完整预设和快捷命令；停止一个分屏时，其他分屏继续运行。
 
 A PyQt6-based smart terminal with file explorer, Git GUI, LLM proxy, and VS Code extension browser.
 

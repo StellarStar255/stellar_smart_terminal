@@ -281,7 +281,7 @@ def merge_extracted_lines(rows, columns: int,
 from PyQt6.QtWidgets import (
     QWidget, QApplication, QHBoxLayout, QPushButton, QLabel, QFileDialog, QSizePolicy, QScrollBar
 )
-from PyQt6.QtCore import QThread, pyqtSignal, Qt, QTimer, QUrl, QPoint
+from PyQt6.QtCore import QSocketNotifier, QThread, pyqtSignal, Qt, QTimer, QUrl, QPoint
 from PyQt6.QtGui import (
     QFont, QColor, QPainter, QPen, QFontMetrics, QFontMetricsF, QFontInfo,
     QResizeEvent, QDesktopServices, QPixmap
@@ -597,7 +597,9 @@ class TerminalWidget(TerminalInputMixin, TerminalMouseMixin,
         # 挪到读取线程时，这把锁即提供真正的互斥。
         self._screen_lock = threading.RLock()
         self._output_cancelled = threading.Event()
-        self._startup_commands = []
+        self._retryable_quick_commands = []
+        self._startup_input = []
+        self._exec_notifier = None
         self._failed_process_start = None
         self._pending_process_start = None
         self._process_start_token = None
@@ -1367,7 +1369,7 @@ class TerminalWidget(TerminalInputMixin, TerminalMouseMixin,
         """设置工作目录（用于自动启动终端时）"""
         self._working_dir = path
 
-    def start_process(self, command: List[str], cwd: Optional[str] = None):
+    def start_process(self, command: List[str], cwd: Optional[str] = None, preset_commands=(), quick_commands=()):
         """启动子进程
 
         Args:
@@ -1383,11 +1385,14 @@ class TerminalWidget(TerminalInputMixin, TerminalMouseMixin,
             # "退出 → 再启动"都泄漏一个 fd（旧实例从未被清理）
             self.stop_process()
 
-        self._startup_commands.clear()
+        self._startup_input.clear()
+        self._retryable_quick_commands.clear()
         self._failed_process_start = None
-        request = (list(command), cwd or os.getcwd())
+        request = (list(command), cwd or os.getcwd(), tuple(preset_commands))
         self._process_start_token = request
         self._pending_process_start = request
+        if quick_commands:
+            self._queue_startup_commands(quick_commands)
         self.process_start_changed.emit()
         self._try_start_process(request)
 
@@ -1402,8 +1407,7 @@ class TerminalWidget(TerminalInputMixin, TerminalMouseMixin,
             self._reset_process_screen()
         finally:
             self._screen_lock.release()
-        self._pending_process_start = None
-        command, cwd = request
+        command, cwd, _ = request
         self._utf8_decoder.reset()
         self._output_cancelled = threading.Event()
         self._sequence_buffer = TerminalSequenceBuffer()
@@ -1451,22 +1455,79 @@ class TerminalWidget(TerminalInputMixin, TerminalMouseMixin,
         self._backend.on_output = on_output
         self._backend.on_exit = on_exit
 
-        # 启动进程
-        if self._backend.start(command, cwd, self.term_cols, self.term_rows):
+        if getattr(type(backend), "begin_start", None) is not None:
+            fd = backend.begin_start(command, cwd, self.term_cols, self.term_rows)
+            if fd is None:
+                self._finish_process_start(request, False)
+                return
+            notifier = QSocketNotifier(fd, QSocketNotifier.Type.Read, self)
+            self._exec_notifier = notifier
+
+            def exec_ready():
+                if self._pending_process_start is not request:
+                    return
+                self._clear_exec_notifier()
+                self._finish_process_start(request, backend.finish_start())
+
+            notifier.activated.connect(exec_ready)
+        else:
+            started = backend.start(command, cwd, self.term_cols, self.term_rows)
+            self._finish_process_start(request, started)
+
+    def _clear_exec_notifier(self):
+        if self._exec_notifier is not None:
+            self._exec_notifier.setEnabled(False)
+            self._exec_notifier.deleteLater()
+            self._exec_notifier = None
+
+    def _finish_process_start(self, request, started):
+        self._pending_process_start = None
+        if started:
+            preset_commands = request[2]
+            queued, self._startup_input = self._startup_input, []
+            self._retryable_quick_commands.clear()
             self.process_start_changed.emit()
+            if self._process_start_token is not request:
+                return
+            if preset_commands:
+                self._send_preset_commands(preset_commands)
             # 延迟再次更新终端大小（确保窗口布局完成）
             QTimer.singleShot(100, self._update_terminal_size)
             QTimer.singleShot(500, self._update_terminal_size)
-            if self._startup_commands:
-                commands, self._startup_commands = self._startup_commands, []
-                self._execute_commands(commands)
+            for deliver in queued:
+                if self._process_start_token is not request or not self.is_running():
+                    break
+                deliver()
         else:
             reason = getattr(self._backend, "start_error", "") or t("terminal.backend_start_failed")
-            self.stop_process()
             self._report_start_failure(request, reason)
 
+    def _send_preset_commands(self, commands):
+        """向指定终端发送命令（使用闭包绑定终端引用）"""
+        commands = list(commands)
+        session_token = self._process_start_token
+
+        def send_next():
+            if not commands or self._process_start_token is not session_token:
+                return
+            if self.is_starting():
+                QTimer.singleShot(50, send_next)
+                return
+            if not self.is_running():
+                return
+            if self._defer_native_paste_input(send_next):
+                return
+            cmd = commands.pop(0)
+            if self._send_text_now(cmd + '\r') and commands:
+                QTimer.singleShot(300, send_next)
+
+        # 延迟 500ms 等待 shell 初始化
+        QTimer.singleShot(500, send_next)
+
     def _report_start_failure(self, request, reason):
-        self._failed_process_start = request
+        retry_commands = tuple(self._retryable_quick_commands)
+        self.stop_process()
+        self._failed_process_start = (*request, retry_commands)
         detail = "".join(ch if ch.isprintable() else " " for ch in reason)
         message = t("terminal.start_failure_retry", reason=detail)
         with self._screen_lock:
@@ -2263,7 +2324,10 @@ class TerminalWidget(TerminalInputMixin, TerminalMouseMixin,
 
     def stop_process(self):
         """停止进程并清理资源"""
-        self._startup_commands.clear()
+        self._clear_exec_notifier()
+        self._failed_process_start = None
+        self._startup_input.clear()
+        self._retryable_quick_commands.clear()
         self._pending_process_start = None
         self._process_start_token = None
         self._output_cancelled.set()
@@ -2906,16 +2970,19 @@ class TerminalWidget(TerminalInputMixin, TerminalMouseMixin,
         if not self._defer_native_paste_input(deliver):
             deliver()
 
+    def _queue_startup_commands(self, commands):
+        batch = tuple(commands)
+        self._retryable_quick_commands.extend(batch)
+        self._startup_input.append(lambda: self._execute_commands(batch))
+
     def _start_and_execute(self, commands: list):
         """启动终端并执行命令"""
         if self._cleaned_up or not commands:
             return
-        if not self.is_starting():
-            cwd = getattr(self, '_working_dir', None) or str(Path.home())
-            self.start_process([self._get_default_shell()], cwd=cwd)
         if self.is_starting():
-            # The requested process is waiting for reflow. Its successful start
-            # drains this batch; stop or replacement discards it.
-            self._startup_commands.extend(commands)
+            self._queue_startup_commands(commands)
         elif self.is_running():
             self._execute_commands(commands)
+        else:
+            cwd = getattr(self, '_working_dir', None) or str(Path.home())
+            self.start_process([self._get_default_shell()], cwd=cwd, quick_commands=commands)

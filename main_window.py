@@ -306,7 +306,6 @@ class MainWindow(ThemeMixin, ToolbarMixin, ConfigMixin, ExplorerPanelMixin,
         self.command_history = []
         self.presets = []  # 预设命令列表
         self.local_presets = []  # 本地快速命令列表（目录级别）
-        self.pending_commands = []  # 待执行的命令队列
         self.current_theme = "午夜黑"  # 当前主题名称（初装默认：Midnight Black）
         self._use_icon_tint = False  # 是否给图标添加主题色蒙版
         self._global_zoom_delta = 0  # 全局缩放偏移量（相对于默认字体大小）
@@ -3122,9 +3121,6 @@ class MainWindow(ThemeMixin, ToolbarMixin, ConfigMixin, ExplorerPanelMixin,
 
         # 第一条命令作为 shell（如 zsh, bash）
         shell_cmd = commands[0]
-        # 后续命令需要在 shell 启动后发送
-        self.pending_commands = commands[1:] if len(commands) > 1 else []
-
         # 启动进程不再自动录制；重启正在录制的终端时先保存旧录制。
         if self._recording_terminal is self.terminal:
             self._stop_terminal_recording()
@@ -3136,7 +3132,7 @@ class MainWindow(ThemeMixin, ToolbarMixin, ConfigMixin, ExplorerPanelMixin,
         working_dir = cwd if cwd else self._window_cwd
 
         # 启动 shell 进程
-        self.terminal.start_process(shell_cmd.split(), cwd=working_dir)
+        self.terminal.start_process(shell_cmd.split(), cwd=working_dir, preset_commands=commands[1:])
 
         # 更新标签页名称 (预设名-文件夹名)
         tab_idx = self.tab_widget.currentIndex()
@@ -3162,42 +3158,11 @@ class MainWindow(ThemeMixin, ToolbarMixin, ConfigMixin, ExplorerPanelMixin,
 
         # 仅手动开始录制时启动历史自动保存。
 
-        # 延迟发送后续命令（等待 shell 初始化）
-        # 重要：使用闭包绑定当前终端和命令列表，避免快速启动多个 tab 时命令发送到错误的终端
-        if self.pending_commands:
-            target_terminal = self.terminal
-            commands_to_send = self.pending_commands.copy()
-            self.pending_commands = []  # 清空，避免干扰其他启动
-            self._send_commands_to_terminal(target_terminal, commands_to_send)
-
         # 延迟重新启用启动按钮（给进程一些时间完全启动）
         def enable_start_btn():
             if not sip.isdeleted(self):
                 self.start_btn.setEnabled(True)
         QTimer.singleShot(800, enable_start_btn)
-
-    def _send_commands_to_terminal(self, terminal, commands):
-        """向指定终端发送命令（使用闭包绑定终端引用）"""
-        if not terminal or not commands:
-            return
-        session_token = terminal._process_start_token
-
-        def send_next():
-            if not commands or terminal._process_start_token is not session_token:
-                return
-            if terminal.is_starting():
-                QTimer.singleShot(50, send_next)
-                return
-            if not terminal.is_running():
-                return
-            if terminal._defer_native_paste_input(send_next):
-                return
-            cmd = commands.pop(0)
-            if terminal._send_text_now(cmd + '\r') and commands:
-                QTimer.singleShot(300, send_next)
-
-        # 延迟 500ms 等待 shell 初始化
-        QTimer.singleShot(500, send_next)
 
     def _stop_session(self):
         """停止活动终端；多分屏保留页面，单分屏关闭标签。"""
