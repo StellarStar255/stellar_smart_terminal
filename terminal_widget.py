@@ -385,6 +385,7 @@ class TerminalWidget(TerminalInputMixin, TerminalMouseMixin,
     # 信号
     input_recorded = pyqtSignal(str)
     output_recorded = pyqtSignal(str)
+    process_start_changed = pyqtSignal()
     session_ended = pyqtSignal()
     image_pasted = pyqtSignal(str)  # 图片粘贴信号，参数为图片路径
     file_link_requested = pyqtSignal(str, int)
@@ -597,6 +598,7 @@ class TerminalWidget(TerminalInputMixin, TerminalMouseMixin,
         self._screen_lock = threading.RLock()
         self._output_cancelled = threading.Event()
         self._startup_commands = []
+        self._failed_process_start = None
         self._pending_process_start = None
         self._process_start_token = None
         # 显示路径用的历史行数缓存：异步 reflow worker 持锁期间滚动条/滚轮
@@ -1382,9 +1384,11 @@ class TerminalWidget(TerminalInputMixin, TerminalMouseMixin,
             self.stop_process()
 
         self._startup_commands.clear()
-        request = (list(command), cwd)
+        self._failed_process_start = None
+        request = (list(command), cwd or os.getcwd())
         self._process_start_token = request
         self._pending_process_start = request
+        self.process_start_changed.emit()
         self._try_start_process(request)
 
     def _try_start_process(self, request):
@@ -1407,7 +1411,11 @@ class TerminalWidget(TerminalInputMixin, TerminalMouseMixin,
         self._update_terminal_size()
 
         # 创建后端
-        self._backend = create_backend()
+        try:
+            self._backend = create_backend()
+        except OSError as exc:
+            self._report_start_failure(request, str(exc))
+            return
 
         # 断开旧信号桥的连接（防止信号泄漏）
         if hasattr(self, '_signal_bridge') and self._signal_bridge:
@@ -1445,6 +1453,7 @@ class TerminalWidget(TerminalInputMixin, TerminalMouseMixin,
 
         # 启动进程
         if self._backend.start(command, cwd, self.term_cols, self.term_rows):
+            self.process_start_changed.emit()
             # 延迟再次更新终端大小（确保窗口布局完成）
             QTimer.singleShot(100, self._update_terminal_size)
             QTimer.singleShot(500, self._update_terminal_size)
@@ -1452,10 +1461,19 @@ class TerminalWidget(TerminalInputMixin, TerminalMouseMixin,
                 commands, self._startup_commands = self._startup_commands, []
                 self._execute_commands(commands)
         else:
-            self._startup_commands.clear()
-            logger.error("[Terminal] Failed to start process")
-            self._backend = None
-            self._signal_bridge = None
+            reason = getattr(self._backend, "start_error", "") or t("terminal.backend_start_failed")
+            self.stop_process()
+            self._report_start_failure(request, reason)
+
+    def _report_start_failure(self, request, reason):
+        self._failed_process_start = request
+        detail = "".join(ch if ch.isprintable() else " " for ch in reason)
+        message = t("terminal.start_failure_retry", reason=detail)
+        with self._screen_lock:
+            self.stream.feed("\r\n" + message + "\r\n")
+        self._invalidate_render_cache()
+        self.update()
+        self.process_start_changed.emit()
 
     def _reset_process_screen(self):
         """新进程使用默认协议状态，保留前一个会话的主屏内容和历史。"""

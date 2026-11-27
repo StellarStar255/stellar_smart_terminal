@@ -349,6 +349,11 @@ class TerminalInputMixin:
 
         # === 终端未运行时的 GUI 快捷键 ===
         if self._backend is None or not getattr(self._backend, 'is_running', True):
+            if (key in (Qt.Key.Key_Return, Qt.Key.Key_Enter)
+                    and modifiers == Qt.KeyboardModifier.NoModifier and self._failed_process_start):
+                self.start_process(*self._failed_process_start)
+                event.accept()
+                return
             if event.matches(QKeySequence.StandardKey.SelectAll):
                 self._select_all_content()
                 event.accept()

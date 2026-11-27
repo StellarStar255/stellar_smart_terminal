@@ -25,14 +25,6 @@ from PyQt6.QtWidgets import QApplication, QMessageBox
 from _qt_quit_reset_2026_09_win import dispose_windows
 
 
-class _FakeBox:
-    def __init__(self, reply):
-        self._reply = reply
-
-    def exec(self):
-        return self._reply
-
-
 class TestQuitBatchVsManual(unittest.TestCase):
     @classmethod
     def setUpClass(cls):
@@ -47,10 +39,10 @@ class TestQuitBatchVsManual(unittest.TestCase):
     def _fake_box(self, reply):
         prompts = self.prompts
 
-        def fake_box(self_, icon, title, text, buttons=None):
+        def fake_confirm(self_, message):
             prompts.append(self_)
-            return _FakeBox(reply)
-        return fake_box
+            return reply == QMessageBox.StandardButton.Yes
+        return fake_confirm
 
     def _make_windows(self, n):
         wins = [self.mw.MainWindow() for _ in range(n)]
@@ -63,7 +55,7 @@ class TestQuitBatchVsManual(unittest.TestCase):
         a, b = self._make_windows(2)
         try:
             with mock.patch.object(self.mw.TerminalWidget, 'is_running', return_value=True), \
-                 mock.patch.object(self.mw.MainWindow, '_make_styled_message_box',
+                 mock.patch.object(self.mw.MainWindow, '_confirm_window_close',
                                    self._fake_box(QMessageBox.StandardButton.Yes)):
                 QApplication.sendEvent(a, QCloseEvent())
                 self.assertEqual(len(self.prompts), 1)
@@ -79,7 +71,7 @@ class TestQuitBatchVsManual(unittest.TestCase):
         wins = self._make_windows(3)
         try:
             with mock.patch.object(self.mw.TerminalWidget, 'is_running', return_value=True), \
-                 mock.patch.object(self.mw.MainWindow, '_make_styled_message_box',
+                 mock.patch.object(self.mw.MainWindow, '_confirm_window_close',
                                    self._fake_box(QMessageBox.StandardButton.Yes)):
                 # Cmd+Q / Dock Quit：Qt 给 app 发 Quit，QApplication::event 里
                 # 同步 closeAllWindows()

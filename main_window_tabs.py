@@ -63,7 +63,6 @@ class TabSplitMixin:
         cwd = self.tab_cwds.get(self.tab_widget.currentIndex()) or self._window_cwd
         terminal.set_working_dir(cwd)
         terminal.start_process([get_terminal_shell()], cwd=cwd)
-        self._update_running_state(True)
 
     def _add_new_tab(self, external_splitter=None, external_terminals=None, external_session=None, tab_name=None, tab_cwd=None):
         """添加新的终端标签页
@@ -103,6 +102,7 @@ class TabSplitMixin:
             session = None
 
         # 添加到标签页
+        was_empty = self.tab_widget.count() == 0
         idx = self.tab_widget.addTab(splitter, tab_name)
         self.tab_splitters[idx] = splitter
         self.tab_terminals[idx] = terminals
@@ -121,7 +121,7 @@ class TabSplitMixin:
         if external_session and any(t.is_running() for t in terminals):
             self.current_session = external_session
             self._update_running_state(True)
-        elif getattr(self, "_session_status_key", None) == "status.no_open_terminal":
+        elif was_empty and hasattr(self, "stop_btn"):
             self._update_running_state(any(term.is_running() for term in terminals))
 
         # 工作区快照：标签结构变化，限流补写
@@ -754,14 +754,8 @@ class TabSplitMixin:
                 self._close_current_split()
             else:
                 self._request_close_tab(idx)
-        else:
-            reply = QMessageBox.question(
-                self, t("msg.confirm_close_title"), t("msg.confirm_close_window"),
-                QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No,
-                QMessageBox.StandardButton.No,
-            )
-            if reply == QMessageBox.StandardButton.Yes:
-                self.close()
+        elif self._confirm_window_close(t("msg.confirm_close_window")):
+            self.close()
 
     def _align_child_with_parent_geometry(self, new_window, abort_check=None):
         """让子窗口与本窗口逐像素重合（位置+尺寸），并持续校正 macOS 的异步微调。"""
@@ -2055,6 +2049,7 @@ class TabSplitMixin:
             # 更新状态栏 - 检查是否有任何终端在运行
             any_running = any(t.is_running() for t in terminals)
             self._update_running_state(any_running)
+            self._sync_terminal_status(terminals[0])
             self._update_stats()
 
         # 更新窗口标题为当前 tab 名称

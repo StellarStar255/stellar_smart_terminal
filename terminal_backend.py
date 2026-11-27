@@ -122,6 +122,7 @@ class TerminalBackend(ABC):
 
     def __init__(self):
         self.on_output: Optional[Callable[[bytes], None]] = None
+        self.start_error = ""
         self.on_exit: Optional[Callable[[int], None]] = None
         self._running = False
         self._input_writer = None
@@ -577,6 +578,7 @@ if IS_WINDOWS:
                 return True
 
             except Exception as e:
+                self.start_error = str(e)
                 logger.error(f"[WindowsBackend] Error starting process: {e}")
                 import traceback
                 traceback.print_exc()
@@ -803,36 +805,37 @@ else:
                 # 激活到 GUI 窗口，会导致通知点击无响应。
                 smart_terminal_pid = os.getpid()
 
-                # Fork
-                self._child_pid = os.fork()
-
-                if self._child_pid == 0:
-                    # 子进程。整个分支必须兜底 os._exit：setsid/ioctl/dup2/chdir
-                    # 任一处抛异常若逃到父进程的 except，子进程就会带着 Qt
-                    # 事件循环继续跑——变成第二个 GUI 实例，共享父进程的 fd。
-                    try:
-                        self._child_exec(slave_fd, command, cwd, cols, rows,
-                                         smart_terminal_pid)
-                    except BaseException:  # 子进程内任何异常都只能走 os._exit
-                        pass
-                    os._exit(127)
-
-                else:
-                    # 父进程
+                # The non-inheritable write end closes on exec. A child that cannot
+                # start reports its OS error here before the parent announces success.
+                try:
+                    error_read, error_write = os.pipe()
+                    with os.fdopen(error_read, "rb") as errors:
+                        try:
+                            self._child_pid = os.fork()
+                            if self._child_pid == 0:
+                                try:
+                                    self._child_exec(slave_fd, command, cwd, cols, rows,
+                                                     smart_terminal_pid)
+                                except BaseException as exc:
+                                    os.write(error_write, str(exc).encode("utf-8", "replace")[:1024])
+                                finally:
+                                    os._exit(127)
+                        finally:
+                            os.close(error_write)
+                        error = errors.read(1024)
+                finally:
                     os.close(slave_fd)
-                    self._running = True
-                    self._input_closed = False
+                if error:
+                    raise RuntimeError(error.decode("utf-8", "replace"))
 
-                    # 启动读取线程
-                    self._reader_thread = threading.Thread(
-                        target=self._read_loop,
-                        daemon=True
-                    )
-                    self._reader_thread.start()
-
-                    return True
+                self._running = True
+                self._input_closed = False
+                self._reader_thread = threading.Thread(target=self._read_loop, daemon=True)
+                self._reader_thread.start()
+                return True
 
             except Exception as e:
+                self.start_error = str(e)
                 logger.error(f"[UnixBackend] Error starting process: {e}")
                 self._cleanup()
                 return False
@@ -855,7 +858,7 @@ else:
                 os.close(slave_fd)
 
             # 切换工作目录
-            if cwd and os.path.isdir(cwd):
+            if cwd:
                 os.chdir(cwd)
 
             # 设置环境变量

@@ -24,14 +24,6 @@ from PyQt6.QtWidgets import QApplication, QMessageBox
 from _qt_quit_reset_2026_09_win import reset_quit_state
 
 
-class _FakeBox:
-    def __init__(self, reply):
-        self._reply = reply
-
-    def exec(self):
-        return self._reply
-
-
 class TestQuitConfirmOnce(unittest.TestCase):
     @classmethod
     def setUpClass(cls):
@@ -52,12 +44,12 @@ class TestQuitConfirmOnce(unittest.TestCase):
         closeEvent（已用探针证实 offscreen 下也如此）。返回弹框次数。"""
         prompts = []
 
-        def fake_box(self_, icon, title, text, buttons=None):
+        def fake_confirm(self_, message):
             prompts.append(self_)
-            return _FakeBox(reply)
+            return reply == QMessageBox.StandardButton.Yes
 
         with mock.patch.object(self.mw.TerminalWidget, 'is_running', return_value=True), \
-             mock.patch.object(self.mw.MainWindow, '_make_styled_message_box', fake_box):
+             mock.patch.object(self.mw.MainWindow, '_confirm_window_close', fake_confirm):
             QApplication.sendEvent(self.app, QEvent(QEvent.Type.Quit))
         return prompts
 

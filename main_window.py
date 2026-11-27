@@ -2772,7 +2772,7 @@ class MainWindow(ThemeMixin, ToolbarMixin, ConfigMixin, ExplorerPanelMixin,
     # 列表，漏断的信号让旧窗口继续响应已转移的终端（分屏左移在两个窗口各
     # 执行一次），漏接的信号（alert_matched）让输出提醒在接管后失效。
     _TERMINAL_SIGNAL_NAMES = (
-        'input_recorded', 'output_recorded', 'session_ended', 'image_pasted',
+        'input_recorded', 'output_recorded', 'process_start_changed', 'session_ended', 'image_pasted',
         'file_link_requested',
         'close_tab_requested', 'new_tab_requested', 'new_terminal_requested',
         'manage_presets_requested', 'add_command_requested',
@@ -2790,6 +2790,7 @@ class MainWindow(ThemeMixin, ToolbarMixin, ConfigMixin, ExplorerPanelMixin,
         return {
             'input_recorded': lambda text, term=terminal: self._on_input(text, term),
             'output_recorded': lambda text, term=terminal: self._on_output(text, term),
+            'process_start_changed': lambda: self._sync_terminal_status(terminal),
             'session_ended': lambda t=terminal: self._on_terminal_ended(t),
             'image_pasted': self._on_image_pasted,
             'file_link_requested': self._open_file_in_editor,
@@ -2941,6 +2942,7 @@ class MainWindow(ThemeMixin, ToolbarMixin, ConfigMixin, ExplorerPanelMixin,
             # （旧窗口未摘除），也不会把别窗口的终端记成自己的活动终端。
             if isinstance(obj, TerminalWidget) and self._owns_terminal(obj):
                 self.active_terminal = obj
+                self._sync_terminal_status(obj)
         elif event.type() == QEvent.Type.MouseButtonPress:
             # 点击终端时「确定性」触发弹簧。focusChanged 在终端已持有键盘焦点时
             # 不会再次发出（Ubuntu/X11 上尤其常见——运行 Claude Code 时终端长期
@@ -2988,8 +2990,7 @@ class MainWindow(ThemeMixin, ToolbarMixin, ConfigMixin, ExplorerPanelMixin,
                 if all_stopped:
                     self._on_tab_session_ended(terminal)
                 break
-
-
+        self._sync_terminal_status(terminal)
 
     def _focus_in_editor_area(self) -> bool:
         """当前键盘焦点是否落在编辑器区域（某个文件编辑窗格）里。"""
@@ -3110,7 +3111,7 @@ class MainWindow(ThemeMixin, ToolbarMixin, ConfigMixin, ExplorerPanelMixin,
             self.start_btn.setEnabled(True)  # 恢复按钮
             return
 
-        if self.terminal is None or self.terminal.is_running():
+        if self.terminal is None or self.terminal.is_running() or self.terminal.is_starting():
             self._add_new_tab()
 
         preset = self.presets[preset_idx]
@@ -3155,8 +3156,9 @@ class MainWindow(ThemeMixin, ToolbarMixin, ConfigMixin, ExplorerPanelMixin,
         self._update_window_title_from_tab(tab_idx)
 
         # 更新UI
-        self._update_running_state(True)
-        self.statusbar.showMessage(t("status.session_started", name=preset_name))
+        self.start_btn.setEnabled(True)
+        if self.terminal.is_running():
+            self.statusbar.showMessage(t("status.session_started", name=preset_name))
 
         # 仅手动开始录制时启动历史自动保存。
 
@@ -3198,7 +3200,7 @@ class MainWindow(ThemeMixin, ToolbarMixin, ConfigMixin, ExplorerPanelMixin,
         QTimer.singleShot(500, send_next)
 
     def _stop_session(self):
-        """停止会话并关闭当前标签页"""
+        """停止活动终端；多分屏保留页面，单分屏关闭标签。"""
         if not self.terminal:
             return
 
@@ -3216,8 +3218,10 @@ class MainWindow(ThemeMixin, ToolbarMixin, ConfigMixin, ExplorerPanelMixin,
         if session_id:
             self.statusbar.showMessage(t("status.session_stopped_saved", session_id=session_id), 3000)
 
-        # 直接关闭当前标签页
-        self._close_current_tab()
+        if len(self.tab_terminals.get(self.tab_widget.currentIndex(), [])) > 1:
+            self._on_terminal_ended(terminal)
+        else:
+            self._close_current_tab()
 
     def _any_terminal_running(self) -> bool:
         """窗口内是否还有终端在运行（跨全部标签页与分屏）。"""
@@ -3303,6 +3307,22 @@ class MainWindow(ThemeMixin, ToolbarMixin, ConfigMixin, ExplorerPanelMixin,
             parent=self,
         )
         dialog.exec()
+
+    def _sync_terminal_status(self, terminal):
+        if terminal is not self.terminal or not hasattr(self, "stop_btn"):
+            return
+        if terminal.is_starting():
+            key, color = "status.starting", "#aa8833"
+        elif terminal._failed_process_start:
+            key, color = "status.start_failed", "#ef4444"
+        elif terminal.is_running():
+            key, color = "status.running", "#4ade80"
+        else:
+            key, color = "status.stopped", "#ef4444"
+        self._session_status_key = key
+        self.status_indicator.setStyleSheet(f"color: {color}; font-size: 16px;")
+        self.stop_btn.setEnabled(terminal.is_running() or terminal.is_starting())
+        self._translate_session_status()
 
     def _update_running_state(self, running: bool):
         """更新运行状态UI"""
@@ -5621,6 +5641,20 @@ class MainWindow(ThemeMixin, ToolbarMixin, ConfigMixin, ExplorerPanelMixin,
         msg_box.setStyleSheet(message_box_qss(theme, check_image))
         return msg_box
 
+    def _confirm_window_close(self, message):
+        buttons = QMessageBox.StandardButton
+        box = self._make_styled_message_box(
+            QMessageBox.Icon.Question, t("msg.confirm_close_title"), message,
+            buttons.Yes | buttons.Cancel)
+        box.button(buttons.Yes).setText(t("msg.quit_app" if self._batch_closing else "msg.close_window"))
+        box.button(buttons.Cancel).setText(t("msg.keep_windows" if self._batch_closing else "msg.keep_window"))
+        box.setDefaultButton(buttons.Cancel)
+        box.setEscapeButton(buttons.Cancel)
+        try:
+            return box.exec() == buttons.Yes
+        finally:
+            box.deleteLater()
+
     def _styled_message_box(self, icon, title, text, buttons=QMessageBox.StandardButton.Ok):
         """创建带明确样式的消息框，避免深色主题导致文字不可见"""
         return self._make_styled_message_box(icon, title, text, buttons).exec()
@@ -6234,7 +6268,7 @@ class MainWindow(ThemeMixin, ToolbarMixin, ConfigMixin, ExplorerPanelMixin,
         # 检查是否有任何终端在运行
         try:
             any_running = any(
-                term.is_running()
+                term.is_running() or term.is_starting()
                 for terminals in self.tab_terminals.values()
                 for term in terminals
             )
@@ -6242,18 +6276,8 @@ class MainWindow(ThemeMixin, ToolbarMixin, ConfigMixin, ExplorerPanelMixin,
             any_running = False
 
         if any_running and not force_closing and not self._quit_recently_confirmed():
-            # 创建自定义样式的消息框，避免深色主题导致文字不可见
-            msg_box = self._make_styled_message_box(
-                QMessageBox.Icon.Question,
-                t("msg.confirm_exit_title"),
-                t("msg.confirm_exit_msg"),
-                QMessageBox.StandardButton.Yes |
-                QMessageBox.StandardButton.No |
-                QMessageBox.StandardButton.Cancel,
-            )
-            reply = msg_box.exec()
-
-            if reply == QMessageBox.StandardButton.Cancel:
+            message = t("msg.confirm_quit_processes" if self._batch_closing else "msg.confirm_exit_msg")
+            if not self._confirm_window_close(message):
                 MainWindow._quit_confirmed_at = 0.0
                 event.ignore()
                 return

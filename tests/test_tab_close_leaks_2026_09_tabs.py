@@ -15,8 +15,10 @@
 import gc
 import os
 import sys
+import tempfile
 import types
 import unittest
+from pathlib import Path
 from unittest import mock
 
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
@@ -24,7 +26,7 @@ sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 os.environ.setdefault('QT_QPA_PLATFORM', 'offscreen')
 
 from PyQt6 import sip
-from PyQt6.QtCore import QEvent, QPoint, Qt
+from PyQt6.QtCore import QEvent, QPoint, Qt, QTimer
 from PyQt6.QtGui import QCloseEvent, QContextMenuEvent, QKeySequence
 from PyQt6.QtTest import QTest
 from PyQt6.QtWidgets import QApplication, QMenu, QMessageBox
@@ -76,6 +78,75 @@ class _WindowCase(unittest.TestCase):
 
 # ---------------------------------------------------------------------------
 class TestCloseLastTab(_WindowCase):
+    @unittest.skipIf(os.name == "nt", "Requires a POSIX shell")
+    def test_stop_split_keeps_sibling_shell_and_output(self):
+        win = self.win
+        left = win.terminal
+        with tempfile.TemporaryDirectory() as cwd:
+            left.start_process(["/bin/sh"], cwd)
+            left._send_text_now("echo LEFT_OUTPUT\r")
+            for _ in range(100):
+                QTest.qWait(20)
+                if "LEFT_OUTPUT" in "".join(left.screen.display):
+                    break
+            win._split_current_tab()
+            right = win.terminal
+            self.assertIsNot(left, right)
+            left.setFocus()
+            self.app.processEvents()
+            win.stop_btn.click()
+            self.assertFalse(left.is_running())
+            self.assertIn("LEFT_OUTPUT", "".join(left.screen.display))
+            self.assertTrue(right.is_running())
+            self.assertEqual(win.tab_terminals[0], [left, right])
+            right.setFocus()
+            self.app.processEvents()
+            self.assertTrue(win.stop_btn.isEnabled())
+            marker = Path(cwd, "still-running")
+            right._send_text_now(f"touch '{marker}'\r")
+            for _ in range(100):
+                QTest.qWait(20)
+                if marker.exists():
+                    break
+            self.assertTrue(marker.exists())
+
+    @unittest.skipIf(os.name == "nt", "Requires a POSIX shell")
+    def test_failed_exec_shows_reason_and_enter_retries_original_directory(self):
+        from i18n import t
+
+        win = self.win
+        term = win.terminal
+        with tempfile.TemporaryDirectory() as cwd:
+            shell = Path(cwd, "missing-shell")
+            term.start_process([str(shell)], cwd)
+            self.assertFalse(term.is_running())
+            self.assertEqual(win.session_label.text(), t("status.start_failed"))
+            self.assertIn("missing-shell", "".join(term.screen.display).replace(" ", ""))
+            shell.symlink_to("/bin/sh")
+            QTest.keyClick(term, Qt.Key.Key_Return)
+            self.assertTrue(term.is_running())
+            self.assertEqual(win.session_label.text(), t("status.running"))
+            term._send_text_now("pwd > actual-cwd\r")
+            marker = Path(cwd, "actual-cwd")
+            for _ in range(100):
+                QTest.qWait(20)
+                if marker.exists() and marker.read_text().strip():
+                    break
+            self.assertTrue(Path(marker.read_text().strip()).samefile(cwd))
+
+    def test_window_close_buttons_and_default(self):
+        from i18n import t
+
+        seen = []
+        def press_default():
+            box = QApplication.activeModalWidget()
+            seen.append((box.defaultButton().text(), box.escapeButton().text(),
+                         box.button(QMessageBox.StandardButton.Yes).text()))
+            QTest.keyClick(box, Qt.Key.Key_Return)
+        QTimer.singleShot(0, press_default)
+        self.assertFalse(self.win._confirm_window_close(t("msg.confirm_close_window")))
+        self.assertEqual(seen, [(t("msg.keep_window"), t("msg.keep_window"), t("msg.close_window"))])
+
     def test_empty_workspace_restores_and_start_opens_one_tab(self):
         win = self.win
         win._apply_restored_window_state({})
@@ -124,7 +195,7 @@ class TestCloseLastTab(_WindowCase):
         self.assertEqual(tabs.count(), 1)
         self.assertFalse(button.isVisible())
         self.assertTrue(all(tool.isEnabled() for tool in tools))
-        self.assertEqual(win.session_label.text(), t("status.running"))
+        self.assertNotEqual(win.session_label.text(), t("status.running"))
 
     def test_empty_menu_creates_a_shell_only_on_command_selection(self):
         from dialogs import get_terminal_shell
@@ -162,20 +233,15 @@ class TestCloseLastTab(_WindowCase):
         win = self.win
         with mock.patch.object(win, '_focus_in_editor_area', return_value=False), \
              mock.patch.object(win, 'close') as close, \
-             mock.patch('main_window_tabs.QMessageBox.question',
-                        return_value=QMessageBox.StandardButton.Yes) as question:
+             mock.patch.object(win, '_confirm_window_close', side_effect=[False, True]) as confirm:
             win._close_tab_or_window()
             self.assertEqual(win.tab_widget.count(), 0)
             close.assert_not_called()
             self.assertFalse(win._force_closing)
-            question.reset_mock()
-            question.return_value = QMessageBox.StandardButton.No
             win._close_tab_or_window()
-            question.assert_called_once()
-            self.assertEqual(question.call_args.args[-1], QMessageBox.StandardButton.No)
+            confirm.assert_called_once()
             close.assert_not_called()
             self.assertEqual(win.tab_widget.count(), 0)
-            question.return_value = QMessageBox.StandardButton.Yes
             win._close_tab_or_window()
             close.assert_called_once()
 
