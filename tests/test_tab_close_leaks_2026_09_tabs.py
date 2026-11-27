@@ -130,6 +130,7 @@ class TestCloseLastTab(_WindowCase):
 
     @unittest.skipIf(os.name == "nt", "Requires a POSIX shell")
     def test_slow_start_allows_switching_tabs_and_cancellation(self):
+        import select
         import signal
         from terminal_backend import UnixBackend
 
@@ -137,25 +138,44 @@ class TestCloseLastTab(_WindowCase):
         self._ensure_tabs(2)
         term = win.terminal
         child_exec = UnixBackend._child_exec
+        read_fd, write_fd = os.pipe()
 
         def delayed_exec(backend, *args):
             signal.signal(signal.SIGTERM, signal.SIG_IGN)
-            time.sleep(0.6)
+            os.close(write_fd)
+            # Hold the forked child before exec until the GUI has requested stop.
+            select.select([read_fd], [], [], 5)
             child_exec(backend, *args)
 
         with tempfile.TemporaryDirectory() as cwd:
-            with mock.patch.object(UnixBackend, "_child_exec", delayed_exec):
-                term.start_process(["/bin/sh", "-c", "touch launched"], cwd)
-            timer_states = []
-            QTimer.singleShot(20, lambda: timer_states.append(term.is_starting()))
-            win.tab_widget.setCurrentIndex(0)
-            QTest.qWait(80)
-            self.assertEqual(timer_states, [True])
-            win.tab_widget.setCurrentIndex(1)
-            self.assertTrue(win.stop_btn.isEnabled())
-            win.stop_btn.click()
-            self.assertEqual(win.tab_widget.count(), 1)
-            QTest.qWait(650)
+            try:
+                with mock.patch.object(UnixBackend, "_child_exec", delayed_exec):
+                    term.start_process(["/bin/sh", "-c", "touch launched"], cwd)
+                pid = term._backend._child_pid
+                timer_states = []
+                QTimer.singleShot(0, lambda: timer_states.append(term.is_starting()))
+                win.tab_widget.setCurrentIndex(0)
+                deadline = time.monotonic() + 3
+                while not timer_states and time.monotonic() < deadline:
+                    QTest.qWait(10)
+                self.assertEqual(timer_states, [True])
+                win.tab_widget.setCurrentIndex(1)
+                self.assertTrue(win.stop_btn.isEnabled())
+                win.stop_btn.click()
+                self.assertEqual(win.tab_widget.count(), 1)
+            finally:
+                os.close(read_fd)
+                os.close(write_fd)
+
+            deadline = time.monotonic() + 5
+            while time.monotonic() < deadline:
+                try:
+                    os.kill(pid, 0)
+                except ProcessLookupError:
+                    break
+                QTest.qWait(10)
+            else:
+                self.fail("Cancelled startup process was not reaped")
             self.assertFalse(Path(cwd, "launched").exists())
 
     @unittest.skipIf(os.name == "nt", "Requires a POSIX shell")
