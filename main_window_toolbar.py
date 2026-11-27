@@ -9,7 +9,7 @@ from PyQt6.QtCore import QSize, QTimer, Qt
 from PyQt6.QtGui import QKeySequence, QShortcut
 from PyQt6.QtWidgets import (
     QCheckBox, QComboBox, QHBoxLayout, QLabel, QPushButton, QSizePolicy,
-    QToolBar, QWidget,
+    QStyleFactory, QToolBar, QWidget,
 )
 from command_palette import CommandPalette
 from flow_layout import FlowLayout
@@ -81,6 +81,22 @@ class ToolbarMixin:
         toolbar.addWidget(self.preset_label)
 
         self.preset_combo = CenteredComboBox()
+        preset_view = self.preset_combo.view()
+        # A non-transient scrollbar makes overflow visible before the first scroll on macOS.
+        scrollbar = preset_view.verticalScrollBar()
+        scrollbar_style = QStyleFactory.create("Fusion")
+        scrollbar_style.setParent(scrollbar)
+        scrollbar.setStyle(scrollbar_style)
+        scrollbar.setStyleSheet("""
+            QScrollBar:vertical { width: 12px; background: transparent; margin: 0; }
+            QScrollBar::handle:vertical {
+                background: palette(mid); min-height: 20px; border-radius: 4px;
+                margin: 1px 2px;
+            }
+            QScrollBar::add-line:vertical, QScrollBar::sub-line:vertical { height: 0; }
+            QScrollBar::add-page:vertical, QScrollBar::sub-page:vertical { background: transparent; }
+        """)
+        preset_view.setVerticalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAsNeeded)
         self.preset_combo.setMinimumWidth(200)
         self.preset_combo.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Fixed)
         self.preset_combo.setStyleSheet("""
