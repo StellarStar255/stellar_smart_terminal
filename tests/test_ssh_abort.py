@@ -178,6 +178,17 @@ class TestReconnectCooldown(_Base):
         self.assertEqual(len(attempts), 2,
                          "冷却期结束后应允许再次尝试重连（网络恢复要能自愈）")
 
+    def test_explicit_retry_after_failure_in_same_clock_tick(self):
+        from unittest.mock import Mock, patch
+
+        sess = self._session()
+        sess._reconnect = Mock(side_effect=[RuntimeError("cancelled"), None])
+        with patch("ssh_session.time.monotonic", return_value=123.0):
+            with self.assertRaisesRegex(RuntimeError, "cancelled"):
+                sess.recover_async().result(timeout=2)
+            sess.recover_async().result(timeout=2)
+        self.assertEqual(sess._reconnect.call_count, 2)
+
     def test_success_clears_cooldown(self):
         sess = self._session()
         sess._last_reconnect_failure = None

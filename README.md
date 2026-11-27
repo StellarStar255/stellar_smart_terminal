@@ -10,7 +10,7 @@ A PyQt6-based smart terminal with file explorer, Git GUI, LLM proxy, and VS Code
 
 **Signed and notarized for macOS.** The Apple Silicon app is signed with a Developer ID certificate and notarized by Apple.
 
-[v1.35.85 release notes](docs/releases/v1.35.85.md) — Give folders memorable names in the window navigator, follow independent output indicators, and reconnect the remote file browser without opening another terminal.
+[v1.35.86 release notes](docs/releases/v1.35.86.md) — Give folders memorable names in the window navigator, follow independent output indicators, and reconnect the remote file browser without opening another terminal.
 
 <img src="assets/smart_terminal.png" width="300" />
 

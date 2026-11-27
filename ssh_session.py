@@ -895,6 +895,7 @@ class SSHSession(QObject):
         # 上次重连失败的时刻（monotonic）；冷却期内的操作快速失败，
         # 见 _reconnect_or_fail_fast
         self._last_reconnect_failure: Optional[float] = None
+        self._reconnect_failures = 0
 
     # --- lifecycle ---
 
@@ -1753,21 +1754,25 @@ class SSHSession(QObject):
         try:
             self._reconnect()
         except Exception:
-            self._last_reconnect_failure = time.monotonic()
+            self._record_reconnect_failure()
             raise
         else:
             self._last_reconnect_failure = None
 
+    def _record_reconnect_failure(self):
+        self._last_reconnect_failure = time.monotonic()
+        self._reconnect_failures += 1
+
     def recover_async(self):
-        requested = time.monotonic()
+        failures_at_request = self._reconnect_failures
 
         def recover():
-            if self._last_reconnect_failure and self._last_reconnect_failure >= requested:
+            if self._last_reconnect_failure is not None and self._reconnect_failures != failures_at_request:
                 raise RuntimeError(t("ssh.reconnect_failed"))
             try:
                 self._reconnect(attempts=1)
             except Exception:
-                self._last_reconnect_failure = time.monotonic()
+                self._record_reconnect_failure()
                 raise
             self._last_reconnect_failure = None
 
