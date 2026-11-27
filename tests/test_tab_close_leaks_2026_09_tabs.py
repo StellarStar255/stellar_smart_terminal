@@ -25,7 +25,7 @@ os.environ.setdefault('QT_QPA_PLATFORM', 'offscreen')
 
 from PyQt6 import sip
 from PyQt6.QtCore import QEvent, QPoint, Qt
-from PyQt6.QtGui import QCloseEvent
+from PyQt6.QtGui import QCloseEvent, QContextMenuEvent
 from PyQt6.QtWidgets import QApplication, QMenu, QMessageBox
 
 
@@ -89,6 +89,38 @@ class TestCloseLastTab(_WindowCase):
             start.assert_called_once()
         self.assertEqual(win.tab_widget.count(), 1)
         self.assertIs(win.active_terminal, win.tab_terminals[0][0])
+
+    def test_empty_menu_creates_a_shell_only_on_command_selection(self):
+        from dialogs import get_terminal_shell
+        from i18n import t
+
+        win = self.win
+        win._close_tab(0)
+        win.local_presets = [{'name': 'Probe', 'commands': ['echo probe']}]
+        tabs = win.tab_widget
+        event = QContextMenuEvent(QContextMenuEvent.Reason.Mouse, QPoint(10, 10))
+        entries = []
+
+        def browse(menu, pos):
+            actions = [action for action in menu.actions() if not action.isSeparator()]
+            self.assertTrue(actions[0].text().startswith(t('shortcuts.act.new_terminal')))
+            self.assertEqual([action.text() for action in actions[1:]], [
+                t('ctx.quick_commands'), t('ctx.local_quick_commands'),
+                t('ctx.open_current_dir'), t('ctx.copy_current_dir')])
+            submenu = actions[2].menu()
+            submenu.aboutToShow.emit()
+            entries.append(submenu.command_list.item(0).data(Qt.ItemDataRole.UserRole))
+
+        with mock.patch.object(QMenu, 'exec', browse):
+            tabs.contextMenuEvent(event)
+        self.assertEqual(tabs.count(), 0)
+        with mock.patch.object(self.TerminalWidget, 'start_process') as start, \
+             mock.patch.object(self.TerminalWidget, '_execute_commands') as execute:
+            entries[0].run()
+            entries[0].run()  # A stale menu must never launch a second shell.
+            start.assert_called_once_with([get_terminal_shell()], cwd=win._window_cwd)
+            execute.assert_called_once_with(['echo probe'])
+        self.assertEqual(tabs.count(), 1)
 
     def test_close_window_only_after_tabs_are_closed(self):
         win = self.win

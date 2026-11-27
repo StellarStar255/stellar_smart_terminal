@@ -48,7 +48,7 @@ from PyQt6.QtWidgets import (
     QPushButton, QLabel, QStatusBar,
     QMessageBox, QFileDialog, QSplitter,
     QTextEdit, QFrame, QDialog, QLineEdit, QListWidget,
-    QListWidgetItem, QTabWidget,
+    QListWidgetItem,
     QApplication, QInputDialog, QMenu, QSizePolicy,
     QStackedWidget, QCheckBox
 )
@@ -58,6 +58,7 @@ from PyQt6.QtCore import (Qt, QTimer, QEvent, QPoint, QRect, QObject, QThreadPoo
                           QVariantAnimation, QEasingCurve, QAbstractAnimation, QTextBoundaryFinder, pyqtSignal)
 from PyQt6.QtGui import QAction, QIcon, QColor, QKeySequence
 
+from terminal_mouse import TerminalTabWidget
 from terminal_widget import TerminalWidget
 from session_manager import SessionManager, Session, SessionEntry
 from exporter import export_session
@@ -884,7 +885,7 @@ class MainWindow(ThemeMixin, ToolbarMixin, ConfigMixin, ExplorerPanelMixin,
         """)
 
         # 终端标签页容器
-        self.tab_widget = QTabWidget()
+        self.tab_widget = TerminalTabWidget()
 
         # 使用自定义可分离的标签栏
         self.detachable_tab_bar = DetachableTabBar(self.tab_widget)
@@ -1365,13 +1366,19 @@ class MainWindow(ThemeMixin, ToolbarMixin, ConfigMixin, ExplorerPanelMixin,
             return False
 
         def run():
-            if not is_current() or terminal._defer_native_paste_input(run):
+            if not is_current():
+                return
+            if terminal is None:
+                self._new_terminal()
+                self.terminal._execute_commands(displayed)
+                return
+            if terminal._defer_native_paste_input(run):
                 return
             terminal.setFocus()
             terminal._execute_commands(displayed)
 
         return Command(title=title, run=run, group=group, search_text="\n".join(displayed),
-                       insert=lambda: self._insert_palette_preset(terminal, displayed, is_current),
+                       insert=(lambda: self._insert_palette_preset(terminal, displayed, is_current)) if terminal else None,
                        edit=lambda: self._edit_palette_preset(preset, cwd),
                        target=lambda: (self._quick_command_target_label(terminal) if target_is_current()
                                        else t("palette.selection_changed")))

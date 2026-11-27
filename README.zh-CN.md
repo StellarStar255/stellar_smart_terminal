@@ -10,7 +10,7 @@
 
 **macOS 版已通过 Apple 公证。** 适用于 Apple 芯片 Mac 的应用已使用 Developer ID 证书签名。
 
-[v1.35.77 更新说明](docs/releases/v1.35.77.md) — 关闭最后一个终端标签后，窗口可保持空白。再按一次 Cmd+W 可关闭窗口，也可以点「启动」运行预设。
+[v1.35.78 更新说明](docs/releases/v1.35.78.md) — 右键点击空白终端区，即可在新 Shell 中运行全局或本地快捷命令。
 
 A PyQt6-based smart terminal with file explorer, Git GUI, LLM proxy, and VS Code extension browser.
 
