@@ -110,8 +110,15 @@ def test_double_click_and_password_recovery(server, tmp_path, monkeypatch, app, 
 
     def drop(*, background_refresh=False):
         session = panel._session
-        server.transports[-1].close()
-        wait_for(lambda: not session.is_alive())
+        # The previous login/recovery also schedules a directory listing. Finish
+        # it before injecting the next outage so it cannot reconnect in the
+        # interval between closing the transport and observing the disconnect.
+        drained = session.submit(lambda: None)
+        wait_for(drained.done)
+        drained.result()
+        if session.is_alive():
+            server.transports[-1].close()
+            wait_for(lambda: not session.is_alive())
         if background_refresh:
             refresh = session.submit(session.listdir, panel._current_path, False)
         for _ in range(10):
