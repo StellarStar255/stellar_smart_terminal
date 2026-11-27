@@ -10,7 +10,7 @@
 
 **macOS 版已通过 Apple 公证。** 适用于 Apple 芯片 Mac 的应用已使用 Developer ID 证书签名。
 
-[v1.35.80 更新说明](docs/releases/v1.35.80.md) — 关闭最后一个终端标签页时直接停止其中的进程，窗口保留，可在当前目录新建终端。
+[v1.35.81 更新说明](docs/releases/v1.35.81.md) — 关闭最后一个终端标签页时直接停止其中的进程，窗口保留，可在当前目录新建终端。
 
 A PyQt6-based smart terminal with file explorer, Git GUI, LLM proxy, and VS Code extension browser.
 

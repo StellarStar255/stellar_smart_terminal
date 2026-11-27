@@ -10,7 +10,7 @@ A PyQt6-based smart terminal with file explorer, Git GUI, LLM proxy, and VS Code
 
 **Signed and notarized for macOS.** The Apple Silicon app is signed with a Developer ID certificate and notarized by Apple.
 
-[v1.35.80 release notes](docs/releases/v1.35.80.md) — Close the last terminal tab in one step. Its processes stop, and the window stays open so you can start another terminal in the current directory.
+[v1.35.81 release notes](docs/releases/v1.35.81.md) — Close the last terminal tab in one step. Its processes stop, and the window stays open so you can start another terminal in the current directory.
 
 <img src="assets/smart_terminal.png" width="300" />
 
