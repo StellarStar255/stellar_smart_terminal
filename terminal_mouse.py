@@ -38,6 +38,12 @@ from i18n import t
 
 
 class _QuickCommandList(QListWidget):
+    def mouseMoveEvent(self, event):
+        super().mouseMoveEvent(event)
+        item = self.itemAt(event.position().toPoint())
+        if item is not None and item.flags() & Qt.ItemFlag.ItemIsSelectable:
+            self.setCurrentItem(item)
+
     def keyPressEvent(self, event):
         # Let the enclosing menu handle submenu navigation and dismissal.
         key = event.key()
@@ -344,6 +350,7 @@ class TerminalMenuMixin:
         # Keep scrolling inside the list instead of using QMenu's edge arrows.
         commands = _QuickCommandList(menu)
         commands.setAccessibleName(menu.title())
+        commands.setMouseTracking(True)
         commands.setVerticalScrollMode(QAbstractItemView.ScrollMode.ScrollPerPixel)
         commands.setHorizontalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAlwaysOff)
         commands.setTextElideMode(Qt.TextElideMode.ElideRight)
@@ -356,7 +363,8 @@ class TerminalMenuMixin:
                 outline: none;
             }
             QListWidget::item { padding: 6px 12px; border-radius: 3px; }
-            QListWidget::item:selected, QListWidget::item:hover {
+            QListWidget::item:hover:!selected { background: #2d2d44; color: #eaeaea; }
+            QListWidget::item:selected {
                 background: #667eea;
                 color: #ffffff;
             }

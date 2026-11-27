@@ -132,6 +132,20 @@ class TestLocalQuickShell(unittest.TestCase):
         self.assertIs(self.app.focusWidget(), action.menu().search_box)
         return action.menu()
 
+    def test_hover_moves_selection_and_keyboard_uses_highlighted_command(self):
+        menu = self._open_project_menu_with_keyboard()
+        listing = menu.command_list
+        self.assertTrue(QTest.qWaitForWindowExposed(menu))
+        for row in (0, 1):
+            point = listing.visualItemRect(listing.item(row)).center()
+            QTest.mouseMove(menu.windowHandle(), listing.viewport().mapTo(menu, point))
+        self.assertEqual(listing.selectedItems(), [listing.item(1)])
+        self.w._execute_commands.assert_not_called()
+        QTest.keyClick(menu.search_box, Qt.Key.Key_Up)
+        self.assertEqual(listing.selectedItems(), [listing.item(0)])
+        QTest.keyClick(menu.search_box, Qt.Key.Key_Return)
+        self.w._execute_commands.assert_called_once_with(['echo other'])
+
     def test_preedit_return_preserves_menu_until_committed_query_is_confirmed(self):
         menu = self._open_project_menu_with_keyboard()
         field = menu.search_box
