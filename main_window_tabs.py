@@ -718,7 +718,7 @@ class TabSplitMixin:
         0. 如果焦点在编辑器窗格里，关闭当前选中的编辑器窗格
         1. 如果当前标签页有多个分屏，关闭当前选中的分屏
         2. 如果只有一个分屏，关闭整个标签页
-        3. 如果没有标签页了，关闭窗口
+        3. 如果没有标签页了，确认后关闭窗口
         """
         # 焦点在编辑器里 → Cmd+W 关闭当前选中的编辑器窗格（而不是终端标签）
         if self._focus_in_editor_area():
@@ -743,8 +743,13 @@ class TabSplitMixin:
                         return
                 self._close_tab(idx)
         else:
-            # 没有标签页了，关闭整个窗口
-            self.close()
+            reply = QMessageBox.question(
+                self, t("msg.confirm_close_title"), t("msg.confirm_close_window"),
+                QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No,
+                QMessageBox.StandardButton.No,
+            )
+            if reply == QMessageBox.StandardButton.Yes:
+                self.close()
 
     def _align_child_with_parent_geometry(self, new_window, abort_check=None):
         """让子窗口与本窗口逐像素重合（位置+尺寸），并持续校正 macOS 的异步微调。"""

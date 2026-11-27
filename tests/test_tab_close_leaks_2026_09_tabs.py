@@ -127,11 +127,19 @@ class TestCloseLastTab(_WindowCase):
         with mock.patch.object(win, '_focus_in_editor_area', return_value=False), \
              mock.patch.object(win, 'close') as close, \
              mock.patch('main_window_tabs.QMessageBox.question',
-                        return_value=QMessageBox.StandardButton.Yes):
+                        return_value=QMessageBox.StandardButton.Yes) as question:
             win._close_tab_or_window()
             self.assertEqual(win.tab_widget.count(), 0)
             close.assert_not_called()
             self.assertFalse(win._force_closing)
+            question.reset_mock()
+            question.return_value = QMessageBox.StandardButton.No
+            win._close_tab_or_window()
+            question.assert_called_once()
+            self.assertEqual(question.call_args.args[-1], QMessageBox.StandardButton.No)
+            close.assert_not_called()
+            self.assertEqual(win.tab_widget.count(), 0)
+            question.return_value = QMessageBox.StandardButton.Yes
             win._close_tab_or_window()
             close.assert_called_once()
 
