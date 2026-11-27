@@ -1344,16 +1344,19 @@ class TerminalWidget(TerminalInputMixin, TerminalMouseMixin,
         """开启/关闭「快速 resize」模式。
 
         开启时 paintEvent 不再每帧重建整屏，而是把上一帧的缓存缩放贴到当前尺寸
-        （便宜很多），用于弹簧/动画等连续 resize 场景，避免卡顿。关闭时立即让缓存
-        失效并重绘一次，按最终尺寸渲染出清晰文本。期间 PTY 尺寸不变（SIGWINCH 由
-        150ms 防抖在动画结束后才发），故缩放仅为临时显示、不影响内容。
+        （便宜很多），用于弹簧/动画等连续 resize 场景。退出时立即处理待定的尺寸
+        更新，按最终网格重绘；大历史仍可交给后台 reflow。
         """
         on = bool(on)
         if on == self._fast_resize:
             return
         self._fast_resize = on
         if not on:
-            self._invalidate_render_cache()
+            # The final geometry is known. Reflow before repainting so we do not
+            # render the old grid once more and wait for the drag debounce.
+            if self._resize_pending:
+                self.flush_resize()
+            self.update()
 
     def flush_resize(self):
         """立即处理待定的 resize，跳过防抖定时器。

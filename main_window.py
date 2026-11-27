@@ -4142,7 +4142,12 @@ class MainWindow(ThemeMixin, ToolbarMixin, ConfigMixin, ExplorerPanelMixin,
         if reg is None:
             reg = self._live_spring_anims = set()
         reg.add(anim)
-        anim.finished.connect(lambda a=anim: reg.discard(a))
+        # stop() on a superseded animation does not emit finished.
+        def unregister(state, previous):
+            if state == QAbstractAnimation.State.Stopped:
+                reg.discard(anim)
+
+        anim.stateChanged.connect(unregister)
 
     def _pause_spring_anims_for_press(self):
         """鼠标按下瞬间冻结所有进行中的 spring 动画。
@@ -4303,6 +4308,7 @@ class MainWindow(ThemeMixin, ToolbarMixin, ConfigMixin, ExplorerPanelMixin,
         prev = getattr(splitter, '_spring_anim', None)
         if prev is not None:
             prev.stop()
+            prev.deleteLater()
         terms = [term for term in splitter.findChildren(TerminalWidget)
                  if hasattr(term, 'set_fast_resize')]
         for term in terms:
@@ -4330,6 +4336,7 @@ class MainWindow(ThemeMixin, ToolbarMixin, ConfigMixin, ExplorerPanelMixin,
 
         anim.valueChanged.connect(_on_val)
         anim.finished.connect(_on_done)
+        anim.finished.connect(anim.deleteLater)
         self._register_spring_anim(anim)
         splitter._spring_anim = anim
         anim.start()
@@ -4380,6 +4387,7 @@ class MainWindow(ThemeMixin, ToolbarMixin, ConfigMixin, ExplorerPanelMixin,
         # 停止上一段未完成的动画
         if self._spring_anim is not None:
             self._spring_anim.stop()
+            self._spring_anim.deleteLater()
             self._spring_anim = None
 
         # 动画期间终端只缩放旧缓存，避免每帧重建整屏导致卡顿
@@ -4411,6 +4419,7 @@ class MainWindow(ThemeMixin, ToolbarMixin, ConfigMixin, ExplorerPanelMixin,
 
         anim.valueChanged.connect(_on_val)
         anim.finished.connect(_on_done)
+        anim.finished.connect(anim.deleteLater)
         self._register_spring_anim(anim)
         self._spring_anim = anim
         anim.start()
