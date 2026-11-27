@@ -1184,10 +1184,22 @@ class SSHSession(QObject):
                     pwd = self._password_provider(cfg.alias)
                     if pwd is None:
                         raise
-                    connect_kwargs["password"] = pwd
-                    connect_kwargs["allow_agent"] = False
-                    connect_kwargs["look_for_keys"] = False
-                    client.connect(**connect_kwargs)
+                    transport = client.get_transport()
+                    if transport is not None and transport.is_active():
+                        # Keep the host-key-checked transport (including a ProxyJump channel).
+                        # connect() would replace it while its reader thread was still running.
+                        remaining = transport.auth_password(cfg.user or getpass.getuser(), pwd)
+                        if remaining:
+                            if "keyboard-interactive" not in remaining:
+                                raise paramiko.AuthenticationException("Additional SSH authentication required")
+                            completed = self._auth_keyboard_interactive(client, cfg, sock)
+                            if completed is None:
+                                raise paramiko.AuthenticationException("Additional SSH authentication required")
+                            client = completed
+                    else:
+                        client.close()
+                        connect_kwargs.update(password=pwd, allow_agent=False, look_for_keys=False)
+                        client.connect(**connect_kwargs)
                     self._auth_secrets.setdefault(cfg.credential_key, {})["password"] = pwd
             except paramiko.SSHException:
                 # 如「No authentication methods available」（clean_interactive

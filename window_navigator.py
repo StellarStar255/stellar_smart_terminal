@@ -35,6 +35,16 @@ logger = get_logger(__name__)
 # 导航条目的「执行完毕」提醒标记角色（绿点）
 NAV_ATTENTION_ROLE = Qt.ItemDataRole.UserRole + 1
 NAV_OUTPUT_ROLE = Qt.ItemDataRole.UserRole + 2
+_NAV_PULSE_ROLE = Qt.ItemDataRole.UserRole + 3
+_PULSE_EPOCH = time.monotonic()
+
+
+def _output_pulse_alpha(seed, elapsed):
+    # Separate the starting phase and period so simultaneous output can drift apart.
+    phase = (seed & 0xffff) / 65536
+    period = 1.75 + 0.65 * ((seed >> 16) / 65535)
+    return 0.72 + 0.28 * math.cos(math.tau * (phase + elapsed / period))
+
 
 # 未收到主题前的兜底配色（与 themes.THEMES['深蓝'] 一致）。
 # 面板样式一律从 self._theme 取色，MainWindow._apply_theme 会调 apply_theme()
@@ -296,7 +306,8 @@ class NoHighlightDelegate(QStyledItemDelegate):
         color = QColor('#2ecc71')
         if not attention:
             color = QColor(view.output_color)
-            color.setAlphaF(0.72 + 0.28 * math.cos(math.pi * time.monotonic()))
+            color.setAlphaF(_output_pulse_alpha(index.data(_NAV_PULSE_ROLE),
+                                               time.monotonic() - _PULSE_EPOCH))
         painter.save()
         painter.setRenderHint(QPainter.RenderHint.Antialiasing, True)
         painter.setPen(Qt.PenStyle.NoPen)
@@ -1102,6 +1113,7 @@ class WindowNavigatorPanel(QWidget):
                 item.setData(Qt.ItemDataRole.UserRole, wid)
                 item.setData(NAV_ATTENTION_ROLE, bool(getattr(window, '_nav_attention', False)))
                 item.setData(NAV_OUTPUT_ROLE, window.has_nav_output)
+                item.setData(_NAV_PULSE_ROLE, hash(window._workspace_id) & 0xffffffff)
                 new_refs[wid] = _weakref.ref(window)
                 item.setForeground(QColor(color))
                 self.window_list.addItem(item)

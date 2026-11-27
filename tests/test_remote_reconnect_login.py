@@ -153,6 +153,7 @@ def test_double_click_and_password_recovery(server, tmp_path, monkeypatch, app, 
         assert server.attempts[-2:] == [('tester', 'first-test-password'), ('tester', server.password)]
         assert panel.get_cached_password(host) == server.password
         assert len(opens) == 1
+        wait_for(lambda: sum(t.is_active() for t in server.transports) == 1)
 
         cancel = True
         server.password = 'another-test-password'

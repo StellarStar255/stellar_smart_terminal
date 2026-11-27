@@ -149,19 +149,16 @@ class TestKeyboardInteractiveAuth(unittest.TestCase):
                 raise paramiko.BadAuthenticationType(
                     "kbd not allowed", ["password"])
 
-        class _PasswordClient(_FakeClient):
-            def connect(self, **kwargs):
-                self.connect_calls.append(kwargs)
-                if kwargs.get('password') == 'pw':
-                    return  # 密码认证成功
-                raise paramiko.AuthenticationException("auth failed")
+            def auth_password(self, username, password):
+                self.credentials = (username, password)
+                return []
 
         sess._interactive_provider = lambda alias, prompt, echo: self.fail(
             "interactive provider should not be asked")
         sess._password_provider = lambda label: 'pw'
-        client = _PasswordClient(_NoKbdTransport())
-        self._connect_with(sess, host, client)
-        self.assertEqual(client.connect_calls[-1].get('password'), 'pw')
+        transport = _NoKbdTransport()
+        self._connect_with(sess, host, _FakeClient(transport))
+        self.assertEqual(transport.credentials, ('u', 'pw'))
         self.assertEqual(sess._auth_secrets[sess.host_config.credential_key].get('password'), 'pw')
 
     def test_user_cancel_raises_auth_error(self):

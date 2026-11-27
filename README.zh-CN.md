@@ -10,7 +10,7 @@
 
 **macOS 版已通过 Apple 公证。** 适用于 Apple 芯片 Mac 的应用已使用 Developer ID 证书签名。
 
-[v1.35.84 更新说明](docs/releases/v1.35.84.md) — 同一窗口内的编辑器和终端分屏同步缩放。把标签移到其他窗口时，所有终端分屏都会采用目标窗口的字号。
+[v1.35.85 更新说明](docs/releases/v1.35.85.md) — 给导航列表中的文件夹设置别名，按各自的呼吸节律识别窗口输出；远程文件浏览器断线后可恢复到原目录，继续使用已有终端。
 
 A PyQt6-based smart terminal with file explorer, Git GUI, LLM proxy, and VS Code extension browser.
 

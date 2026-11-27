@@ -562,3 +562,23 @@ def test_folder_alias_menu_persists_and_follows_directory(panels, tmp_path):
         assert not row(floating, first).text().endswith('训练服务器')
     finally:
         reopened.deleteLater()
+
+
+def test_output_pulse_belongs_to_window_across_navigators(panels):
+    from window_navigator import _NAV_PULSE_ROLE, _output_pulse_alpha
+
+    first, second, floating, embedded = panels
+
+    def samples(nav, window):
+        seed = row(nav, window).data(_NAV_PULSE_ROLE)
+        return [_output_pulse_alpha(seed, elapsed / 10) for elapsed in range(60)]
+
+    first_frames = samples(floating, first)
+    second_frames = samples(floating, second)
+    assert first_frames != second_frames
+    floating.search_input.setText('temporarily hidden')
+    floating._force_refresh()
+    floating.search_input.clear()
+    for nav in (embedded, floating):
+        assert samples(nav, first) == first_frames
+        assert samples(nav, second) == second_frames
