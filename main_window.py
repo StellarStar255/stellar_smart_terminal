@@ -2300,7 +2300,9 @@ class MainWindow(ThemeMixin, ToolbarMixin, ConfigMixin, ExplorerPanelMixin,
                 continue
             wid = id(widget)
             ss = widget.styleSheet()
-            if widget is not self and (not ss or 'font-size' not in ss):
+            # Only cache styles this pass actually scales. Content widgets set
+            # their own point sizes whenever the window zoom changes.
+            if widget is not self and not _font_size_re.search(ss):
                 continue
 
             # 首次遇到：记录原始样式表

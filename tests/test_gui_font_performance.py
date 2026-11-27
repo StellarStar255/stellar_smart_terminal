@@ -103,3 +103,30 @@ def test_floating_mode_does_not_resize_other_window(windows):
         app.processEvents()
         assert b.styleSheet() == original
         assert b._gui_font_size == 0
+
+
+def test_window_content_shortcuts_keep_editor_and_terminal_in_sync(windows, tmp_path):
+    from PyQt6.QtCore import Qt
+    from PyQt6.QtTest import QTest
+
+    app, (win, other) = windows
+    source = tmp_path / 'example.sh'
+    source.write_text('echo hello\n')
+    win._open_file_in_editor(str(source))
+    win.activateWindow()
+    select(win, 16)
+    app.processEvents()
+    editor = win.editor_area.active_pane.editor
+    terminal = win.terminal
+    initial = terminal.term_font.pointSize()
+    other_initial = other.terminal.term_font.pointSize()
+    for widget, key, expected in (
+        (terminal, Qt.Key.Key_Equal, initial + 1),
+        (editor, Qt.Key.Key_Minus, initial),
+    ):
+        widget.setFocus()
+        QTest.keyClick(widget, key, Qt.KeyboardModifier.ControlModifier)
+        app.processEvents()
+        assert terminal.term_font.pointSize() == expected
+        assert editor.font().pointSize() == expected
+        assert other.terminal.term_font.pointSize() == other_initial
