@@ -989,7 +989,7 @@ class TestForwardRulesInPanel(unittest.TestCase):
         panel = self._panel()
         panel._save_forwards('bastion', [
             {'type': 'L', 'bind_port': 8888, 'dest_port': 8888, 'auto': True}])
-        panel.prime_cached_password('bastion', 'pw1')
+        panel.prime_cached_password(_host(), 'pw1')
         order = []
         with mock.patch('ssh_control.is_supported', lambda: True), \
                 mock.patch('ssh_control.master_socket_exists', lambda h: False), \

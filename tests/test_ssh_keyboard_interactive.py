@@ -68,6 +68,8 @@ class _FakeClient:
 
     def connect(self, **kwargs):
         self.connect_calls.append(kwargs)
+        if "password" in kwargs:
+            raise paramiko.BadAuthenticationType("password unsupported", ["keyboard-interactive"])
         raise paramiko.AuthenticationException("no valid key")
 
     def get_transport(self):
@@ -119,7 +121,7 @@ class TestKeyboardInteractiveAuth(unittest.TestCase):
             ('otp-host', 'Verification code:', True),
         ])
         # 密码缓存供自动重连；一次性验证码不缓存
-        self.assertEqual(sess._auth_secrets['otp-host'].get('password'), 'secret')
+        self.assertEqual(sess._auth_secrets[sess.host_config.credential_key].get('password'), 'secret')
         self.assertNotIn('123456', str(sess._auth_secrets))
         # keep-alive 正常设置（走完了 _connect_client 全程）
         self.assertEqual(transport.keepalive, 30)
@@ -127,7 +129,7 @@ class TestKeyboardInteractiveAuth(unittest.TestCase):
     def test_cached_password_only_prompts_for_otp(self):
         """重连场景：密码步骤用缓存自动作答，只向用户要验证码。"""
         sess, host = _make_session()
-        sess._auth_secrets['otp-host'] = {'password': 'secret'}
+        sess._auth_secrets[sess.host_config.credential_key] = {'password': 'secret'}
         prompts_seen = []
 
         def provider(alias, prompt, echo):
@@ -160,7 +162,7 @@ class TestKeyboardInteractiveAuth(unittest.TestCase):
         client = _PasswordClient(_NoKbdTransport())
         self._connect_with(sess, host, client)
         self.assertEqual(client.connect_calls[-1].get('password'), 'pw')
-        self.assertEqual(sess._auth_secrets['otp-host'].get('password'), 'pw')
+        self.assertEqual(sess._auth_secrets[sess.host_config.credential_key].get('password'), 'pw')
 
     def test_user_cancel_raises_auth_error(self):
         """任一步提示被取消 → 抛 AuthenticationException（连接失败，不挂起）。"""
@@ -306,7 +308,7 @@ class TestTwoFactorAndRecovery(unittest.TestCase):
         self.assertIs(client, fresh, "应在干净连接上重试并成功")
         self.assertEqual(prompts_seen, ["[OTP Code]:"])
         self.assertEqual(
-            sess._auth_secrets['otp-host'].get('auth_flow'),
+            sess._auth_secrets[sess.host_config.credential_key].get('auth_flow'),
             'clean_interactive',
             "成功路径应被记住，下次直接复现")
 
@@ -337,7 +339,7 @@ class TestTwoFactorAndRecovery(unittest.TestCase):
         self.assertFalse(client.connect_calls[0]['allow_agent'])
         self.assertFalse(client.connect_calls[0]['look_for_keys'])
         self.assertNotIn('key_filename', client.connect_calls[0])
-        self.assertEqual(sess._auth_secrets['otp-host'].get('auth_flow'),
+        self.assertEqual(sess._auth_secrets[sess.host_config.credential_key].get('auth_flow'),
                          'clean_interactive')
         self.assertEqual(transport.keepalive, 30)
 
@@ -372,7 +374,7 @@ class TestTwoFactorAndRecovery(unittest.TestCase):
         self.assertIs(result, client)
         self.assertEqual(len(client.connect_calls), 1)
         self.assertEqual(transport.pw_attempt, ('u', 'pw'))
-        self.assertEqual(sess._auth_secrets['otp-host'].get('password'), 'pw')
+        self.assertEqual(sess._auth_secrets[sess.host_config.credential_key].get('password'), 'pw')
 
     def test_probe_failure_falls_back_to_normal_flow(self):
         """探测连接建立失败（网络抖动等）→ 原有全量流程照常运行。"""
@@ -399,7 +401,7 @@ class TestTwoFactorAndRecovery(unittest.TestCase):
         self.assertIs(result, ok)
         self.assertTrue(ok.connect_calls[0]['allow_agent'],
                         "回落流程应保留 agent 认证能力")
-        self.assertEqual(sess._auth_secrets['otp-host'].get('auth_flow'),
+        self.assertEqual(sess._auth_secrets[sess.host_config.credential_key].get('auth_flow'),
                          'default')
 
     def test_cached_clean_flow_replays_directly(self):
@@ -412,7 +414,7 @@ class TestTwoFactorAndRecovery(unittest.TestCase):
                 raise paramiko.SSHException("No authentication methods available")
 
         sess, host = _make_session()
-        sess._auth_secrets['otp-host'] = {'auth_flow': 'clean_interactive'}
+        sess._auth_secrets[sess.host_config.credential_key] = {'auth_flow': 'clean_interactive'}
         sess._interactive_provider = lambda alias, prompt, echo: "123456"
         constructed = []
 

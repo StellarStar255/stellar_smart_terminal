@@ -149,6 +149,7 @@ def local_ssh():
             f'AuthorizedKeysFile {directory / "client_key.pub"}', f'PidFile {directory / "sshd.pid"}',
             'StrictModes no', 'PasswordAuthentication no', 'KbdInteractiveAuthentication no',
             'UsePAM no', 'PubkeyAuthentication yes', 'AllowTcpForwarding yes',
+            'Subsystem sftp internal-sftp',
             'PermitRootLogin prohibit-password', 'LogLevel VERBOSE',
         ]) + '\n')
         # All SSH calls remain real, but are insulated from ~/.ssh/config.
@@ -311,3 +312,58 @@ def test_diagnostics_do_not_start_stopped_forward_or_reconnect(local_ssh):
         assert not ssh_control.master_pid(h.cfg)
     finally:
         h.start()
+
+
+def test_sftp_recovery_preserves_live_ssh_terminal(local_ssh, monkeypatch):
+    from dataclasses import replace
+    from PyQt6.QtCore import QEvent
+    from PyQt6.QtTest import QTest
+    from PyQt6.QtWidgets import QApplication
+    import ssh_session
+    from remote_explorer_widget import RemoteExplorerPanel
+    from terminal_widget import TerminalWidget
+
+    app = QApplication.instance() or QApplication([])
+    h = local_ssh
+    host = replace(h.cfg, identity_file=str(h.directory / 'client_key'))
+    monkeypatch.setattr(ssh_session, '_append_known_hosts', lambda entries: None)
+    panel = RemoteExplorerPanel(theme={})
+    term = TerminalWidget()
+    opened = []
+    panel.host_connected.connect(opened.append)
+
+    def wait(check):
+        until = time.monotonic() + 8
+        while not check() and time.monotonic() < until:
+            QTest.qWait(20)
+        assert check()
+
+    def probe(name):
+        out = h.directory / name
+        term._write_to_backend(f'echo $$ > {shlex.quote(str(out))}\n'.encode())
+        wait(lambda: out.exists() and out.stat().st_size > 0)
+        return int(out.read_text())
+
+    try:
+        term.start_process([h.ssh, '-F', os.devnull, '-S', ssh_control.control_path_for(host),
+                            '-o', 'BatchMode=yes', ssh_control.ssh_target(host), '/bin/sh -s'],
+                           cwd=str(h.directory))
+        wait(term.is_running)
+        pid = probe('pid-before')
+        panel._connect_to(host)
+        wait(lambda: bool(opened))
+        session = panel._session
+        panel._current_path = str(h.directory)
+        session._client.get_transport().close()
+        for _ in range(10):
+            panel._connect_to(host)
+        wait(lambda: session.is_alive() and panel._recovering_session is None)
+        assert panel._current_path == str(h.directory)
+        assert opened == [host]
+        assert probe('pid-after') == pid
+    finally:
+        panel.close()
+        term.cleanup()
+        term.deleteLater()
+        panel.deleteLater()
+        app.sendPostedEvents(None, QEvent.Type.DeferredDelete)

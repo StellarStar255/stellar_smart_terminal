@@ -1073,7 +1073,7 @@ class ControlMasterSession(QObject):
         return self._alive
 
     def is_alive(self) -> bool:
-        return self._alive
+        return self._alive and master_socket_exists(self.host_config)
 
     def connect_async(self, password_provider=None, passphrase_provider=None,
                       interactive_provider=None, prefer_interactive=False,

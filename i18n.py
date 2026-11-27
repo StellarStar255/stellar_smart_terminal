@@ -823,6 +823,7 @@ TRANSLATIONS = {
     "remote.connect_failed_title": {"zh": "连接失败", "en": "Connection Failed", "fr": "Échec de la connexion"},
     "remote.connect_failed_msg": {"zh": "无法连接到 {host}:\n{error}", "en": "Could not connect to {host}:\n{error}", "fr": "Impossible de se connecter à {host} :\n{error}"},
     "remote.password_prompt": {"zh": "{host} 的密码:", "en": "Password for {host}:", "fr": "Mot de passe pour {host} :"},
+    "remote.restored_home": {"zh": "原目录已不存在，已返回远程主目录。", "en": "The previous folder is gone. Opened the remote home folder.", "fr": "Le dossier précédent a disparu. Retour au dossier personnel distant."},
     "remote.password_title": {"zh": "需要密码", "en": "Password Required", "fr": "Mot de passe requis"},
     "remote.interactive_title": {"zh": "需要验证", "en": "Verification Required", "fr": "Vérification requise"},
     "remote.interactive_prompt": {"zh": "{host}: {prompt}", "en": "{host}: {prompt}", "fr": "{host} : {prompt}"},

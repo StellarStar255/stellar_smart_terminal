@@ -161,6 +161,7 @@ class RemotePanelMixin:
         panel.file_open_requested.connect(self._open_remote_file_in_editor)
         # 连接成功后自动开一个 SSH 终端 tab
         panel.host_connected.connect(self._on_remote_host_connected)
+        panel.error_occurred.connect(lambda message: self.statusbar.showMessage(message, 5000))
         # 右键 "在此处打开终端" → 同样开一个 SSH tab，且 cd 进指定目录
         panel.open_terminal_at.connect(self._open_ssh_terminal_tab)
         # 右键 "在新窗口中连接" → 新开一个独立窗口并 SSH 进该主机
@@ -256,8 +257,8 @@ class RemotePanelMixin:
         延迟到窗口初始化稳定后再连。"""
         # 把原窗口已缓存的密码带给新窗口，避免自动连 SFTP 时再弹一次密码框
         try:
-            pw = self._ensure_remote_panel().get_cached_password(host_config.alias)
-            new_window._ensure_remote_panel().prime_cached_password(host_config.alias, pw)
+            pw = self._ensure_remote_panel().get_cached_password(host_config)
+            new_window._ensure_remote_panel().prime_cached_password(host_config, pw)
         except Exception:
             logger.debug("_auto_connect_remote_in_window: suppressed exception", exc_info=True)
 
@@ -817,7 +818,7 @@ class RemotePanelMixin:
         # 若用户刚在 Remote 面板里为该主机输入过密码，预置一次性自动回填，
         # 这样终端里的 ssh 密码提示就不用再输一遍。
         try:
-            cached_pw = self._ensure_remote_panel().get_cached_password(alias)
+            cached_pw = self._ensure_remote_panel().get_cached_password(host_config)
             if cached_pw:
                 term.arm_password_autofill(cached_pw)
         except Exception:
@@ -922,8 +923,8 @@ class RemotePanelMixin:
         # 重合、且处于隐形对齐期，密码框会被盖住/吞掉，用户永远没法输入，后台
         # SSH 线程就一直卡在「Connecting…」。提前预置密码即可免去这次弹框。
         try:
-            pw = self._ensure_remote_panel().get_cached_password(alias)
-            new_window._ensure_remote_panel().prime_cached_password(alias, pw)
+            pw = self._ensure_remote_panel().get_cached_password(host_config)
+            new_window._ensure_remote_panel().prime_cached_password(host_config, pw)
         except Exception:
             # 预置失败不致命（新窗口会自行弹密码框），但要记日志：
             # 曾因静默吞异常导致「SSH 密码框死锁」难以定位

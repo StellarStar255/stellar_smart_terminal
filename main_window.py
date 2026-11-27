@@ -6275,6 +6275,9 @@ class MainWindow(ThemeMixin, ToolbarMixin, ConfigMixin, ExplorerPanelMixin,
 
         # 标记进入清理阶段，防止重入
         self._closing_in_progress = True
+        remote_panel = getattr(self, 'remote_panel', None)
+        if isinstance(remote_panel, QWidget) and not sip.isdeleted(remote_panel):
+            remote_panel.close()
 
         # 强制关闭路径下窗口已 hide()，此处再保险确认一次
         if force_closing:

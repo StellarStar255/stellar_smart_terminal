@@ -1879,6 +1879,9 @@ class RemoteExplorerPanel(QWidget, explorer_common.TransferJobHost):
     open_in_new_window = pyqtSignal(object)
     # —— 内部信号：用于把 SSH 工作线程的结果安全派发回 UI 线程
     # （直接 QTimer.singleShot 在没有事件循环的工作线程里不会触发）
+    _recovery_finished = pyqtSignal(object, str)
+    _root_loaded = pyqtSignal(object, int, list)
+    _root_failed = pyqtSignal(object, int, object, bool)
     _top_level_ready = pyqtSignal(list)
     _subtree_ready = pyqtSignal(object, int, list)    # (parent_item, req_gen, entries)
     _subtree_failed = pyqtSignal(object, int, str)    # (parent_item, req_gen, error_msg)
@@ -1907,16 +1910,18 @@ class RemoteExplorerPanel(QWidget, explorer_common.TransferJobHost):
         super().__init__(parent)
         self.theme = theme or {}
         self._session: Optional[SSHSession] = None
-        # 上一次成功连上的主机和当时的目录；socket 掉了 → 直接拿这两个一键重连
+        # 上一次成功连接的主机，供断线提示使用。
         self._last_connected_host: Optional[HostConfig] = None
-        self._last_connected_cwd: Optional[str] = None
         # 同一会话只弹一次重连框（多个并发 future 都 fail 时不刷屏）
         self._reconnect_dialog_open: bool = False
         self._current_path: str = "/"
-        # 用户在「Password Required」对话框里输入的密码，按主机别名缓存在内存里，
-        # 供同一主机的 SSH 终端 tab 自动回填，避免二次输入。只存内存、不落盘、
-        # 断开连接即清除。
-        self._cached_passwords: dict[str, str] = {}
+        # 成功验证的密码仅在内存中复用，按目标地址、端口、账号及跳板区分。
+        self._cached_passwords: dict[tuple, str] = {}
+        self._connecting_session = None
+        self._recovering_session = None
+        self._restore_path = None
+        self._auth_cancelled = False
+        self._prompt_lock = threading.Lock()
         # 「主连接是旧档但有终端搭车、没重建」已经提示过的主机：提示只发一次
         self._pre_qos_notified: set = set()
         # MFA（一次性动态码）登录：登录框里预先收好的答案，认证回调直接拿它作答，
@@ -1965,6 +1970,9 @@ class RemoteExplorerPanel(QWidget, explorer_common.TransferJobHost):
         _FORWARD_PANELS.add(self)
 
         # 内部跨线程信号 → UI 线程槽（QueuedConnection 自动应用）
+        self._recovery_finished.connect(self._on_recovery_finished)
+        self._root_loaded.connect(self._on_root_loaded)
+        self._root_failed.connect(self._on_root_failed)
         self._top_level_ready.connect(self._apply_top_level)
         self._subtree_ready.connect(self._apply_children)
         self._subtree_failed.connect(self._on_subtree_failed)
@@ -2000,8 +2008,9 @@ class RemoteExplorerPanel(QWidget, explorer_common.TransferJobHost):
 
         self._refresh_root_signal.connect(self._refresh_current_view)
         self._refresh_subtree_signal.connect(self._reload_subtree)
-        self._password_prompt_signal.connect(self._on_password_prompt)
-        self._interactive_prompt_signal.connect(self._on_interactive_prompt)
+        self._password_prompt_signal.connect(self._show_auth_prompt)
+        self._prompt_expired.connect(self._dismiss_prompt)
+        self._interactive_prompt_signal.connect(self._show_auth_prompt)
         self._search_result_signal.connect(self._on_search_results)
         self._search_fallback_signal.connect(self._search_step, Qt.ConnectionType.QueuedConnection)
 
@@ -2520,11 +2529,6 @@ class RemoteExplorerPanel(QWidget, explorer_common.TransferJobHost):
         host: HostConfig = item.data(_ROLE_ENTRY)
         if not host:
             return
-        # 已经连着这台、只是从主机列表切回来 → 直接回到文件树，不必重连
-        if (self._session is not None and self._session.is_connected()
-                and self._session.host_config.alias == host.alias):
-            self._show_tree_view()
-            return
         self._connect_to(host)
 
     def set_view_action(self, action):
@@ -2782,17 +2786,40 @@ class RemoteExplorerPanel(QWidget, explorer_common.TransferJobHost):
         再连（_mfa_login 会带着 mfa_answers 回到这里），这样认证回调有现成答案可
         用，不必在认证中途弹框干等用户翻手机。
         """
+        # The host editor can mutate its list entry while a session is running.
+        host = copy.deepcopy(host)
+        current = self._session
+        if (mfa_answers is None and current is not None
+                and current.host_config.credential_key == host.credential_key):
+            if current is self._connecting_session or current is self._recovering_session:
+                return
+            if current.is_alive():
+                self._show_tree_view()
+                return
+            if hasattr(current, 'recover_async'):
+                self._auth_cancelled = False
+                self._recovering_session = current
+                self._subtitle_label.setText(t("remote.connecting", host=host.alias))
+                future = current.recover_async()
+
+                def finished(f):
+                    if not sip.isdeleted(self):
+                        error = f.exception()
+                        self._recovery_finished.emit(current, str(error) if error else "")
+                future.add_done_callback(finished)
+                return
         if mfa_answers is None and self._is_mfa_host(host.alias):
             self._mfa_login(host)
             return
-        if self._session is not None:
-            self._disconnect()   # 注意：会清掉 _pending_mfa，所以答案在它之后再放
-            # _disconnect 也清空了密码缓存——MFA 登录框刚收的密码要在这之后
-            # 再放进去，否则 SSH 终端标签自动回填 / 新窗口 prime 全部失效
-            if mfa_answers and mfa_answers.get('password'):
-                self._cached_passwords[host.alias] = mfa_answers['password']
-
+        restore_path = (self._current_path if current is not None
+                        and current.host_config.credential_key == host.credential_key
+                        and current is not self._connecting_session else None)
+        if current is not None:
+            self._disconnect(forget=False)
+        self._restore_path = restore_path
+        self._auth_cancelled = False
         self._pending_mfa = mfa_answers
+        self._mfa_reuse_attempt = bool(mfa_answers and mfa_answers.get("reuse"))
         if mfa_answers is None:
             # 普通连接：恢复默认行为（连上即开 SSH 终端标签、不做空闲断开），
             # 免得上一次 MFA 登录的选择粘到别的主机上
@@ -2813,6 +2840,7 @@ class RemoteExplorerPanel(QWidget, explorer_common.TransferJobHost):
             sess.connect_failed.connect(
                 lambda msg: self._on_session_connect_failed(sess, msg))
             answers = mfa_answers or {}
+            self._session = self._connecting_session = sess
             sess.connect_async(
                 mfa_code=answers.get('code') or "",
                 mfa_password=answers.get('password') or "",
@@ -2821,23 +2849,26 @@ class RemoteExplorerPanel(QWidget, explorer_common.TransferJobHost):
             )
             # 码已经交给 ssh 了，面板这边不再留副本
             self._clear_pending_mfa()
-            self._session = sess
             return
 
         sess = SSHSession(host, parent=self)
         sess.connected.connect(lambda: self._on_session_connected(sess))
         sess.connect_failed.connect(lambda msg: self._on_session_connect_failed(sess, msg))
         sess.host_key_check_degraded.connect(self._on_host_key_degraded)
+        password = self._cached_passwords.pop(host.credential_key, None)
+        if password:
+            sess.seed_verified_password(password)
+        self._session = self._connecting_session = sess
         sess.connect_async(
-            password_provider=self._prompt_password,
-            passphrase_provider=self._prompt_password,
-            interactive_provider=self._prompt_interactive,
+            password_provider=lambda label: self._prompt_password(label, sess),
+            passphrase_provider=lambda label: self._prompt_password(label, sess),
+            interactive_provider=lambda alias, prompt, echo: self._prompt_interactive(
+                alias, prompt, echo, sess),
             # 走 MFA 的主机：一把密钥都别试。堡垒机同时宣告 publickey，但只有
             # 交互认证能过，试密钥只会把 MaxAuthTries 打满被掐线
             # （"transport shut down or saw EOF"），码框都轮不到弹。
             prefer_interactive=mfa,
         )
-        self._session = sess
 
     # ---------- MFA / 动态码登录 ----------
 
@@ -2871,10 +2902,7 @@ class RemoteExplorerPanel(QWidget, explorer_common.TransferJobHost):
         password = dlg.password()
         self._mfa_keep_secs = dlg.keep_secs()
         self._mfa_open_terminal = dlg.open_terminal()
-        # 密码可以缓存（SSH 终端标签自动回填、重连自动作答）；动态码是一次性的，
-        # 只放在 _pending_mfa 里，用掉即擦，永不进 _cached_passwords、永不落盘。
-        if password:
-            self._cached_passwords[host.alias] = password
+        # 预收答案只交给这一轮认证。
         answers = {
             'alias': host.alias,
             'code': code or None,
@@ -3039,14 +3067,14 @@ class RemoteExplorerPanel(QWidget, explorer_common.TransferJobHost):
             QMessageBox.information(self, t("remote.fwd_title", host=host.alias),
                                     t("remote.fwd_need_master"))
             return False
-        password = self.get_cached_password(host.alias) or ""
+        password = self.get_cached_password(host) or ""
         for attempt in range(2):
             try:
                 self._run_blocking(
                     lambda pw=password: ssh_control.ensure_master(host, password=pw),
                     t("remote.fwd_connecting_master", host=host.alias))
                 if password:
-                    self._cached_passwords[host.alias] = password
+                    self.prime_cached_password(host, password)
                 return True
             except ssh_control.NeedsPassword:
                 if attempt == 1:
@@ -3108,7 +3136,7 @@ class RemoteExplorerPanel(QWidget, explorer_common.TransferJobHost):
         try:
             self._run_blocking(
                 lambda: ssh_control.refresh_master(
-                    host, password=self.get_cached_password(host.alias) or ""),
+                    host, password=self.get_cached_password(host) or ""),
                 t("remote.fwd_refreshing_master", host=host.alias))
         except Exception as e:      # noqa: BLE001 — 重建失败就保留旧的
             logger.info("[RemoteExplorerPanel] refresh master for %s failed: %s",
@@ -3143,7 +3171,7 @@ class RemoteExplorerPanel(QWidget, explorer_common.TransferJobHost):
             cancel_cb=_bg(lambda spec: ssh_control.forward_apply(host, spec, cancel=True)),
             force_cb=_bg(lambda spec: ssh_control.forward_force_apply(
                 host, spec, mfa=self._is_mfa_host(host.alias),
-                password=self.get_cached_password(host.alias) or "")),
+                password=self.get_cached_password(host) or "")),
             active=active,
             active_changed=lambda added, removed: self._update_active_forwards(host, added, removed),
             status_cb=lambda specs: ssh_control.forward_statuses(host, specs),
@@ -3185,7 +3213,7 @@ class RemoteExplorerPanel(QWidget, explorer_common.TransferJobHost):
             try:
                 self._run_blocking(
                     lambda: ssh_control.ensure_master(
-                        host, password=self.get_cached_password(host.alias) or ""),
+                        host, password=self.get_cached_password(host) or ""),
                     t("remote.fwd_connecting_master", host=host.alias))
             except Exception as e:      # noqa: BLE001
                 self.error_occurred.emit(t("remote.fwd_master_failed", error=str(e)))
@@ -3262,116 +3290,104 @@ class RemoteExplorerPanel(QWidget, explorer_common.TransferJobHost):
             "remote.mfa_idle_disconnected", host=alias,
             minutes=max(1, self._mfa_keep_secs // 60)))
 
-    _password_prompt_signal = pyqtSignal(str)  # 在 UI 线程触发输入框
-
-    # 工作线程等 UI 答复的上限：与 paramiko 交互认证的放宽超时一致。以前是
-    # `while not done: sleep`，唯一出口是 UI 槽置位——面板断开/关闭后线程永久
-    # 自旋，Python 3.13 的 ThreadPoolExecutor worker 非 daemon，退出时 join 卡死。
+    _password_prompt_signal = pyqtSignal(object)
+    _interactive_prompt_signal = pyqtSignal(object)
+    _prompt_expired = pyqtSignal(object)
     _PROMPT_WAIT_SECS = INTERACTIVE_AUTH_TIMEOUT
 
-    def _new_prompt_holder(self, **extra) -> dict:
-        holder = {'done': threading.Event(), 'value': None}
-        holder.update(extra)
-        return holder
-
-    def _wait_prompt(self, holder: dict) -> Optional[str]:
-        if not holder['done'].wait(self._PROMPT_WAIT_SECS):
-            logger.warning("[RemoteExplorerPanel] auth prompt timed out (%ss)",
-                           self._PROMPT_WAIT_SECS)
-            return None
-        return holder['value']
-
     def _cancel_pending_prompts(self):
-        """断开/关闭面板：让还在等答案的工作线程立刻拿到 None 返回。"""
-        for attr in ('_pending_password_request', '_pending_interactive_request'):
-            holder = getattr(self, attr, None)
-            if holder is not None:
-                holder['value'] = None
-                holder['done'].set()
-                setattr(self, attr, None)
+        with self._prompt_lock:
+            request = getattr(self, '_auth_request', None)
+            self._auth_request = None
+            if request:
+                request['done'].set()
+        if request:
+            self._dismiss_prompt(request)
 
-    def _prompt_password(self, label: str) -> Optional[str]:
-        # paramiko 回调在后台线程；用 QInputDialog 必须切回 UI 线程。
-        # 这里通过自定义事件 + 信号触发，主线程显示对话框并把结果放回 holder。
-        result_holder = self._new_prompt_holder(label=label)
-        self._pending_password_request = result_holder
+    def _dismiss_prompt(self, request):
+        dialog = request.get('dialog')
+        if dialog is not None and not sip.isdeleted(dialog):
+            dialog.reject()
+
+    def _prompt_password(self, label, session=None):
+        return self._request_auth(session, label, None, False)
+
+    def _prompt_interactive(self, alias, prompt, echo, session=None):
+        return self._request_auth(session, alias, prompt, echo)
+
+    def _request_auth(self, session, alias, prompt, echo):
+        with self._prompt_lock:
+            if session is not None and session is not self._session:
+                return None
+            if prompt is not None:
+                answer = self._take_pre_answer(alias, prompt)
+                if answer is not None:
+                    return answer
+            request = dict(session=session, alias=alias, prompt=prompt, echo=echo,
+                           done=threading.Event(), value=None)
+            self._auth_request = request
+        signal = self._password_prompt_signal if prompt is None else self._interactive_prompt_signal
         try:
-            self._password_prompt_signal.emit(label)
-        except Exception as e:
-            logger.warning(f"[RemoteExplorerPanel] password prompt emit failed: {e}")
-            return None
-        # 不能在工作线程里 processEvents（会和主线程冲突），带截止地等就行
-        return self._wait_prompt(result_holder)
+            signal.emit(request)
+            if not request['done'].wait(self._PROMPT_WAIT_SECS):
+                request['done'].set()
+                self._prompt_expired.emit(request)
+            return request['value']
+        finally:
+            with self._prompt_lock:
+                if self._auth_request is request:
+                    self._auth_request = None
 
-    def _on_password_prompt(self, label: str):
-        # 真正在 UI 线程里跑的输入框
-        holder = getattr(self, '_pending_password_request', None)
-        if holder is None:
+    def _show_auth_prompt(self, request):
+        if (request is not getattr(self, '_auth_request', None) or request['done'].is_set()
+                or request['session'] is not self._session):
             return
-        text, ok = QInputDialog.getText(
-            self, t("remote.password_title"),
-            t("remote.password_prompt", host=label),
-            QLineEdit.EchoMode.Password,
-        )
-        holder['value'] = text if ok else None
-        holder['done'].set()
-        # 缓存密码（仅密码认证、非 passphrase 提示）：label 即主机别名时才存，
-        # 供同一主机的 SSH 终端 tab 一次性自动回填。
-        if ok and text:
-            self._cached_passwords[label] = text
-
-    _interactive_prompt_signal = pyqtSignal(str, str, bool)  # alias, 服务器提示, echo
-
-    def _prompt_interactive(self, alias: str, prompt: str, echo: bool) -> Optional[str]:
-        # keyboard-interactive（OTP/2FA）的逐步提示；跨线程模式同 _prompt_password
-        # MFA 登录框已经把答案收齐时直接作答，不再弹框——认证等待有硬超时，
-        # 让用户在这一步现翻手机很容易超时失败。
-        pre = self._take_pre_answer(alias, prompt)
-        if pre is not None:
-            return pre
-        result_holder = self._new_prompt_holder()
-        self._pending_interactive_request = result_holder
-        try:
-            self._interactive_prompt_signal.emit(alias, prompt, echo)
-        except Exception as e:
-            logger.warning(f"[RemoteExplorerPanel] interactive prompt emit failed: {e}")
-            return None
-        return self._wait_prompt(result_holder)
-
-    def _on_interactive_prompt(self, alias: str, prompt: str, echo: bool):
-        holder = getattr(self, '_pending_interactive_request', None)
-        if holder is None:
-            return
-        # 展示服务器原始提示（Password: / Verification code: …），echo 决定明暗文。
-        # 已知走 MFA 的主机用专门的追问框（说清"要一个新码"），其余保持原样。
-        if self._is_mfa_host(alias) or self._pending_mfa is not None:
-            dlg = _MfaLoginDialog(self, alias=alias, reauth=True,
-                                  prompt=prompt, echo=echo)
-            ok = dlg.exec() == QDialog.DialogCode.Accepted
-            text = dlg.code() if ok else ""
+        alias, prompt, echo = request['alias'], request['prompt'], request['echo']
+        mfa_prompt = prompt is not None and (self._is_mfa_host(alias) or self._pending_mfa is not None)
+        if mfa_prompt:
+            dialog = _MfaLoginDialog(self, alias=alias, reauth=True, prompt=prompt, echo=echo)
         else:
-            text, ok = QInputDialog.getText(
-                self, t("remote.interactive_title"),
-                t("remote.interactive_prompt", host=alias, prompt=prompt),
-                QLineEdit.EchoMode.Normal if echo else QLineEdit.EchoMode.Password,
-            )
-        holder['value'] = text if ok else None
-        holder['done'].set()
-        # 只有密码类回答按 alias 缓存（供 SSH 终端 tab 自动回填）；
-        # OTP 验证码是一次性的，绝不缓存
-        if ok and text and looks_like_password_prompt(prompt):
-            self._cached_passwords[alias] = text
+            dialog = QInputDialog(self)
+            dialog.setWindowTitle(t("remote.password_title" if prompt is None else "remote.interactive_title"))
+            dialog.setLabelText(t("remote.password_prompt", host=alias) if prompt is None
+                                else t("remote.interactive_prompt", host=alias, prompt=prompt))
+            dialog.setTextEchoMode(QLineEdit.EchoMode.Normal if echo else QLineEdit.EchoMode.Password)
+        request['dialog'] = dialog
+        accepted = dialog.exec() == QDialog.DialogCode.Accepted
+        if not request['done'].is_set() and request['session'] is self._session:
+            if accepted:
+                request['value'] = dialog.code() if mfa_prompt else dialog.textValue()
+            else:
+                self._auth_cancelled = True
+            request['done'].set()
+        request.pop('dialog', None)
+        if not sip.isdeleted(dialog):
+            dialog.deleteLater()
 
-    def get_cached_password(self, alias: str) -> Optional[str]:
-        """返回某主机此前在「Password Required」里输入过的密码（无则 None）。
-        供主窗口打开 SSH 终端时自动回填，避免二次输入。"""
-        return self._cached_passwords.get(alias)
+    def get_cached_password(self, host: HostConfig) -> Optional[str]:
+        sess = self._session
+        if (sess is not None and sess.host_config.credential_key == host.credential_key
+                and hasattr(sess, 'verified_password')):
+            password = sess.verified_password()
+            if password:
+                return password
+        return self._cached_passwords.get(host.credential_key)
 
-    def prime_cached_password(self, alias: str, password: Optional[str]):
-        """预置某主机的密码（内存）。用于「扩展远程终端到新窗口」时把原窗口
-        已缓存的密码带给新窗口的 Remote 面板，避免自动连接 SFTP 时再次弹框。"""
-        if alias and password:
-            self._cached_passwords[alias] = password
+    def prime_cached_password(self, host: HostConfig, password: Optional[str]):
+        if password:
+            self._cached_passwords[host.credential_key] = password
+
+    def _on_recovery_finished(self, sess, error):
+        if sess is not self._session or sess is not self._recovering_session:
+            return
+        self._recovering_session = None
+        self._subtitle_label.setText(sess.host_config.alias)
+        if error:
+            if not self._auth_cancelled:
+                QMessageBox.warning(self, t("remote.connect_failed_title"), error)
+            return
+        self._show_tree_view()
+        self._populate_tree_root(restoring=True)
 
     def _on_host_key_degraded(self, reason: str):
         """known_hosts 加载失败 → MITM 拦截降级，非模态警告横幅提示用户。"""
@@ -3380,6 +3396,9 @@ class RemoteExplorerPanel(QWidget, explorer_common.TransferJobHost):
     def _on_session_connected(self, sess: SSHSession):
         if sess is not self._session:
             return
+        self._connecting_session = None
+        self._mfa_reuse_attempt = False
+        restore_path, self._restore_path = self._restore_path, None
         self._subtitle_label.setText(sess.host_config.alias)
         self._disconnect_btn.show()
         self._hosts_btn.show()
@@ -3389,13 +3408,15 @@ class RemoteExplorerPanel(QWidget, explorer_common.TransferJobHost):
         # 若为该主机设过默认启动目录就跳过去，否则回 home
         # （目录若已失效，_populate_tree_root 的 listdir 会通过 _error_signal 提示）
         default_dir = self._get_default_dir(sess.host_config.alias)
-        self._current_path = default_dir or sess.home()
+        self._current_path = restore_path or default_dir or sess.home()
         self._set_path_bar(self._current_path)
-        self._populate_tree_root()
+        if restore_path:
+            self._populate_tree_root(restoring=True)
+        else:
+            self._populate_tree_root()
         self._auto_refresh_timer.start()
         # 记住最近连上的 host，供"断线后一键重连"使用
         self._last_connected_host = sess.host_config
-        self._last_connected_cwd = self._current_path
         # 认证过程中真的要过一次性动态码 → 记住这台主机走 MFA，下次直接弹
         # MFA 登录框先收码（用户不必自己去菜单里选）
         otp_host = False
@@ -3418,12 +3439,15 @@ class RemoteExplorerPanel(QWidget, explorer_common.TransferJobHost):
         self._auto_apply_forwards(sess.host_config)
         # 通知主窗口：可以开一个 SSH 终端 tab 进去。MFA 登录时用户没勾"同时开
         # 终端"就不开——终端是另一条连接，会再要一次动态码。
-        if self._mfa_open_terminal:
+        if self._mfa_open_terminal and not restore_path:
             self.host_connected.emit(sess.host_config)
 
     def _on_session_connect_failed(self, sess: SSHSession, msg: str):
         if sess is not self._session:
             return
+        self._connecting_session = None
+        if hasattr(sess, 'verified_password'):
+            self.prime_cached_password(sess.host_config, sess.verified_password())
         self._clear_pending_mfa()
         self._idle_timer.stop()
         # 丢弃的会话要真正关掉：否则每次失败留一个空闲 executor 线程和 QObject
@@ -3443,29 +3467,41 @@ class RemoteExplorerPanel(QWidget, explorer_common.TransferJobHost):
             self._add_btn.show()
             self._reload_btn.show()
             self._hosts_btn.hide()
+            restore_path = self._restore_path
             self._mfa_login(host, allow_reuse=False)
+            if self._connecting_session is not None and self._session.host_config.credential_key == host.credential_key:
+                self._restore_path = restore_path
             return
-        QMessageBox.warning(
-            self, t("remote.connect_failed_title"),
-            t("remote.connect_failed_msg", host=sess.host_config.alias, error=msg),
-        )
         self._subtitle_label.setText("")
         self._add_btn.show()
         self._reload_btn.show()
         self._hosts_btn.hide()
         self._session = None
+        if self._auth_cancelled:
+            return
+        QMessageBox.warning(
+            self, t("remote.connect_failed_title"),
+            t("remote.connect_failed_msg", host=sess.host_config.alias, error=msg),
+        )
 
-    def _disconnect(self):
+    def _disconnect(self, *, forget=True):
         # 取消独立搜索通道及 SFTP 回退链，并停止防抖。
         self._search_gen += 1
         self._search_timer.stop()
         self._exit_search()
         # 还在等密码/动态码答复的工作线程先放走（它们没阻塞在 socket 上，
         # 关 socket 对它们无效）
+        sess, self._session = self._session, None
+        self._connecting_session = self._recovering_session = None
+        self._restore_path = None
+        self._last_connected_host = None
+        self._top_level_gen += 1
         self._cancel_pending_prompts()
-        if self._session is not None:
+        if sess is not None:
+            if not forget and hasattr(sess, 'verified_password'):
+                self.prime_cached_password(sess.host_config, sess.verified_password())
             try:
-                self._session.disconnect()
+                sess.disconnect()
             except Exception as e:
                 logger.debug(f"[RemoteExplorerPanel] disconnect failed: {e}")
             self._session = None
@@ -3474,7 +3510,8 @@ class RemoteExplorerPanel(QWidget, explorer_common.TransferJobHost):
         self._auto_refresh_fingerprints.clear()
         self._auto_refresh_pending = 0
         # 断开即清空内存里的密码缓存与未用完的动态码，缩短敏感数据驻留时间
-        self._cached_passwords.clear()
+        if forget:
+            self._cached_passwords.clear()
         self._clear_pending_mfa()
         self._stack.setCurrentWidget(self._hosts_page)
         self._tree.clear()
@@ -3485,29 +3522,29 @@ class RemoteExplorerPanel(QWidget, explorer_common.TransferJobHost):
         self._disconnect_btn.hide()
 
     def closeEvent(self, event):
-        """窗口被销毁时关掉 SSH 会话，避免后台线程在 panel 已销毁后还回调
-        Qt slot → C++ 侧 use-after-free。
-        注意：直接 disconnect() 会阻塞最多 5 秒（paramiko 关 sftp 走 5s timeout）。
-        在 closeEvent 里阻塞会让窗口关闭看起来卡死。这里把 session 引用先摘下
-        来交给一个 daemon 线程异步关闭。
-        """
-        self._search_gen += 1
-        self._search_timer.stop()
-        self._cancel_pending_prompts()
-        if self._session is not None:
-            sess = self._session
-            self._session = None
-            def _bg_disconnect():
-                try:
-                    sess.disconnect()
-                except Exception as e:
-                    logger.warning(f"[RemoteExplorerPanel] async disconnect failed: {e}")
-            threading.Thread(target=_bg_disconnect, name="ssh-bg-disconnect", daemon=True).start()
+        self._disconnect()
         super().closeEvent(event)
 
     # ---------- 文件树 ----------
 
-    def _populate_tree_root(self):
+    def _on_root_loaded(self, sess, gen, entries):
+        if sess is self._session and gen == self._top_level_gen:
+            self._top_level_ready.emit(entries)
+
+    def _on_root_failed(self, sess, gen, error, restoring):
+        if sess is not self._session or gen != self._top_level_gen:
+            return
+        if restoring and isinstance(error, (FileNotFoundError, NotADirectoryError)):
+            home = sess.home()
+            if self._current_path != home:
+                self._current_path = home
+                self._set_path_bar(home)
+                self._populate_tree_root()
+                self.error_occurred.emit(t("remote.restored_home"))
+                return
+        self._toast_error(str(error))
+
+    def _populate_tree_root(self, *, restoring=False):
         """加载当前路径的内容到顶层（不再包一层 path 节点）
 
         和本地 Explorer 行为一致：path 在路径栏里显示，文件/目录直接平铺在树根。
@@ -3543,13 +3580,15 @@ class RemoteExplorerPanel(QWidget, explorer_common.TransferJobHost):
                 entries: list[RemoteEntry] = f.result()
             except Exception as e:
                 # 在 SSH 工作线程里只能通过信号回 UI 线程，QTimer 在这里不灵
-                self._error_signal.emit(str(e))
+                if not sip.isdeleted(self):
+                    self._root_failed.emit(sess, gen, e, restoring)
                 return
             # 其间又发起过新的 populate（换目录/再刷新）→ 旧结果作废，
             # 否则慢的那个后到会把新目录的内容盖掉
-            if gen != self._top_level_gen:
+            if sess is not self._session or gen != self._top_level_gen:
                 return
-            self._top_level_ready.emit(entries)
+            if not sip.isdeleted(self):
+                self._root_loaded.emit(sess, gen, entries)
         fut.add_done_callback(on_done)
 
     # ---- 隐藏文件显示开关（持久化到共享配置） ----
@@ -3885,7 +3924,7 @@ class RemoteExplorerPanel(QWidget, explorer_common.TransferJobHost):
 
     def _auto_refresh_tick(self):
         """每 10s 触发一次：拉根 + 已展开目录，做指纹对比 + 增量更新"""
-        if self._session is None or not self._session.is_connected():
+        if self._recovering_session is not None or self._session is None or not self._session.is_connected():
             return
         if not self.isVisible():
             return  # 看不见的 panel 不浪费带宽
@@ -6353,10 +6392,9 @@ class RemoteExplorerPanel(QWidget, explorer_common.TransferJobHost):
     def _toast_error(self, msg: str):
         self.error_occurred.emit(msg)
         # 断线类错误 → 弹"重连/取消"对话框，而不是冷冰冰的 OK
-        if (self._looks_like_disconnect(msg)
-                and self._last_connected_host is not None
-                and not self._reconnect_dialog_open):
-            self._prompt_reconnect(msg)
+        if self._looks_like_disconnect(msg) and self._last_connected_host is not None:
+            if not self._reconnect_dialog_open and self._recovering_session is None:
+                self._prompt_reconnect(msg)
             return
         QMessageBox.warning(self, t("remote.op_failed_title"), msg)
 
@@ -6385,23 +6423,12 @@ class RemoteExplorerPanel(QWidget, explorer_common.TransferJobHost):
             self._reconnect_to(host)
 
     def _reconnect_to(self, host: HostConfig):
-        """复用 _connect_to，但断线前若停在某个子目录则尝试还原回去"""
-        saved_cwd = self._last_connected_cwd
-        self._connect_to(host)
-        # _connect_to 内部会在 _on_session_connected 跳到 home()；
-        # 这里挂一个 one-shot：等下次 connected 时把目录还原回旧位置。
-        if not saved_cwd:
-            return
         sess = self._session
-        if sess is None:
+        if sess is None or sess.host_config.credential_key != host.credential_key:
             return
-        def restore_once():
-            try:
-                sess.connected.disconnect(restore_once)
-            except Exception:
-                logger.debug("restore_once: suppressed exception", exc_info=True)
-            if sess is self._session and saved_cwd:
-                self._current_path = saved_cwd
-                self._set_path_bar(saved_cwd)
-                self._populate_tree_root()
-        sess.connected.connect(restore_once)
+        if isinstance(sess, ssh_control.ControlMasterSession):
+            self._mfa_login(host)
+        else:
+            self._connect_to(host)
+            if sess.is_alive() and self._recovering_session is None:
+                self._populate_tree_root(restoring=True)

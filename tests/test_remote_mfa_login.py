@@ -23,6 +23,7 @@ from pathlib import Path
 from unittest import mock
 
 import paramiko
+from PyQt6.QtWidgets import QDialog
 
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
@@ -243,7 +244,7 @@ class TestReconnectPolicy(unittest.TestCase):
     def test_otp_host_reconnects_only_once(self):
         """OTP 主机重试 3 次 = 连弹 3 个动态码框，只许试一次。"""
         sess, _host = _make_session()
-        sess._auth_secrets['otp-host'] = {'needs_otp': True}
+        sess._auth_secrets[sess.host_config.credential_key] = {'needs_otp': True}
         self.assertEqual(self._count_attempts(sess, OSError("net down")), 1)
 
     def test_plain_host_keeps_retrying(self):
@@ -299,7 +300,7 @@ class _FakeSession:
         self.disconnect_calls += 1
 
 
-class _FakeMfaDialog:
+class _FakeMfaDialog(QDialog):
     """替身 MFA 对话框：记录构造参数，直接返回预设答案（不进事件循环）。"""
 
     calls: list = []
@@ -308,6 +309,7 @@ class _FakeMfaDialog:
     accepted = True
 
     def __init__(self, *_args, **kwargs):
+        super().__init__()
         type(self).calls.append(kwargs)
 
     @classmethod
@@ -744,8 +746,8 @@ class TestMfaDialog(_PanelBase):
         self.assertEqual(panel._mfa_keep_secs, 3600)
         self.assertFalse(panel._mfa_open_terminal)
         self.assertTrue(panel._is_mfa_host('bastion'))
-        # 密码可缓存（SSH 终端自动回填），动态码不行
-        self.assertEqual(panel.get_cached_password('bastion'), 'pw')
+        # 尚未认证的密码和动态码都不能进入复用缓存。
+        self.assertIsNone(panel.get_cached_password(self._host()))
         self.assertNotIn('123456', str(panel._cached_passwords))
 
     def test_cancelled_login_connects_nothing(self):

@@ -287,6 +287,11 @@ class HostConfig:
     proxy_jump: Optional[str] = None     # ProxyJump 跳板机别名
     raw: dict = field(default_factory=dict)  # 原始 ssh_config dict
 
+    @property
+    def credential_key(self):
+        return (self.alias, self.hostname.lower(), self.port, self.user or getpass.getuser(),
+                self.proxy_jump or "")
+
 
 def parse_ssh_config(path: Optional[str] = None) -> list[HostConfig]:
     """读 ~/.ssh/config，返回所有非通配符主机的解析后配置
@@ -833,6 +838,10 @@ class _NoStdinTransport(paramiko.Transport):
     SSHSession._auth_keyboard_interactive 用 GUI 回调把验证码问完。
     """
 
+    def auth_password(self, username, password, event=None, fallback=True):
+        # Route keyboard-interactive through our prompt-aware handler, including OTP.
+        return super().auth_password(username, password, event=event, fallback=False)
+
     def auth_interactive_dumb(self, username, handler=None, submethods=""):
         raise paramiko.AuthenticationException(
             "keyboard-interactive prompt requires GUI (no stdin)")
@@ -860,6 +869,7 @@ class SSHSession(QObject):
         self._executor = ThreadPoolExecutor(max_workers=1, thread_name_prefix=f"ssh-{host_config.alias}")
         self._lock = threading.Lock()  # serializes paramiko calls just in case
         self._reconnect_lock = threading.Lock()  # 保证同一时刻只有一个重连在进行
+        self._closed = threading.Event()
         self._was_connected = False               # 曾成功连接过（区分「从未连上」和「断线」）
         # 认证上下文：初次连接用的 provider + 成功过的密码/口令缓存（按 alias），
         # 重连时优先复用缓存，避免在后台重连流程里再次弹框
@@ -872,7 +882,7 @@ class SSHSession(QObject):
         # 交互认证；不置这个标志的话 agent 里的 key 会被一把把试过去，
         # MaxAuthTries（通常 3）瞬间打满、服务器直接掐线，动态码框都轮不到弹。
         self._prefer_interactive = False
-        self._auth_secrets: dict[str, dict[str, str]] = {}
+        self._auth_secrets: dict[tuple, dict] = {}
         self._home: Optional[str] = None
         self._host_key_degraded = False  # known_hosts 加载失败 → MITM 拦截降级
         # 路径 → (timestamp, entries) 的 listdir 缓存，节省重复网络往返
@@ -898,7 +908,7 @@ class SSHSession(QObject):
         不该在后台静默重试，UI 也该用"重新 MFA 登录"这种明确的交互去承接。
         """
         return bool(self._auth_secrets.get(
-            self.host_config.alias, {}).get("needs_otp"))
+            self.host_config.credential_key, {}).get("needs_otp"))
 
     def connect_async(self, password_provider: Optional[Callable[[str], Optional[str]]] = None,
                       passphrase_provider: Optional[Callable[[str], Optional[str]]] = None,
@@ -928,7 +938,18 @@ class SSHSession(QObject):
         self._passphrase_provider = passphrase_provider
         self._interactive_provider = interactive_provider
         self._prefer_interactive = bool(prefer_interactive)
-        self._establish()
+        try:
+            self._establish()
+        finally:
+            if self._closed.is_set():
+                self._teardown_connection()
+                self._auth_secrets.clear()
+
+    def verified_password(self):
+        return self._auth_secrets.get(self.host_config.credential_key, {}).get("password")
+
+    def seed_verified_password(self, password):
+        self._auth_secrets.setdefault(self.host_config.credential_key, {})["password"] = password
 
     def _open_sftp_bounded(self, client: paramiko.SSHClient) -> paramiko.SFTPClient:
         """打开 SFTP 通道，带整体超时。
@@ -1012,7 +1033,7 @@ class SSHSession(QObject):
         host key 策略、认证回退（agent/key → passphrase → password）对目标机
         和跳板机一视同仁；成功用过的密码/口令按 alias 缓存，供自动重连复用。
         """
-        cached = self._auth_secrets.get(cfg.alias, {})
+        cached = self._auth_secrets.get(cfg.credential_key, {})
 
         # 首次连接（本会话无任何认证记忆）且为直连时：先零凭据探测服务器
         # 允许的认证方式。keyboard-interactive 专用的堡垒机（MFA/OTP）根本
@@ -1032,33 +1053,36 @@ class SSHSession(QObject):
                 # 试密钥纯粹是在替对端把 MaxAuthTries 消耗光（然后掐线）。
                 kbd_first = (self._prefer_interactive and allowed is not None
                              and "keyboard-interactive" in allowed)
-                if allowed is None:
-                    done_client = p_client  # auth_none 直接通过（免认证服务器）
-                elif kbd_first or "publickey" not in allowed:
-                    logger.info(
-                        "[SSH] %s: server allows %s (prefer_interactive=%s), "
-                        "skipping key attempts entirely",
-                        cfg.alias, allowed, self._prefer_interactive)
-                    if "keyboard-interactive" in allowed:
-                        done_client = self._auth_keyboard_interactive(
-                            p_client, cfg, None)
-                    if (done_client is None and "password" in allowed
-                            and self._password_provider is not None):
-                        pwd = self._password_provider(cfg.alias)
-                        if pwd is not None:
-                            p_transport.auth_password(
-                                cfg.user or getpass.getuser(), pwd)
-                            self._auth_secrets.setdefault(
-                                cfg.alias, {})["password"] = pwd
+                try:
+                    if allowed is None:
+                        done_client = p_client  # auth_none 直接通过（免认证服务器）
+                    elif kbd_first or "publickey" not in allowed:
+                        logger.info(
+                            "[SSH] %s: server allows %s (prefer_interactive=%s), "
+                            "skipping key attempts entirely",
+                            cfg.alias, allowed, self._prefer_interactive)
+                        if "keyboard-interactive" in allowed:
+                            done_client = self._auth_keyboard_interactive(
+                                p_client, cfg, None)
+                        if (done_client is None and "password" in allowed
+                                and self._password_provider is not None):
+                            pwd = self._password_provider(cfg.alias)
+                            if pwd is None:
+                                raise paramiko.AuthenticationException("authentication cancelled by user")
+                            p_transport.auth_password(cfg.user or getpass.getuser(), pwd)
+                            self._auth_secrets.setdefault(cfg.credential_key, {})["password"] = pwd
                             done_client = p_client
-                if done_client is not None:
-                    self._auth_secrets.setdefault(cfg.alias, {}).setdefault(
-                        "auth_flow", "clean_interactive")
-                    self._persist_new_host_key(done_client, p_policy)
-                    dt = done_client.get_transport()
-                    if dt is not None:
-                        dt.set_keepalive(KEEPALIVE_INTERVAL)
-                    return done_client
+                    if done_client is not None:
+                        self._auth_secrets.setdefault(cfg.credential_key, {}).setdefault(
+                            "auth_flow", "clean_interactive")
+                        self._persist_new_host_key(done_client, p_policy)
+                        dt = done_client.get_transport()
+                        if dt is not None:
+                            dt.set_keepalive(KEEPALIVE_INTERVAL)
+                        return done_client
+                except Exception:
+                    p_client.close()
+                    raise
                 # 探测连接用不上（publickey 可用 / 交互走不通）→ 原有流程
                 try:
                     p_client.close()
@@ -1136,11 +1160,18 @@ class SSHSession(QObject):
                     raise
                 connect_kwargs["passphrase"] = phrase
                 client.connect(**connect_kwargs)
-                self._auth_secrets.setdefault(cfg.alias, {})["passphrase"] = phrase
+                self._auth_secrets.setdefault(cfg.credential_key, {})["passphrase"] = phrase
             except paramiko.BadHostKeyException:
                 # 主机密钥变更（疑似 MITM）：绝不降级到交互认证，原样拦截
                 raise
-            except paramiko.AuthenticationException:
+            except paramiko.AuthenticationException as exc:
+                if "password" in connect_kwargs and not isinstance(exc, paramiko.BadAuthenticationType):
+                    transport = client.get_transport()
+                    if not transport or not transport.is_active() or "timeout" in str(exc).lower():
+                        raise
+                    cached.pop("password", None)
+                    cached.pop("auth_flow", None)
+                    connect_kwargs.pop("password", None)
                 # 先试 keyboard-interactive：OTP/2FA 主机（验证码多步提示，
                 # 含 key 部分成功后的第二因子）只有这条路能过；纯密码主机若
                 # 开着 PAM 交互式认证也能走通。走不通再回落单密码。
@@ -1157,7 +1188,7 @@ class SSHSession(QObject):
                     connect_kwargs["allow_agent"] = False
                     connect_kwargs["look_for_keys"] = False
                     client.connect(**connect_kwargs)
-                    self._auth_secrets.setdefault(cfg.alias, {})["password"] = pwd
+                    self._auth_secrets.setdefault(cfg.credential_key, {})["password"] = pwd
             except paramiko.SSHException:
                 # 如「No authentication methods available」（clean_interactive
                 # 复现路径下没有可自动尝试的凭据）：transport 已建好且存活时
@@ -1178,7 +1209,7 @@ class SSHSession(QObject):
 
         # 记住成功路径（未被交互路径标记过的记为 default），会话内重连时
         # 不再重复零凭据探测
-        self._auth_secrets.setdefault(cfg.alias, {}).setdefault(
+        self._auth_secrets.setdefault(cfg.credential_key, {}).setdefault(
             "auth_flow", "default")
 
         # keep-alive：定期发 transport 层心跳，防止 NAT/防火墙把空闲连接掐掉
@@ -1230,7 +1261,7 @@ class SSHSession(QObject):
             if already_authed:
                 return client  # 单 IdentityFile 直接认证通过（无需第二因子）
         username = cfg.user or getpass.getuser()
-        secrets = self._auth_secrets.setdefault(cfg.alias, {})
+        secrets = self._auth_secrets.setdefault(cfg.credential_key, {})
         # cached_password_used：本次认证是否已经消费过密码（缓存自动作答或用户
         # 刚输入）。既防止错误的缓存密码被反复自动作答打满 MaxAuthTries，也让
         # 服务器再次要密码时能落回用户弹框。
@@ -1238,7 +1269,7 @@ class SSHSession(QObject):
         # 它是一次性的，缓存不了 —— 会话断线后重连必须再找人要一次，所以要
         # 记住这件事（见 used_otp_auth / _reconnect 的单次尝试策略）。
         state = {"cached_password_used": False, "cancelled": False,
-                 "password_candidate": None, "asked_otp": False}
+                 "password_candidate": None, "asked_otp": False, "sent_cached": False}
 
         def _ask(prompt: str, echo: bool) -> Optional[str]:
             if self._interactive_provider is not None:
@@ -1253,6 +1284,7 @@ class SSHSession(QObject):
                         and not state["cached_password_used"]
                         and secrets.get("password") is not None):
                     state["cached_password_used"] = True
+                    state["sent_cached"] = True
                     answers.append(secrets["password"])
                     continue
                 ans = _ask(text, bool(echo))
@@ -1302,6 +1334,13 @@ class SSHSession(QObject):
                     transport_dead = not transport.is_active()
                 except Exception:
                     transport_dead = True
+                if (state["sent_cached"] and not state["asked_otp"] and not transport_dead
+                        and isinstance(exc, paramiko.AuthenticationException)
+                        and "timeout" not in str(exc).lower()):
+                    secrets.pop("password", None)
+                    state["sent_cached"] = False
+                    if state["password_candidate"] is None:
+                        continue  # Ask for the replacement on this authenticated-host transport.
                 if transport_dead and not attempted_clean and sock is None:
                     # 首次 connect 的多 key 尝试已把 MaxAuthTries 消耗殆尽，
                     # 我们的交互请求成了压死连接的最后一根稻草（表现为
@@ -1599,6 +1638,8 @@ class SSHSession(QObject):
         改为直接走 abort()：它绕开 executor 关 transport/socket，瞬间返回，
         同时让卡在 recv 上的 worker 立即抛错退出，是更彻底的清理。
         """
+        self._closed.set()
+        self._auth_secrets.clear()
         self._was_connected = False   # 阻止 abort 之后的自动重连
         try:
             self.abort()
@@ -1662,10 +1703,12 @@ class SSHSession(QObject):
     def is_alive(self) -> bool:
         """底层 transport 是否仍然存活（不额外发请求）"""
         client = self._client
-        if client is None or self._sftp is None:
+        sftp = self._sftp
+        if client is None or sftp is None:
             return False
         transport = client.get_transport()
-        return bool(transport is not None and transport.is_active())
+        return bool(transport is not None and transport.is_active()
+                    and not sftp.get_channel().closed)
 
     def _should_reconnect(self, exc: BaseException) -> bool:
         """判断一次操作失败是否应该走自动重连。
@@ -1703,7 +1746,22 @@ class SSHSession(QObject):
         else:
             self._last_reconnect_failure = None
 
-    def _reconnect(self):
+    def recover_async(self):
+        requested = time.monotonic()
+
+        def recover():
+            if self._last_reconnect_failure and self._last_reconnect_failure >= requested:
+                raise RuntimeError(t("ssh.reconnect_failed"))
+            try:
+                self._reconnect(attempts=1)
+            except Exception:
+                self._last_reconnect_failure = time.monotonic()
+                raise
+            self._last_reconnect_failure = None
+
+        return self.submit(recover)
+
+    def _reconnect(self, attempts=None):
         """自动重连：指数退避，最多 RECONNECT_MAX_ATTEMPTS 次。
 
         用 _reconnect_lock 保证同一时刻只有一个重连在跑（操作本身都在单线程
@@ -1717,11 +1775,17 @@ class SSHSession(QObject):
             # MFA/OTP 主机：每次重连都要人手输一个新码，重试 3 次 = 连弹 3 个
             # 动态码框（第 2、3 个还必然发生在用户已经放弃之后）。只试一次，
             # 把"要不要再登一次"交还给用户。
-            max_attempts = 1 if self.used_otp_auth() else RECONNECT_MAX_ATTEMPTS
+            max_attempts = 1 if self.used_otp_auth() else (attempts or RECONNECT_MAX_ATTEMPTS)
             for attempt in range(max_attempts):
+                if self._closed.is_set():
+                    raise RuntimeError("SSH session closed")
                 self._teardown_connection()
                 try:
                     self._establish()
+                    if self._closed.is_set():
+                        self._teardown_connection()
+                        self._auth_secrets.clear()
+                        raise RuntimeError("SSH session closed")
                     self.invalidate_cache()  # 断线期间远端可能已变化
                     return
                 except paramiko.AuthenticationException as e:

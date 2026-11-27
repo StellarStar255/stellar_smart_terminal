@@ -121,7 +121,7 @@ class TestPanelGate(unittest.TestCase):
              mock.patch('remote_explorer_widget.QInputDialog.getText', return_value=('pw!', True)):
             self.assertTrue(self.panel._ensure_master_interactive(host))
         self.assertEqual(calls, ['', 'pw!'])
-        self.assertEqual(self.panel.get_cached_password('pwhost'), 'pw!')
+        self.assertEqual(self.panel.get_cached_password(host), 'pw!')
 
 
 if __name__ == '__main__':

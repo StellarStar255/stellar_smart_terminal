@@ -127,10 +127,9 @@ class TestPromptWaitIsBounded(_PanelBase):
         self.assertIsNone(out.get('v'))
 
 
-class TestMfaPasswordSurvivesReconnect(_PanelBase):
-    def test_password_cached_after_switching_hosts(self):
-        """已连着 A 时对 B 做 MFA 登录：_connect_to 先 _disconnect（清缓存），
-        刚从登录框拿到的密码必须在之后仍可取到。"""
+class TestUnverifiedMfaPassword(_PanelBase):
+    def test_pending_password_not_cached_after_switching_hosts(self):
+        """切到 B 后，提交给 MFA 的密码须等服务器验证成功才可复用。"""
         import remote_explorer_widget as rew
         panel = self._panel()
         panel._session = _FakeSession('other')
@@ -163,7 +162,7 @@ class TestMfaPasswordSurvivesReconnect(_PanelBase):
             panel._connect_to(self._host('bastion'), mfa_answers={
                 'alias': 'bastion', 'code': '123456', 'code_used': False,
                 'password': 'hunter2', 'password_used': False})
-        self.assertEqual(panel.get_cached_password('bastion'), 'hunter2')
+        self.assertIsNone(panel.get_cached_password(created[0].host_config))
         self.assertTrue(created)
 
 
