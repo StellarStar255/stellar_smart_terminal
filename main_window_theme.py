@@ -1065,7 +1065,11 @@ class ThemeMixin:
         ):
             _btn = getattr(self, _name, None)
             if _btn is not None:
-                _btn.setStyleSheet(brand_button_qss(t, _bg, _hover, text_color=t['text']))
+                style = brand_button_qss(t, _bg, _hover, text_color=t['text'])
+                _btn.setStyleSheet(style + f"QPushButton:disabled {{ background-color: {t['bg_lighter']}; color: {t['text_dim']}; }}")
+
+        if self.tab_widget.count() == 0:
+            self.status_indicator.setStyleSheet(f"color: {t['text_dim']}; font-size: 16px;")
 
         # LLM 配置按钮（紫底白帽子）：浅色主题中性底 + 强调色帽子
         _llm = getattr(self, 'llm_config_btn', None)

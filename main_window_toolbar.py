@@ -373,7 +373,7 @@ class ToolbarMixin:
                 background-color: #9b4a4a;
             }
         """)
-        self.close_tab_btn.clicked.connect(self._close_current_tab)
+        self.close_tab_btn.clicked.connect(lambda: self._request_close_tab(self.tab_widget.currentIndex()))
 
         # --- 面板与编辑器组 ---
         self.explorer_toggle_btn = QPushButton(t("toolbar.explorer"))

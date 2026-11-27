@@ -1180,6 +1180,7 @@ TRANSLATIONS = {
     "log.clear": {"zh": "清空", "en": "Clear", "fr": "Effacer"},
 
     # ===== main_window.py - 底部状态栏 =====
+    "status.no_open_terminal": {"zh": "无打开的终端", "en": "No open terminals", "fr": "Aucun terminal ouvert"},
     "status.not_started": {"zh": "未启动", "en": "Not Started", "fr": "Non démarré"},
     "status.entries": {"zh": "记录: {n}", "en": "Entries: {n}", "fr": "Entrées : {n}"},
     "status.files": {"zh": "文件: {n}", "en": "Files: {n}", "fr": "Fichiers : {n}"},
@@ -1276,6 +1277,7 @@ TRANSLATIONS = {
     "dir.current": {"zh": "当前: {cwd}", "en": "Current: {cwd}", "fr": "Actuel : {cwd}"},
 
     # ===== main_window.py - Tab & 终端 =====
+    "terminal.new_in_current_dir": {"zh": "在当前目录新建终端", "en": "New Terminal in Current Directory", "fr": "Ouvrir un terminal dans le dossier actuel"},
     "terminal.default_name": {"zh": "终端 {n}", "en": "Terminal {n}", "fr": "Terminal {n}"},
 
     # ===== main_window.py - 快速启动搜索 =====

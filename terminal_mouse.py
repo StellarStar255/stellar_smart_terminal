@@ -31,7 +31,7 @@ from PyQt6.QtGui import (
     QAction, QActionGroup, QColor, QPainter, QDesktopServices, QDragEnterEvent, QDropEvent, QKeySequence, QMouseEvent
 )
 from PyQt6.QtWidgets import (
-    QAbstractItemView, QApplication, QListWidget, QListWidgetItem, QMenu, QStyle, QTabWidget, QWidgetAction,
+    QAbstractItemView, QApplication, QListWidget, QListWidgetItem, QMenu, QPushButton, QStyle, QTabWidget, QWidgetAction,
 )
 from command_palette import Command, CommandSearchEdit, matching_commands
 from i18n import t
@@ -467,6 +467,36 @@ class TerminalMenuMixin:
         commands.itemActivated.connect(activate)
 
 class TerminalTabWidget(TerminalMenuMixin, QTabWidget):
+    def __init__(self, parent=None):
+        super().__init__(parent)
+        self.empty_terminal_button = QPushButton(self)
+
+    def refresh_empty_button(self, shortcut):
+        label = t("terminal.new_in_current_dir")
+        keys = shortcut.toString(QKeySequence.SequenceFormat.NativeText)
+        self.empty_terminal_button.setText(f"{label}  ({keys})" if keys else label)
+        self.empty_terminal_button.adjustSize()
+        self._center_empty_button()
+
+    def _center_empty_button(self):
+        button = self.empty_terminal_button
+        button.move((self.width() - button.width()) // 2,
+                    (self.height() - button.height()) // 2)
+
+    def resizeEvent(self, event):
+        super().resizeEvent(event)
+        self._center_empty_button()
+
+    def tabInserted(self, index):
+        super().tabInserted(index)
+        self.empty_terminal_button.hide()
+
+    def tabRemoved(self, index):
+        super().tabRemoved(index)
+        if self.count() == 0:
+            self.empty_terminal_button.show()
+            self.empty_terminal_button.raise_()
+
     def contextMenuEvent(self, event):
         if self.count():
             super().contextMenuEvent(event)

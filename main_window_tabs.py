@@ -121,6 +121,8 @@ class TabSplitMixin:
         if external_session and any(t.is_running() for t in terminals):
             self.current_session = external_session
             self._update_running_state(True)
+        elif getattr(self, "_session_status_key", None) == "status.no_open_terminal":
+            self._update_running_state(any(term.is_running() for term in terminals))
 
         # 工作区快照：标签结构变化，限流补写
         self._checkpoint_workspace()
@@ -153,11 +155,11 @@ class TabSplitMixin:
         sender = self.sender()
         for i in range(self.tab_widget.count()):
             if self.tab_widget.tabBar().tabButton(i, QTabBar.ButtonPosition.RightSide) is sender:
-                self._close_tab(i)
+                self._request_close_tab(i)
                 return
         # 如果找不到，尝试使用原始索引
         if index < self.tab_widget.count():
-            self._close_tab(index)
+            self._request_close_tab(index)
 
     def _on_tab_moved(self, _from_idx, _to_idx):
         """拖动标签重排后重建索引映射。
@@ -707,6 +709,24 @@ class TabSplitMixin:
         if self.tab_widget.count() == 0 and auto_create_new:
             self._new_terminal()
 
+    def _request_close_tab(self, index):
+        """Confirm before a user-initiated close stops the last tab's processes."""
+        if not 0 <= index < self.tab_widget.count():
+            return
+        page = self._synced_tab_splitter(index)
+        if self.tab_widget.count() == 1 and any(
+                term.is_running() or term.is_starting()
+                for term in self.tab_terminals.get(index, [])):
+            reply = QMessageBox.question(
+                self, t("msg.confirm_close_title"), t("msg.confirm_close_last_tab"),
+                QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No,
+                QMessageBox.StandardButton.No,
+            )
+            if reply != QMessageBox.StandardButton.Yes or sip.isdeleted(page):
+                return
+            index = self.tab_widget.indexOf(page)
+        self._close_tab(index)
+
     def _close_current_tab(self):
         """关闭当前标签页"""
         self._close_tab(self.tab_widget.currentIndex())
@@ -733,15 +753,7 @@ class TabSplitMixin:
                 # 有多个分屏，关闭当前选中的分屏
                 self._close_current_split()
             else:
-                if self.tab_widget.count() == 1 and any(term.is_running() for term in terminals):
-                    reply = QMessageBox.question(
-                        self, t("msg.confirm_close_title"), t("msg.confirm_close_last_tab"),
-                        QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No,
-                        QMessageBox.StandardButton.No,
-                    )
-                    if reply != QMessageBox.StandardButton.Yes:
-                        return
-                self._close_tab(idx)
+                self._request_close_tab(idx)
         else:
             reply = QMessageBox.question(
                 self, t("msg.confirm_close_title"), t("msg.confirm_close_window"),
@@ -2526,7 +2538,7 @@ class TabSplitMixin:
 
         # 关闭标签页
         close_action = menu.addAction(t("tab.close"))
-        close_action.triggered.connect(lambda: self._close_tab(tab_index))
+        close_action.triggered.connect(lambda: self._request_close_tab(tab_index))
 
         menu.exec(tab_bar.mapToGlobal(pos))
         self._release_context_menu(menu)

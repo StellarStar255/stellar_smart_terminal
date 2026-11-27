@@ -886,6 +886,7 @@ class MainWindow(ThemeMixin, ToolbarMixin, ConfigMixin, ExplorerPanelMixin,
 
         # 终端标签页容器
         self.tab_widget = TerminalTabWidget()
+        self.tab_widget.empty_terminal_button.clicked.connect(self._new_terminal)
 
         # 使用自定义可分离的标签栏
         self.detachable_tab_bar = DetachableTabBar(self.tab_widget)
@@ -1823,6 +1824,8 @@ class MainWindow(ThemeMixin, ToolbarMixin, ConfigMixin, ExplorerPanelMixin,
             self.addAction(action)
             self.shortcut_actions[action_id] = action
 
+        self.shortcut_actions["new_terminal"].changed.connect(self._refresh_empty_terminal_button)
+        self._refresh_empty_terminal_button()
         self.shortcut_actions["toggle_remote"].changed.connect(self._sync_remote_toggle_tooltip)
         self._sync_remote_toggle_tooltip()
 
@@ -1836,6 +1839,9 @@ class MainWindow(ThemeMixin, ToolbarMixin, ConfigMixin, ExplorerPanelMixin,
         debug_action.setShortcut("Ctrl+Shift+D")
         debug_action.triggered.connect(self._debug_special_chars)
         self.addAction(debug_action)
+
+    def _refresh_empty_terminal_button(self):
+        self.tab_widget.refresh_empty_button(self.shortcut_actions["new_terminal"].shortcut())
 
     def _setup_window_menu(self):
         """兼容旧入口：菜单栏现由 main_window_menus.MenusMixin 统一搭建。"""
@@ -3306,7 +3312,11 @@ class MainWindow(ThemeMixin, ToolbarMixin, ConfigMixin, ExplorerPanelMixin,
 
         # 启动按钮始终可用，运行时点击会自动新建tab
         self.start_btn.setEnabled(True)
+        has_tabs = self.tab_widget.count() > 0
+        running = has_tabs and running
         self.stop_btn.setEnabled(running)
+        for button in (self.split_btn, self.split_v_btn, self.close_split_btn, self.close_tab_btn):
+            button.setEnabled(has_tabs)
         # 预设选择和管理始终可用
         self.preset_combo.setEnabled(True)
         self.manage_preset_btn.setEnabled(True)
@@ -3315,11 +3325,15 @@ class MainWindow(ThemeMixin, ToolbarMixin, ConfigMixin, ExplorerPanelMixin,
             self.status_indicator.setStyleSheet("color: #4ade80; font-size: 16px;")
             self._session_status_key = "status.running"
         else:
-            self.status_indicator.setStyleSheet("color: #ef4444; font-size: 16px;")  # 红色表示已停止
-            self._session_status_key = "status.stopped"
+            color = "#ef4444" if has_tabs else self.THEMES[self.current_theme]["text_dim"]
+            self.status_indicator.setStyleSheet(f"color: {color}; font-size: 16px;")
+            self._session_status_key = "status.stopped" if has_tabs else "status.no_open_terminal"
             self.entries_label.setText(t("status.entries", n=0))
             self.files_label.setText(t("status.files", n=0))
-            self.statusbar.showMessage(t("status.session_stopped"))
+            if has_tabs:
+                self.statusbar.showMessage(t("status.session_stopped"))
+            else:
+                self.statusbar.clearMessage()
             self.current_session = None
         self._translate_session_status()
 
@@ -5364,6 +5378,7 @@ class MainWindow(ThemeMixin, ToolbarMixin, ConfigMixin, ExplorerPanelMixin,
             self.clear_log_btn.setText(t("log.clear"))
 
         # 底部状态栏
+        self._refresh_empty_terminal_button()
         self._translate_session_status()
         if self.current_session:
             self._update_stats()

@@ -25,7 +25,8 @@ os.environ.setdefault('QT_QPA_PLATFORM', 'offscreen')
 
 from PyQt6 import sip
 from PyQt6.QtCore import QEvent, QPoint, Qt
-from PyQt6.QtGui import QCloseEvent, QContextMenuEvent
+from PyQt6.QtGui import QCloseEvent, QContextMenuEvent, QKeySequence
+from PyQt6.QtTest import QTest
 from PyQt6.QtWidgets import QApplication, QMenu, QMessageBox
 
 
@@ -89,6 +90,41 @@ class TestCloseLastTab(_WindowCase):
             start.assert_called_once()
         self.assertEqual(win.tab_widget.count(), 1)
         self.assertIs(win.active_terminal, win.tab_terminals[0][0])
+
+    def test_toolbar_close_and_empty_window_reopen(self):
+        from dialogs import get_terminal_shell
+        from i18n import t
+
+        win = self.win
+        tabs = win.tab_widget
+        button = tabs.empty_terminal_button
+        tools = (win.split_btn, win.split_v_btn, win.close_split_btn, win.close_tab_btn)
+        term = win.terminal
+        term._backend = _fake_backend()
+        with mock.patch.object(QMessageBox, 'question', side_effect=[
+                QMessageBox.StandardButton.No, QMessageBox.StandardButton.Yes]) as question:
+            win.close_tab_btn.click()
+            self.assertIs(win.terminal, term)
+            self.assertTrue(term.is_running())
+            win.close_tab_btn.click()
+            self.assertEqual(question.call_count, 2)
+        self.assertEqual(tabs.count(), 0)
+        self.assertEqual(win.session_label.text(), t("status.no_open_terminal"))
+        self.assertTrue(all(not tool.isEnabled() for tool in tools))
+        self.assertTrue(button.isVisible())
+        self.assertIs(tabs.childAt(button.geometry().center()), button)
+        action = win.shortcut_actions["new_terminal"]
+        action.setShortcut(QKeySequence("Ctrl+Shift+9"))
+        self.assertIn(action.shortcut().toString(QKeySequence.SequenceFormat.NativeText), button.text())
+        action.setShortcut(QKeySequence())
+        self.assertEqual(button.text(), t("terminal.new_in_current_dir"))
+        with mock.patch.object(self.TerminalWidget, 'start_process') as start:
+            QTest.mouseClick(button, Qt.MouseButton.LeftButton)
+            start.assert_called_once_with([get_terminal_shell()], cwd=win._window_cwd)
+        self.assertEqual(tabs.count(), 1)
+        self.assertFalse(button.isVisible())
+        self.assertTrue(all(tool.isEnabled() for tool in tools))
+        self.assertEqual(win.session_label.text(), t("status.running"))
 
     def test_empty_menu_creates_a_shell_only_on_command_selection(self):
         from dialogs import get_terminal_shell
