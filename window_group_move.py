@@ -124,7 +124,11 @@ class GroupMoveSession:
     def _reassert(placed):
         for w, geo, was_max in placed:
             try:
-                if sip.isdeleted(w) or was_max or w.geometry() == geo:
+                if sip.isdeleted(w) or was_max or not w.isVisible():
+                    continue
+                if w.isMaximized() or w.isFullScreen() or w.isMinimized():
+                    continue
+                if w.geometry() == geo:
                     continue
                 # Qt 几何缓存可能与原生窗口脱节，先制造一次真实变化再设回
                 w.resize(geo.width(), max(1, geo.height() - 1))

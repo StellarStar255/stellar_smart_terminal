@@ -555,8 +555,39 @@ class WindowNavigatorPanel(QWidget):
         if move_windows_to_screen([window], screen):
             self._force_refresh()
 
+    @staticmethod
+    def _visible_main_windows(app):
+        # 获取所有 MainWindow 实例（排除已删除/正在关闭的窗口）
+        # 强制关闭中的窗口已 hide() 但 sip 对象还未销毁 —— 它正处于不稳定状态，
+        # 任何读取（windowTitle、x()、get_window_color()）都可能与底层
+        # NSWindow detach/deleteLater 重入 → 段错误。
+        windows = []
+        for w in app.topLevelWidgets():
+            try:
+                if not isinstance(w, main_window.MainWindow):
+                    continue
+                if sip.isdeleted(w):
+                    continue
+                # 跳过正在关闭/已隐藏的窗口
+                if getattr(w, '_closing_in_progress', False):
+                    continue
+                if getattr(w, '_force_closing', False):
+                    continue
+                if not w.isVisible():
+                    continue
+                windows.append(w)
+            except Exception:
+                continue  # 窗口已被删除/不稳定，跳过
+        return windows
+
+    def _maximize_all_windows(self):
+        for window in self._visible_main_windows(QApplication.instance()):
+            # Leave native fullscreen Spaces intact.
+            if not window.isFullScreen():
+                window.showMaximized()
+
     def _show_settings_menu(self):
-        """弹出设置菜单：排序方式（时间/名称/手动）+ 刷新。"""
+        """弹出设置菜单：排序、刷新和窗口操作。"""
         menu = QMenu(self)
         title = menu.addAction(t("window.sort_menu_label"))
         title.setEnabled(False)
@@ -572,7 +603,11 @@ class WindowNavigatorPanel(QWidget):
         menu.addSeparator()
         refresh_act = menu.addAction(t("window.refresh"))
         refresh_act.triggered.connect(self._force_refresh)
+        menu.addSeparator()
+        maximize_act = menu.addAction(t("window.maximize_all"))
+        maximize_act.triggered.connect(self._maximize_all_windows)
         menu.exec(self.settings_btn.mapToGlobal(QPoint(0, self.settings_btn.height())))
+        menu.deleteLater()
 
     def _on_embed_checkbox_changed(self, state):
         """勾选/取消「嵌入到侧栏」：在内嵌与浮动之间切换停靠方式（全局，自动记住）。"""
@@ -970,27 +1005,7 @@ class WindowNavigatorPanel(QWidget):
         if not app:
             return
 
-        # 获取所有 MainWindow 实例（排除已删除/正在关闭的窗口）
-        # 强制关闭中的窗口已 hide() 但 sip 对象还未销毁 —— 它正处于不稳定状态，
-        # 任何读取（windowTitle、x()、get_window_color()）都可能与底层
-        # NSWindow detach/deleteLater 重入 → 段错误。
-        windows = []
-        for w in app.topLevelWidgets():
-            try:
-                if not isinstance(w, main_window.MainWindow):
-                    continue
-                if sip.isdeleted(w):
-                    continue
-                # 跳过正在关闭/已隐藏的窗口
-                if getattr(w, '_closing_in_progress', False):
-                    continue
-                if getattr(w, '_force_closing', False):
-                    continue
-                if not w.isVisible():
-                    continue
-                windows.append(w)
-            except Exception:
-                continue  # 窗口已被删除/不稳定，跳过
+        windows = self._visible_main_windows(app)
 
         # 给新出现的窗口挂标题/销毁信号（每窗口只挂一次），把变化即时推过来；
         # 接收方是本面板，面板销毁时 Qt 自动断开这些连接

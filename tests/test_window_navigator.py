@@ -62,6 +62,56 @@ class TestWindowNavigatorExtraction(unittest.TestCase):
                 self.app.sendPostedEvents(None, QEvent.Type.DeferredDelete)
                 self.app.processEvents()
 
+    def test_maximize_menu_ignores_filter_and_only_targets_open_main_windows(self):
+        from unittest.mock import patch
+        from PyQt6.QtCore import QEvent
+        from PyQt6.QtWidgets import QMenu
+        import main_window
+        from i18n import t
+
+        normal, minimized, fullscreen, closing, hidden = windows = [
+            main_window.MainWindow() for _ in range(5)]
+        floating = main_window.WindowNavigatorPanel()
+        try:
+            normal.show()
+            minimized.showMinimized()
+            fullscreen.showFullScreen()
+            closing.show()
+            closing._closing_in_progress = True
+            floating.show()
+
+            def select_maximize(menu, *_):
+                refresh, separator, maximize = menu.actions()[-3:]
+                self.assertEqual(refresh.text(), t("window.refresh"))
+                self.assertTrue(separator.isSeparator())
+                self.assertEqual(maximize.text(), t("window.maximize_all"))
+                self.assertFalse(maximize.isCheckable())
+                maximize.trigger()
+
+            for panel in (normal.nav_panel, floating):
+                normal.showNormal()
+                minimized.showMinimized()
+                panel.search_input.setText("no-matching-window")
+                with patch.object(QMenu, "exec", select_maximize):
+                    panel.settings_btn.click()
+                self.app.processEvents()
+                self.assertTrue(normal.isMaximized())
+                self.assertTrue(minimized.isMaximized())
+                self.assertFalse(minimized.isMinimized())
+                self.assertTrue(fullscreen.isFullScreen())
+                self.assertFalse(closing.isMaximized())
+                self.assertFalse(hidden.isVisible())
+                self.assertFalse(floating.isMaximized())
+        finally:
+            closing._closing_in_progress = False
+            floating.deleteLater()
+            for window in windows:
+                window.close()
+                window.deleteLater()
+            for _ in range(5):
+                self.app.sendPostedEvents(None, QEvent.Type.DeferredDelete)
+                self.app.processEvents()
+
     def test_title_change_refreshes_without_polling(self):
         """标题变化经 windowTitleChanged 信号即时刷新列表（不等 30 秒兜底轮询）；
         重复刷新不重复挂钩。"""

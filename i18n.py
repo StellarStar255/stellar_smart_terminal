@@ -256,6 +256,7 @@ TRANSLATIONS = {
     "window.sort_tooltip_name": {"zh": "按名称排序，点击切换为手动排序", "en": "Sort by name, click to sort manually", "fr": "Tri par nom ; cliquez pour trier manuellement"},
     "window.sort_tooltip_manual": {"zh": "手动排序，点击切换为时间排序", "en": "Manual sort, click to sort by time", "fr": "Tri manuel ; cliquez pour trier par date"},
     "window.sort_toggle_tooltip": {"zh": "点击切换排序方式", "en": "Click to change sort mode", "fr": "Cliquez pour changer le mode de tri"},
+    "window.maximize_all": {"zh": "最大化所有窗口", "en": "Maximize All Windows", "fr": "Agrandir toutes les fenêtres"},
     "window.refresh": {"zh": "刷新", "en": "Refresh", "fr": "Actualiser"},
     "window.force_close": {"zh": "强制关闭(自动保存)", "en": "Force Close (Auto-Save)", "fr": "Forcer la fermeture (sauvegarde automatique)"},
     "window.force_close_tooltip": {"zh": "保存会话和配置后关闭窗口，跳过确认弹窗", "en": "Save session and config, then close without confirmation", "fr": "Enregistrer la session et les paramètres, puis fermer sans confirmation"},

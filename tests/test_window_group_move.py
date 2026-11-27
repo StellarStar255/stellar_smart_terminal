@@ -108,6 +108,20 @@ class TestGroupMoveSession(unittest.TestCase):
         # 尺寸等比放大，顶边中点对准松手点
         self.assertEqual(a.geometry(), QRect(1700, 490, 600, 400))
 
+    def test_maximize_immediately_after_drop_survives_delayed_relayout(self):
+        from PyQt6.QtCore import QPoint
+        from PyQt6.QtTest import QTest
+        from window_group_move import move_window_to_point
+        window, _ = self._make_windows()
+        self.assertTrue(move_window_to_point(window, QPoint(350, 200)))
+        dropped = window.geometry()
+        window.showMaximized()
+        QTest.qWait(500)
+        self.assertTrue(window.isMaximized())
+        window.showNormal()
+        self.app.processEvents()
+        self.assertEqual(window.geometry(), dropped)
+
     def test_cancel_snaps_windows_back(self):
         from PyQt6.QtCore import QPoint
         from window_group_move import GroupMoveSession
