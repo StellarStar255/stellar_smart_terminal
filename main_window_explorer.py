@@ -300,14 +300,8 @@ class ExplorerPanelMixin:
     def _apply_zoom_to_explorer_tree(self):
         """文件树字号跟随终端缩放（默认 13pt，范围 8-28），不受 GUI 字号影响。"""
         panel = getattr(self, 'explorer_panel', None)
-        tree = getattr(panel, 'tree_view', None) if panel is not None else None
-        if tree is None:
-            return
-        target_size = max(8, min(28, 13 + self._global_zoom_delta))
-        font = tree.font()
-        if font.pointSize() != target_size:
-            font.setPointSize(target_size)
-            tree.setFont(font)
+        if panel is not None:
+            panel.set_tree_point_size(max(8, min(28, 13 + self._global_zoom_delta)))
 
     def _on_explorer_favorites_changed(self):
         """快捷方式增删后的钩子：★ 下拉每次打开都重读，这里仅刷新提示气泡。"""

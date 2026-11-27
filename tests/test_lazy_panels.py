@@ -97,6 +97,8 @@ class TestLazyPanels(unittest.TestCase):
     def test_explorer_panel_follows_current_zoom(self):
         """懒建出来的面板要追平当前缩放（树字号 = 13 + delta）"""
         win = self._new_window()
+        win._select_combo_value(win.gui_font_spin, 16)
+        win._gui_font_size = 16
         win._global_zoom_delta = 3
         win._apply_global_zoom()
         win._toggle_explorer_panel()

@@ -2181,15 +2181,23 @@ class MainWindow(ThemeMixin, ToolbarMixin, ConfigMixin, ExplorerPanelMixin,
         # 按窗口宽度自动让 spring 生效/失效（仅在跨阈值翻转时动一次）
         self._update_spring_width_gate()
 
+    @property
+    def _content_point_size(self):
+        return max(8, min(32, 12 + self._global_zoom_delta))
+
     def _global_zoom_in(self):
-        """放大内容区字体（终端/编辑器/文件树）；界面字体只由 GUI Font 控制"""
-        self._global_zoom_delta += 1
-        self._apply_global_zoom()
-        self._save_config_debounced()
+        self._change_content_zoom(1)
 
     def _global_zoom_out(self):
-        """缩小内容区字体（终端/编辑器/文件树）；界面字体只由 GUI Font 控制"""
-        self._global_zoom_delta -= 1
+        self._change_content_zoom(-1)
+
+    def _change_content_zoom(self, step):
+        # 从实际显示字号起步，旧版本保存的越界偏移也能一键反向缩放。
+        size = self._content_point_size
+        new_size = max(8, min(32, size + step))
+        if new_size == size:
+            return
+        self._global_zoom_delta = new_size - 12
         self._apply_global_zoom()
         self._save_config_debounced()
 
@@ -2215,19 +2223,17 @@ class MainWindow(ThemeMixin, ToolbarMixin, ConfigMixin, ExplorerPanelMixin,
         """应用字体设置：缩放偏移（Cmd+±）只动内容区（终端/编辑器/文件树），
         界面（工具栏/标签/按钮/Git 面板）字体只由 GUI Font 下拉框控制——
         二者解耦，互不影响（用户明确要求分开）。"""
-        delta = self._global_zoom_delta
+        target_size = self._content_point_size
         # 1. 所有终端 (默认12pt, 范围8-32) — 始终跟随全局缩放。
         #    apply_font_size：字号立即生效，O(历史) 的网格 reflow 走 150ms
         #    防抖——连按 Cmd+± 时每个终端只在停手后 reflow 一次，不再每按
         #    一次就对所有分屏同步串行 reflow（满历史时曾达秒级冻结）。
         for terminals in self.tab_terminals.values():
             for term in terminals:
-                target_size = max(8, min(32, 12 + delta))
                 term.apply_font_size(target_size)
 
         # 2. 文件编辑器 — 与终端字号完全联动（同一字号、同一范围 8-32），不受 GUI 字号影响
         if hasattr(self, 'editor_area') and self.editor_area is not None:
-            target_size = max(8, min(32, 12 + delta))
             self.editor_area.set_editor_font_size(target_size)
 
         # 3. 资源管理器文件树 (默认13pt, 范围8-28) — 跟随终端缩放，不受 GUI 字号影响
@@ -2879,8 +2885,7 @@ class MainWindow(ThemeMixin, ToolbarMixin, ConfigMixin, ExplorerPanelMixin,
 
         # 应用全局缩放偏移
         if self._global_zoom_delta != 0:
-            target_size = max(8, min(32, 12 + self._global_zoom_delta))
-            terminal.term_font.setPointSize(target_size)
+            terminal.term_font.setPointSize(self._content_point_size)
             terminal._calculate_char_size()
 
         # 安装事件过滤器来监听焦点变化（并登记归属窗口）

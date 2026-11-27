@@ -10,7 +10,7 @@ A PyQt6-based smart terminal with file explorer, Git GUI, LLM proxy, and VS Code
 
 **Signed and notarized for macOS.** The Apple Silicon app is signed with a Developer ID certificate and notarized by Apple.
 
-[v1.35.83 release notes](docs/releases/v1.35.83.md) — Use Maximize All Windows in the navigator gear menu to maximize terminals on their own displays. Windows moved between displays now restore on the destination display.
+[v1.35.84 release notes](docs/releases/v1.35.84.md) — Editor and terminal panes zoom together. Tabs moved between windows adopt the destination window’s text size.
 
 <img src="assets/smart_terminal.png" width="300" />
 

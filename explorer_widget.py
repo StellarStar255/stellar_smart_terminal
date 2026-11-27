@@ -595,6 +595,7 @@ class ExplorerPanel(QWidget, explorer_common.TransferJobHost):
         super().__init__(parent)
         self.theme = theme or {}
         self._current_path = os.path.expanduser("~")
+        self._tree_point_size = 13
         self._editing_file = None  # 当前正在编辑的文件路径
         # 是否显示隐藏文件（以点开头），从配置读取，默认显示
         self._show_hidden = self._load_show_hidden()
@@ -1016,6 +1017,16 @@ class ExplorerPanel(QWidget, explorer_common.TransferJobHost):
             target = self._current_path or os.path.expanduser("~")
         self._clipboard_paste_into(target)
 
+    def set_tree_point_size(self, size):
+        if size != self._tree_point_size:
+            self._tree_point_size = size
+            self._apply_tree_style()
+
+    def _apply_tree_style(self):
+        # A tree-local point size takes precedence over the window GUI font.
+        self.tree_view.setStyleSheet(
+            self._tree_theme_style + f"QTreeView {{ font-size: {self._tree_point_size}pt; }}")
+
     def _update_style(self):
         """更新样式"""
         bg_dark = self.theme.get('bg_dark', '#1a1a2e')
@@ -1045,7 +1056,7 @@ class ExplorerPanel(QWidget, explorer_common.TransferJobHost):
             }}
         """)
 
-        self.tree_view.setStyleSheet(f"""
+        self._tree_theme_style = f"""
             QTreeView {{
                 background-color: {bg_dark};
                 color: {text};
@@ -1130,7 +1141,8 @@ class ExplorerPanel(QWidget, explorer_common.TransferJobHost):
             QScrollBar::sub-line:horizontal {{
                 width: 0px;
             }}
-        """)
+        """
+        self._apply_tree_style()
 
         # 搜索框（已置于带 4px 外边距的 search_bar 里，故自身不再加 margin）
         self.search_edit.setStyleSheet(f"""

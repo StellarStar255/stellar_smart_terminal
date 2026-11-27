@@ -139,6 +139,7 @@ class TabSplitMixin:
             # 归属转移：务必走 _adopt_terminal（内部会摘掉原窗口的事件
             # 过滤器），否则原窗口的 active_terminal 会被本窗口的终端污染
             self._adopt_terminal(terminal)
+            terminal.apply_font_size(self._content_point_size)
 
             # 重新设置快速命令提供者，指向当前窗口的预设
             terminal.quick_commands_provider = lambda: self.presets

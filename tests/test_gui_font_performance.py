@@ -130,3 +130,34 @@ def test_window_content_shortcuts_keep_editor_and_terminal_in_sync(windows, tmp_
         assert terminal.term_font.pointSize() == expected
         assert editor.font().pointSize() == expected
         assert other.terminal.term_font.pointSize() == other_initial
+
+
+@pytest.mark.parametrize(('boundary', 'direction'), [(8, -1), (32, 1)])
+def test_content_zoom_reverses_immediately_at_limit(windows, boundary, direction):
+    _, (win, _) = windows
+    win._global_zoom_delta = boundary - 12
+    win._apply_global_zoom()
+    forward, reverse = win._global_zoom_in, win._global_zoom_out
+    if direction < 0:
+        forward, reverse = reverse, forward
+    for _ in range(3):
+        forward()
+    reverse()
+    assert win.terminal.term_font.pointSize() == boundary - direction
+    assert win.editor_area.active_pane.editor.font().pointSize() == boundary - direction
+
+
+def test_moved_split_tab_uses_destination_zoom(windows):
+    _, (src, dst) = windows
+    src._global_zoom_delta = 4
+    src._apply_global_zoom()
+    dst._global_zoom_delta = -2
+    dst._apply_global_zoom()
+    moving = src._add_new_tab()
+    src._split_current_tab()
+    terms = list(src.tab_terminals[moving])
+    assert len(terms) == 2
+    assert [term.term_font.pointSize() for term in terms] == [16, 16]
+    target = dst._adopt_tab_from(src, moving)
+    assert dst.tab_terminals[target] == terms
+    assert [term.term_font.pointSize() for term in terms] == [10, 10]
