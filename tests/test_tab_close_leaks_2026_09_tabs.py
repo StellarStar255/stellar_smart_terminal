@@ -329,13 +329,11 @@ class TestCloseLastTab(_WindowCase):
         tools = (win.split_btn, win.split_v_btn, win.close_split_btn, win.close_tab_btn)
         term = win.terminal
         term._backend = _fake_backend()
-        with mock.patch.object(QMessageBox, 'question', side_effect=[
-                QMessageBox.StandardButton.No, QMessageBox.StandardButton.Yes]) as question:
+        self.assertTrue(term.is_running())
+        with mock.patch.object(QMessageBox, 'question') as question:
             win.close_tab_btn.click()
-            self.assertIs(win.terminal, term)
-            self.assertTrue(term.is_running())
-            win.close_tab_btn.click()
-            self.assertEqual(question.call_count, 2)
+            question.assert_not_called()
+        self.assertFalse(term.is_running())
         self.assertEqual(tabs.count(), 0)
         self.assertEqual(win.session_label.text(), t("status.no_open_terminal"))
         self.assertTrue(all(not tool.isEnabled() for tool in tools))

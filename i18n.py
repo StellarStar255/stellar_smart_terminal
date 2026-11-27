@@ -1248,7 +1248,6 @@ TRANSLATIONS = {
     "msg.cannot_find_container": {"zh": "无法找到终端的父容器", "en": "Cannot find terminal container", "fr": "Conteneur de terminal introuvable"},
     "msg.cannot_close_only_terminal": {"zh": "当前标签页只有一个终端，无法关闭分屏", "en": "Cannot close split: only one terminal in this tab", "fr": "Impossible de fermer le volet : un seul terminal dans cet onglet"},
     "msg.confirm_close_title": {"zh": "确认关闭", "en": "Confirm Close", "fr": "Confirmer la fermeture"},
-    "msg.confirm_close_last_tab": {"zh": "这是最后一个标签页，且仍有进程在运行。\n确定要停止进程并关闭这个标签页吗？", "en": "This is the last tab and a process is still running.\nStop the process and close this tab?", "fr": "C’est le dernier onglet et un processus est encore en cours.\nArrêter le processus et fermer cet onglet ?"},
     "msg.confirm_close_window": {"zh": "此窗口已没有标签页。要关闭窗口吗？", "en": "This window has no tabs. Close the window?", "fr": "Cette fenêtre ne contient plus d’onglets. Voulez-vous la fermer ?"},
     "msg.select_or_create_preset": {"zh": "请先选择或创建一个预设", "en": "Please select or create a preset first", "fr": "Sélectionnez ou créez d’abord un préréglage"},
     "msg.no_session_to_export": {"zh": "没有可导出的会话", "en": "No session to export", "fr": "Aucune session à exporter"},
