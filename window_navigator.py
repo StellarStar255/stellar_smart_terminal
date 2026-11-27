@@ -25,7 +25,7 @@ import app_config
 from git_widget import _make_git_tool_icon
 from i18n import t
 from themes import readable_on_light
-from window_group_move import (GroupMoveGrip, move_window_to_point,
+from window_group_move import (GroupMoveGrip, cancel_pending_placement, move_window_to_point,
                                move_windows_to_screen)
 from app_logging import get_logger
 
@@ -584,6 +584,7 @@ class WindowNavigatorPanel(QWidget):
         for window in self._visible_main_windows(QApplication.instance()):
             # Leave native fullscreen Spaces intact.
             if not window.isFullScreen():
+                cancel_pending_placement(window)
                 window.showMaximized()
 
     def _show_settings_menu(self):
@@ -607,7 +608,8 @@ class WindowNavigatorPanel(QWidget):
         maximize_act = menu.addAction(t("window.maximize_all"))
         maximize_act.triggered.connect(self._maximize_all_windows)
         menu.exec(self.settings_btn.mapToGlobal(QPoint(0, self.settings_btn.height())))
-        menu.deleteLater()
+        if not sip.isdeleted(menu):
+            menu.deleteLater()
 
     def _on_embed_checkbox_changed(self, state):
         """勾选/取消「嵌入到侧栏」：在内嵌与浮动之间切换停靠方式（全局，自动记住）。"""
@@ -1316,6 +1318,8 @@ class WindowNavigatorPanel(QWidget):
         force_close_action.setToolTip(t("window.force_close_tooltip"))
 
         chosen = menu.exec(self.window_list.viewport().mapToGlobal(pos))
+        if sip.isdeleted(menu):
+            return
         menu.deleteLater()
         if sip.isdeleted(window):
             return

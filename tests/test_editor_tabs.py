@@ -251,22 +251,18 @@ class TestTabContextMenu(_Base):
         from PyQt6.QtWidgets import QMenu
 
         seen = {}
-        orig_exec = QMenu.exec
 
         def fake_exec(menu, *a, **k):
             seen["menu"] = menu
             seen["actions"] = {act.text(): act for act in menu.actions()}
             return None
-        QMenu.exec = fake_exec
-        try:
+        with patch.object(QMenu, "exec", fake_exec):
             bar = self.pane.tab_bar
             rect = bar.tabRect(tab_index)
             ev = QContextMenuEvent(QContextMenuEvent.Reason.Mouse,
                                    rect.center(),
                                    bar.mapToGlobal(rect.center()))
             bar.contextMenuEvent(ev)
-        finally:
-            QMenu.exec = orig_exec
         return seen.get("actions", {}), seen.get("menu")
 
     def _trigger(self, tab_index, key):
@@ -274,15 +270,13 @@ class TestTabContextMenu(_Base):
         from i18n import t
         from PyQt6.QtWidgets import QMenu
         label = t(key)
-        orig_exec = QMenu.exec
 
         def fake_exec(menu, *a, **k):
             for act in menu.actions():
                 if act.text() == label:
                     return act
             return None
-        QMenu.exec = fake_exec
-        try:
+        with patch.object(QMenu, "exec", fake_exec):
             from PyQt6.QtGui import QContextMenuEvent
             bar = self.pane.tab_bar
             rect = bar.tabRect(tab_index)
@@ -290,8 +284,6 @@ class TestTabContextMenu(_Base):
                                    rect.center(),
                                    bar.mapToGlobal(rect.center()))
             bar.contextMenuEvent(ev)
-        finally:
-            QMenu.exec = orig_exec
         self.app.processEvents()
 
     def test_close_others_keeps_only_the_clicked_tab(self):

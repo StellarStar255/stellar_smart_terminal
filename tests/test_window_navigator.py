@@ -112,6 +112,17 @@ class TestWindowNavigatorExtraction(unittest.TestCase):
                 self.app.sendPostedEvents(None, QEvent.Type.DeferredDelete)
                 self.app.processEvents()
 
+    def test_disposing_navigator_while_settings_menu_is_open(self):
+        from PyQt6 import sip
+        from PyQt6.QtCore import QTimer
+        from main_window import WindowNavigatorPanel
+        panel = WindowNavigatorPanel()
+        panel.show()
+        self.app.processEvents()
+        QTimer.singleShot(0, panel.deleteLater)
+        panel._show_settings_menu()
+        self.assertTrue(sip.isdeleted(panel))
+
     def test_title_change_refreshes_without_polling(self):
         """标题变化经 windowTitleChanged 信号即时刷新列表（不等 30 秒兜底轮询）；
         重复刷新不重复挂钩。"""

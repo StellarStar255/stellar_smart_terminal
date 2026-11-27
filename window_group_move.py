@@ -1,7 +1,7 @@
 """「整组搬家」拖拽把手：抓住它一次拖动导航列表里的全部窗口。
 
 场景：笔记本接上大显示器后，把一屏的终端窗口整体挪过去，不用逐个拖。
-- 拖动过程中各窗口按同一位移刚性平移（保持相对布局）；
+- 普通窗口随拖动平移；最大化窗口在松手时切换屏幕，保留还原几何；
 - 松手时若光标落在另一块屏幕上，按「源屏可用区 → 目标屏可用区」等比
   重排每个窗口的位置与尺寸（小屏到大屏自动放大），最大化窗口在新屏重新最大化；
 - 全屏窗口（macOS 独立 Space）搬不动，跳过。
@@ -43,6 +43,27 @@ def _screen_of(window):
     return QApplication.screenAt(window.frameGeometry().center())
 
 
+def cancel_pending_placement(window):
+    window._pending_move_geometry = None
+
+
+def _schedule_placement_check(window, geometry):
+    window._pending_move_geometry = geometry
+
+    def check():
+        if sip.isdeleted(window) or window._pending_move_geometry is not geometry:
+            return
+        cancel_pending_placement(window)
+        if not window.isVisible() or window.isMinimized() or window.isFullScreen() or window.isMaximized():
+            return
+        if window.geometry() != geometry:
+            # Force a native resize when the window manager adjusted the placement.
+            window.resize(geometry.width(), max(1, geometry.height() - 1))
+            window.setGeometry(geometry)
+
+    QTimer.singleShot(350, check)
+
+
 class GroupMoveSession:
     """一次整组拖动：begin 快照各窗口原位，drag 刚性平移，finish 跨屏重排。"""
 
@@ -59,8 +80,10 @@ class GroupMoveSession:
                     continue
                 if w.isFullScreen() or w.isMinimized():
                     continue
-                self.items.append((w, w.pos(), w.geometry(), _screen_of(w),
-                                   w.isMaximized()))
+                cancel_pending_placement(w)
+                maximized = w.isMaximized()
+                geometry = w.normalGeometry() if maximized else w.geometry()
+                self.items.append((w, w.pos(), geometry, _screen_of(w), maximized))
             except Exception:
                 logger.debug("GroupMoveSession: skip window", exc_info=True)
 
@@ -71,12 +94,15 @@ class GroupMoveSession:
 
     def drag_to(self, global_pos: QPoint):
         delta = global_pos - self.start
-        for w, pos, _geo, _scr, _mx in self._alive():
-            w.move(pos + delta)
+        for w, pos, _geo, _scr, was_max in self._alive():
+            if not was_max:
+                w.move(pos + delta)
 
     def cancel(self):
         """Esc 取消：所有窗口回到按下把手时的位置。"""
-        for w, pos, _geo, _scr, _mx in self._alive():
+        for w, pos, _geo, _scr, was_max in self._alive():
+            if was_max:
+                continue
             try:
                 w.move(pos)
             except Exception:
@@ -96,7 +122,7 @@ class GroupMoveSession:
         返回实际搬动的窗口数。
         """
         dst = target.availableGeometry()
-        placed = []
+        moved = 0
         for w, _pos, geo, src_screen, was_max in self._alive():
             if src_screen is None or src_screen is target:
                 continue
@@ -108,33 +134,17 @@ class GroupMoveSession:
             try:
                 if was_max:
                     # 先回到普通状态落到新屏，再在新屏最大化
+                    w.setScreen(target)
                     w.showNormal()
                 w.setGeometry(new_geo)
                 if was_max:
                     w.showMaximized()
-                placed.append((w, new_geo, was_max))
+                else:
+                    _schedule_placement_check(w, new_geo)
+                moved += 1
             except Exception:
                 logger.debug("GroupMoveSession.relayout_to: suppressed", exc_info=True)
-        if placed:
-            # 台前调度等系统策略可能在落位后把窗口推挪/压窄：稍后校正一次
-            QTimer.singleShot(350, lambda: self._reassert(placed))
-        return len(placed)
-
-    @staticmethod
-    def _reassert(placed):
-        for w, geo, was_max in placed:
-            try:
-                if sip.isdeleted(w) or was_max or not w.isVisible():
-                    continue
-                if w.isMaximized() or w.isFullScreen() or w.isMinimized():
-                    continue
-                if w.geometry() == geo:
-                    continue
-                # Qt 几何缓存可能与原生窗口脱节，先制造一次真实变化再设回
-                w.resize(geo.width(), max(1, geo.height() - 1))
-                w.setGeometry(geo)
-            except Exception:
-                logger.debug("GroupMoveSession._reassert: suppressed", exc_info=True)
+        return moved
 
 
 def move_windows_to_screen(windows, target, anchor: QPoint = None) -> int:
@@ -168,8 +178,7 @@ def move_window_to_point(window, global_pos: QPoint) -> bool:
     except Exception:
         logger.debug("move_window_to_point: suppressed", exc_info=True)
         return False
-    placed = [(w, new_geo, False)]
-    QTimer.singleShot(350, lambda: GroupMoveSession._reassert(placed))
+    _schedule_placement_check(w, new_geo)
     return True
 
 

@@ -122,6 +122,52 @@ class TestGroupMoveSession(unittest.TestCase):
         self.app.processEvents()
         self.assertEqual(window.geometry(), dropped)
 
+    def test_old_drop_callback_cannot_interrupt_next_drag(self):
+        from PyQt6.QtCore import QPoint
+        import window_group_move as gm
+        window, _ = self._make_windows()
+        with mock.patch.object(gm.QTimer, 'singleShot') as timer:
+            self.assertTrue(gm.move_window_to_point(window, QPoint(350, 200)))
+            pending = timer.call_args.args[1]
+        second = gm.GroupMoveSession([window], QPoint(350, 200))
+        second.drag_to(QPoint(410, 280))
+        dragged = window.geometry()
+        pending()
+        self.assertEqual(window.geometry(), dragged)
+        second.finish(QPoint(410, 280))
+        self.assertEqual(window.geometry(), dragged)
+
+    def test_same_screen_drop_from_maximized_restores_normal_size(self):
+        from PyQt6.QtCore import QPoint
+        from PyQt6.QtTest import QTest
+        from window_group_move import move_window_to_point
+        window, _ = self._make_windows()
+        size = window.size()
+        window.showMaximized()
+        self.app.processEvents()
+        self.assertTrue(move_window_to_point(window, QPoint(450, 200)))
+        QTest.qWait(450)
+        self.assertFalse(window.isMaximized())
+        self.assertEqual(window.size(), size)
+
+    def test_group_drag_keeps_maximized_window_intact_until_release(self):
+        from PyQt6.QtCore import QPoint
+        from window_group_move import GroupMoveSession
+        window, other = self._make_windows()
+        normal = window.geometry()
+        window.showMaximized()
+        self.app.processEvents()
+        maximized = window.geometry()
+        session = GroupMoveSession([window, other], QPoint())
+        session.drag_to(QPoint(80, 70))
+        self.app.processEvents()
+        self.assertTrue(window.isMaximized())
+        self.assertEqual(window.geometry(), maximized)
+        session.cancel()
+        window.showNormal()
+        self.app.processEvents()
+        self.assertEqual(window.geometry(), normal)
+
     def test_cancel_snaps_windows_back(self):
         from PyQt6.QtCore import QPoint
         from window_group_move import GroupMoveSession
