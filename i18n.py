@@ -8,6 +8,12 @@ SUPPORTED_LANGUAGES = {"zh": "中文", "en": "English", "fr": "Français"}
 _current_language = "zh"
 
 TRANSLATIONS = {
+    "remote.keychain_update": {"zh": "更新 macOS 钥匙串中的密码", "en": "Update password in macOS Keychain", "fr": "Mettre à jour le mot de passe dans le trousseau macOS"},
+    "remote.keychain_save": {"zh": "保存到 macOS 钥匙串", "en": "Save to macOS Keychain", "fr": "Enregistrer dans le trousseau macOS"},
+    "remote.keychain_forget": {"zh": "从钥匙串忘记登录密码", "en": "Forget Login Password in Keychain", "fr": "Supprimer le mot de passe du trousseau"},
+    "remote.keychain_read_failed": {"zh": "无法读取钥匙串，可继续手动登录。", "en": "Could not read the Keychain. You can still sign in manually.", "fr": "Lecture du trousseau impossible. Vous pouvez vous connecter manuellement."},
+    "remote.keychain_save_failed": {"zh": "登录成功，但密码未能保存到钥匙串。", "en": "Signed in, but the password could not be saved to the Keychain.", "fr": "Connexion réussie, mais l’enregistrement dans le trousseau a échoué."},
+    "remote.keychain_forget_failed": {"zh": "未能从钥匙串移除密码。", "en": "Could not remove the password from the Keychain.", "fr": "Impossible de supprimer le mot de passe du trousseau."},
     "remote.fwd_group": {"zh": "端口组合", "en": "Port Group", "fr": "Groupe de ports"},
     "remote.fwd_group_custom": {"zh": "自定义勾选", "en": "Custom selection", "fr": "Sélection personnalisée"},
     "remote.fwd_group_save_as": {"zh": "另存组合…", "en": "Save Group As…", "fr": "Enregistrer le groupe sous…"},

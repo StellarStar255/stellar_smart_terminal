@@ -29,6 +29,7 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any, Callable, Optional
 
+import ssh_keychain
 import paramiko
 import paramiko.sftp_file  # noqa: F401 — 用于全局调高 SFTP prefetch 块大小
 from paramiko.config import SSHConfig
@@ -223,10 +224,17 @@ _RECONNECTABLE_ERRORS = (paramiko.SSHException, EOFError, OSError)
 # 密码类回答可以缓存复用（自动重连、SSH 终端 tab 回填）；验证码是一次性的，
 # 缓存了也没用，还有泄漏面。
 _PASSWORD_PROMPT_RE = re.compile(r"password|passphrase|密码|口令", re.IGNORECASE)
+_OTP_PROMPT_RE = re.compile(r"one[ -]?time|otp|verification|一次性|动态|验证码", re.IGNORECASE)
+_LOGIN_PASSWORD_PROMPT_RE = re.compile(
+    r"(?:(?:please )?enter (?:your )?)?(?:(?:login )?password|登录密码|密码|mot de passe)\s*[:：]?", re.IGNORECASE)
 
 
 def looks_like_password_prompt(prompt: str) -> bool:
-    return bool(_PASSWORD_PROMPT_RE.search(prompt))
+    return bool(_PASSWORD_PROMPT_RE.search(prompt) and not _OTP_PROMPT_RE.search(prompt))
+
+
+def is_login_password_prompt(prompt: str) -> bool:
+    return bool(_LOGIN_PASSWORD_PROMPT_RE.fullmatch(prompt.strip()))
 
 
 def _relax_auth_timeout(transport) -> Optional[float]:
@@ -854,6 +862,7 @@ class SSHSession(QObject):
     通过 Qt 信号回到 UI 线程。
     """
 
+    keychain_failed = pyqtSignal(str)
     connected = pyqtSignal()
     connect_failed = pyqtSignal(str)        # error message
     disconnected = pyqtSignal()
@@ -863,6 +872,9 @@ class SSHSession(QObject):
     def __init__(self, host_config: HostConfig, parent: Optional[QObject] = None):
         super().__init__(parent)
         self.host_config = host_config
+        self.use_keychain = False
+        self.has_keychain_password = False
+        self.pending_keychain_save = None
         self._client: Optional[paramiko.SSHClient] = None
         self._sftp: Optional[paramiko.SFTPClient] = None
         self._jump_clients: list[paramiko.SSHClient] = []  # ProxyJump 跳板连接（按跳序）
@@ -939,7 +951,18 @@ class SSHSession(QObject):
         self._passphrase_provider = passphrase_provider
         self._interactive_provider = interactive_provider
         self._prefer_interactive = bool(prefer_interactive)
+        if self.use_keychain and not self.verified_password():
+            try:
+                saved = ssh_keychain.read(self.host_config)
+                if saved:
+                    self.has_keychain_password = True
+                    self.seed_verified_password(saved)
+            except (ImportError, OSError):
+                self.keychain_failed.emit(t("remote.keychain_read_failed"))
         try:
+            # A Keychain unlock prompt may outlive the window or host selection.
+            if self._closed.is_set():
+                raise RuntimeError("SSH session closed")
             self._establish()
         finally:
             if self._closed.is_set():
@@ -1005,6 +1028,22 @@ class SSHSession(QObject):
 
         初次连接和自动重连共用这一条路径，保证认证/host key 策略完全一致。
         """
+        self.pending_keychain_save = None
+        try:
+            self._establish_connection()
+            pending = self.pending_keychain_save
+            if pending and not self._closed.is_set():
+                generation, password = pending
+                if password == self.verified_password():
+                    try:
+                        self.has_keychain_password = ssh_keychain.save_if_current(
+                            self.host_config, generation, password)
+                    except (ImportError, OSError):
+                        self.keychain_failed.emit(t("remote.keychain_save_failed"))
+        finally:
+            self.pending_keychain_save = None
+
+    def _establish_connection(self):
         cfg = self.host_config
         jump_clients, sock = self._connect_jump_chain(cfg)
         try:
@@ -1165,8 +1204,15 @@ class SSHSession(QObject):
             except paramiko.BadHostKeyException:
                 # 主机密钥变更（疑似 MITM）：绝不降级到交互认证，原样拦截
                 raise
-            except paramiko.AuthenticationException as exc:
-                if "password" in connect_kwargs and not isinstance(exc, paramiko.BadAuthenticationType):
+            except paramiko.SSHException as exc:
+                # With an already-open ProxyJump channel and no local keys, Paramiko
+                # completes host-key verification but never attempts authentication.
+                no_local_credentials = str(exc) == "No authentication methods available"
+                password_fallback = isinstance(exc, paramiko.AuthenticationException) or (
+                    no_local_credentials and client.get_transport() is not None
+                    and client.get_transport().is_active())
+                if ("password" in connect_kwargs and isinstance(exc, paramiko.AuthenticationException)
+                        and not isinstance(exc, paramiko.BadAuthenticationType)):
                     transport = client.get_transport()
                     if not transport or not transport.is_active() or "timeout" in str(exc).lower():
                         raise
@@ -1180,7 +1226,7 @@ class SSHSession(QObject):
                 if kbd_client is not None:
                     client = kbd_client  # 可能是原连接续认证，也可能是重开的干净连接
                 else:
-                    if not self._password_provider:
+                    if not password_fallback or not self._password_provider:
                         raise
                     pwd = self._password_provider(cfg.alias)
                     if pwd is None:
@@ -1202,14 +1248,6 @@ class SSHSession(QObject):
                         connect_kwargs.update(password=pwd, allow_agent=False, look_for_keys=False)
                         client.connect(**connect_kwargs)
                     self._auth_secrets.setdefault(cfg.credential_key, {})["password"] = pwd
-            except paramiko.SSHException:
-                # 如「No authentication methods available」（clean_interactive
-                # 复现路径下没有可自动尝试的凭据）：transport 已建好且存活时
-                # 直接走交互认证；走不通（返回 None）则原样抛出
-                kbd_client = self._auth_keyboard_interactive(client, cfg, sock)
-                if kbd_client is None:
-                    raise
-                client = kbd_client
         except Exception:
             try:
                 client.close()
@@ -1293,7 +1331,7 @@ class SSHSession(QObject):
             answers = []
             for prompt_text, echo in prompts:
                 text = str(prompt_text).strip()
-                if (looks_like_password_prompt(text)
+                if (not echo and is_login_password_prompt(text)
                         and not state["cached_password_used"]
                         and secrets.get("password") is not None):
                     state["cached_password_used"] = True
@@ -1305,7 +1343,7 @@ class SSHSession(QObject):
                     state["cancelled"] = True
                     raise paramiko.AuthenticationException(
                         "authentication cancelled by user")
-                if looks_like_password_prompt(text):
+                if not echo and is_login_password_prompt(text):
                     state["cached_password_used"] = True
                     state["password_candidate"] = ans
                 else:

@@ -464,9 +464,9 @@ class MainWindow(ThemeMixin, ToolbarMixin, ConfigMixin, ExplorerPanelMixin,
             self.pin_row2_checkbox.setChecked(True)
             self.pin_row2_checkbox.blockSignals(False)
 
-        # 恢复全局缩放（无偏移也要跑一次：显式 GUI 字号需要在启动时应用；
-        # Auto 且无偏移时保留系统默认字号）
+        # 启动时分别恢复内容字号和 GUI 字号。
         self._apply_global_zoom()
+        self._apply_gui_font()
 
         # 恢复左右分屏偏好
         if hasattr(self, '_explorer_split_checkbox') and self._explorer_split_horizontal:
@@ -2220,8 +2220,8 @@ class MainWindow(ThemeMixin, ToolbarMixin, ConfigMixin, ExplorerPanelMixin,
         self._save_config_debounced()
 
     def _apply_global_zoom(self):
-        """应用字体设置：缩放偏移（Cmd+±）只动内容区（终端/编辑器/文件树），
-        界面（工具栏/标签/按钮/Git 面板）字体只由 GUI Font 下拉框控制——
+        """应用字体设置：缩放偏移（Cmd+±）只动内容区（终端/编辑器），
+        界面（工具栏/标签/按钮/文件树/Git 面板）字体只由 GUI Font 下拉框控制——
         二者解耦，互不影响（用户明确要求分开）。"""
         target_size = self._content_point_size
         # 1. 所有终端 (默认12pt, 范围8-32) — 始终跟随全局缩放。
@@ -2235,12 +2235,6 @@ class MainWindow(ThemeMixin, ToolbarMixin, ConfigMixin, ExplorerPanelMixin,
         # 2. 文件编辑器 — 与终端字号完全联动（同一字号、同一范围 8-32），不受 GUI 字号影响
         if hasattr(self, 'editor_area') and self.editor_area is not None:
             self.editor_area.set_editor_font_size(target_size)
-
-        # 3. 资源管理器文件树 (默认13pt, 范围8-28) — 跟随终端缩放，不受 GUI 字号影响
-        self._apply_zoom_to_explorer_tree()
-
-        self._apply_gui_font()
-        # 持久化由各用户动作入口按防抖触发。
 
     def _apply_gui_font(self):
         """只更新界面字号，避免重设编辑器主题、Markdown 预览及终端字体。

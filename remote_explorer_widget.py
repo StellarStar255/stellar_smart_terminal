@@ -46,11 +46,12 @@ from explorer_common import _TransferRateTracker, _BYTE_BAR_SCALE  # 共享的�
 from explorer_common import _BreadcrumbBar  # 与本地 Explorer 同款面包屑
 import remote_bookmarks
 import ssh_control
+import ssh_keychain
 import forward_diagnostics
 from ssh_session import (
     HostConfig, RemoteEntry, SSHSession, parse_ssh_config, append_ssh_config_host,
     rename_ssh_config_host, remove_ssh_config_host, update_ssh_config_host,
-    looks_like_password_prompt, INTERACTIVE_AUTH_TIMEOUT,
+    looks_like_password_prompt, is_login_password_prompt, INTERACTIVE_AUTH_TIMEOUT,
 )
 from git_widget import _make_git_tool_icon  # 复用统一风格的矢量线条图标
 from utils import parse_search_tokens, name_matches_tokens
@@ -2620,6 +2621,9 @@ class RemoteExplorerPanel(QWidget, explorer_common.TransferJobHost):
             new_win_act = menu.addAction(t("remote.connect_in_new_window"))
             new_win_act.triggered.connect(lambda checked=False, h=host: self.open_in_new_window.emit(h))
             menu.addSeparator()
+            if ssh_keychain.available:
+                forget_password = menu.addAction(t("remote.keychain_forget"))
+                forget_password.triggered.connect(lambda checked=False, h=host: self._forget_keychain_password(h))
             edit_act = menu.addAction(t("remote.edit_host"))
             edit_act.triggered.connect(lambda checked=False, h=host: self._edit_host(h))
             rename_act = menu.addAction(t("remote.rename_host"))
@@ -2855,6 +2859,9 @@ class RemoteExplorerPanel(QWidget, explorer_common.TransferJobHost):
         sess.connected.connect(lambda: self._on_session_connected(sess))
         sess.connect_failed.connect(lambda msg: self._on_session_connect_failed(sess, msg))
         sess.host_key_check_degraded.connect(self._on_host_key_degraded)
+        sess.use_keychain = ssh_keychain.available and not mfa
+        if sess.use_keychain:
+            sess.keychain_failed.connect(self.error_occurred.emit)
         password = self._cached_passwords.pop(host.credential_key, None)
         if password:
             sess.seed_verified_password(password)
@@ -3352,17 +3359,40 @@ class RemoteExplorerPanel(QWidget, explorer_common.TransferJobHost):
             dialog.setLabelText(t("remote.password_prompt", host=alias) if prompt is None
                                 else t("remote.interactive_prompt", host=alias, prompt=prompt))
             dialog.setTextEchoMode(QLineEdit.EchoMode.Normal if echo else QLineEdit.EchoMode.Password)
+        remember = None
+        sess = request['session']
+        if (getattr(sess, 'use_keychain', False) and alias == sess.host_config.alias
+                and not mfa_prompt and not echo and (prompt is None or
+                    is_login_password_prompt(prompt))):
+            dialog.sizeHint()  # QInputDialog builds its layout lazily.
+            label = "remote.keychain_update" if sess.has_keychain_password else "remote.keychain_save"
+            remember = QCheckBox(t(label), dialog)
+            dialog.layout().insertWidget(dialog.layout().count() - 1, remember)
         request['dialog'] = dialog
         accepted = dialog.exec() == QDialog.DialogCode.Accepted
         if not request['done'].is_set() and request['session'] is self._session:
             if accepted:
                 request['value'] = dialog.code() if mfa_prompt else dialog.textValue()
+                if remember is not None:
+                    sess.pending_keychain_save = (
+                        (ssh_keychain.save_generation(sess.host_config), request['value'])
+                        if remember.isChecked() else None)
             else:
                 self._auth_cancelled = True
             request['done'].set()
         request.pop('dialog', None)
         if not sip.isdeleted(dialog):
             dialog.deleteLater()
+
+    def _forget_keychain_password(self, host):
+        try:
+            ssh_keychain.forget(host)
+            sess = self._session
+            if getattr(sess, "use_keychain", False) and sess.host_config.credential_key == host.credential_key:
+                sess.has_keychain_password = False
+                sess.pending_keychain_save = None
+        except (ImportError, OSError):
+            QMessageBox.warning(self, t("remote.keychain_forget"), t("remote.keychain_forget_failed"))
 
     def get_cached_password(self, host: HostConfig) -> Optional[str]:
         sess = self._session

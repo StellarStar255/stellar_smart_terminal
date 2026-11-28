@@ -60,17 +60,35 @@ def test_gui_change_keeps_app_style_and_content_untouched(windows):
     unrelated.installEventFilter(counter)
     original = app.styleSheet()
     with patch.object(a.editor_area, 'set_editor_font_size') as editor, \
-            patch.object(a, '_apply_zoom_to_explorer_tree') as tree, \
             patch.object(a, '_apply_global_zoom') as content:
         select(a, 14)
         app.processEvents()
         editor.assert_not_called()
-        tree.assert_not_called()
         content.assert_not_called()
     assert app.styleSheet() == original
     assert counter.changes == 0
     unrelated.close()
     unrelated.deleteLater()
+
+
+def test_file_lists_follow_gui_font_across_content_zoom(windows):
+    app, (win, _) = windows
+    trees = (win._ensure_explorer_panel().tree_view, win._ensure_remote_panel()._tree)
+    for tree in trees:
+        tree.ensurePolished()
+    baseline = [tree.font() for tree in trees]
+    for size in (11, 16, 11):
+        select(win, size)
+        win._apply_theme(next(name for name in win.THEMES if name != win.current_theme))
+        with patch.object(win, '_apply_gui_font', wraps=win._apply_gui_font) as gui:
+            win._global_zoom_in()
+            app.processEvents()
+            gui.assert_not_called()
+        assert [tree.font().pixelSize() for tree in trees] == [size, size]
+    select(win, 0)
+    win._global_zoom_out()
+    app.processEvents()
+    assert [tree.font() for tree in trees] == baseline
 
 
 def test_embed_sync_and_auto_restore_without_compounding(windows):
@@ -113,7 +131,9 @@ def test_window_content_shortcuts_keep_editor_and_terminal_in_sync(windows, tmp_
     source = tmp_path / 'example.sh'
     source.write_text('echo hello\n')
     win._open_file_in_editor(str(source))
+    win.raise_()
     win.activateWindow()
+    assert QTest.qWaitForWindowActive(win)
     select(win, 16)
     app.processEvents()
     editor = win.editor_area.active_pane.editor

@@ -94,16 +94,17 @@ class TestLazyPanels(unittest.TestCase):
         win._toggle_explorer_panel()
         self.assertIs(win.explorer_panel, panel)
 
-    def test_explorer_panel_follows_current_zoom(self):
-        """懒建出来的面板要追平当前缩放（树字号 = 13 + delta）"""
+    def test_explorer_panel_inherits_current_gui_font(self):
+        """首次展开文件树时也要继承当前 GUI Font。"""
+        import app_config
+        app_config.update_config({'gui_font_size': 16, 'global_zoom_delta': 6},
+                                 description='test-restored-fonts')
         win = self._new_window()
-        win._select_combo_value(win.gui_font_spin, 16)
-        win._gui_font_size = 16
-        win._global_zoom_delta = 3
-        win._apply_global_zoom()
+        self.assertEqual(win.gui_font_spin.currentData(), 16)
+        self.assertEqual(win.terminal.term_font.pointSize(), 18)
         win._toggle_explorer_panel()
         tree = win.explorer_panel.tree_view
-        self.assertEqual(tree.font().pointSize(), 16)
+        self.assertEqual(tree.font().pixelSize(), 16)
 
     def test_toggle_git_builds_panel_and_sets_repo(self):
         win = self._new_window()

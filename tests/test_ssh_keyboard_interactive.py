@@ -161,6 +161,25 @@ class TestKeyboardInteractiveAuth(unittest.TestCase):
         self.assertEqual(transport.credentials, ('u', 'pw'))
         self.assertEqual(sess._auth_secrets[sess.host_config.credential_key].get('password'), 'pw')
 
+    def test_password_only_target_through_jump_without_local_keys(self):
+        import ssh_session
+
+        sess, host = _make_session()
+        channel = object()
+        client = _FakeClient(_FakeTransport())
+        client.connect = mock.Mock(side_effect=paramiko.SSHException("No authentication methods available"))
+        transport = client.get_transport()
+        transport.auth_interactive = mock.Mock(
+            side_effect=paramiko.BadAuthenticationType("Not supported", ["password"]))
+        transport.auth_password = mock.Mock(return_value=[])
+        sess._password_provider = mock.Mock(return_value="target-password")
+        with mock.patch.object(ssh_session.paramiko, 'SSHClient', return_value=client):
+            self.assertIs(sess._connect_client(host, sock=channel), client)
+        self.assertIs(client.connect.call_args.kwargs['sock'], channel)
+        client.connect.assert_called_once()
+        sess._password_provider.assert_called_once_with(host.alias)
+        transport.auth_password.assert_called_once_with(host.user, "target-password")
+
     def test_user_cancel_raises_auth_error(self):
         """任一步提示被取消 → 抛 AuthenticationException（连接失败，不挂起）。"""
         sess, host = _make_session()
@@ -475,3 +494,12 @@ class TestTwoFactorAndRecovery(unittest.TestCase):
 
 if __name__ == '__main__':
     unittest.main()
+
+
+def test_keychain_password_challenge_excludes_otp_and_key_passphrases():
+    from ssh_session import is_login_password_prompt
+
+    for prompt in ('Password:', 'Enter your login password:', '密码：', 'Mot de passe :'):
+        assert is_login_password_prompt(prompt)
+    for prompt in ('One-time password:', '请输入动态密码', 'Key passphrase:', 'Password + OTP:'):
+        assert not is_login_password_prompt(prompt)

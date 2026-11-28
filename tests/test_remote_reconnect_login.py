@@ -16,7 +16,7 @@ from ssh_session import HostConfig
 os.environ.setdefault('QT_QPA_PLATFORM', 'offscreen')
 
 
-@pytest.fixture(scope='module')
+@pytest.fixture(scope='session')
 def app():
     return QApplication.instance() or QApplication([])
 
@@ -245,3 +245,186 @@ def test_switch_target_while_password_dialog_is_open(server, tmp_path, monkeypat
         panel.deleteLater()
         app.sendPostedEvents(None, QEvent.Type.DeferredDelete)
         app.processEvents()
+
+
+def test_keychain_opt_in_reuse_replace_and_forget(server, app, monkeypatch):
+    import ssh_keychain
+    import ssh_session
+    from PyQt6.QtWidgets import QCheckBox
+    from i18n import t
+
+    store = {}
+    monkeypatch.setattr(ssh_keychain, 'available', True)
+    monkeypatch.setattr(ssh_keychain, 'read', lambda host: store.get(host.credential_key))
+    monkeypatch.setattr(ssh_keychain, 'save', lambda host, pwd: store.update({host.credential_key: pwd}))
+    monkeypatch.setattr(ssh_keychain, '_delete', lambda host: store.pop(host.credential_key, None))
+    monkeypatch.setattr(ssh_session, '_append_known_hosts', lambda entries: None)
+    errors = []
+    monkeypatch.setattr(QMessageBox, 'warning', lambda *args: errors.append(args[-1]))
+    host = HostConfig('keychain-test', '127.0.0.1', 'tester', server.server_address[1])
+    prompts = []
+    answer = server.password
+    opt_in = False
+    cancel = False
+
+    def respond(dialog):
+        remember, = [box for box in dialog.findChildren(QCheckBox) if box.text() in (t('remote.keychain_save'), t('remote.keychain_update'))]
+        prompts.append(remember.isChecked())
+        remember.setChecked(opt_in)
+        dialog.setTextValue(answer)
+        return QInputDialog.DialogCode.Rejected if cancel else QInputDialog.DialogCode.Accepted
+
+    monkeypatch.setattr(QInputDialog, 'exec', respond)
+
+    def login(*, success=True, forget=False):
+        panel = RemoteExplorerPanel(theme={})
+        opened = []
+        errors.clear()
+        panel.host_connected.connect(opened.append)
+        try:
+            panel._connect_to(host)
+            wait_for(lambda: panel._connecting_session is None)
+            assert bool(opened) == success
+            if forget:
+                panel._forget_keychain_password(host)
+        finally:
+            panel.close()
+            panel.deleteLater()
+            app.sendPostedEvents(None, QEvent.Type.DeferredDelete)
+
+    login()
+    assert not store
+    opt_in = True
+    login()
+    assert store == {host.credential_key: answer}
+    login()
+    assert prompts == [False, False]
+    server.password = 'replacement-test-password'
+    cancel = True
+    login(success=False)
+    assert not errors
+    assert store[host.credential_key] == 'first-test-password'
+    cancel = False
+    answer = 'mistyped-test-password'
+    login(success=False)
+    assert store[host.credential_key] == 'first-test-password'
+    answer = server.password
+    login()
+    assert store[host.credential_key] == answer
+    login(forget=True)
+    assert not store
+    opt_in = False
+    login()
+    assert prompts == [False] * 6
+
+
+def test_forget_from_another_window_while_login_finishes(server, monkeypatch, app):
+    import ssh_keychain
+    import ssh_session
+    from PyQt6.QtWidgets import QCheckBox
+
+    host = HostConfig('pending-save', '127.0.0.1', 'tester', server.server_address[1])
+    panel = RemoteExplorerPanel(theme={})
+    other = RemoteExplorerPanel(theme={})
+    opened, writes = [], []
+    panel.host_connected.connect(opened.append)
+    verified, resume = threading.Event(), threading.Event()
+    open_channel = ssh_session.SSHSession._open_sftp_bounded
+
+    def pause(session, client):
+        verified.set()
+        assert resume.wait(8)
+        return open_channel(session, client)
+
+    def consent(dialog):
+        dialog.findChild(QCheckBox).setChecked(True)
+        dialog.setTextValue(server.password)
+        return QInputDialog.DialogCode.Accepted
+
+    monkeypatch.setattr(ssh_keychain, 'available', True)
+    monkeypatch.setattr(ssh_keychain, 'read', lambda h: None)
+    monkeypatch.setattr(ssh_keychain, 'save', lambda h, pwd: writes.append(h))
+    monkeypatch.setattr(ssh_keychain, '_delete', lambda h: None)
+    monkeypatch.setattr(ssh_session, '_append_known_hosts', lambda entries: None)
+    monkeypatch.setattr(ssh_session.SSHSession, '_open_sftp_bounded', pause)
+    monkeypatch.setattr(QInputDialog, 'exec', consent)
+    try:
+        panel._connect_to(host)
+        wait_for(verified.is_set)
+        other._forget_keychain_password(host)
+        resume.set()
+        wait_for(lambda: bool(opened))
+        assert not writes
+    finally:
+        resume.set()
+        for widget in (panel, other):
+            widget.close()
+            widget.deleteLater()
+        app.sendPostedEvents(None, QEvent.Type.DeferredDelete)
+
+
+def test_keychain_access_denied_still_allows_manual_login(server, app, monkeypatch):
+    import ssh_keychain
+    import ssh_session
+    from i18n import t
+    from PyQt6.QtWidgets import QCheckBox
+
+    def denied(*args):
+        raise OSError("denied")
+
+    def answer(dialog):
+        dialog.findChild(QCheckBox).setChecked(True)
+        dialog.setTextValue(server.password)
+        return QInputDialog.DialogCode.Accepted
+
+    monkeypatch.setattr(ssh_keychain, 'available', True)
+    monkeypatch.setattr(ssh_keychain, 'read', denied)
+    monkeypatch.setattr(ssh_keychain, 'save', denied)
+    monkeypatch.setattr(ssh_keychain, '_delete', denied)
+    monkeypatch.setattr(QInputDialog, 'exec', answer)
+    monkeypatch.setattr(ssh_session, '_append_known_hosts', lambda entries: None)
+    host = HostConfig('keychain-denied', '127.0.0.1', 'tester', server.server_address[1])
+    panel = RemoteExplorerPanel(theme={})
+    notices, opened = [], []
+    panel.error_occurred.connect(notices.append)
+    panel.host_connected.connect(opened.append)
+    monkeypatch.setattr(QMessageBox, 'warning', lambda parent, title, message: notices.append(message))
+    try:
+        panel._connect_to(host)
+        wait_for(lambda: bool(opened))
+        assert panel._session.is_alive()
+        panel._forget_keychain_password(host)
+        assert notices == [t('remote.keychain_read_failed'), t('remote.keychain_save_failed'),
+                           t('remote.keychain_forget_failed')]
+    finally:
+        panel.close()
+        panel.deleteLater()
+        app.sendPostedEvents(None, QEvent.Type.DeferredDelete)
+
+
+def test_closed_session_does_not_login_after_keychain_unlock(monkeypatch, app):
+    import ssh_keychain
+    from ssh_session import SSHSession
+
+    entered, unlocked = threading.Event(), threading.Event()
+    attempts = []
+
+    def delayed_read(host):
+        entered.set()
+        assert unlocked.wait(4)
+        return 'previously-saved-test-password'
+
+    monkeypatch.setattr(ssh_keychain, 'read', delayed_read)
+    sess = SSHSession(HostConfig('retired', 'test.invalid'))
+    sess.use_keychain = True
+    monkeypatch.setattr(sess, '_establish', lambda: attempts.append(1))
+    future = sess.connect_async()
+    try:
+        assert entered.wait(2)
+        sess.disconnect()
+    finally:
+        unlocked.set()
+    with pytest.raises(RuntimeError, match="closed"):
+        future.result(timeout=2)
+    assert not attempts
+    assert sess.verified_password() is None

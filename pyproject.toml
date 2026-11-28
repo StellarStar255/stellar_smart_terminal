@@ -32,6 +32,7 @@ dependencies = [
     "pyte>=0.8.0",
     "paramiko>=3.0.0",
     "requests>=2.28.0",
+    "pyobjc-framework-Security; sys_platform == 'darwin'",
 ]
 
 [project.gui-scripts]
@@ -92,6 +93,7 @@ py-modules = [
     "ssh_control",
     "ssh_process_io",
     "ssh_session",
+    "ssh_keychain",
     "terminal_backend",
     "terminal_graphics",
     "terminal_render",
