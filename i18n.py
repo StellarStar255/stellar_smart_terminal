@@ -13,6 +13,7 @@ TRANSLATIONS = {
     "remote.keychain_forget": {"zh": "从钥匙串忘记登录密码", "en": "Forget Login Password in Keychain", "fr": "Supprimer le mot de passe du trousseau"},
     "remote.keychain_read_failed": {"zh": "无法读取钥匙串，可继续手动登录。", "en": "Could not read the Keychain. You can still sign in manually.", "fr": "Lecture du trousseau impossible. Vous pouvez vous connecter manuellement."},
     "remote.keychain_save_failed": {"zh": "登录成功，但密码未能保存到钥匙串。", "en": "Signed in, but the password could not be saved to the Keychain.", "fr": "Connexion réussie, mais l’enregistrement dans le trousseau a échoué."},
+    "remote.keychain_rename_failed": {"zh": "主机已改名，钥匙串条目未能迁移。", "en": "Host renamed. The Keychain entry could not be moved.", "fr": "Hôte renommé. Impossible de déplacer l’entrée du trousseau."},
     "remote.keychain_forget_failed": {"zh": "未能从钥匙串移除密码。", "en": "Could not remove the password from the Keychain.", "fr": "Impossible de supprimer le mot de passe du trousseau."},
     "remote.fwd_group": {"zh": "端口组合", "en": "Port Group", "fr": "Groupe de ports"},
     "remote.fwd_group_custom": {"zh": "自定义勾选", "en": "Custom selection", "fr": "Sélection personnalisée"},

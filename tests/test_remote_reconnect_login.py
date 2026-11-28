@@ -318,7 +318,8 @@ def test_keychain_opt_in_reuse_replace_and_forget(server, app, monkeypatch):
     assert prompts == [False] * 6
 
 
-def test_forget_from_another_window_while_login_finishes(server, monkeypatch, app):
+@pytest.mark.parametrize("other_action", ["forget", "replace"])
+def test_late_login_respects_other_window_keychain_change(server, monkeypatch, app, other_action):
     import ssh_keychain
     import ssh_session
     from PyQt6.QtWidgets import QCheckBox
@@ -332,8 +333,9 @@ def test_forget_from_another_window_while_login_finishes(server, monkeypatch, ap
     open_channel = ssh_session.SSHSession._open_sftp_bounded
 
     def pause(session, client):
-        verified.set()
-        assert resume.wait(8)
+        if session is panel._session:
+            verified.set()
+            assert resume.wait(8)
         return open_channel(session, client)
 
     def consent(dialog):
@@ -343,7 +345,7 @@ def test_forget_from_another_window_while_login_finishes(server, monkeypatch, ap
 
     monkeypatch.setattr(ssh_keychain, 'available', True)
     monkeypatch.setattr(ssh_keychain, 'read', lambda h: None)
-    monkeypatch.setattr(ssh_keychain, 'save', lambda h, pwd: writes.append(h))
+    monkeypatch.setattr(ssh_keychain, 'save', lambda h, pwd: writes.append(pwd))
     monkeypatch.setattr(ssh_keychain, '_delete', lambda h: None)
     monkeypatch.setattr(ssh_session, '_append_known_hosts', lambda entries: None)
     monkeypatch.setattr(ssh_session.SSHSession, '_open_sftp_bounded', pause)
@@ -351,10 +353,17 @@ def test_forget_from_another_window_while_login_finishes(server, monkeypatch, ap
     try:
         panel._connect_to(host)
         wait_for(verified.is_set)
-        other._forget_keychain_password(host)
+        if other_action == "forget":
+            other._forget_keychain_password(host)
+        else:
+            server.password = "newer-test-password"
+            other_opened = []
+            other.host_connected.connect(other_opened.append)
+            other._connect_to(host)
+            wait_for(lambda: bool(other_opened))
         resume.set()
         wait_for(lambda: bool(opened))
-        assert not writes
+        assert writes == ([] if other_action == "forget" else ["newer-test-password"])
     finally:
         resume.set()
         for widget in (panel, other):

@@ -2663,9 +2663,11 @@ class RemoteExplorerPanel(QWidget, explorer_common.TransferJobHost):
         new_alias = (new_alias or "").strip()
         if not new_alias or new_alias == host.alias:
             return
+        before = copy.copy(host)
         if self._is_memory_host(host):
             host.alias = new_alias          # 仅内存中的主机（未落 config）→ 直接改
             self._populate_hosts_list()
+            self._rename_keychain_item(before, host)
             return
         try:
             renamed = rename_ssh_config_host(host.alias, new_alias)
@@ -2682,10 +2684,19 @@ class RemoteExplorerPanel(QWidget, explorer_common.TransferJobHost):
             )
             return
         if renamed:
-            self._reload_hosts()            # config 改了 → 重新读取
+            self._reload_hosts()
+            self._rename_keychain_item(before, next((h for h in self._hosts if h.alias == new_alias), None))
         else:
             host.alias = new_alias          # config 里没匹配到（内存态）→ 直接改
             self._populate_hosts_list()
+            self._rename_keychain_item(before, host)
+
+    def _rename_keychain_item(self, before, after):
+        if ssh_keychain.available and after is not None:
+            try:
+                ssh_keychain.rename(before, after)
+            except (ImportError, OSError):
+                self.error_occurred.emit(t("remote.keychain_rename_failed"))
 
     def _is_memory_host(self, host: HostConfig) -> bool:
         """该主机是否只存在于本会话内存（写盘失败退回的 _extra_hosts）而非 ~/.ssh/config。"""
@@ -2729,9 +2740,11 @@ class RemoteExplorerPanel(QWidget, explorer_common.TransferJobHost):
         user = user.strip()
         new_alias = dlg.alias() or host.alias
 
+        before = copy.copy(host)
         if self._is_memory_host(host):
             host.alias, host.hostname, host.user, host.port = new_alias, host_s, user, port
             self._populate_hosts_list()
+            self._rename_keychain_item(before, host)
             return
 
         try:
@@ -2746,6 +2759,7 @@ class RemoteExplorerPanel(QWidget, explorer_common.TransferJobHost):
                     return
             update_ssh_config_host(new_alias, hostname=host_s, user=user, port=port)
             self._reload_hosts()
+            self._rename_keychain_item(before, next((h for h in self._hosts if h.alias == new_alias), None))
         except Exception as e:
             QMessageBox.warning(
                 self, t("remote.edit_host_title"),
